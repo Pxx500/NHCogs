@@ -82,17 +82,6 @@ By default, only the server owner can use `!honeypot` and all subcommands. Red P
 | `!honeypot spam channels <2-10>` | Different channels required to trigger |
 | `!honeypot spam status` | Show spam detection status |
 
-### fakeactivity
-
-| Command | Description |
-|---------|-------------|
-| `!honeypot fakeactivity toggle <bool>` | Simulate activity in the honeypot channel to attract scammers |
-| `!honeypot fakeactivity interval <1-120>` | Minutes between fake messages |
-| `!honeypot fakeactivity add <message>` | Add a custom message |
-| `!honeypot fakeactivity remove <index>` | Remove a message by index |
-| `!honeypot fakeactivity list` | List custom messages |
-| `!honeypot fakeactivity reset` | Reset to default messages |
-
 ### review
 
 | Command | Description |
@@ -160,7 +149,6 @@ Detection cases expire 24 hours after the first detection. This lifetime is fixe
 | `!honeypot config purge` | Show purge settings |
 | `!honeypot config firstpost` | Show firstpost settings |
 | `!honeypot config spam` | Show spam detection settings |
-| `!honeypot config fakeactivity` | Show fake activity settings |
 | `!honeypot config review` | Show review settings |
 | `!honeypot config roles` | Show whitelist role settings |
 | `!honeypot config keywords` | Show keyword and attachment-pattern counts |
@@ -404,7 +392,6 @@ the cog data directory so large servers do not inflate Red Config.
 
 - Bot owners, mods, admins, users with `Manage Server`, and users at or above the bot's top role are ignored
 - Purge uses a 2-minute Gateway message cache; it does not scan channel history
-- Fake activity runs once per minute, only posts when the configured interval has elapsed
 - When using review mode, a mute role is used as temporary containment until moderators decide
 - `!honeypot doctor` checks all permissions and configuration at once
 - Stats are per-server and reset with `resetstats`
