@@ -52,14 +52,6 @@ msgstr ""
 msgid "Minutes of message history to purge from the user."
 msgstr ""
 
-#: honeypot\honeypot.py:214
-msgid "Simulate activity in the honeypot channel to attract scammers."
-msgstr ""
-
-#: honeypot\honeypot.py:217
-msgid "Minutes between fake activity messages."
-msgstr ""
-
 #: honeypot\honeypot.py:221
 msgid "Send suspicious messages to moderator review instead of acting immediately."
 msgstr ""
@@ -288,50 +280,4 @@ msgstr ""
 
 #: honeypot\honeypot.py:602
 msgid "**Whitelisted roles:**\n{lines}"
-msgstr ""
-
-# ─── Fake activity commands ───────────────────────────────────────────
-
-#: honeypot\honeypot.py:607 (docstring)
-msgid "Manage fake activity messages for the honeypot channel."
-msgstr ""
-
-#: honeypot\honeypot.py:611 (docstring)
-msgid "Add a custom fake activity message."
-msgstr ""
-
-#: honeypot\honeypot.py:615
-msgid "✅ Fake activity message added. ({num} total)"
-msgstr ""
-
-#: honeypot\honeypot.py:618 (docstring)
-msgid "Remove a fake activity message by its number (see list)."
-msgstr ""
-
-#: honeypot\honeypot.py:623
-msgid "Invalid index. Use `{prefix}sethoneypot fakeactivity list` to see valid indices."
-msgstr ""
-
-#: honeypot\honeypot.py:628
-msgid "✅ Removed message #{index}: {msg}"
-msgstr ""
-
-#: honeypot\honeypot.py:631 (docstring)
-msgid "List all custom fake activity messages."
-msgstr ""
-
-#: honeypot\honeypot.py:635
-msgid "No custom fake activity messages set. Defaults will be used."
-msgstr ""
-
-#: honeypot\honeypot.py:638
-msgid "**Custom fake activity messages:**\n{lines}"
-msgstr ""
-
-#: honeypot\honeypot.py:641 (docstring)
-msgid "Reset to default fake activity messages."
-msgstr ""
-
-#: honeypot\honeypot.py:644
-msgid "✅ Custom messages cleared. Defaults will be used."
 msgstr ""
