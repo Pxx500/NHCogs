@@ -7612,6 +7612,212 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
 
                 member.add_roles.assert_not_awaited()
 
+    async def test_role_apply_is_superseded_by_completed_moderation(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                now = datetime.now(timezone.utc)
+                cog = honeypot.Honeypot(_Bot())
+                appended = self._append_case(honeypot, cog, now)
+                role = SimpleNamespace(id=77)
+                member = SimpleNamespace(
+                    id=appended.case.user_id,
+                    roles=[],
+                    add_roles=mock.AsyncMock(),
+                )
+                guild = SimpleNamespace(
+                    id=appended.case.guild_id,
+                    get_member=lambda _user_id: member,
+                    get_role=lambda _role_id: role,
+                )
+                cog.bot.get_guild = lambda _guild_id: guild
+                cog._increment_stat = mock.AsyncMock()
+                moderation = cog._case_store.ensure_operation(
+                    appended.case.case_id,
+                    "moderator_ban",
+                    f"moderator-ban:{appended.case.case_id}",
+                    actor_id=99,
+                )
+                claimed_moderation = cog._case_store.claim_operation(
+                    moderation.operation_id,
+                    now,
+                )
+                self.assertTrue(
+                    cog._case_store.complete_operation(
+                        claimed_moderation.operation_id,
+                        claimed_moderation.claim_token,
+                        now,
+                        "ban",
+                    )
+                )
+                operation = cog._case_store.ensure_operation(
+                    appended.case.case_id,
+                    "role_apply",
+                    f"role-apply:{appended.case.case_id}:{role.id}",
+                )
+                claimed = cog._case_store.claim_operation(operation.operation_id, now)
+
+                await cog._execute_detection_case_operation(claimed, now)
+
+                snapshot = cog._case_store.get_case(appended.case.case_id)
+                completed = next(
+                    item
+                    for item in snapshot.operations
+                    if item.operation_id == operation.operation_id
+                )
+                self.assertEqual(completed.status.value, "succeeded")
+                self.assertEqual(completed.result, "superseded_by_moderation")
+                member.add_roles.assert_not_awaited()
+                self.assertFalse(
+                    any(
+                        call.args[1] == "pending_mute_failures"
+                        for call in cog._increment_stat.await_args_list
+                    )
+                )
+
+    async def test_role_apply_fetches_cache_miss_and_terminalizes_not_found(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                now = datetime.now(timezone.utc)
+                cog = honeypot.Honeypot(_Bot())
+                appended = self._append_case(honeypot, cog, now)
+                role = SimpleNamespace(id=77)
+                fetch_member = mock.AsyncMock(
+                    side_effect=honeypot.discord.NotFound()
+                )
+                guild = SimpleNamespace(
+                    id=appended.case.guild_id,
+                    get_member=lambda _user_id: None,
+                    fetch_member=fetch_member,
+                    get_role=lambda _role_id: role,
+                )
+                cog.bot.get_guild = lambda _guild_id: guild
+                cog._increment_stat = mock.AsyncMock()
+                cog._record_operational_failure = mock.AsyncMock()
+                operation = cog._case_store.ensure_operation(
+                    appended.case.case_id,
+                    "role_apply",
+                    f"role-apply:{appended.case.case_id}:{role.id}",
+                )
+                claimed = cog._case_store.claim_operation(operation.operation_id, now)
+
+                await cog._execute_detection_case_operation(claimed, now)
+
+                snapshot = cog._case_store.get_case(appended.case.case_id)
+                completed = next(
+                    item
+                    for item in snapshot.operations
+                    if item.operation_id == operation.operation_id
+                )
+                self.assertEqual(completed.status.value, "succeeded")
+                self.assertEqual(completed.result, "member_unavailable")
+                fetch_member.assert_awaited_once_with(appended.case.user_id)
+                cog._record_operational_failure.assert_not_awaited()
+                self.assertFalse(
+                    any(
+                        call.args[1] == "pending_mute_failures"
+                        for call in cog._increment_stat.await_args_list
+                    )
+                )
+
+    async def test_current_role_apply_warning_disappears_after_recovery(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                now = datetime.now(timezone.utc)
+                cog = honeypot.Honeypot(_Bot())
+                appended = self._append_case(honeypot, cog, now)
+                operation = cog._case_store.ensure_operation(
+                    appended.case.case_id,
+                    "role_apply",
+                    f"role-apply:{appended.case.case_id}:77",
+                )
+                claimed = cog._case_store.claim_operation(operation.operation_id, now)
+                retry_at = now + timedelta(seconds=10)
+                self.assertTrue(
+                    cog._case_store.fail_operation(
+                        claimed.operation_id,
+                        claimed.claim_token,
+                        "RuntimeError: temporary failure",
+                        now,
+                        retry_at,
+                    )
+                )
+
+                failed = cog._case_store.get_case(appended.case.case_id)
+                self.assertTrue(
+                    any(
+                        "temporary mute" in note.lower() and "retry" in note.lower()
+                        for note in honeypot.render_timeline(failed).case_notes
+                    )
+                )
+
+                retry = cog._case_store.claim_operation(
+                    operation.operation_id,
+                    retry_at,
+                )
+                self.assertTrue(
+                    cog._case_store.complete_operation(
+                        retry.operation_id,
+                        retry.claim_token,
+                        retry_at,
+                        "already_present",
+                    )
+                )
+                recovered = cog._case_store.get_case(appended.case.case_id)
+                self.assertFalse(
+                    any(
+                        "temporary mute" in note.lower()
+                        for note in honeypot.render_timeline(recovered).case_notes
+                    )
+                )
+
+    async def test_terminal_capture_failure_is_a_current_case_note(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog._case_store.initialize()
+                now = datetime.now(timezone.utc)
+                appended = cog._case_store.append_message(
+                    honeypot.NewMessage(
+                        10,
+                        20,
+                        30,
+                        40,
+                        "evidence",
+                        now,
+                        None,
+                        (
+                            honeypot.NewAttachment(
+                                0,
+                                "proof.png",
+                                4,
+                                "image/png",
+                                None,
+                                None,
+                                "https://cdn.test/proof.png",
+                            ),
+                        ),
+                    ),
+                    (),
+                )
+                self.assertEqual(
+                    cog._case_store.fail_pending_attachment_captures(
+                        appended.case.case_id,
+                        appended.message.sequence,
+                        "NotFound after 3 attempts",
+                    ),
+                    1,
+                )
+
+                snapshot = cog._case_store.get_case(appended.case.case_id)
+
+                self.assertTrue(
+                    any(
+                        "evidence" in note.lower()
+                        and "unavailable" in note.lower()
+                        for note in honeypot.render_timeline(snapshot).case_notes
+                    )
+                )
+
     async def test_terminal_case_fences_late_role_apply(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
