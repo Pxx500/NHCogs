@@ -60,7 +60,11 @@ class RoleAnalyticsService:
         self._event_queues: dict[int, list[tuple[str, object]]] = defaultdict(list)
         self._last_full_request: dict[int, float] = {}
         self._tasks: set[asyncio.Task] = set()
+        self._guild_tasks: dict[int, set[asyncio.Task]] = defaultdict(set)
         self._resumed_task: asyncio.Task | None = None
+
+    def is_syncing(self, guild_id: int) -> bool:
+        return self._sync_locks[int(guild_id)].locked()
 
     async def sync_guild(self, guild: Any, *, manual: bool) -> SyncResult:
         guild_id = int(guild.id)
@@ -68,18 +72,20 @@ class RoleAnalyticsService:
         if lock.locked():
             raise SyncAlreadyRunningError("A role synchronization is already running")
 
-        state = await self._store.get_state(guild_id)
-        if not manual and not state.enabled:
-            raise AnalyticsDisabledError("Role analytics are disabled")
-        if not bool(getattr(getattr(self._bot, "intents", None), "members", False)):
-            await self._store.set_status(
-                guild_id,
-                SyncStatus.FAILED,
-                "missing_members_intent",
-            )
-            raise MemberIntentRequiredError("The members intent is required")
-
         async with lock:
+            state = await self._store.get_state(guild_id)
+            if not manual and not state.enabled:
+                raise AnalyticsDisabledError("Role analytics are disabled")
+            if not bool(
+                getattr(getattr(self._bot, "intents", None), "members", False)
+            ):
+                await self._store.set_status(
+                    guild_id,
+                    SyncStatus.FAILED,
+                    "missing_members_intent",
+                )
+                raise MemberIntentRequiredError("The members intent is required")
+
             started = self._monotonic()
             if not bool(guild.chunked):
                 last_request = self._last_full_request.get(guild_id)
@@ -102,8 +108,8 @@ class RoleAnalyticsService:
 
                 if not bool(guild.chunked):
                     source = "gateway-chunk"
-                    await guild.chunk(cache=True)
                     self._last_full_request[guild_id] = self._monotonic()
+                    await guild.chunk(cache=True)
 
                 default_role_id = int(guild.default_role.id)
                 members = tuple(
@@ -171,17 +177,26 @@ class RoleAnalyticsService:
         self,
         guilds: list[Any] | tuple[Any, ...],
     ) -> tuple[SyncResult, ...]:
-        results: list[SyncResult] = []
+        enabled_guilds: list[Any] = []
         for guild in tuple(guilds):
-            state = await self._store.get_state(int(guild.id))
-            if not state.enabled:
-                continue
-            await self._store.set_status(
-                int(guild.id),
-                SyncStatus.NEEDS_RECONCILIATION,
-            )
+            if await self._store.mark_needs_reconciliation_if_enabled(
+                int(guild.id)
+            ):
+                enabled_guilds.append(guild)
+        return await self._reconcile_marked_guilds(tuple(enabled_guilds))
+
+    async def _reconcile_marked_guilds(
+        self,
+        guilds: tuple[Any, ...],
+    ) -> tuple[SyncResult, ...]:
+        results: list[SyncResult] = []
+        for guild in guilds:
             try:
                 results.append(await self.sync_guild(guild, manual=False))
+            except AnalyticsDisabledError:
+                continue
+            except SyncAlreadyRunningError:
+                continue
             except FullMemberRequestCooldownError as error:
                 self._log.warning(
                     "Role analytics reconciliation for guild %s is waiting %.1fs",
@@ -189,11 +204,22 @@ class RoleAnalyticsService:
                     error.retry_after,
                 )
                 self.schedule_guild_retry(guild, error.retry_after)
+            except MemberIntentRequiredError:
+                self._log.error(
+                    "Role analytics reconciliation requires members intent for guild %s",
+                    guild.id,
+                )
             except Exception:
                 self._log.exception(
                     "Role analytics reconciliation failed for guild %s",
                     guild.id,
                 )
+                await self._store.set_status(
+                    int(guild.id),
+                    SyncStatus.RETRYING,
+                    "sync_retry_scheduled",
+                )
+                self.schedule_guild_retry(guild, 30.0)
         return tuple(results)
 
     async def run_daily_reconciliation(
@@ -202,7 +228,7 @@ class RoleAnalyticsService:
     ) -> tuple[SyncResult, ...]:
         return await self.reconcile_enabled_guilds(guilds)
 
-    def schedule_resumed_check(
+    async def schedule_resumed_check(
         self,
         guilds: list[Any] | tuple[Any, ...],
         *,
@@ -211,31 +237,86 @@ class RoleAnalyticsService:
         if self._resumed_task is not None and not self._resumed_task.done():
             self._resumed_task.cancel()
 
+        enabled_guilds: list[Any] = []
+        for guild in tuple(guilds):
+            if await self._store.mark_needs_reconciliation_if_enabled(
+                int(guild.id)
+            ):
+                enabled_guilds.append(guild)
+        marked_guilds = tuple(enabled_guilds)
+
         async def run() -> tuple[SyncResult, ...]:
             await asyncio.sleep(delay)
-            return await self.reconcile_enabled_guilds(guilds)
+            return await self._reconcile_marked_guilds(marked_guilds)
 
         self._resumed_task = self._track_task(asyncio.create_task(run()))
         return self._resumed_task
 
     def schedule_guild_retry(self, guild: Any, delay: float) -> asyncio.Task:
-        async def run() -> SyncResult | None:
-            await asyncio.sleep(delay)
-            try:
-                return await self.sync_guild(guild, manual=False)
-            except Exception:
-                self._log.exception(
-                    "Scheduled role analytics retry failed for guild %s",
-                    guild.id,
-                )
-                return None
+        guild_id = int(guild.id)
+        existing = next(
+            (
+                task
+                for task in self._guild_tasks.get(guild_id, ())
+                if not task.done()
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
 
-        return self._track_task(asyncio.create_task(run()))
+        async def run() -> SyncResult | None:
+            next_delay = max(0.0, delay)
+            attempt = 0
+            while True:
+                await asyncio.sleep(next_delay)
+                try:
+                    return await self.sync_guild(guild, manual=False)
+                except (AnalyticsDisabledError, MemberIntentRequiredError):
+                    return None
+                except FullMemberRequestCooldownError as error:
+                    next_delay = error.retry_after
+                except Exception:
+                    attempt += 1
+                    exponent = min(attempt - 1, 7)
+                    next_delay = min(30.0 * (2**exponent), 3600.0)
+                    self._log.exception(
+                        "Scheduled role analytics retry failed for guild %s; retrying in %.1fs",
+                        guild.id,
+                        next_delay,
+                    )
+                await self._store.set_status(
+                    guild_id,
+                    SyncStatus.RETRYING,
+                    "sync_retry_scheduled",
+                )
+
+        task = self._track_task(asyncio.create_task(run()))
+        self._guild_tasks[guild_id].add(task)
+
+        def discard_guild_task(done: asyncio.Task) -> None:
+            tasks = self._guild_tasks.get(guild_id)
+            if tasks is None:
+                return
+            tasks.discard(done)
+            if not tasks:
+                self._guild_tasks.pop(guild_id, None)
+
+        task.add_done_callback(discard_guild_task)
+        return task
+
+    async def disable_guild(self, guild_id: int) -> None:
+        guild_id = int(guild_id)
+        for task in tuple(self._guild_tasks.pop(guild_id, ())):
+            task.cancel()
+        async with self._sync_locks[guild_id]:
+            await self._store.clear_guild(guild_id)
 
     def cancel(self) -> None:
         for task in tuple(self._tasks):
             task.cancel()
         self._tasks.clear()
+        self._guild_tasks.clear()
         self._resumed_task = None
 
     def _track_task(self, task: asyncio.Task) -> asyncio.Task:

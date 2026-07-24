@@ -2,6 +2,7 @@ import importlib.util
 import sys
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -74,6 +75,40 @@ class GatedStore:
         await self._store.write_generation(guild_id, generation, members)
 
 
+class StateBarrierStore:
+    def __init__(self, store):
+        self._store = store
+        self.read_started = __import__("asyncio").Event()
+        self.allow_read = __import__("asyncio").Event()
+
+    def __getattr__(self, name):
+        return getattr(self._store, name)
+
+    async def get_state(self, guild_id):
+        self.read_started.set()
+        await self.allow_read.wait()
+        return await self._store.get_state(guild_id)
+
+
+class FailingOnceGuild(FakeGuild):
+    async def chunk(self, *, cache):
+        self.chunk_calls += 1
+        if self.chunk_calls == 1:
+            raise ConnectionError("gateway disconnected")
+        self.chunked = True
+
+
+class FakeClock:
+    def __init__(self):
+        self.value = 0.0
+
+    def monotonic(self):
+        return self.value
+
+    async def sleep(self, delay):
+        self.value += delay
+
+
 class RoleAnalyticsServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp_dir = TemporaryDirectory()
@@ -142,6 +177,38 @@ class RoleAnalyticsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(guild.chunk_calls, 1)
         self.assertEqual(raised.exception.retry_after, 30.0)
 
+    async def test_concurrent_sync_is_refused_instead_of_waiting_and_running_again(self):
+        guild = FakeGuild([FakeMember(1, (123, 10))])
+        barrier_store = StateBarrierStore(self.store)
+        service = role_analytics_service.RoleAnalyticsService(
+            FakeBot(), barrier_store
+        )
+
+        first = __import__("asyncio").create_task(
+            service.sync_guild(guild, manual=True)
+        )
+        await barrier_store.read_started.wait()
+        second = __import__("asyncio").create_task(
+            service.sync_guild(guild, manual=True)
+        )
+        await __import__("asyncio").sleep(0)
+        barrier_store.allow_read.set()
+        outcomes = await __import__("asyncio").gather(
+            first, second, return_exceptions=True
+        )
+
+        self.assertEqual(
+            sum(isinstance(item, role_analytics_service.SyncResult) for item in outcomes),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                isinstance(item, role_analytics_service.SyncAlreadyRunningError)
+                for item in outcomes
+            ),
+            1,
+        )
+
     async def test_cold_start_reconciles_enabled_guild_but_ignores_disabled_guild(self):
         enabled_guild = FakeGuild([FakeMember(1, (123, 10))])
         first_service = role_analytics_service.RoleAnalyticsService(
@@ -174,8 +241,12 @@ class RoleAnalyticsServiceTests(unittest.IsolatedAsyncioTestCase):
         service = role_analytics_service.RoleAnalyticsService(FakeBot(), self.store)
         first = await service.sync_guild(guild, manual=True)
 
-        first_task = service.schedule_resumed_check([guild], delay=60)
-        second_task = service.schedule_resumed_check([guild], delay=0)
+        first_task = await service.schedule_resumed_check([guild], delay=60)
+        self.assertEqual(
+            (await self.store.get_state(guild.id)).status,
+            role_analytics_store.SyncStatus.NEEDS_RECONCILIATION,
+        )
+        second_task = await service.schedule_resumed_check([guild], delay=0)
         await second_task
 
         self.assertTrue(first_task.cancelled())
@@ -183,6 +254,79 @@ class RoleAnalyticsServiceTests(unittest.IsolatedAsyncioTestCase):
             (await self.store.get_state(guild.id)).active_generation,
             first.generation,
         )
+
+    async def test_transient_reconciliation_failure_retries_until_ready(self):
+        initial_guild = FakeGuild([FakeMember(1, (123, 10))])
+        initial_service = role_analytics_service.RoleAnalyticsService(
+            FakeBot(), self.store
+        )
+        await initial_service.sync_guild(initial_guild, manual=True)
+        guild = FailingOnceGuild(initial_guild.members, chunked=False)
+        clock = FakeClock()
+        service = role_analytics_service.RoleAnalyticsService(
+            FakeBot(), self.store, monotonic=clock.monotonic
+        )
+
+        with mock.patch.object(
+            role_analytics_service.asyncio, "sleep", new=clock.sleep
+        ):
+            await service.reconcile_enabled_guilds([guild])
+            await __import__("asyncio").gather(*tuple(service._tasks))
+
+        self.assertEqual(guild.chunk_calls, 2)
+        self.assertGreaterEqual(clock.value, 30.0)
+        self.assertEqual(
+            (await self.store.get_state(guild.id)).status,
+            role_analytics_store.SyncStatus.READY,
+        )
+
+    async def test_reconciliation_does_not_schedule_retry_over_manual_sync(self):
+        guild = FakeGuild([FakeMember(1, (123, 10))])
+        initial_service = role_analytics_service.RoleAnalyticsService(
+            FakeBot(), self.store
+        )
+        await initial_service.sync_guild(guild, manual=True)
+        gated_store = GatedStore(self.store)
+        service = role_analytics_service.RoleAnalyticsService(
+            FakeBot(), gated_store
+        )
+        manual_task = __import__("asyncio").create_task(
+            service.sync_guild(guild, manual=True)
+        )
+        await gated_store.write_started.wait()
+
+        await service.reconcile_enabled_guilds([guild])
+
+        self.assertFalse(service._tasks)
+        gated_store.allow_write.set()
+        await manual_task
+        self.assertEqual(
+            (await self.store.get_state(guild.id)).status,
+            role_analytics_store.SyncStatus.READY,
+        )
+
+    async def test_disable_waits_for_sync_then_clears_guild(self):
+        guild = FakeGuild([FakeMember(1, (123, 10))])
+        gated_store = GatedStore(self.store)
+        service = role_analytics_service.RoleAnalyticsService(FakeBot(), gated_store)
+        sync_task = __import__("asyncio").create_task(
+            service.sync_guild(guild, manual=True)
+        )
+        await gated_store.write_started.wait()
+
+        disable_task = __import__("asyncio").create_task(
+            service.disable_guild(guild.id)
+        )
+        await __import__("asyncio").sleep(0)
+        self.assertFalse(disable_task.done())
+
+        gated_store.allow_write.set()
+        await sync_task
+        await disable_task
+
+        state = await self.store.get_state(guild.id)
+        self.assertEqual(state.status, role_analytics_store.SyncStatus.DISABLED)
+        self.assertFalse(state.enabled)
 
 
 if __name__ == "__main__":
