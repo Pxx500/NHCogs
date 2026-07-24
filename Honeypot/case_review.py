@@ -468,16 +468,18 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
         message.delete_status is DeleteStatus.FORBIDDEN for message in snapshot.messages
     )
     message_lines = tuple(_message_review_line(message) for message in snapshot.messages)
-    signal_lines_list: list[str] = []
-    seen_reasons: set[str] = set()
-    for message in snapshot.messages:
-        for signal in snapshot.signals:
-            reason = _signal_reason(signal.signal.detector, signal.signal.reason)
-            if signal.message_sequence != message.sequence or reason in seen_reasons:
-                continue
-            seen_reasons.add(reason)
-            signal_lines_list.append(f"<#{message.channel_id}>: {reason}")
-    signal_lines = tuple(signal_lines_list)
+    reasons_by_message: dict[int, list[str]] = {}
+    for signal in snapshot.signals:
+        reason = _signal_reason(signal.signal.detector, signal.signal.reason)
+        reasons = reasons_by_message.setdefault(signal.message_sequence, [])
+        if reason not in reasons:
+            reasons.append(reason)
+    sorted_messages = tuple(sorted(snapshot.messages, key=lambda item: item.sequence))
+    signal_lines = tuple(
+        f"<#{message.channel_id}>: {reason}"
+        for message in sorted_messages
+        for reason in reasons_by_message.get(message.sequence, ())
+    )
     moderation_operations = tuple(
         operation
         for operation in snapshot.operations
@@ -486,8 +488,10 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
         in {"moderator_ban", "moderator_kick", "moderator_ignore"}
     )
     moderation_actions = ("ban", "kick", "ignore")
+    moderation_completed = False
     if moderation_operations:
         moderation = moderation_operations[-1]
+        moderation_completed = moderation.status is OperationStatus.SUCCEEDED
         action = moderation.result
         if action is None and moderation.operation_type.startswith("moderator_"):
             action = moderation.operation_type.removeprefix("moderator_")
@@ -523,6 +527,11 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
         for attachment in snapshot.attachments
     )
     feedback_items = case_feedback_items(snapshot)
+    awaiting_classification = (
+        snapshot.case.status in {CaseStatus.PENDING, CaseStatus.RESOLVING}
+        and moderation_completed
+        and any(item.decision is None for item in feedback_items)
+    )
     feedback_lines = tuple(
         f"{item.message_sequence}.{item.position + 1} {item.filename}: "
         f"{item.decision or 'pending'}"
@@ -578,9 +587,12 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
         "resolved": "Closed",
         "expired": "Expired",
     }
-    identity_lines.append(
-        f"Status: {status_labels.get(snapshot.case.status.value, snapshot.case.status.value)}"
+    display_status = (
+        "Awaiting classification"
+        if awaiting_classification
+        else status_labels.get(snapshot.case.status.value, snapshot.case.status.value)
     )
+    identity_lines.append(f"Status: {display_status}")
     resolution_lines: tuple[str, ...] = ()
     if snapshot.case.resolution is not None:
         automatic_resolution = any(
@@ -598,9 +610,26 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
         if snapshot.case.resolved_at is not None:
             reviewer += f" • <t:{int(snapshot.case.resolved_at.timestamp())}:F>"
         resolution_lines += (reviewer,)
-    summary_signal_lines = tuple(
-        line[:300] for line in tuple(dict.fromkeys(signal_lines))[:2]
-    )
+    summary_signal_lines_list: list[str] = []
+    for message in sorted_messages[:3]:
+        reasons = reasons_by_message.get(message.sequence, ())
+        first_reason = (
+            " ".join(reasons[0].split())
+            if reasons
+            else "Detection signal recorded"
+        )
+        remaining = max(0, len(reasons) - 1)
+        suffix = f" (+{remaining} more)" if remaining else ""
+        prefix = f"Message {message.sequence} · <#{message.channel_id}>: "
+        available = max(0, 300 - len(prefix) - len(suffix))
+        summary_signal_lines_list.append(
+            f"{prefix}{first_reason[:available]}{suffix}"
+        )
+    if len(sorted_messages) > 3:
+        summary_signal_lines_list.append(
+            f"+{len(sorted_messages) - 3} additional messages in thread"
+        )
+    summary_signal_lines = tuple(summary_signal_lines_list)
     summary_publication_warnings = tuple(
         line[:300] for line in publication_warning_lines[:3]
     )

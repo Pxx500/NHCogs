@@ -9467,6 +9467,173 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                     mock.ANY, "case-1", "tp"
                 )
 
+    async def test_case_summary_represents_each_source_message_channel(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog._case_store.initialize()
+                now = datetime(2026, 7, 24, 8, tzinfo=timezone.utc)
+                first = cog._case_store.append_message(
+                    honeypot.NewMessage(
+                        10, 20, 30, 40, "first", now, None, ()
+                    ),
+                    (
+                        honeypot.DetectionSignal(
+                            "honeypot",
+                            "Multiple image attachments: 4\nKnown suspicious image match",
+                            honeypot.ActionIntent.REVIEW,
+                            True,
+                            {},
+                        ),
+                        honeypot.DetectionSignal(
+                            "image",
+                            "Initial image scan matched known suspicious content",
+                            honeypot.ActionIntent.REVIEW,
+                            True,
+                            {},
+                        ),
+                    ),
+                )
+                cog._case_store.append_message(
+                    honeypot.NewMessage(
+                        10,
+                        20,
+                        31,
+                        41,
+                        "second",
+                        now + timedelta(seconds=3),
+                        None,
+                        (),
+                    ),
+                    (
+                        honeypot.DetectionSignal(
+                            "spam",
+                            "Same message in 2 channels within 3s",
+                            honeypot.ActionIntent.REVIEW,
+                            True,
+                            {},
+                        ),
+                    ),
+                )
+
+                snapshot = cog._case_store.get_case(first.case.case_id)
+                projection = honeypot.render_case(snapshot)
+
+                self.assertIn("Message 1 · <#30>", projection.description)
+                self.assertIn("Message 2 · <#31>", projection.description)
+                self.assertIn(
+                    "Same message in 2 channels within 3s",
+                    projection.description,
+                )
+
+    async def test_identical_reasons_survive_across_source_messages(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog._case_store.initialize()
+                now = datetime(2026, 7, 24, 8, tzinfo=timezone.utc)
+                signal = lambda: honeypot.DetectionSignal(
+                    "spam",
+                    "Repeated suspicious content",
+                    honeypot.ActionIntent.REVIEW,
+                    True,
+                    {},
+                )
+                first = cog._case_store.append_message(
+                    honeypot.NewMessage(10, 20, 30, 40, "first", now, None, ()),
+                    (signal(),),
+                )
+                cog._case_store.append_message(
+                    honeypot.NewMessage(
+                        10,
+                        20,
+                        31,
+                        41,
+                        "second",
+                        now + timedelta(seconds=3),
+                        None,
+                        (),
+                    ),
+                    (signal(),),
+                )
+
+                projection = honeypot.render_case(
+                    cog._case_store.get_case(first.case.case_id)
+                )
+
+                self.assertIn("Message 1 · <#30>", projection.description)
+                self.assertIn("Message 2 · <#31>", projection.description)
+                self.assertEqual(
+                    sum(
+                        "Repeated suspicious content" in line
+                        for line in projection.signal_lines
+                    ),
+                    2,
+                )
+
+    async def test_completed_moderation_with_pending_image_is_awaiting_classification(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog._case_store.initialize()
+                now = datetime(2026, 7, 24, 8, tzinfo=timezone.utc)
+                appended = cog._case_store.append_message(
+                    honeypot.NewMessage(
+                        10,
+                        20,
+                        30,
+                        40,
+                        "evidence",
+                        now,
+                        None,
+                        (
+                            honeypot.NewAttachment(
+                                0,
+                                "proof.png",
+                                4,
+                                "image/png",
+                                None,
+                                None,
+                                "https://cdn.test/proof.png",
+                            ),
+                        ),
+                    ),
+                    (),
+                )
+                self.assertTrue(
+                    capture_attachment(
+                        cog._case_store,
+                        appended.case.case_id,
+                        appended.message.sequence,
+                        0,
+                        Path(directory) / "proof.png",
+                    )
+                )
+                operation = cog._case_store.ensure_operation(
+                    appended.case.case_id,
+                    "moderator_ban",
+                    f"moderator-ban:{appended.case.case_id}",
+                    actor_id=99,
+                )
+                claimed = cog._case_store.claim_operation(
+                    operation.operation_id,
+                    now,
+                )
+                self.assertTrue(
+                    cog._case_store.complete_operation(
+                        claimed.operation_id,
+                        claimed.claim_token,
+                        now,
+                        "ban",
+                    )
+                )
+
+                snapshot = cog._case_store.get_case(appended.case.case_id)
+                projection = honeypot.render_case(snapshot)
+
+                self.assertEqual(snapshot.case.status.value, "pending")
+                self.assertIn("Status: Awaiting classification", projection.description)
+
     async def test_case_view_hides_individual_when_case_has_too_many_images(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
