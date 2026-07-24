@@ -2449,11 +2449,16 @@ class Honeypot(Cog):
         except Exception:
             log.exception("Could not persist Honeypot operational failure")
             return
-        exhausted_fast_retries = (
-            terminal and attempts == DETECTION_FAST_RETRY_LIMIT + 1
+        slow_retry_started = (
+            not terminal and attempts == DETECTION_FAST_RETRY_LIMIT + 1
         )
-        if failure.occurrences == 1 or exhausted_fast_retries:
-            state = "fast retries exhausted" if exhausted_fast_retries else "will retry"
+        if failure.occurrences == 1 or slow_retry_started:
+            if terminal:
+                state = "terminal"
+            elif slow_retry_started:
+                state = "fast retries exhausted; slow retry scheduled"
+            else:
+                state = "will retry"
             await self._send_operational_alert(
                 guild_id,
                 f"⚠️ Honeypot operation failed ({source}, attempt {attempts}, {state}): "
@@ -4309,6 +4314,8 @@ class Honeypot(Cog):
                 "evidence_capture",
                 f"Failed to capture {len(failed_captures)} attachment(s): {details}"[:512],
                 case_id=case_id,
+                attempts=3,
+                terminal=True,
             )
         return tuple(persisted_captures)
 

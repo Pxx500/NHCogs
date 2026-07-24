@@ -3442,7 +3442,6 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
                 cog._scan_all_case_message_images = mock.AsyncMock()
                 cog._publish_detection_case = mock.AsyncMock()
-
                 await cog.on_message(message)
 
                 snapshot = await asyncio.to_thread(
@@ -3524,6 +3523,10 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
                 cog._scan_all_case_message_images = mock.AsyncMock()
                 cog._publish_detection_case = mock.AsyncMock()
+                cog._record_operational_failure = mock.AsyncMock(
+                    wraps=cog._record_operational_failure
+                )
+                cog._send_operational_alert = mock.AsyncMock()
 
                 with mock.patch.object(
                     honeypot, "DETECTION_ATTACHMENT_TIMEOUT_SECONDS", 0.01
@@ -3550,6 +3553,16 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(operational_failures), 1)
                 self.assertEqual(operational_failures[0].source, "evidence_capture")
                 self.assertIn("Failed to capture 2 attachment(s)", operational_failures[0].summary)
+                evidence_failure = next(
+                    call
+                    for call in cog._record_operational_failure.await_args_list
+                    if call.args[1] == "evidence_capture"
+                )
+                self.assertEqual(evidence_failure.kwargs.get("attempts"), 3)
+                self.assertIs(evidence_failure.kwargs.get("terminal"), True)
+                alert = cog._send_operational_alert.await_args.args[1]
+                self.assertIn("terminal", alert)
+                self.assertNotIn("will retry", alert)
 
     async def test_two_cogs_do_not_apply_an_aggregate_case_byte_limit(self):
         with TemporaryDirectory() as directory:

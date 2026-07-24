@@ -103,6 +103,25 @@ class FailingAttachment(Attachment):
         raise OSError("download failed " + "x" * 1_000)
 
 
+class RecoveringAttachment(Attachment):
+    def __init__(self, filename: str, failures: int, data: bytes):
+        super().__init__(filename, data)
+        self.failures = failures
+
+    async def read(self, *, use_cached: bool = False):
+        self.calls.append(use_cached)
+        if self.failures:
+            self.failures -= 1
+            raise NotFound("asset not found")
+        return self.data
+
+
+class ForbiddenAttachment(Attachment):
+    async def read(self, *, use_cached: bool = False):
+        self.calls.append(use_cached)
+        raise Forbidden("attachment access forbidden")
+
+
 class CachedFallbackAttachment(Attachment):
     async def read(self, *, use_cached: bool = False):
         self.calls.append(use_cached)
@@ -170,6 +189,66 @@ class CaptureAttachmentTests(unittest.IsolatedAsyncioTestCase):
         data = await read_attachment_bounded(attachment, 10)
 
         self.assertEqual(data, b"cached")
+        self.assertEqual(attachment.calls, [False, True])
+
+    async def test_production_reader_succeeds_on_third_complete_attempt(self):
+        attachment = RecoveringAttachment("proof.png", failures=4, data=b"captured")
+        delays = []
+
+        async def record_delay(delay):
+            delays.append(delay)
+
+        with mock.patch.object(
+            detection_runtime.asyncio,
+            "sleep",
+            new=record_delay,
+        ):
+            try:
+                data = await read_attachment_bounded(attachment, 20)
+            except NotFound:
+                self.fail("reader stopped before the third complete attempt")
+
+        self.assertEqual(data, b"captured")
+        self.assertEqual(
+            attachment.calls,
+            [False, True, False, True, False],
+        )
+        self.assertEqual(delays, [1.0, 3.0])
+
+    async def test_production_reader_stops_after_three_complete_attempts(self):
+        attachment = FailingAttachment("proof.png")
+
+        async def no_sleep(_delay):
+            return None
+
+        with (
+            mock.patch.object(
+                detection_runtime.asyncio,
+                "sleep",
+                new=no_sleep,
+            ),
+            self.assertRaises(OSError),
+        ):
+            await read_attachment_bounded(attachment, 20)
+
+        self.assertEqual(attachment.calls, [False, True] * 3)
+
+    async def test_production_reader_does_not_retry_forbidden_pair(self):
+        attachment = ForbiddenAttachment("proof.png")
+
+        async def no_sleep(_delay):
+            return None
+
+        with (
+            mock.patch.object(
+                detection_runtime.asyncio,
+                "sleep",
+                new=no_sleep,
+            ),
+            self.assertRaises(Forbidden),
+        ):
+            await read_attachment_bounded(attachment, 20)
+
         self.assertEqual(attachment.calls, [False, True])
 
     async def test_production_reader_rejects_actual_bytes_above_limit(self):
