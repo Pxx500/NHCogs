@@ -349,6 +349,32 @@ def _signal_reason(detector: str, reason: str) -> str:
     return reason
 
 
+def _signal_reasons_by_message(snapshot: CaseSnapshot) -> dict[int, list[str]]:
+    image_message_sequences = {
+        signal.message_sequence
+        for signal in snapshot.signals
+        if signal.signal.detector == "image"
+    }
+    reasons_by_message: dict[int, list[str]] = {}
+    for persisted_signal in snapshot.signals:
+        detector = persisted_signal.signal.detector
+        reasons = reasons_by_message.setdefault(
+            persisted_signal.message_sequence,
+            [],
+        )
+        for raw_reason in persisted_signal.signal.reason.splitlines():
+            reason = _signal_reason(detector, raw_reason.strip())
+            if not reason or (
+                detector == "honeypot"
+                and persisted_signal.message_sequence in image_message_sequences
+                and reason == "Known suspicious image match"
+            ):
+                continue
+            if reason not in reasons:
+                reasons.append(reason)
+    return reasons_by_message
+
+
 def render_timeline(snapshot: CaseSnapshot) -> CaseTimelineProjection:
     """Project the complete chronological case workspace from persisted state."""
 
@@ -359,12 +385,7 @@ def render_timeline(snapshot: CaseSnapshot) -> CaseTimelineProjection:
     ):
         attachments_by_message.setdefault(attachment.message_sequence, []).append(attachment)
 
-    reasons_by_message: dict[int, list[str]] = {}
-    for signal in snapshot.signals:
-        reason = _signal_reason(signal.signal.detector, signal.signal.reason)
-        reasons = reasons_by_message.setdefault(signal.message_sequence, [])
-        if reason not in reasons:
-            reasons.append(reason)
+    reasons_by_message = _signal_reasons_by_message(snapshot)
 
     messages = tuple(
         TimelineMessageProjection(
@@ -479,12 +500,7 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
         message.delete_status is DeleteStatus.FORBIDDEN for message in snapshot.messages
     )
     message_lines = tuple(_message_review_line(message) for message in snapshot.messages)
-    reasons_by_message: dict[int, list[str]] = {}
-    for signal in snapshot.signals:
-        reason = _signal_reason(signal.signal.detector, signal.signal.reason)
-        reasons = reasons_by_message.setdefault(signal.message_sequence, [])
-        if reason not in reasons:
-            reasons.append(reason)
+    reasons_by_message = _signal_reasons_by_message(snapshot)
     sorted_messages = tuple(sorted(snapshot.messages, key=lambda item: item.sequence))
     signal_lines = tuple(
         f"<#{message.channel_id}>: {reason}"
@@ -611,6 +627,7 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
     )
     identity_lines.append(f"Status: {display_status}")
     resolution_lines: tuple[str, ...] = ()
+    automatic_resolution = False
     if snapshot.case.resolution is not None:
         automatic_resolution = any(
             operation.operation_type == "moderation_action"
@@ -622,7 +639,7 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
         if automatic_resolution:
             resolution_label += " automatically"
         resolution_lines += (resolution_label,)
-    if snapshot.case.moderator_id is not None:
+    if snapshot.case.moderator_id is not None and not automatic_resolution:
         reviewer = f"<@{snapshot.case.moderator_id}>"
         if snapshot.case.resolved_at is not None:
             reviewer += f" • <t:{int(snapshot.case.resolved_at.timestamp())}:F>"
@@ -630,18 +647,21 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
     summary_signal_lines_list: list[str] = []
     for message in sorted_messages[:3]:
         reasons = reasons_by_message.get(message.sequence, ())
-        first_reason = (
-            " ".join(reasons[0].split())
-            if reasons
-            else "Detection signal recorded"
-        )
-        remaining = max(0, len(reasons) - 1)
-        suffix = f" (+{remaining} more)" if remaining else ""
-        prefix = f"Message {message.sequence} · <#{message.channel_id}>: "
-        available = max(0, 300 - len(prefix) - len(suffix))
         summary_signal_lines_list.append(
-            f"{prefix}{first_reason[:available]}{suffix}"
+            f"Message {message.sequence} · <#{message.channel_id}>:"
         )
+        visible_reasons = [" ".join(reason.split()) for reason in reasons[:2]]
+        if not visible_reasons:
+            visible_reasons.append("Detection signal recorded")
+        remaining = max(0, len(reasons) - len(visible_reasons))
+        for index, reason in enumerate(visible_reasons):
+            suffix = (
+                f" (+{remaining} more)"
+                if remaining and index == len(visible_reasons) - 1
+                else ""
+            )
+            available = max(0, 300 - len(suffix))
+            summary_signal_lines_list.append(f"{reason[:available]}{suffix}")
     if len(sorted_messages) > 3:
         summary_signal_lines_list.append(
             f"+{len(sorted_messages) - 3} additional messages in thread"

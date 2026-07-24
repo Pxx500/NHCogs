@@ -7394,7 +7394,7 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                 cog.resolve_detection_case.assert_awaited_once_with(
                     appended.case.case_id,
                     "planned_ban",
-                    99,
+                    None,
                 )
 
     async def test_resolution_failure_releases_the_case_lease(self):
@@ -8964,6 +8964,103 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                     if pending:
                         await asyncio.gather(*pending)
 
+    async def test_automatic_ban_does_not_inherit_image_reviewer_attribution(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog._case_store.initialize()
+                now = datetime.now(timezone.utc)
+                appended = cog._case_store.append_message(
+                    honeypot.NewMessage(
+                        10,
+                        20,
+                        30,
+                        40,
+                        "evidence",
+                        now,
+                        None,
+                        (
+                            honeypot.NewAttachment(
+                                0,
+                                "proof.png",
+                                4,
+                                "image/png",
+                                None,
+                                None,
+                                "https://cdn.test/proof.png",
+                            ),
+                        ),
+                    ),
+                    (),
+                )
+                self.assertTrue(
+                    capture_attachment(
+                        cog._case_store,
+                        appended.case.case_id,
+                        appended.message.sequence,
+                        0,
+                        Path(directory) / "proof.png",
+                    )
+                )
+                automatic_ban = cog._case_store.ensure_operation(
+                    appended.case.case_id,
+                    "moderation_action",
+                    f"moderation-action:{appended.case.case_id}:1",
+                    message_sequence=appended.message.sequence,
+                )
+                claimed_ban = cog._case_store.claim_operation(
+                    automatic_ban.operation_id,
+                    now,
+                )
+                self.assertTrue(
+                    cog._case_store.complete_operation(
+                        claimed_ban.operation_id,
+                        claimed_ban.claim_token,
+                        now,
+                        "ban",
+                    )
+                )
+                cog._schedule_case_review_followup = mock.Mock()
+                interaction = SimpleNamespace(
+                    user=SimpleNamespace(
+                        id=99,
+                        guild_permissions=SimpleNamespace(manage_messages=True),
+                    ),
+                    response=SimpleNamespace(
+                        defer=mock.AsyncMock(),
+                        is_done=lambda: False,
+                    ),
+                    followup=SimpleNamespace(send=mock.AsyncMock()),
+                )
+
+                completed = await cog._case_review_bulk_interaction(
+                    interaction,
+                    appended.case.case_id,
+                    "tp",
+                    confirmed=True,
+                    expected_keys=(
+                        honeypot.AttachmentKey(
+                            appended.case.case_id,
+                            appended.message.sequence,
+                            0,
+                        ),
+                    ),
+                )
+
+                self.assertTrue(completed)
+                snapshot = cog._case_store.get_case(appended.case.case_id)
+                self.assertEqual(snapshot.case.status.value, "resolved")
+                self.assertEqual(snapshot.case.resolution, "ban")
+                self.assertIsNone(snapshot.case.moderator_id)
+                self.assertEqual(
+                    snapshot.attachments[0].learning_decision,
+                    "true_positive",
+                )
+                self.assertEqual(
+                    snapshot.attachments[0].learning_metadata["moderator_id"],
+                    99,
+                )
+
     async def test_dismissed_confirmation_reports_failure_in_new_ephemeral_message(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -9822,6 +9919,13 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                             True,
                             {},
                         ),
+                        honeypot.DetectionSignal(
+                            "spam",
+                            "Repeated suspicious content",
+                            honeypot.ActionIntent.REVIEW,
+                            True,
+                            {},
+                        ),
                     ),
                 )
                 cog._case_store.append_message(
@@ -9848,10 +9952,39 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
 
                 snapshot = cog._case_store.get_case(first.case.case_id)
                 projection = honeypot.render_case(snapshot)
+                timeline = honeypot.render_timeline(snapshot)
 
                 self.assertIn("Message 1 · <#30>", projection.description)
                 self.assertIn("Message 2 · <#31>", projection.description)
                 self.assertIn(
+                    "Same message in 2 channels within 3s",
+                    projection.description,
+                )
+                rendered_signals = "\n".join(projection.signal_lines)
+                self.assertNotIn(
+                    "Known suspicious image match",
+                    rendered_signals,
+                )
+                self.assertEqual(
+                    rendered_signals.count(
+                        "Initial image scan matched known suspicious content"
+                    ),
+                    1,
+                )
+                self.assertEqual(
+                    timeline.messages[0].signal_reasons,
+                    (
+                        "Multiple image attachments: 4",
+                        "Initial image scan matched known suspicious content",
+                        "Repeated suspicious content",
+                    ),
+                )
+                self.assertIn(
+                    "Signals:\n"
+                    "Message 1 · <#30>:\n"
+                    "Multiple image attachments: 4\n"
+                    "Initial image scan matched known suspicious content (+1 more)\n"
+                    "Message 2 · <#31>:\n"
                     "Same message in 2 channels within 3s",
                     projection.description,
                 )

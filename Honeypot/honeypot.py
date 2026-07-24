@@ -5653,13 +5653,13 @@ class Honeypot(Cog):
             return await self.resolve_detection_case(
                 case_id,
                 resolution,
-                completed.actor_id or moderator_id,
+                completed.actor_id,
                 defer_final_operations=True,
             )
         return await self.resolve_detection_case(
             case_id,
             resolution,
-            completed.actor_id or moderator_id,
+            completed.actor_id,
         )
 
     async def _case_review_bulk_interaction(
