@@ -3442,7 +3442,6 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
                 cog._scan_all_case_message_images = mock.AsyncMock()
                 cog._publish_detection_case = mock.AsyncMock()
-
                 await cog.on_message(message)
 
                 snapshot = await asyncio.to_thread(
@@ -3524,6 +3523,10 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
                 cog._scan_all_case_message_images = mock.AsyncMock()
                 cog._publish_detection_case = mock.AsyncMock()
+                cog._record_operational_failure = mock.AsyncMock(
+                    wraps=cog._record_operational_failure
+                )
+                cog._send_operational_alert = mock.AsyncMock()
 
                 with mock.patch.object(
                     honeypot, "DETECTION_ATTACHMENT_TIMEOUT_SECONDS", 0.01
@@ -3550,6 +3553,16 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(operational_failures), 1)
                 self.assertEqual(operational_failures[0].source, "evidence_capture")
                 self.assertIn("Failed to capture 2 attachment(s)", operational_failures[0].summary)
+                evidence_failure = next(
+                    call
+                    for call in cog._record_operational_failure.await_args_list
+                    if call.args[1] == "evidence_capture"
+                )
+                self.assertEqual(evidence_failure.kwargs.get("attempts"), 3)
+                self.assertIs(evidence_failure.kwargs.get("terminal"), True)
+                alert = cog._send_operational_alert.await_args.args[1]
+                self.assertIn("terminal", alert)
+                self.assertNotIn("will retry", alert)
 
     async def test_two_cogs_do_not_apply_an_aggregate_case_byte_limit(self):
         with TemporaryDirectory() as directory:
@@ -7599,6 +7612,212 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
 
                 member.add_roles.assert_not_awaited()
 
+    async def test_role_apply_is_superseded_by_completed_moderation(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                now = datetime.now(timezone.utc)
+                cog = honeypot.Honeypot(_Bot())
+                appended = self._append_case(honeypot, cog, now)
+                role = SimpleNamespace(id=77)
+                member = SimpleNamespace(
+                    id=appended.case.user_id,
+                    roles=[],
+                    add_roles=mock.AsyncMock(),
+                )
+                guild = SimpleNamespace(
+                    id=appended.case.guild_id,
+                    get_member=lambda _user_id: member,
+                    get_role=lambda _role_id: role,
+                )
+                cog.bot.get_guild = lambda _guild_id: guild
+                cog._increment_stat = mock.AsyncMock()
+                moderation = cog._case_store.ensure_operation(
+                    appended.case.case_id,
+                    "moderator_ban",
+                    f"moderator-ban:{appended.case.case_id}",
+                    actor_id=99,
+                )
+                claimed_moderation = cog._case_store.claim_operation(
+                    moderation.operation_id,
+                    now,
+                )
+                self.assertTrue(
+                    cog._case_store.complete_operation(
+                        claimed_moderation.operation_id,
+                        claimed_moderation.claim_token,
+                        now,
+                        "ban",
+                    )
+                )
+                operation = cog._case_store.ensure_operation(
+                    appended.case.case_id,
+                    "role_apply",
+                    f"role-apply:{appended.case.case_id}:{role.id}",
+                )
+                claimed = cog._case_store.claim_operation(operation.operation_id, now)
+
+                await cog._execute_detection_case_operation(claimed, now)
+
+                snapshot = cog._case_store.get_case(appended.case.case_id)
+                completed = next(
+                    item
+                    for item in snapshot.operations
+                    if item.operation_id == operation.operation_id
+                )
+                self.assertEqual(completed.status.value, "succeeded")
+                self.assertEqual(completed.result, "superseded_by_moderation")
+                member.add_roles.assert_not_awaited()
+                self.assertFalse(
+                    any(
+                        call.args[1] == "pending_mute_failures"
+                        for call in cog._increment_stat.await_args_list
+                    )
+                )
+
+    async def test_role_apply_fetches_cache_miss_and_terminalizes_not_found(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                now = datetime.now(timezone.utc)
+                cog = honeypot.Honeypot(_Bot())
+                appended = self._append_case(honeypot, cog, now)
+                role = SimpleNamespace(id=77)
+                fetch_member = mock.AsyncMock(
+                    side_effect=honeypot.discord.NotFound()
+                )
+                guild = SimpleNamespace(
+                    id=appended.case.guild_id,
+                    get_member=lambda _user_id: None,
+                    fetch_member=fetch_member,
+                    get_role=lambda _role_id: role,
+                )
+                cog.bot.get_guild = lambda _guild_id: guild
+                cog._increment_stat = mock.AsyncMock()
+                cog._record_operational_failure = mock.AsyncMock()
+                operation = cog._case_store.ensure_operation(
+                    appended.case.case_id,
+                    "role_apply",
+                    f"role-apply:{appended.case.case_id}:{role.id}",
+                )
+                claimed = cog._case_store.claim_operation(operation.operation_id, now)
+
+                await cog._execute_detection_case_operation(claimed, now)
+
+                snapshot = cog._case_store.get_case(appended.case.case_id)
+                completed = next(
+                    item
+                    for item in snapshot.operations
+                    if item.operation_id == operation.operation_id
+                )
+                self.assertEqual(completed.status.value, "succeeded")
+                self.assertEqual(completed.result, "member_unavailable")
+                fetch_member.assert_awaited_once_with(appended.case.user_id)
+                cog._record_operational_failure.assert_not_awaited()
+                self.assertFalse(
+                    any(
+                        call.args[1] == "pending_mute_failures"
+                        for call in cog._increment_stat.await_args_list
+                    )
+                )
+
+    async def test_current_role_apply_warning_disappears_after_recovery(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                now = datetime.now(timezone.utc)
+                cog = honeypot.Honeypot(_Bot())
+                appended = self._append_case(honeypot, cog, now)
+                operation = cog._case_store.ensure_operation(
+                    appended.case.case_id,
+                    "role_apply",
+                    f"role-apply:{appended.case.case_id}:77",
+                )
+                claimed = cog._case_store.claim_operation(operation.operation_id, now)
+                retry_at = now + timedelta(seconds=10)
+                self.assertTrue(
+                    cog._case_store.fail_operation(
+                        claimed.operation_id,
+                        claimed.claim_token,
+                        "RuntimeError: temporary failure",
+                        now,
+                        retry_at,
+                    )
+                )
+
+                failed = cog._case_store.get_case(appended.case.case_id)
+                self.assertTrue(
+                    any(
+                        "temporary mute" in note.lower() and "retry" in note.lower()
+                        for note in honeypot.render_timeline(failed).case_notes
+                    )
+                )
+
+                retry = cog._case_store.claim_operation(
+                    operation.operation_id,
+                    retry_at,
+                )
+                self.assertTrue(
+                    cog._case_store.complete_operation(
+                        retry.operation_id,
+                        retry.claim_token,
+                        retry_at,
+                        "already_present",
+                    )
+                )
+                recovered = cog._case_store.get_case(appended.case.case_id)
+                self.assertFalse(
+                    any(
+                        "temporary mute" in note.lower()
+                        for note in honeypot.render_timeline(recovered).case_notes
+                    )
+                )
+
+    async def test_terminal_capture_failure_is_a_current_case_note(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog._case_store.initialize()
+                now = datetime.now(timezone.utc)
+                appended = cog._case_store.append_message(
+                    honeypot.NewMessage(
+                        10,
+                        20,
+                        30,
+                        40,
+                        "evidence",
+                        now,
+                        None,
+                        (
+                            honeypot.NewAttachment(
+                                0,
+                                "proof.png",
+                                4,
+                                "image/png",
+                                None,
+                                None,
+                                "https://cdn.test/proof.png",
+                            ),
+                        ),
+                    ),
+                    (),
+                )
+                self.assertEqual(
+                    cog._case_store.fail_pending_attachment_captures(
+                        appended.case.case_id,
+                        appended.message.sequence,
+                        "NotFound after 3 attempts",
+                    ),
+                    1,
+                )
+
+                snapshot = cog._case_store.get_case(appended.case.case_id)
+
+                self.assertTrue(
+                    any(
+                        "evidence" in note.lower()
+                        and "unavailable" in note.lower()
+                        for note in honeypot.render_timeline(snapshot).case_notes
+                    )
+                )
+
     async def test_terminal_case_fences_late_role_apply(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -8621,6 +8840,130 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                 release_action.set()
                 await callback
 
+    async def test_classification_returns_before_final_operations_finish(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog._case_store.initialize()
+                now = datetime.now(timezone.utc)
+                appended = cog._case_store.append_message(
+                    honeypot.NewMessage(
+                        10,
+                        20,
+                        30,
+                        40,
+                        "evidence",
+                        now,
+                        None,
+                        (
+                            honeypot.NewAttachment(
+                                0,
+                                "proof.png",
+                                4,
+                                "image/png",
+                                None,
+                                None,
+                                "https://cdn.test/proof.png",
+                            ),
+                        ),
+                    ),
+                    (),
+                )
+                self.assertTrue(
+                    capture_attachment(
+                        cog._case_store,
+                        appended.case.case_id,
+                        appended.message.sequence,
+                        0,
+                        Path(directory) / "proof.png",
+                    )
+                )
+                moderation = cog._case_store.ensure_operation(
+                    appended.case.case_id,
+                    "moderator_ban",
+                    f"moderator-ban:{appended.case.case_id}",
+                    actor_id=99,
+                )
+                claimed_moderation = cog._case_store.claim_operation(
+                    moderation.operation_id,
+                    now,
+                )
+                self.assertTrue(
+                    cog._case_store.complete_operation(
+                        claimed_moderation.operation_id,
+                        claimed_moderation.claim_token,
+                        now,
+                        "ban",
+                    )
+                )
+                final_operation_started = asyncio.Event()
+                release_final_operation = asyncio.Event()
+
+                async def block_final_operation(*_args, **_kwargs):
+                    final_operation_started.set()
+                    await release_final_operation.wait()
+
+                cog._execute_detection_case_operation = mock.AsyncMock(
+                    side_effect=block_final_operation
+                )
+                interaction = SimpleNamespace(
+                    user=SimpleNamespace(
+                        id=99,
+                        guild_permissions=SimpleNamespace(manage_messages=True),
+                    ),
+                    response=SimpleNamespace(
+                        defer=mock.AsyncMock(),
+                        is_done=lambda: False,
+                    ),
+                    followup=SimpleNamespace(send=mock.AsyncMock()),
+                )
+
+                interaction_task = asyncio.create_task(
+                    cog._case_review_bulk_interaction(
+                        interaction,
+                        appended.case.case_id,
+                        "tp",
+                        confirmed=True,
+                        expected_keys=(
+                            honeypot.AttachmentKey(
+                                appended.case.case_id,
+                                appended.message.sequence,
+                                0,
+                            ),
+                        ),
+                    )
+                )
+                await final_operation_started.wait()
+                try:
+                    try:
+                        completed = await asyncio.wait_for(
+                            asyncio.shield(interaction_task),
+                            timeout=0.05,
+                        )
+                    except TimeoutError:
+                        self.fail(
+                            "classification interaction waited for final operations"
+                        )
+                    self.assertTrue(completed)
+                    snapshot = cog._case_store.get_case(appended.case.case_id)
+                    self.assertEqual(snapshot.case.status.value, "resolved")
+                    self.assertEqual(
+                        snapshot.attachments[0].learning_decision,
+                        "true_positive",
+                    )
+                    self.assertTrue(
+                        any(
+                            operation.operation_type == "review_update"
+                            for operation in snapshot.operations
+                        )
+                    )
+                finally:
+                    release_final_operation.set()
+                    await interaction_task
+                    pending = tuple(getattr(cog, "_case_review_tasks", ()))
+                    if pending:
+                        await asyncio.gather(*pending)
+
     async def test_dismissed_confirmation_reports_failure_in_new_ephemeral_message(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -9453,6 +9796,173 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                 cog._case_review_bulk_interaction.assert_awaited_once_with(
                     mock.ANY, "case-1", "tp"
                 )
+
+    async def test_case_summary_represents_each_source_message_channel(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog._case_store.initialize()
+                now = datetime(2026, 7, 24, 8, tzinfo=timezone.utc)
+                first = cog._case_store.append_message(
+                    honeypot.NewMessage(
+                        10, 20, 30, 40, "first", now, None, ()
+                    ),
+                    (
+                        honeypot.DetectionSignal(
+                            "honeypot",
+                            "Multiple image attachments: 4\nKnown suspicious image match",
+                            honeypot.ActionIntent.REVIEW,
+                            True,
+                            {},
+                        ),
+                        honeypot.DetectionSignal(
+                            "image",
+                            "Initial image scan matched known suspicious content",
+                            honeypot.ActionIntent.REVIEW,
+                            True,
+                            {},
+                        ),
+                    ),
+                )
+                cog._case_store.append_message(
+                    honeypot.NewMessage(
+                        10,
+                        20,
+                        31,
+                        41,
+                        "second",
+                        now + timedelta(seconds=3),
+                        None,
+                        (),
+                    ),
+                    (
+                        honeypot.DetectionSignal(
+                            "spam",
+                            "Same message in 2 channels within 3s",
+                            honeypot.ActionIntent.REVIEW,
+                            True,
+                            {},
+                        ),
+                    ),
+                )
+
+                snapshot = cog._case_store.get_case(first.case.case_id)
+                projection = honeypot.render_case(snapshot)
+
+                self.assertIn("Message 1 · <#30>", projection.description)
+                self.assertIn("Message 2 · <#31>", projection.description)
+                self.assertIn(
+                    "Same message in 2 channels within 3s",
+                    projection.description,
+                )
+
+    async def test_identical_reasons_survive_across_source_messages(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog._case_store.initialize()
+                now = datetime(2026, 7, 24, 8, tzinfo=timezone.utc)
+                signal = lambda: honeypot.DetectionSignal(
+                    "spam",
+                    "Repeated suspicious content",
+                    honeypot.ActionIntent.REVIEW,
+                    True,
+                    {},
+                )
+                first = cog._case_store.append_message(
+                    honeypot.NewMessage(10, 20, 30, 40, "first", now, None, ()),
+                    (signal(),),
+                )
+                cog._case_store.append_message(
+                    honeypot.NewMessage(
+                        10,
+                        20,
+                        31,
+                        41,
+                        "second",
+                        now + timedelta(seconds=3),
+                        None,
+                        (),
+                    ),
+                    (signal(),),
+                )
+
+                projection = honeypot.render_case(
+                    cog._case_store.get_case(first.case.case_id)
+                )
+
+                self.assertIn("Message 1 · <#30>", projection.description)
+                self.assertIn("Message 2 · <#31>", projection.description)
+                self.assertEqual(
+                    sum(
+                        "Repeated suspicious content" in line
+                        for line in projection.signal_lines
+                    ),
+                    2,
+                )
+
+    async def test_completed_moderation_with_pending_image_is_awaiting_classification(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog._case_store.initialize()
+                now = datetime(2026, 7, 24, 8, tzinfo=timezone.utc)
+                appended = cog._case_store.append_message(
+                    honeypot.NewMessage(
+                        10,
+                        20,
+                        30,
+                        40,
+                        "evidence",
+                        now,
+                        None,
+                        (
+                            honeypot.NewAttachment(
+                                0,
+                                "proof.png",
+                                4,
+                                "image/png",
+                                None,
+                                None,
+                                "https://cdn.test/proof.png",
+                            ),
+                        ),
+                    ),
+                    (),
+                )
+                self.assertTrue(
+                    capture_attachment(
+                        cog._case_store,
+                        appended.case.case_id,
+                        appended.message.sequence,
+                        0,
+                        Path(directory) / "proof.png",
+                    )
+                )
+                operation = cog._case_store.ensure_operation(
+                    appended.case.case_id,
+                    "moderator_ban",
+                    f"moderator-ban:{appended.case.case_id}",
+                    actor_id=99,
+                )
+                claimed = cog._case_store.claim_operation(
+                    operation.operation_id,
+                    now,
+                )
+                self.assertTrue(
+                    cog._case_store.complete_operation(
+                        claimed.operation_id,
+                        claimed.claim_token,
+                        now,
+                        "ban",
+                    )
+                )
+
+                snapshot = cog._case_store.get_case(appended.case.case_id)
+                projection = honeypot.render_case(snapshot)
+
+                self.assertEqual(snapshot.case.status.value, "pending")
+                self.assertIn("Status: Awaiting classification", projection.description)
 
     async def test_case_view_hides_individual_when_case_has_too_many_images(self):
         with TemporaryDirectory() as directory:

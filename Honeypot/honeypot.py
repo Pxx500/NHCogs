@@ -758,6 +758,7 @@ class Honeypot(Cog):
 
         self._console_log_buffer = ReadOnlyLogBuffer()
         self._post_ban_sweep_tasks: set[asyncio.Task] = set()
+        self._case_review_tasks: set[asyncio.Task] = set()
         self._recent_user_messages: dict[int, dict[int, deque[MessageRef]]] = defaultdict(
             lambda: defaultdict(deque)
         )
@@ -2371,6 +2372,12 @@ class Honeypot(Cog):
         if pending_sweeps:
             await asyncio.gather(*pending_sweeps, return_exceptions=True)
         self._post_ban_sweep_tasks.clear()
+        pending_case_reviews = tuple(self._case_review_tasks)
+        for task in pending_case_reviews:
+            task.cancel()
+        if pending_case_reviews:
+            await asyncio.gather(*pending_case_reviews, return_exceptions=True)
+        self._case_review_tasks.clear()
         pending_scans = tuple(self._initial_image_scan_tasks)
         for task in pending_scans:
             task.cancel()
@@ -2449,11 +2456,16 @@ class Honeypot(Cog):
         except Exception:
             log.exception("Could not persist Honeypot operational failure")
             return
-        exhausted_fast_retries = (
-            terminal and attempts == DETECTION_FAST_RETRY_LIMIT + 1
+        slow_retry_started = (
+            not terminal and attempts == DETECTION_FAST_RETRY_LIMIT + 1
         )
-        if failure.occurrences == 1 or exhausted_fast_retries:
-            state = "fast retries exhausted" if exhausted_fast_retries else "will retry"
+        if failure.occurrences == 1 or slow_retry_started:
+            if terminal:
+                state = "terminal"
+            elif slow_retry_started:
+                state = "fast retries exhausted; slow retry scheduled"
+            else:
+                state = "will retry"
             await self._send_operational_alert(
                 guild_id,
                 f"⚠️ Honeypot operation failed ({source}, attempt {attempts}, {state}): "
@@ -2499,6 +2511,7 @@ class Honeypot(Cog):
         moderator_id: int | None = None,
         *,
         now: datetime | None = None,
+        defer_final_operations: bool = False,
     ) -> bool:
         resolved_at = now or datetime.now(timezone.utc)
         lease = await asyncio.to_thread(
@@ -2555,6 +2568,19 @@ class Honeypot(Cog):
             await self._increment_stat(guild, "review_expired")
         elif guild is not None and resolution == "ignore":
             await self._increment_stat(guild, "ignored")
+        if defer_final_operations:
+            return True
+        await self._execute_case_final_operations(case_id, resolved_at)
+        return True
+
+    async def _execute_case_final_operations(
+        self,
+        case_id: str,
+        now: datetime,
+    ) -> None:
+        snapshot = await asyncio.to_thread(self._case_store.get_case, case_id)
+        if snapshot is None:
+            return
         final_operation_priority = {
             "review_update": 0,
             "role_release": 1,
@@ -2572,11 +2598,10 @@ class Honeypot(Cog):
             }:
                 continue
             claimed = await asyncio.to_thread(
-                self._case_store.claim_operation, operation.operation_id, resolved_at
+                self._case_store.claim_operation, operation.operation_id, now
             )
             if claimed is not None:
-                await self._execute_detection_case_operation(claimed, resolved_at)
-        return True
+                await self._execute_detection_case_operation(claimed, now)
 
     async def _execute_detection_message_child(
         self,
@@ -3030,6 +3055,27 @@ class Honeypot(Cog):
                         publication_channel=publication_channel,
                         timings=timings,
                     )
+            elif operation.operation_type == "role_apply" and any(
+                item.operation_type
+                in {
+                    "moderation_action",
+                    "moderator_ban",
+                    "moderator_kick",
+                    "moderator_ignore",
+                }
+                and item.status.value == "succeeded"
+                and item.result
+                in {
+                    "ban",
+                    "kick",
+                    "kick_missing",
+                    "ignore",
+                    "planned_ban",
+                    "planned_kick",
+                }
+                for item in snapshot.operations
+            ):
+                operation_result = "superseded_by_moderation"
             elif (
                 operation.operation_type == "role_apply"
                 and snapshot.case.status is not CaseStatus.PENDING
@@ -3045,98 +3091,115 @@ class Honeypot(Cog):
                 member = guild.get_member(snapshot.case.user_id)
                 role = guild.get_role(role_id)
                 if member is None:
-                    raise RuntimeError("detection case member is unavailable")
-                if role is None:
-                    raise RuntimeError("detection case role is unavailable")
-                effect_started = await asyncio.to_thread(
-                    self._case_store.operation_effect_started, operation.operation_id
-                )
-                if role not in member.roles:
-                    started = await asyncio.to_thread(
-                        self._case_store.start_role_apply_effect,
+                    fetch_member = getattr(guild, "fetch_member", None)
+                    if not callable(fetch_member):
+                        raise RuntimeError(
+                            "detection case member lookup is unavailable"
+                        )
+                    try:
+                        member = await fetch_member(snapshot.case.user_id)
+                    except discord.NotFound:
+                        operation_result = "member_unavailable"
+                    except discord.HTTPException as error:
+                        raise RuntimeError(
+                            "detection case member lookup failed"
+                        ) from error
+                if operation_result != "member_unavailable":
+                    if role is None:
+                        raise RuntimeError("detection case role is unavailable")
+                    effect_started = await asyncio.to_thread(
+                        self._case_store.operation_effect_started,
                         operation.operation_id,
-                        operation.claim_token,
-                        datetime.now(timezone.utc),
                     )
-                    if not started:
-                        raise RuntimeError("detection operation lease was lost")
-                    await member.add_roles(
-                        role, reason="Detection case pending moderator review."
-                    )
-                    role_was_added = True
-                    ownership_result = await asyncio.to_thread(
-                        self._case_store.record_operation_role_ownership,
-                        operation.operation_id,
-                        operation.claim_token,
-                        operation.case_id,
-                        snapshot.case.guild_id,
-                        snapshot.case.user_id,
-                        role_id,
-                        datetime.now(timezone.utc),
-                    )
-                    if ownership_result is None:
+                    if role not in member.roles:
+                        started = await asyncio.to_thread(
+                            self._case_store.start_role_apply_effect,
+                            operation.operation_id,
+                            operation.claim_token,
+                            datetime.now(timezone.utc),
+                        )
+                        if not started:
+                            raise RuntimeError("detection operation lease was lost")
+                        await member.add_roles(
+                            role, reason="Detection case pending moderator review."
+                        )
+                        role_was_added = True
+                        ownership_result = await asyncio.to_thread(
+                            self._case_store.record_operation_role_ownership,
+                            operation.operation_id,
+                            operation.claim_token,
+                            operation.case_id,
+                            snapshot.case.guild_id,
+                            snapshot.case.user_id,
+                            role_id,
+                            datetime.now(timezone.utc),
+                        )
+                        if ownership_result is None:
+                            operation_result = "ambiguous_role_ownership"
+                            await asyncio.to_thread(
+                                self._case_store.mark_case_needs_attention,
+                                operation.case_id,
+                            )
+                        elif ownership_result == "release_required":
+                            terminal_snapshot = await asyncio.to_thread(
+                                self._case_store.get_case, operation.case_id
+                            )
+                            release = next(
+                                (
+                                    item
+                                    for item in terminal_snapshot.operations
+                                    if item.operation_type == "role_release"
+                                    and item.idempotency_key
+                                    == f"role-release:{operation.case_id}:{role_id}"
+                                ),
+                                None,
+                            )
+                            if release is not None:
+                                claimed_release = await asyncio.to_thread(
+                                    self._case_store.claim_operation,
+                                    release.operation_id,
+                                    datetime.now(timezone.utc),
+                                )
+                                if claimed_release is not None:
+                                    await self._execute_detection_case_operation(
+                                        claimed_release, datetime.now(timezone.utc)
+                                    )
+                    elif effect_started:
                         operation_result = "ambiguous_role_ownership"
                         await asyncio.to_thread(
                             self._case_store.mark_case_needs_attention,
                             operation.case_id,
                         )
-                    elif ownership_result == "release_required":
-                        terminal_snapshot = await asyncio.to_thread(
-                            self._case_store.get_case, operation.case_id
-                        )
-                        release = next(
-                            (
-                                item
-                                for item in terminal_snapshot.operations
-                                if item.operation_type == "role_release"
-                                and item.idempotency_key
-                                == f"role-release:{operation.case_id}:{role_id}"
-                            ),
-                            None,
-                        )
-                        if release is not None:
-                            claimed_release = await asyncio.to_thread(
-                                self._case_store.claim_operation,
-                                release.operation_id,
-                                datetime.now(timezone.utc),
-                            )
-                            if claimed_release is not None:
-                                await self._execute_detection_case_operation(
-                                    claimed_release, datetime.now(timezone.utc)
-                                )
-                elif effect_started:
-                    operation_result = "ambiguous_role_ownership"
-                    await asyncio.to_thread(
-                        self._case_store.mark_case_needs_attention,
-                        operation.case_id,
-                    )
-                else:
-                    owner_case_id = await asyncio.to_thread(
-                        self._case_store.role_owner_case,
-                        snapshot.case.guild_id,
-                        snapshot.case.user_id,
-                        role_id,
-                    )
-                    transferred = await asyncio.to_thread(
-                        self._case_store.transfer_terminal_role_ownership,
-                        operation.operation_id,
-                        operation.claim_token,
-                        operation.case_id,
-                        snapshot.case.guild_id,
-                        snapshot.case.user_id,
-                        role_id,
-                        datetime.now(timezone.utc),
-                    )
-                    if transferred:
-                        operation_result = "transferred_role_ownership"
-                    elif owner_case_id is not None and owner_case_id != operation.case_id:
-                        raise RuntimeError(
-                            "previous detection case role release is still in progress"
-                        )
-                    elif owner_case_id == operation.case_id:
-                        operation_result = "role_already_owned"
                     else:
-                        operation_result = "preexisting_role"
+                        owner_case_id = await asyncio.to_thread(
+                            self._case_store.role_owner_case,
+                            snapshot.case.guild_id,
+                            snapshot.case.user_id,
+                            role_id,
+                        )
+                        transferred = await asyncio.to_thread(
+                            self._case_store.transfer_terminal_role_ownership,
+                            operation.operation_id,
+                            operation.claim_token,
+                            operation.case_id,
+                            snapshot.case.guild_id,
+                            snapshot.case.user_id,
+                            role_id,
+                            datetime.now(timezone.utc),
+                        )
+                        if transferred:
+                            operation_result = "transferred_role_ownership"
+                        elif (
+                            owner_case_id is not None
+                            and owner_case_id != operation.case_id
+                        ):
+                            raise RuntimeError(
+                                "previous detection case role release is still in progress"
+                            )
+                        elif owner_case_id == operation.case_id:
+                            operation_result = "role_already_owned"
+                        else:
+                            operation_result = "preexisting_role"
             elif operation.operation_type == "review_publish":
                 config = await self.config.guild_from_id(snapshot.case.guild_id).all()
                 guild = self.bot.get_guild(snapshot.case.guild_id)
@@ -3538,11 +3601,10 @@ class Honeypot(Cog):
                     case_id=operation.case_id,
                     operation_id=operation.operation_id,
                     attempts=operation.attempts,
-                    terminal=(
-                        retry_at is None
-                        or operation.attempts > DETECTION_FAST_RETRY_LIMIT
-                    ),
+                    terminal=retry_at is None,
                 )
+            if operation.operation_type == "role_apply":
+                await self._case_review_rerender_safely(operation.case_id)
             if operation.operation_type == "role_apply" and snapshot is not None:
                 failed_guild = self.bot.get_guild(snapshot.case.guild_id)
                 if failed_guild is not None:
@@ -3602,6 +3664,12 @@ class Honeypot(Cog):
             guild = self.bot.get_guild(snapshot.case.guild_id)
             if guild is not None:
                 await self._increment_stat(guild, "pending_mutes")
+        if completed and operation.operation_type == "role_apply" and (
+            operation.attempts > 1
+            or operation_result
+            in {"superseded_by_moderation", "member_unavailable"}
+        ):
+            await self._case_review_rerender_safely(operation.case_id)
         if operation.operation_type in {
             "review_update",
             "role_release",
@@ -4309,6 +4377,8 @@ class Honeypot(Cog):
                 "evidence_capture",
                 f"Failed to capture {len(failed_captures)} attachment(s): {details}"[:512],
                 case_id=case_id,
+                attempts=3,
+                terminal=True,
             )
         return tuple(persisted_captures)
 
@@ -5493,8 +5563,33 @@ class Honeypot(Cog):
                 error,
             )
 
+    def _schedule_case_review_followup(self, case_id: str) -> None:
+        task = asyncio.create_task(self._run_case_review_followup(case_id))
+        self._case_review_tasks.add(task)
+        task.add_done_callback(self._case_review_tasks.discard)
+
+    async def _run_case_review_followup(self, case_id: str) -> None:
+        try:
+            await self._execute_case_final_operations(
+                case_id,
+                datetime.now(timezone.utc),
+            )
+            await self._case_review_rerender_safely(case_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.warning(
+                "Detection case review follow-up failed case=%s",
+                case_id,
+                exc_info=True,
+            )
+
     async def _finish_case_review_if_ready(
-        self, case_id: str, moderator_id: int | None
+        self,
+        case_id: str,
+        moderator_id: int | None,
+        *,
+        defer_final_operations: bool = False,
     ) -> bool:
         snapshot = await asyncio.to_thread(self._case_store.get_case, case_id)
         if (
@@ -5533,6 +5628,20 @@ class Honeypot(Cog):
         if completed is None:
             return False
         if snapshot.case.status.value in {"resolving", "resolved"}:
+            if defer_final_operations:
+                if snapshot.case.status.value == "resolving":
+                    await asyncio.to_thread(
+                        self._case_store.reconcile_moderator_actions,
+                        datetime.now(timezone.utc),
+                    )
+                refreshed = await asyncio.to_thread(
+                    self._case_store.get_case,
+                    case_id,
+                )
+                return bool(
+                    refreshed is not None
+                    and refreshed.case.status.value in {"resolved", "expired"}
+                )
             await self._run_detection_reconciliation()
             refreshed = await asyncio.to_thread(self._case_store.get_case, case_id)
             return bool(
@@ -5540,6 +5649,13 @@ class Honeypot(Cog):
                 and refreshed.case.status.value in {"resolved", "expired"}
             )
         resolution = "kick" if completed.result == "kick_missing" else completed.result
+        if defer_final_operations:
+            return await self.resolve_detection_case(
+                case_id,
+                resolution,
+                completed.actor_id or moderator_id,
+                defer_final_operations=True,
+            )
         return await self.resolve_detection_case(
             case_id,
             resolution,
@@ -5598,8 +5714,12 @@ class Honeypot(Cog):
                 interaction.user.id,
                 expected_keys=expected_keys or None,
             )
-            await self._finish_case_review_if_ready(case_id, interaction.user.id)
-            await self._case_review_rerender_if_open(case_id)
+            await self._finish_case_review_if_ready(
+                case_id,
+                interaction.user.id,
+                defer_final_operations=True,
+            )
+            self._schedule_case_review_followup(case_id)
             return True
         except (KeyError, ValueError) as error:
             await self._case_review_error(interaction, str(error))
@@ -5663,8 +5783,12 @@ class Honeypot(Cog):
                 interaction.user.id,
                 expected_keys=expected_keys or None,
             )
-            await self._finish_case_review_if_ready(case_id, interaction.user.id)
-            await self._case_review_rerender_if_open(case_id)
+            await self._finish_case_review_if_ready(
+                case_id,
+                interaction.user.id,
+                defer_final_operations=True,
+            )
+            self._schedule_case_review_followup(case_id)
             return True
         except (KeyError, ValueError) as error:
             await self._case_review_error(interaction, str(error))
@@ -5783,8 +5907,12 @@ class Honeypot(Cog):
         await self._case_review_defer(interaction)
         try:
             await self._case_review_service.apply_individual(key, action, interaction.user.id)
-            await self._finish_case_review_if_ready(key.case_id, interaction.user.id)
-            await self._case_review_rerender_if_open(key.case_id)
+            await self._finish_case_review_if_ready(
+                key.case_id,
+                interaction.user.id,
+                defer_final_operations=True,
+            )
+            self._schedule_case_review_followup(key.case_id)
         except (KeyError, ValueError) as error:
             await self._case_review_error(interaction, str(error))
 
