@@ -4,13 +4,13 @@ import asyncio
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from enum import StrEnum
+from enum import Enum
 from pathlib import Path
 import sqlite3
 from typing import Iterator, Sequence
 
 
-class SyncStatus(StrEnum):
+class SyncStatus(str, Enum):
     DISABLED = "DISABLED"
     NEEDS_RECONCILIATION = "NEEDS_RECONCILIATION"
     SYNCING = "SYNCING"
@@ -66,6 +66,13 @@ class RoleAnalyticsStore:
                 guild_id,
                 status,
                 error_code,
+            )
+
+    async def mark_needs_reconciliation_if_enabled(self, guild_id: int) -> bool:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._mark_needs_reconciliation_if_enabled_sync,
+                guild_id,
             )
 
     async def next_generation(self, guild_id: int) -> int:
@@ -332,6 +339,18 @@ class RoleAnalyticsStore:
                 (guild_id, SyncStatus.SYNCING.value),
             )
             return generation
+
+    def _mark_needs_reconciliation_if_enabled_sync(self, guild_id: int) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE role_analytics_state
+                SET status = ?, last_error_code = NULL
+                WHERE guild_id = ? AND enabled = 1
+                """,
+                (SyncStatus.NEEDS_RECONCILIATION.value, guild_id),
+            )
+            return cursor.rowcount > 0
 
     def _write_generation_sync(
         self,
