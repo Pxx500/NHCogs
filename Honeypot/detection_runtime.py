@@ -90,17 +90,27 @@ async def read_attachment_bounded(attachment: object, max_bytes: int) -> bytes:
     read = getattr(attachment, "read", None)
     if not callable(read):
         raise RuntimeError("attachment has no Discord download interface")
-    try:
-        data = await read()
-    except (discord.HTTPException, OSError):
-        data = await read(use_cached=True)
-    if not isinstance(data, bytes):
-        data = bytes(data)
-    if len(data) > max_bytes:
-        raise AttachmentTooLargeError(
-            f"attachment exceeds the {max_bytes} byte evidence limit"
-        )
-    return data
+    retry_delays = (1.0, 3.0)
+    for attempt in range(3):
+        try:
+            try:
+                data = await read()
+            except (discord.HTTPException, OSError):
+                data = await read(use_cached=True)
+            if not isinstance(data, bytes):
+                data = bytes(data)
+            if len(data) > max_bytes:
+                raise AttachmentTooLargeError(
+                    f"attachment exceeds the {max_bytes} byte evidence limit"
+                )
+            return data
+        except discord.Forbidden:
+            raise
+        except (discord.HTTPException, OSError):
+            if attempt == 2:
+                raise
+            await asyncio.sleep(retry_delays[attempt])
+    raise AssertionError("unreachable")
 
 
 def _finish_cancelled_write(task: asyncio.Task[object], temp_path: Path) -> None:
