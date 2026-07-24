@@ -251,7 +251,10 @@ class CaseReviewProjectionTests(unittest.TestCase):
         self.assertIn("Ban", projection.moderation_status)
         self.assertNotIn("succeeded", projection.moderation_status)
         self.assertTrue(projection.incomplete_evidence)
-        self.assertEqual(projection.signal_lines, ("<#20>: same reason",))
+        self.assertEqual(
+            projection.signal_lines,
+            ("<#20>: same reason", "<#10>: same reason"),
+        )
         visible = "\n".join(
             (projection.description,)
             + tuple(f"{field.name} {field.value}" for field in projection.fields)
