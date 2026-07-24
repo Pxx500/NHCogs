@@ -511,8 +511,7 @@ class CaseReviewProjectionTests(unittest.TestCase):
         )
 
         self.assertIn("Banned automatically", visible)
-        self.assertIn("<@99>", visible)
-        self.assertNotIn("<@99> (99)", visible)
+        self.assertNotIn("<@99>", visible)
 
     def test_review_keeps_user_id_but_hides_case_uuid(self):
         projection = case_review.render_case(self.snapshot())
