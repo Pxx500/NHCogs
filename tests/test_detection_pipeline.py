@@ -8840,6 +8840,130 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                 release_action.set()
                 await callback
 
+    async def test_classification_returns_before_final_operations_finish(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog._case_store.initialize()
+                now = datetime.now(timezone.utc)
+                appended = cog._case_store.append_message(
+                    honeypot.NewMessage(
+                        10,
+                        20,
+                        30,
+                        40,
+                        "evidence",
+                        now,
+                        None,
+                        (
+                            honeypot.NewAttachment(
+                                0,
+                                "proof.png",
+                                4,
+                                "image/png",
+                                None,
+                                None,
+                                "https://cdn.test/proof.png",
+                            ),
+                        ),
+                    ),
+                    (),
+                )
+                self.assertTrue(
+                    capture_attachment(
+                        cog._case_store,
+                        appended.case.case_id,
+                        appended.message.sequence,
+                        0,
+                        Path(directory) / "proof.png",
+                    )
+                )
+                moderation = cog._case_store.ensure_operation(
+                    appended.case.case_id,
+                    "moderator_ban",
+                    f"moderator-ban:{appended.case.case_id}",
+                    actor_id=99,
+                )
+                claimed_moderation = cog._case_store.claim_operation(
+                    moderation.operation_id,
+                    now,
+                )
+                self.assertTrue(
+                    cog._case_store.complete_operation(
+                        claimed_moderation.operation_id,
+                        claimed_moderation.claim_token,
+                        now,
+                        "ban",
+                    )
+                )
+                final_operation_started = asyncio.Event()
+                release_final_operation = asyncio.Event()
+
+                async def block_final_operation(*_args, **_kwargs):
+                    final_operation_started.set()
+                    await release_final_operation.wait()
+
+                cog._execute_detection_case_operation = mock.AsyncMock(
+                    side_effect=block_final_operation
+                )
+                interaction = SimpleNamespace(
+                    user=SimpleNamespace(
+                        id=99,
+                        guild_permissions=SimpleNamespace(manage_messages=True),
+                    ),
+                    response=SimpleNamespace(
+                        defer=mock.AsyncMock(),
+                        is_done=lambda: False,
+                    ),
+                    followup=SimpleNamespace(send=mock.AsyncMock()),
+                )
+
+                interaction_task = asyncio.create_task(
+                    cog._case_review_bulk_interaction(
+                        interaction,
+                        appended.case.case_id,
+                        "tp",
+                        confirmed=True,
+                        expected_keys=(
+                            honeypot.AttachmentKey(
+                                appended.case.case_id,
+                                appended.message.sequence,
+                                0,
+                            ),
+                        ),
+                    )
+                )
+                await final_operation_started.wait()
+                try:
+                    try:
+                        completed = await asyncio.wait_for(
+                            asyncio.shield(interaction_task),
+                            timeout=0.05,
+                        )
+                    except TimeoutError:
+                        self.fail(
+                            "classification interaction waited for final operations"
+                        )
+                    self.assertTrue(completed)
+                    snapshot = cog._case_store.get_case(appended.case.case_id)
+                    self.assertEqual(snapshot.case.status.value, "resolved")
+                    self.assertEqual(
+                        snapshot.attachments[0].learning_decision,
+                        "true_positive",
+                    )
+                    self.assertTrue(
+                        any(
+                            operation.operation_type == "review_update"
+                            for operation in snapshot.operations
+                        )
+                    )
+                finally:
+                    release_final_operation.set()
+                    await interaction_task
+                    pending = tuple(getattr(cog, "_case_review_tasks", ()))
+                    if pending:
+                        await asyncio.gather(*pending)
+
     async def test_dismissed_confirmation_reports_failure_in_new_ephemeral_message(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
