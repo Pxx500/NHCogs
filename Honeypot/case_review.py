@@ -416,6 +416,7 @@ def render_timeline(snapshot: CaseSnapshot) -> CaseTimelineProjection:
             operation.operation_type
             in {
                 "review_publish",
+                "role_apply",
                 "role_release",
                 "moderation_action",
                 "moderator_ban",
@@ -424,7 +425,13 @@ def render_timeline(snapshot: CaseSnapshot) -> CaseTimelineProjection:
             and operation.status.value in {"failed", "abandoned"}
         )
     )
-    case_notes = cached_purge_notes + operation_notes
+    evidence_notes = tuple(
+        f"Evidence unavailable for message {attachment.message_sequence}, "
+        f"attachment {attachment.position + 1} ({attachment.filename})."
+        for attachment in snapshot.attachments
+        if attachment.capture_status in {"capture_failed", "capture_timeout"}
+    )
+    case_notes = cached_purge_notes + operation_notes + evidence_notes
     return CaseTimelineProjection(snapshot.case.case_id, messages, case_notes)
 
 
@@ -448,6 +455,10 @@ def _operation_warning(operation: OperationRecord) -> str:
         )
     if operation.operation_type == "role_release":
         return "Temporary mute could not be removed. See bot logs."
+    if operation.operation_type == "role_apply":
+        if operation.status is OperationStatus.FAILED:
+            return "Temporary mute could not be applied; retry scheduled. See bot logs."
+        return "Temporary mute could not be applied. Review it manually."
     if operation.operation_type in {"moderation_action", "moderator_ban", "moderator_kick"}:
         return "Moderation action failed. See bot logs."
     return "Case publication failed. See bot logs."
@@ -561,6 +572,7 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
             operation.operation_type
             in {
                 "review_publish",
+                "role_apply",
                 "role_release",
                 "moderation_action",
                 "moderator_ban",
@@ -568,6 +580,11 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
             }
             and operation.status.value in {"failed", "abandoned"}
         )
+    ) + tuple(
+        f"Evidence unavailable for message {attachment.message_sequence}, "
+        f"attachment {attachment.position + 1} ({attachment.filename})."
+        for attachment in snapshot.attachments
+        if attachment.capture_status in {"capture_failed", "capture_timeout"}
     )
     title = "Detection case"
     subject = snapshot.subject

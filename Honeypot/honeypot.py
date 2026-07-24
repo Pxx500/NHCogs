@@ -3035,6 +3035,27 @@ class Honeypot(Cog):
                         publication_channel=publication_channel,
                         timings=timings,
                     )
+            elif operation.operation_type == "role_apply" and any(
+                item.operation_type
+                in {
+                    "moderation_action",
+                    "moderator_ban",
+                    "moderator_kick",
+                    "moderator_ignore",
+                }
+                and item.status.value == "succeeded"
+                and item.result
+                in {
+                    "ban",
+                    "kick",
+                    "kick_missing",
+                    "ignore",
+                    "planned_ban",
+                    "planned_kick",
+                }
+                for item in snapshot.operations
+            ):
+                operation_result = "superseded_by_moderation"
             elif (
                 operation.operation_type == "role_apply"
                 and snapshot.case.status is not CaseStatus.PENDING
@@ -3050,98 +3071,115 @@ class Honeypot(Cog):
                 member = guild.get_member(snapshot.case.user_id)
                 role = guild.get_role(role_id)
                 if member is None:
-                    raise RuntimeError("detection case member is unavailable")
-                if role is None:
-                    raise RuntimeError("detection case role is unavailable")
-                effect_started = await asyncio.to_thread(
-                    self._case_store.operation_effect_started, operation.operation_id
-                )
-                if role not in member.roles:
-                    started = await asyncio.to_thread(
-                        self._case_store.start_role_apply_effect,
+                    fetch_member = getattr(guild, "fetch_member", None)
+                    if not callable(fetch_member):
+                        raise RuntimeError(
+                            "detection case member lookup is unavailable"
+                        )
+                    try:
+                        member = await fetch_member(snapshot.case.user_id)
+                    except discord.NotFound:
+                        operation_result = "member_unavailable"
+                    except discord.HTTPException as error:
+                        raise RuntimeError(
+                            "detection case member lookup failed"
+                        ) from error
+                if operation_result != "member_unavailable":
+                    if role is None:
+                        raise RuntimeError("detection case role is unavailable")
+                    effect_started = await asyncio.to_thread(
+                        self._case_store.operation_effect_started,
                         operation.operation_id,
-                        operation.claim_token,
-                        datetime.now(timezone.utc),
                     )
-                    if not started:
-                        raise RuntimeError("detection operation lease was lost")
-                    await member.add_roles(
-                        role, reason="Detection case pending moderator review."
-                    )
-                    role_was_added = True
-                    ownership_result = await asyncio.to_thread(
-                        self._case_store.record_operation_role_ownership,
-                        operation.operation_id,
-                        operation.claim_token,
-                        operation.case_id,
-                        snapshot.case.guild_id,
-                        snapshot.case.user_id,
-                        role_id,
-                        datetime.now(timezone.utc),
-                    )
-                    if ownership_result is None:
+                    if role not in member.roles:
+                        started = await asyncio.to_thread(
+                            self._case_store.start_role_apply_effect,
+                            operation.operation_id,
+                            operation.claim_token,
+                            datetime.now(timezone.utc),
+                        )
+                        if not started:
+                            raise RuntimeError("detection operation lease was lost")
+                        await member.add_roles(
+                            role, reason="Detection case pending moderator review."
+                        )
+                        role_was_added = True
+                        ownership_result = await asyncio.to_thread(
+                            self._case_store.record_operation_role_ownership,
+                            operation.operation_id,
+                            operation.claim_token,
+                            operation.case_id,
+                            snapshot.case.guild_id,
+                            snapshot.case.user_id,
+                            role_id,
+                            datetime.now(timezone.utc),
+                        )
+                        if ownership_result is None:
+                            operation_result = "ambiguous_role_ownership"
+                            await asyncio.to_thread(
+                                self._case_store.mark_case_needs_attention,
+                                operation.case_id,
+                            )
+                        elif ownership_result == "release_required":
+                            terminal_snapshot = await asyncio.to_thread(
+                                self._case_store.get_case, operation.case_id
+                            )
+                            release = next(
+                                (
+                                    item
+                                    for item in terminal_snapshot.operations
+                                    if item.operation_type == "role_release"
+                                    and item.idempotency_key
+                                    == f"role-release:{operation.case_id}:{role_id}"
+                                ),
+                                None,
+                            )
+                            if release is not None:
+                                claimed_release = await asyncio.to_thread(
+                                    self._case_store.claim_operation,
+                                    release.operation_id,
+                                    datetime.now(timezone.utc),
+                                )
+                                if claimed_release is not None:
+                                    await self._execute_detection_case_operation(
+                                        claimed_release, datetime.now(timezone.utc)
+                                    )
+                    elif effect_started:
                         operation_result = "ambiguous_role_ownership"
                         await asyncio.to_thread(
                             self._case_store.mark_case_needs_attention,
                             operation.case_id,
                         )
-                    elif ownership_result == "release_required":
-                        terminal_snapshot = await asyncio.to_thread(
-                            self._case_store.get_case, operation.case_id
-                        )
-                        release = next(
-                            (
-                                item
-                                for item in terminal_snapshot.operations
-                                if item.operation_type == "role_release"
-                                and item.idempotency_key
-                                == f"role-release:{operation.case_id}:{role_id}"
-                            ),
-                            None,
-                        )
-                        if release is not None:
-                            claimed_release = await asyncio.to_thread(
-                                self._case_store.claim_operation,
-                                release.operation_id,
-                                datetime.now(timezone.utc),
-                            )
-                            if claimed_release is not None:
-                                await self._execute_detection_case_operation(
-                                    claimed_release, datetime.now(timezone.utc)
-                                )
-                elif effect_started:
-                    operation_result = "ambiguous_role_ownership"
-                    await asyncio.to_thread(
-                        self._case_store.mark_case_needs_attention,
-                        operation.case_id,
-                    )
-                else:
-                    owner_case_id = await asyncio.to_thread(
-                        self._case_store.role_owner_case,
-                        snapshot.case.guild_id,
-                        snapshot.case.user_id,
-                        role_id,
-                    )
-                    transferred = await asyncio.to_thread(
-                        self._case_store.transfer_terminal_role_ownership,
-                        operation.operation_id,
-                        operation.claim_token,
-                        operation.case_id,
-                        snapshot.case.guild_id,
-                        snapshot.case.user_id,
-                        role_id,
-                        datetime.now(timezone.utc),
-                    )
-                    if transferred:
-                        operation_result = "transferred_role_ownership"
-                    elif owner_case_id is not None and owner_case_id != operation.case_id:
-                        raise RuntimeError(
-                            "previous detection case role release is still in progress"
-                        )
-                    elif owner_case_id == operation.case_id:
-                        operation_result = "role_already_owned"
                     else:
-                        operation_result = "preexisting_role"
+                        owner_case_id = await asyncio.to_thread(
+                            self._case_store.role_owner_case,
+                            snapshot.case.guild_id,
+                            snapshot.case.user_id,
+                            role_id,
+                        )
+                        transferred = await asyncio.to_thread(
+                            self._case_store.transfer_terminal_role_ownership,
+                            operation.operation_id,
+                            operation.claim_token,
+                            operation.case_id,
+                            snapshot.case.guild_id,
+                            snapshot.case.user_id,
+                            role_id,
+                            datetime.now(timezone.utc),
+                        )
+                        if transferred:
+                            operation_result = "transferred_role_ownership"
+                        elif (
+                            owner_case_id is not None
+                            and owner_case_id != operation.case_id
+                        ):
+                            raise RuntimeError(
+                                "previous detection case role release is still in progress"
+                            )
+                        elif owner_case_id == operation.case_id:
+                            operation_result = "role_already_owned"
+                        else:
+                            operation_result = "preexisting_role"
             elif operation.operation_type == "review_publish":
                 config = await self.config.guild_from_id(snapshot.case.guild_id).all()
                 guild = self.bot.get_guild(snapshot.case.guild_id)
@@ -3543,11 +3581,10 @@ class Honeypot(Cog):
                     case_id=operation.case_id,
                     operation_id=operation.operation_id,
                     attempts=operation.attempts,
-                    terminal=(
-                        retry_at is None
-                        or operation.attempts > DETECTION_FAST_RETRY_LIMIT
-                    ),
+                    terminal=retry_at is None,
                 )
+            if operation.operation_type == "role_apply":
+                await self._case_review_rerender_safely(operation.case_id)
             if operation.operation_type == "role_apply" and snapshot is not None:
                 failed_guild = self.bot.get_guild(snapshot.case.guild_id)
                 if failed_guild is not None:
@@ -3607,6 +3644,12 @@ class Honeypot(Cog):
             guild = self.bot.get_guild(snapshot.case.guild_id)
             if guild is not None:
                 await self._increment_stat(guild, "pending_mutes")
+        if completed and operation.operation_type == "role_apply" and (
+            operation.attempts > 1
+            or operation_result
+            in {"superseded_by_moderation", "member_unavailable"}
+        ):
+            await self._case_review_rerender_safely(operation.case_id)
         if operation.operation_type in {
             "review_update",
             "role_release",
