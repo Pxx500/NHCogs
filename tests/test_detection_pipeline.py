@@ -3059,6 +3059,38 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 )
 
 
+class ImageScanSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_malformed_threshold_defaults_in_public_threshold_query(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog.config = SimpleNamespace(
+                    guild=lambda guild: SimpleNamespace(
+                        all=mock.AsyncMock(
+                            return_value={
+                                "imagescan_detector_threshold": "invalid",
+                            }
+                        )
+                    )
+                )
+                cog._imagescan_model_state = mock.AsyncMock(
+                    return_value={
+                        "configured_threshold": 20,
+                        "effective_threshold": 20,
+                    }
+                )
+                ctx = SimpleNamespace(
+                    guild=SimpleNamespace(id=100),
+                    send=mock.AsyncMock(),
+                )
+
+                await cog.imagescan_detector_threshold(ctx)
+
+                ctx.send.assert_awaited_once_with(
+                    "Threshold: 20 effective 20"
+                )
+
+
 class JoinwatchSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_disabled_setting_does_not_publish_join_alert(self):
         with TemporaryDirectory() as directory:
