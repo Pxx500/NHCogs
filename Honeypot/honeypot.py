@@ -2347,8 +2347,12 @@ class Honeypot(Cog):
 
     @tasks.loop(minutes=1)
     async def purge_cache_cleanup_loop(self) -> None:
-        configs = {int(guild_id): config for guild_id, config in (await self.config.all_guilds()).items()}
-        self._prune_purge_cache(configs)
+        raw_configs = await self.config.all_guilds()
+        guild_settings_by_id = {
+            int(guild_id): GuildSettings.from_mapping(raw_config)
+            for guild_id, raw_config in raw_configs.items()
+        }
+        self._prune_purge_cache(guild_settings_by_id)
 
     @tasks.loop(minutes=1)
     async def detection_case_loop(self) -> None:
@@ -6243,19 +6247,16 @@ class Honeypot(Cog):
         if not refs:
             self._recent_user_messages[guild_id].pop(user_id, None)
 
-    def _prune_purge_cache(self, configs_by_guild_id: dict[int, dict] | None = None) -> None:
+    def _prune_purge_cache(
+        self,
+        settings_by_guild_id: dict[int, GuildSettings] | None = None,
+    ) -> None:
         now = datetime.now(timezone.utc)
         for guild_id, users in list(self._recent_user_messages.items()):
-            guild_config = (configs_by_guild_id or {}).get(guild_id)
+            guild_settings = (settings_by_guild_id or {}).get(guild_id)
             retention_seconds = self._purge_retention_seconds(
-                int(
-                    guild_config.get(
-                        "purge_backward_seconds",
-                        PURGE_BACKWARD_DEFAULT_SECONDS,
-                    )
-                    or 0
-                )
-                if guild_config is not None
+                guild_settings.purge_backward_seconds
+                if guild_settings is not None
                 else None
             )
             for user_id in list(users):
@@ -6354,7 +6355,7 @@ class Honeypot(Cog):
         self,
         guild: discord.Guild,
         user_id: int,
-        config: dict,
+        guild_settings: GuildSettings,
         *,
         exclude_message_id: int | None = None,
     ) -> int:
@@ -6363,23 +6364,13 @@ class Honeypot(Cog):
             user_id,
             exclude_message_id=exclude_message_id,
             retention_seconds=self._purge_retention_seconds(
-                int(
-                    config.get(
-                        "purge_backward_seconds", PURGE_BACKWARD_DEFAULT_SECONDS
-                    )
-                    or 0
-                )
+                guild_settings.purge_backward_seconds
             ),
         )
         self._activate_forward_purge(
             guild.id,
             user_id,
-            int(
-                config.get(
-                    "purge_forward_seconds", PURGE_FORWARD_DEFAULT_SECONDS
-                )
-                or 0
-            ),
+            guild_settings.purge_forward_seconds,
         )
         return deleted
 
@@ -6398,8 +6389,11 @@ class Honeypot(Cog):
             guild = self.bot.get_guild(guild_id)
             if guild is None:
                 return
-            config = await self.config.guild(guild).all()
-            deleted = await self._cached_purge_user_messages(guild, user_id, config)
+            raw_config = await self.config.guild(guild).all()
+            guild_settings = GuildSettings.from_mapping(raw_config)
+            deleted = await self._cached_purge_user_messages(
+                guild, user_id, guild_settings
+            )
             if deleted:
                 await self._increment_stat(guild, "purged_messages", deleted)
                 await self._increment_stat(guild, "cached_purge_deletes", deleted)

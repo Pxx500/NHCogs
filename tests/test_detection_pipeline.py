@@ -3091,6 +3091,37 @@ class ImageScanSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
                 )
 
 
+class PurgeMaintenanceSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_malformed_retention_defaults_before_cache_cleanup(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog._recent_user_messages[100][200].append(
+                    honeypot.MessageRef(
+                        300,
+                        400,
+                        datetime.now(timezone.utc) - timedelta(minutes=10),
+                        "fingerprint",
+                    )
+                )
+                cog.config = SimpleNamespace(
+                    all_guilds=mock.AsyncMock(
+                        return_value={
+                            "100": {
+                                "purge_backward_seconds": "999",
+                            }
+                        }
+                    )
+                )
+
+                await cog.purge_cache_cleanup_loop.function(cog)
+
+                self.assertNotIn(
+                    200,
+                    cog._recent_user_messages.get(100, {}),
+                )
+
+
 class JoinwatchSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_disabled_setting_does_not_publish_join_alert(self):
         with TemporaryDirectory() as directory:
@@ -9547,7 +9578,9 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                 )
                 member.ban.assert_awaited_once()
                 cog._cached_purge_user_messages.assert_awaited_once_with(
-                    guild, member.id, config
+                    guild,
+                    member.id,
+                    honeypot.GuildSettings.from_mapping(config),
                 )
                 cog._increment_stat.assert_any_await(guild, "banned")
                 honeypot.modlog.create_case.assert_awaited_once()
