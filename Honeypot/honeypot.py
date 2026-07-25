@@ -14,9 +14,10 @@ import typing
 import zipfile
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager, closing
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from functools import partial
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -159,6 +160,18 @@ DETECTION_EVIDENCE_RESERVATION_STALE_SECONDS = 5 * 60
 DETECTION_CAPTURE_CONCURRENCY = 4
 DETECTION_HEARTBEAT_INTERVAL_SECONDS = 60.0
 IMAGE_SCAN_FEEDBACK_BULK_LABELS = ("All TP", "All FP", "Ignore all", "Individual")
+
+
+@dataclass(frozen=True, slots=True)
+class DoctorResult:
+    name: str
+    status: typing.Literal["healthy", "warning", "failed"]
+    detail: str = ""
+
+
+DoctorCheck = typing.Callable[
+    [], typing.Awaitable[typing.Sequence[DoctorResult]]
+]
 
 
 class ImageScanDecision(str, Enum):
@@ -8620,124 +8633,150 @@ class Honeypot(Cog):
         if probe_error is not None:
             raise probe_error
 
-    @honeypot.command(name="doctor")
-    async def honeypot_doctor(self, ctx: commands.Context) -> None:
-        """Check honeypot configuration and required permissions."""
-        raw_config = await self.config.guild(ctx.guild).all()
-        guild_settings = GuildSettings.from_mapping(raw_config)
-        checks: list[tuple[str, bool, str]] = []
-        warnings: list[str] = []
+    async def _doctor_runtime_checks(self, guild_id: int) -> tuple[DoctorResult, ...]:
+        results: list[DoctorResult] = []
         case_database_ok = True
         try:
             await asyncio.to_thread(self._case_store.verify_read_write)
         except (OSError, sqlite3.Error) as error:
             case_database_ok = False
-            checks.append(
-                ("Detection case database", False, f"Read/write check failed: {error}")
-            )
-        try:
-            await asyncio.to_thread(self._verify_detection_case_evidence_directory)
-        except OSError as error:
-            checks.append(
-                (
-                    "Detection case evidence directory",
-                    False,
+            results.append(
+                DoctorResult(
+                    "Detection case database",
+                    "failed",
                     f"Read/write check failed: {error}",
                 )
             )
-        if case_database_ok:
-            now = datetime.now(timezone.utc)
-            operational_failures = await asyncio.to_thread(
-                self._case_store.list_operational_failures,
-                ctx.guild.id,
-            )
-            if operational_failures:
-                oldest = min(item.first_seen_at for item in operational_failures)
-                checks.append(
-                    (
-                        f"Active operational failures: {len(operational_failures)}",
-                        False,
-                        f"Oldest: <t:{int(oldest.timestamp())}:R>. "
-                        "Run `honeypot errors`.",
-                    )
+        else:
+            results.append(DoctorResult("Detection case database", "healthy"))
+        try:
+            await asyncio.to_thread(self._verify_detection_case_evidence_directory)
+        except OSError as error:
+            results.append(
+                DoctorResult(
+                    "Detection case evidence directory",
+                    "failed",
+                    f"Read/write check failed: {error}",
                 )
-            case_counts = await asyncio.to_thread(
-                self._case_store.operational_counts,
-                ctx.guild.id,
-                now,
-                now - timedelta(minutes=5),
             )
-            checks.extend(
-                check
-                for check in (
-                    (
-                        f"Due detection cases: {case_counts['due_cases']}",
-                        case_counts["due_cases"] == 0,
-                        "Run detection case reconciliation.",
-                    ),
-                    (
-                        f"Stale resolving cases: {case_counts['stale_resolving_cases']}",
-                        case_counts["stale_resolving_cases"] == 0,
-                        "Run detection case reconciliation.",
-                    ),
-                    (
-                        f"Failed containment cases: {case_counts['failed_containment']}",
-                        case_counts["failed_containment"] == 0,
-                        "Inspect moderation case delete failures.",
-                    ),
+        else:
+            results.append(
+                DoctorResult("Detection case evidence directory", "healthy")
+            )
+        if not case_database_ok:
+            return tuple(results)
+
+        now = datetime.now(timezone.utc)
+        operational_failures = await asyncio.to_thread(
+            self._case_store.list_operational_failures,
+            guild_id,
+        )
+        if operational_failures:
+            oldest = min(item.first_seen_at for item in operational_failures)
+            results.append(
+                DoctorResult(
+                    f"Active operational failures: {len(operational_failures)}",
+                    "failed",
+                    f"Oldest: <t:{int(oldest.timestamp())}:R>. "
+                    "Run `honeypot errors`.",
                 )
-                if not check[1]
             )
-        me = ctx.guild.me
-        if me is None:
-            await ctx.send(_("**Honeypot doctor:**\n❌ I couldn't find my server member."))
-            return
-        honeypot_channels = [
-            channel
-            for channel_id in self._honeypot_channel_ids(
-                guild_settings.honeypot_channels,
-                guild_settings.honeypot_channel,
+        else:
+            results.append(DoctorResult("Active operational failures: 0", "healthy"))
+        case_counts = await asyncio.to_thread(
+            self._case_store.operational_counts,
+            guild_id,
+            now,
+            now - timedelta(minutes=5),
+        )
+        for name, count, detail in (
+            (
+                "Due detection cases",
+                case_counts["due_cases"],
+                "Run detection case reconciliation.",
+            ),
+            (
+                "Stale resolving cases",
+                case_counts["stale_resolving_cases"],
+                "Run detection case reconciliation.",
+            ),
+            (
+                "Failed containment cases",
+                case_counts["failed_containment"],
+                "Inspect moderation case delete failures.",
+            ),
+        ):
+            results.append(
+                DoctorResult(
+                    f"{name}: {count}",
+                    "healthy" if count == 0 else "failed",
+                    detail,
+                )
             )
-            if (channel := self._get_text_channel_or_thread(ctx.guild, channel_id)) is not None
-        ]
-        logs_channel_id = guild_settings.logs_channel
-        configured_logs_channel = (
-            self._get_cached_message_channel(ctx.guild, logs_channel_id)
-            if isinstance(logs_channel_id, int)
-            else None
-        )
-        logs_channel = (
-            configured_logs_channel
-            if isinstance(configured_logs_channel, discord.TextChannel)
-            else None
-        )
-        logs_channel_invalid = (
-            configured_logs_channel is not None and logs_channel is None
-        )
-        review_channel = self._get_text_channel_or_thread(
-            ctx.guild, guild_settings.review_channel
-        )
+        return tuple(results)
+
+    async def _doctor_configuration_checks(
+        self,
+        guild,
+        me,
+        guild_settings: GuildSettings,
+        honeypot_channels: typing.Sequence,
+        logs_channel,
+        logs_channel_invalid: bool,
+        review_channel,
+    ) -> tuple[DoctorResult, ...]:
+        results: list[DoctorResult] = []
         if not guild_settings.enabled:
-            warnings.append("⚠️ Honeypot is disabled.")
+            results.append(DoctorResult("Honeypot is disabled.", "warning"))
         if guild_settings.action is None:
-            checks.append(("Honeypot action is invalid", False, "Run `honeypot honeypot action`."))
+            results.append(
+                DoctorResult(
+                    "Honeypot action is invalid",
+                    "failed",
+                    "Run `honeypot honeypot action`.",
+                )
+            )
         if guild_settings.firstpost_action.value not in CORE_ACTION_OPTIONS:
-            checks.append(("Firstpost action is invalid", False, "Run `honeypot firstpost action`."))
+            results.append(
+                DoctorResult(
+                    "Firstpost action is invalid",
+                    "failed",
+                    "Run `honeypot firstpost action`.",
+                )
+            )
         if guild_settings.spam_action.value not in CORE_ACTION_OPTIONS:
-            checks.append(("Spam action is invalid", False, "Run `honeypot spam action`."))
+            results.append(
+                DoctorResult(
+                    "Spam action is invalid",
+                    "failed",
+                    "Run `honeypot spam action`.",
+                )
+            )
         if guild_settings.enabled and not honeypot_channels:
-            checks.append(("No honeypot channel exists", False, "Run `honeypot channel add`."))
+            results.append(
+                DoctorResult(
+                    "No honeypot channel exists",
+                    "failed",
+                    "Run `honeypot channel add`.",
+                )
+            )
         if logs_channel_invalid:
-            checks.append(
-                (
+            results.append(
+                DoctorResult(
                     "Logs channel must be a normal text channel",
-                    False,
+                    "failed",
                     "Run `honeypot channel logs` with a normal text channel.",
                 )
             )
         if guild_settings.enabled and logs_channel is None and not logs_channel_invalid:
-            checks.append(("Logs channel is missing", False, "Run `honeypot channel logs`."))
-        if (
+            results.append(
+                DoctorResult(
+                    "Logs channel is missing",
+                    "failed",
+                    "Run `honeypot channel logs`.",
+                )
+            )
+        review_required = (
             guild_settings.fallback_action.value == "review"
             or guild_settings.review_enabled
             or guild_settings.whitelist_mode.value == "review"
@@ -8749,31 +8788,65 @@ class Honeypot(Cog):
                 guild_settings.spam_enabled
                 and guild_settings.spam_action.value == "review"
             )
-        ):
-            if review_channel is None:
-                checks.append(("Review channel is missing", False, "Run `honeypot review channel`."))
+        )
+        if review_required and review_channel is None:
+            results.append(
+                DoctorResult(
+                    "Review channel is missing",
+                    "failed",
+                    "Run `honeypot review channel`.",
+                )
+            )
         if guild_settings.mute_role:
-            mute_role = ctx.guild.get_role(guild_settings.mute_role)
+            mute_role = guild.get_role(guild_settings.mute_role)
             if mute_role is None:
-                checks.append(("Mute role is missing", False, "Run `honeypot punishment mute_role`."))
-            if mute_role is not None:
-                if not me.top_role > mute_role:
-                    checks.append(("Bot is not above mute role", False, "Move bot role above mute role."))
+                results.append(
+                    DoctorResult(
+                        "Mute role is missing",
+                        "failed",
+                        "Run `honeypot punishment mute_role`.",
+                    )
+                )
+            elif not me.top_role > mute_role:
+                results.append(
+                    DoctorResult(
+                        "Bot is not above mute role",
+                        "failed",
+                        "Move bot role above mute role.",
+                    )
+                )
         if guild_settings.joinwatch_auto_role_enabled:
             auto_role_id = guild_settings.joinwatch_auto_role_id
-            auto_role = ctx.guild.get_role(auto_role_id) if auto_role_id else None
+            auto_role = guild.get_role(auto_role_id) if auto_role_id else None
             if auto_role is None:
-                checks.append(("Joinwatch auto-role is missing", False, "Run `honeypot joinwatch autorole role`."))
-            if auto_role is not None:
-                if not me.top_role > auto_role:
-                    checks.append(("Bot is not above joinwatch auto-role", False, "Move bot role above the joinwatch auto-role."))
+                results.append(
+                    DoctorResult(
+                        "Joinwatch auto-role is missing",
+                        "failed",
+                        "Run `honeypot joinwatch autorole role`.",
+                    )
+                )
+            elif not me.top_role > auto_role:
+                results.append(
+                    DoctorResult(
+                        "Bot is not above joinwatch auto-role",
+                        "failed",
+                        "Move bot role above the joinwatch auto-role.",
+                    )
+                )
         if guild_settings.joinwatch_enabled and guild_settings.joinwatch_alert_enabled:
             joinwatch_channel = self._get_text_channel_or_thread(
-                ctx.guild, guild_settings.joinwatch_channel
+                guild, guild_settings.joinwatch_channel
             )
             if joinwatch_channel is None:
-                checks.append(("Joinwatch alert channel is missing", False, "Run `honeypot joinwatch channel`."))
-            if joinwatch_channel is not None:
+                results.append(
+                    DoctorResult(
+                        "Joinwatch alert channel is missing",
+                        "failed",
+                        "Run `honeypot joinwatch channel`.",
+                    )
+                )
+            else:
                 perms = joinwatch_channel.permissions_for(me)
                 send_permission = (
                     "send_messages_in_threads"
@@ -8786,28 +8859,39 @@ class Honeypot(Cog):
                         if send_permission == "send_messages_in_threads"
                         else "Send Messages"
                     )
-                    checks.append(
-                        (
+                    results.append(
+                        DoctorResult(
                             "Cannot send joinwatch alerts",
-                            False,
+                            "failed",
                             f"Grant {permission_label}.",
                         )
                     )
+        return tuple(results)
+
+    async def _doctor_channel_permission_checks(
+        self,
+        guild,
+        me,
+        honeypot_channels: typing.Sequence,
+        logs_channel,
+        review_channel,
+    ) -> tuple[DoctorResult, ...]:
+        results: list[DoctorResult] = []
         for honeypot_channel in honeypot_channels:
             perms = honeypot_channel.permissions_for(me)
             missing_permissions = missing_purge_permissions(perms)
             if missing_permissions:
-                checks.append(
-                    (
+                results.append(
+                    DoctorResult(
                         f"{honeypot_channel} permissions",
-                        False,
+                        "failed",
                         "Missing: " + ", ".join(missing_permissions),
                     )
                 )
         skipped_channels = []
         purgeable_channels = [
             channel
-            for channel in list(ctx.guild.channels) + list(ctx.guild.threads)
+            for channel in list(guild.channels) + list(guild.threads)
             if is_purgeable_message_channel(channel)
         ]
         for channel in purgeable_channels:
@@ -8817,17 +8901,19 @@ class Honeypot(Cog):
             if not perms.manage_messages:
                 skipped_channels.append(channel.mention)
         if skipped_channels:
-            checks.append(
-                (
+            results.append(
+                DoctorResult(
                     "Cached purge can delete visible message channels",
-                    False,
+                    "failed",
                     "\nManage - " + ", ".join(skipped_channels),
                 )
             )
         if logs_channel is not None:
             perms = logs_channel.permissions_for(me)
             if not perms.send_messages:
-                checks.append(("Cannot send logs", False, "Grant Send Messages."))
+                results.append(
+                    DoctorResult("Cannot send logs", "failed", "Grant Send Messages.")
+                )
         case_destination = review_channel or logs_channel
         if case_destination is not None:
             perms = case_destination.permissions_for(me)
@@ -8845,20 +8931,31 @@ class Honeypot(Cog):
                 ("manage_threads", "Manage Threads"),
             )
             missing = [
-                label for attribute, label in required if not getattr(perms, attribute, False)
+                label
+                for attribute, label in required
+                if not getattr(perms, attribute, False)
             ]
             if not isinstance(case_destination, discord.TextChannel) or missing:
-                checks.append(
-                    (
+                detail = (
+                    "Use a normal text channel."
+                    if not isinstance(case_destination, discord.TextChannel)
+                    else "Grant: " + ", ".join(missing)
+                )
+                results.append(
+                    DoctorResult(
                         f"{destination_label} cannot host case threads",
-                        False,
-                        (
-                            "Use a normal text channel."
-                            if not isinstance(case_destination, discord.TextChannel)
-                            else "Grant: " + ", ".join(missing)
-                        ),
+                        "failed",
+                        detail,
                     )
                 )
+        return tuple(results)
+
+    async def _doctor_guild_permission_checks(
+        self,
+        me,
+        guild_settings: GuildSettings,
+    ) -> tuple[DoctorResult, ...]:
+        results: list[DoctorResult] = []
         guild_perms = me.guild_permissions
         configured_actions = {
             guild_settings.action.value
@@ -8870,21 +8967,128 @@ class Honeypot(Cog):
             guild_settings.imagescan_detector_action.value,
         }
         if "kick" in configured_actions and not guild_perms.kick_members:
-            checks.append(("Cannot kick members", False, "Grant Kick Members."))
+            results.append(
+                DoctorResult("Cannot kick members", "failed", "Grant Kick Members.")
+            )
         if "ban" in configured_actions and not guild_perms.ban_members:
-            checks.append(("Cannot ban members", False, "Grant Ban Members."))
-        if (
+            results.append(
+                DoctorResult("Cannot ban members", "failed", "Grant Ban Members.")
+            )
+        roles_configured = (
             guild_settings.mute_role
             or guild_settings.joinwatch_auto_role_enabled
-        ) and not guild_perms.manage_roles:
-            checks.append(("Cannot manage configured roles", False, "Grant Manage Roles."))
+        )
+        if roles_configured and not guild_perms.manage_roles:
+            results.append(
+                DoctorResult(
+                    "Cannot manage configured roles",
+                    "failed",
+                    "Grant Manage Roles.",
+                )
+            )
+        return tuple(results)
+
+    @staticmethod
+    async def _run_doctor_checks(
+        checks: typing.Sequence[DoctorCheck],
+    ) -> tuple[DoctorResult, ...]:
+        results: list[DoctorResult] = []
+        for check in checks:
+            results.extend(await check())
+        return tuple(results)
+
+    @staticmethod
+    def _render_doctor_results(
+        results: typing.Sequence[DoctorResult],
+    ) -> tuple[str, ...]:
         failed = [
-            f"❌ {name}{hint}" if hint.startswith("\n") else f"❌ {name} - {hint}"
-            for name, ok, hint in checks
-            if not ok
+            f"❌ {result.name}{result.detail}"
+            if result.detail.startswith("\n")
+            else f"❌ {result.name} - {result.detail}"
+            for result in results
+            if result.status == "failed"
+        ]
+        warnings = [
+            f"⚠️ {result.name}"
+            if not result.detail
+            else f"⚠️ {result.name} - {result.detail}"
+            for result in results
+            if result.status == "warning"
         ]
         header = _("**Honeypot doctor:**\n")
         findings = failed + warnings
-        body = "\n".join(findings) if findings else "✅ No configuration or runtime problems found."
-        for page in pagify(body, page_length=2000 - len(header)):
-            await ctx.send(header + page)
+        body = (
+            "\n".join(findings)
+            if findings
+            else "✅ No configuration or runtime problems found."
+        )
+        return tuple(
+            header + page
+            for page in pagify(body, page_length=2000 - len(header))
+        )
+
+    @honeypot.command(name="doctor")
+    async def honeypot_doctor(self, ctx: commands.Context) -> None:
+        """Check honeypot configuration and required permissions."""
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
+        results = list(
+            await self._run_doctor_checks(
+                [partial(self._doctor_runtime_checks, ctx.guild.id)]
+            )
+        )
+        me = ctx.guild.me
+        if me is None:
+            await ctx.send(_("**Honeypot doctor:**\n❌ I couldn't find my server member."))
+            return
+
+        honeypot_channels = tuple(
+            channel
+            for channel_id in self._honeypot_channel_ids(
+                guild_settings.honeypot_channels,
+                guild_settings.honeypot_channel,
+            )
+            if (channel := self._get_text_channel_or_thread(ctx.guild, channel_id))
+            is not None
+        )
+        logs_channel_id = guild_settings.logs_channel
+        configured_logs_channel = (
+            self._get_cached_message_channel(ctx.guild, logs_channel_id)
+            if isinstance(logs_channel_id, int)
+            else None
+        )
+        logs_channel = (
+            configured_logs_channel
+            if isinstance(configured_logs_channel, discord.TextChannel)
+            else None
+        )
+        logs_channel_invalid = (
+            configured_logs_channel is not None and logs_channel is None
+        )
+        review_channel = self._get_text_channel_or_thread(
+            ctx.guild, guild_settings.review_channel
+        )
+        checks: list[DoctorCheck] = [
+            partial(
+                self._doctor_configuration_checks,
+                ctx.guild,
+                me,
+                guild_settings,
+                honeypot_channels,
+                logs_channel,
+                logs_channel_invalid,
+                review_channel,
+            ),
+            partial(
+                self._doctor_channel_permission_checks,
+                ctx.guild,
+                me,
+                honeypot_channels,
+                logs_channel,
+                review_channel,
+            ),
+            partial(self._doctor_guild_permission_checks, me, guild_settings),
+        ]
+        results.extend(await self._run_doctor_checks(checks))
+        for page in self._render_doctor_results(results):
+            await ctx.send(page)
