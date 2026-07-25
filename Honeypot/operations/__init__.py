@@ -17,6 +17,7 @@ from .context import (
 from .evidence_cleanup import evidence_cleanup_handler
 from .review_publish import review_publish_handler
 from .review_update import review_update_handler
+from .role_apply import role_apply_handler
 from .role_release import role_release_handler
 from .source_delete import source_delete_handler
 
@@ -29,6 +30,7 @@ HANDLERS: Mapping[OperationType, OperationHandler] = MappingProxyType(
         OperationType.SOURCE_DELETE: source_delete_handler,
         OperationType.EVIDENCE_CLEANUP: evidence_cleanup_handler,
         OperationType.ROLE_RELEASE: role_release_handler,
+        OperationType.ROLE_APPLY: role_apply_handler,
     }
 )
 
