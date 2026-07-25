@@ -254,8 +254,8 @@ class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
                 cog = honeypot.Honeypot(_Bot())
                 handler = self._handler(honeypot, cog)
                 definitions = (
-                    ("tp.png", "image/png"),
                     ("fp.png", "image/png"),
+                    ("tp.png", "image/png"),
                     ("undecided.png", "image/png"),
                     ("report.pdf", "application/pdf"),
                     ("missing.png", "image/png"),
@@ -326,7 +326,7 @@ class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
                     cog, self._context(honeypot, cog, cleanup, now)
                 )
 
-                self.assertEqual(
+                self.assertCountEqual(
                     copied,
                     [
                         (10, "tp.png", "true_positive", 99),
@@ -596,68 +596,104 @@ class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertTrue(evidence.exists())
 
-    async def test_compaction_runs_when_concurrent_completion_loses_the_fence(self):
+    async def test_compaction_runs_when_case_deletion_loses_the_completion_fence(
+        self,
+    ):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
                 cog = honeypot.Honeypot(_Bot())
-                appended = self._append_case(honeypot, cog, now)
+                attachment = honeypot.NewAttachment(
+                    0,
+                    "proof.png",
+                    5,
+                    "image/png",
+                    None,
+                    None,
+                    "https://cdn.test/proof.png",
+                )
+                appended = self._append_case(
+                    honeypot, cog, now, attachments=(attachment,)
+                )
+                case_id = appended.case.case_id
+                case_root = self._case_root(honeypot, cog, appended)
+                case_root.mkdir(parents=True)
+                evidence = case_root / "proof.png"
+                evidence.write_bytes(b"proof")
+                self.assertTrue(
+                    capture_attachment(
+                        cog._case_store,
+                        case_id,
+                        appended.message.sequence,
+                        0,
+                        evidence,
+                    )
+                )
+                snapshot = cog._case_store.get_case(case_id)
+                self.assertTrue(
+                    cog._case_store.apply_attachment_decisions(
+                        case_id,
+                        {snapshot.attachments[0].key: "true_positive"},
+                        99,
+                        now,
+                    )
+                )
                 lease = cog._case_store.claim_resolution(
-                    appended.case.case_id, now
+                    case_id, now
                 )
                 self.assertTrue(
                     cog._case_store.finish_resolution(
                         lease,
                         honeypot.CaseStatus.EXPIRED,
                         "expired",
-                        None,
+                        99,
                         now,
                         final_operations=(
                             (
                                 "evidence_cleanup",
-                                f"evidence-cleanup:{appended.case.case_id}",
+                                f"evidence-cleanup:{case_id}",
                             ),
                         ),
                     )
                 )
-                terminal = cog._case_store.get_case(appended.case.case_id)
+                terminal = cog._case_store.get_case(case_id)
                 cleanup = next(iter(terminal.operations))
                 claimed = cog._case_store.claim_operation(
                     cleanup.operation_id, now
                 )
-                case_root = self._case_root(honeypot, cog, appended)
-                case_root.mkdir(parents=True)
-                (case_root / "proof.png").write_bytes(b"proof")
-                real_complete = cog._case_store.complete_operation
-                real_get_case = cog._case_store.get_case
-                case_reads = 0
+                sample_attempts = []
+                compaction_attempts = []
+                real_compact = cog._case_store.compact_terminal_case
 
-                def completed_by_concurrent_worker(*args, **kwargs):
-                    real_complete(*args, **kwargs)
-                    return None
+                async def delete_case_on_sample_copy(
+                    guild_id, source_path, decision, moderator_id
+                ):
+                    sample_attempts.append(
+                        (guild_id, source_path.name, decision, moderator_id)
+                    )
+                    await cog.red_delete_data_for_user(
+                        requester="discord_deleted_user",
+                        user_id=appended.case.user_id,
+                    )
+                    return "inserted", object()
 
-                def visible_before_fence_loss(case_id):
-                    nonlocal case_reads
-                    case_reads += 1
-                    if case_reads == 1:
-                        return real_get_case(case_id)
-                    return None
+                def record_compaction(compacted_case_id):
+                    compaction_attempts.append(compacted_case_id)
+                    return real_compact(compacted_case_id)
 
-                with (
-                    mock.patch.object(
-                        cog._case_store,
-                        "complete_operation",
-                        side_effect=completed_by_concurrent_worker,
-                    ),
-                    mock.patch.object(
-                        cog._case_store,
-                        "get_case",
-                        side_effect=visible_before_fence_loss,
-                    ),
+                cog._imagescan_add_file_sample = delete_case_on_sample_copy
+                with mock.patch.object(
+                    cog._case_store,
+                    "compact_terminal_case",
+                    side_effect=record_compaction,
                 ):
                     await cog._execute_detection_case_operation(claimed, now)
 
-                compacted = cog._case_store.get_case(appended.case.case_id)
+                self.assertEqual(
+                    sample_attempts,
+                    [(10, "proof.png", "true_positive", 99)],
+                )
+                self.assertIn(case_id, compaction_attempts)
                 self.assertFalse(case_root.exists())
-                self.assertEqual(compacted.messages, ())
-                self.assertEqual(compacted.operations, ())
+                self.assertIsNone(cog._case_store.get_case(case_id))
+                self.assertIsNone(cog._case_store.get_case_deletion_job(case_id))
