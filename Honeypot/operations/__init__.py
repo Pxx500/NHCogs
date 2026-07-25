@@ -13,9 +13,12 @@ from .context import (
     OperationHandler,
     OperationPolicy,
 )
+from .review_update import review_update_handler
 
 
-HANDLERS: Mapping[OperationType, OperationHandler] = MappingProxyType({})
+HANDLERS: Mapping[OperationType, OperationHandler] = MappingProxyType(
+    {OperationType.REVIEW_UPDATE: review_update_handler}
+)
 
 _ROLE_APPLY_FOLLOW_UP = OperationFollowUp(FollowUpKind.ROLE_APPLY_RERENDER)
 _TERMINAL_COMPACTION_FOLLOW_UP = OperationFollowUp(
