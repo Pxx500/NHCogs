@@ -2675,7 +2675,8 @@ class Honeypot(Cog):
             signal.detector == "forward_purge" for signal in signals
         )
         action = effective_action(signals)
-        config = await self.config.guild_from_id(snapshot.case.guild_id).all()
+        raw_config = await self.config.guild_from_id(snapshot.case.guild_id).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         guild = (
             live_message.guild
             if live_message is not None
@@ -2746,7 +2747,7 @@ class Honeypot(Cog):
                 source.delete_status, 0, source.error
             )
             if source.delete_status is DeleteStatus.PENDING and containment_required:
-                if config.get("dry_run"):
+                if guild_settings.dry_run:
                     delete_result = detection_runtime.DeleteResult(
                         DeleteStatus.PLANNED, 0, None
                     )
@@ -2824,7 +2825,7 @@ class Honeypot(Cog):
                 deleted = await self._purge_detection_case_cached_messages(
                     guild,
                     snapshot.case.user_id,
-                    config,
+                    guild_settings,
                     operation.case_id,
                     source.sequence,
                     exclude_message_id=source.message_id,
@@ -2852,7 +2853,7 @@ class Honeypot(Cog):
 
             first_publish_started = perf_counter()
             logs_channel = publication_channel or self._get_text_channel_or_thread(
-                guild, config.get("logs_channel")
+                guild, guild_settings.logs_channel
             )
             review_publication = next(
                 (
@@ -2869,7 +2870,7 @@ class Honeypot(Cog):
                 try:
                     preview_published = await self._publish_detection_case(
                         operation.case_id,
-                        config.get("review_channel"),
+                        guild_settings.review_channel,
                         logs_channel,
                         message_sequence=source.sequence,
                         skip_if_done=capture_task,
@@ -2927,7 +2928,7 @@ class Honeypot(Cog):
             if live_message is not None:
                 await self._scan_all_case_message_images(
                     live_message,
-                    config,
+                    guild_settings,
                     operation.case_id,
                     source.sequence,
                     captures,
@@ -2941,7 +2942,7 @@ class Honeypot(Cog):
                 await self._scan_case_message_images(
                     snapshot.case.guild_id,
                     attachments,
-                    config,
+                    guild_settings,
                     operation.case_id,
                     source.sequence,
                     captures,
@@ -2961,7 +2962,7 @@ class Honeypot(Cog):
             if has_review_publication and not review_executed:
                 await self._publish_detection_case(
                     operation.case_id,
-                    config.get("review_channel"),
+                    guild_settings.review_channel,
                     logs_channel,
                     message_sequence=source.sequence,
                 )
@@ -3152,18 +3153,21 @@ class Honeypot(Cog):
                         else:
                             operation_result = OPERATION_RESULT_PREEXISTING_ROLE
             elif operation.operation_type == OperationType.REVIEW_PUBLISH:
-                config = await self.config.guild_from_id(snapshot.case.guild_id).all()
+                raw_config = await self.config.guild_from_id(
+                    snapshot.case.guild_id
+                ).all()
+                guild_settings = GuildSettings.from_mapping(raw_config)
                 guild = self.bot.get_guild(snapshot.case.guild_id)
                 logs_channel = publication_channel or (
                     self._get_text_channel_or_thread(
-                        guild, config.get("logs_channel")
+                        guild, guild_settings.logs_channel
                     )
                     if guild is not None
                     else None
                 )
                 await self._publish_detection_case(
                     operation.case_id,
-                    config.get("review_channel"),
+                    guild_settings.review_channel,
                     logs_channel,
                     message_sequence=operation.message_sequence,
                 )
@@ -3188,8 +3192,11 @@ class Honeypot(Cog):
                     raise RuntimeError(
                         "detection case moderation action is no longer applicable"
                     )
-                config = await self.config.guild_from_id(snapshot.case.guild_id).all()
-                if config.get("dry_run"):
+                raw_config = await self.config.guild_from_id(
+                    snapshot.case.guild_id
+                ).all()
+                guild_settings = GuildSettings.from_mapping(raw_config)
+                if guild_settings.dry_run:
                     operation_result = f"{PLANNED_PREFIX}{action.value}"
                 else:
                     guild = self.bot.get_guild(snapshot.case.guild_id)
@@ -3234,7 +3241,7 @@ class Honeypot(Cog):
                             guild,
                             member,
                             source.created_at,
-                            config,
+                            raw_config,
                             reason=public_reason,
                             action=action.value,
                         )
@@ -3321,8 +3328,11 @@ class Honeypot(Cog):
                 action = ActionIntent(
                     operation.operation_type.value.removeprefix("moderator_")
                 )
-                config = await self.config.guild_from_id(snapshot.case.guild_id).all()
-                if config.get("dry_run"):
+                raw_config = await self.config.guild_from_id(
+                    snapshot.case.guild_id
+                ).all()
+                guild_settings = GuildSettings.from_mapping(raw_config)
+                if guild_settings.dry_run:
                     operation_result = f"{PLANNED_PREFIX}{action.value}"
                 else:
                     guild = self.bot.get_guild(snapshot.case.guild_id)
@@ -3371,7 +3381,7 @@ class Honeypot(Cog):
                             guild,
                             member,
                             effect_started_at,
-                            config,
+                            raw_config,
                             reason=f"Honeypot review: {action.value.title()}",
                             action=action.value,
                             moderator=moderator,
@@ -4487,7 +4497,7 @@ class Honeypot(Cog):
     async def _scan_all_case_message_images(
         self,
         message: discord.Message,
-        config: dict,
+        guild_settings: GuildSettings,
         case_id: str,
         sequence: int,
         capture_results: tuple[detection_runtime.CaptureResult, ...],
@@ -4495,7 +4505,7 @@ class Honeypot(Cog):
         await self._scan_case_message_images(
             message.guild.id,
             tuple(message.attachments),
-            config,
+            guild_settings,
             case_id,
             sequence,
             capture_results,
@@ -4506,7 +4516,7 @@ class Honeypot(Cog):
         self,
         guild_id: int,
         attachments: tuple,
-        config: dict,
+        guild_settings: GuildSettings,
         case_id: str,
         sequence: int,
         capture_results: tuple[detection_runtime.CaptureResult, ...],
@@ -4518,7 +4528,7 @@ class Honeypot(Cog):
             samples = await self._imagescan_load_samples(guild_id)
             model = await self._imagescan_model_state(
                 guild_id,
-                config.get("imagescan_detector_threshold", 20),
+                guild_settings.imagescan_detector_threshold,
             )
         except Exception as error:
             bounded = f"{type(error).__name__}: {error}"[:512]
@@ -6265,11 +6275,9 @@ class Honeypot(Cog):
                 self._hot_purge_users.pop(guild_id, None)
 
     def _activate_forward_purge(
-        self, guild_id: int, user_id: int, config: dict
+        self, guild_id: int, user_id: int, purge_forward_seconds: int
     ) -> None:
-        forward_seconds = self._purge_forward_seconds(
-            int(config.get("purge_forward_seconds", PURGE_FORWARD_DEFAULT_SECONDS) or 0)
-        )
+        forward_seconds = self._purge_forward_seconds(purge_forward_seconds)
         if forward_seconds <= 0:
             self._deactivate_forward_purge(guild_id, user_id)
             return
@@ -6366,7 +6374,16 @@ class Honeypot(Cog):
                 )
             ),
         )
-        self._activate_forward_purge(guild.id, user_id, config)
+        self._activate_forward_purge(
+            guild.id,
+            user_id,
+            int(
+                config.get(
+                    "purge_forward_seconds", PURGE_FORWARD_DEFAULT_SECONDS
+                )
+                or 0
+            ),
+        )
         return deleted
 
     def _schedule_post_ban_sweep(self, guild: discord.Guild, user_id: int) -> None:
@@ -6406,19 +6423,14 @@ class Honeypot(Cog):
         self,
         guild: discord.Guild,
         user_id: int,
-        config: dict,
+        guild_settings: GuildSettings,
         case_id: str,
         message_sequence: int,
         *,
         exclude_message_id: int | None = None,
     ) -> int:
         retention_seconds = self._purge_retention_seconds(
-            int(
-                config.get(
-                    "purge_backward_seconds", PURGE_BACKWARD_DEFAULT_SECONDS
-                )
-                or 0
-            )
+            guild_settings.purge_backward_seconds
         )
         self._prune_recent_user_messages(
             guild.id, user_id, retention_seconds=retention_seconds
@@ -6446,7 +6458,7 @@ class Honeypot(Cog):
                 self._case_store.claim_operation, operation.operation_id, now
             )
             if claimed is not None:
-                if config.get("dry_run"):
+                if guild_settings.dry_run:
                     await asyncio.to_thread(
                         self._case_store.complete_operation,
                         claimed.operation_id,
@@ -6464,8 +6476,12 @@ class Honeypot(Cog):
             )
             if persisted.result == DeleteStatus.DELETED.value and not was_deleted:
                 deleted += 1
-        if not config.get("dry_run"):
-            self._activate_forward_purge(guild.id, user_id, config)
+        if not guild_settings.dry_run:
+            self._activate_forward_purge(
+                guild.id,
+                user_id,
+                guild_settings.purge_forward_seconds,
+            )
         return deleted
 
     def _firstpost_suspicion_reasons(
@@ -6546,7 +6562,17 @@ class Honeypot(Cog):
             return (None, missing_permission)
         try:
             if action == "kick":
-                self._activate_forward_purge(guild.id, member.id, config)
+                self._activate_forward_purge(
+                    guild.id,
+                    member.id,
+                    int(
+                        config.get(
+                            "purge_forward_seconds",
+                            PURGE_FORWARD_DEFAULT_SECONDS,
+                        )
+                        or 0
+                    ),
+                )
                 try:
                     await member.kick(reason=reason)
                 except discord.NotFound:
@@ -6556,7 +6582,17 @@ class Honeypot(Cog):
                     raise
                 await self._increment_stat(guild, "kicked")
             elif action == "ban":
-                self._activate_forward_purge(guild.id, member.id, config)
+                self._activate_forward_purge(
+                    guild.id,
+                    member.id,
+                    int(
+                        config.get(
+                            "purge_forward_seconds",
+                            PURGE_FORWARD_DEFAULT_SECONDS,
+                        )
+                        or 0
+                    ),
+                )
                 delete_message_seconds = self._ban_delete_message_seconds(config)
                 member_ban = getattr(member, "ban", None)
                 if callable(member_ban):
