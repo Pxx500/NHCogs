@@ -12,8 +12,21 @@ import sqlite3
 from types import MappingProxyType
 from uuid import uuid4
 
+from .storage import apply_migrations, connect
+
 
 log = logging.getLogger(__name__)
+
+
+def _execute_script(connection: sqlite3.Connection, script: str) -> None:
+    statement = ""
+    for line in script.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            connection.execute(statement)
+            statement = ""
+    if statement.strip():
+        raise ValueError("incomplete detection case schema statement")
 
 
 def _freeze(value: object) -> object:
@@ -426,16 +439,15 @@ class DetectionCaseStore:
         self.connection_factory = connection_factory
 
     def _connect(self) -> sqlite3.Connection:
-        connection = self.connection_factory(self.database_path, timeout=5)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 5000")
-        connection.execute("PRAGMA journal_mode = WAL")
-        return connection
+        return connect(
+            self.database_path,
+            connection_factory=self.connection_factory,
+        )
 
     def initialize(self) -> None:
-        with closing(self._connect()) as connection, connection:
-            connection.executescript(
+        def migrate_schema_0(connection: sqlite3.Connection) -> None:
+            _execute_script(
+                connection,
                 """
                 CREATE TABLE IF NOT EXISTS detection_cases (
                     case_id TEXT PRIMARY KEY,
@@ -700,7 +712,7 @@ class DetectionCaseStore:
                 );
                 CREATE INDEX IF NOT EXISTS detection_orphan_publications_due
                     ON detection_orphan_publications(created_at, case_id);
-                """
+                """,
             )
             attachment_columns = {
                 row["name"]
@@ -715,6 +727,13 @@ class DetectionCaseStore:
                     """ALTER TABLE detection_attachments
                        ADD COLUMN spoiler INTEGER NOT NULL DEFAULT 0"""
                 )
+
+        with closing(self._connect()) as connection:
+            apply_migrations(
+                connection,
+                (migrate_schema_0,),
+                label="detection case storage",
+            )
 
     @staticmethod
     def _timeline_logical_key(
