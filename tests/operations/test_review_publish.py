@@ -97,6 +97,9 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                 evidence_cleanup = import_module(
                     "Honeypot.operations.evidence_cleanup"
                 )
+                message_process = import_module(
+                    "Honeypot.operations.message_process"
+                )
                 moderation = import_module("Honeypot.operations.moderation")
                 moderator_decision = import_module(
                     "Honeypot.operations.moderator_decision"
@@ -138,6 +141,9 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     dict(operations.HANDLERS),
                     {
+                        honeypot.OperationType.MESSAGE_PROCESS: (
+                            message_process.message_process_handler
+                        ),
                         honeypot.OperationType.REVIEW_UPDATE: (
                             review_update.review_update_handler
                         ),
@@ -172,6 +178,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 for operation_type in honeypot.OperationType:
                     if operation_type in {
+                        honeypot.OperationType.MESSAGE_PROCESS,
                         honeypot.OperationType.REVIEW_UPDATE,
                         honeypot.OperationType.REVIEW_PUBLISH,
                         honeypot.OperationType.CACHED_PURGE,

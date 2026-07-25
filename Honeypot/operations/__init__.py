@@ -15,6 +15,7 @@ from .context import (
     OperationPolicy,
 )
 from .evidence_cleanup import evidence_cleanup_handler
+from .message_process import message_process_handler
 from .moderation import moderation_action_handler
 from .moderator_decision import moderator_decision_handler
 from .review_publish import review_publish_handler
@@ -26,6 +27,7 @@ from .source_delete import source_delete_handler
 
 HANDLERS: Mapping[OperationType, OperationHandler] = MappingProxyType(
     {
+        OperationType.MESSAGE_PROCESS: message_process_handler,
         OperationType.REVIEW_UPDATE: review_update_handler,
         OperationType.REVIEW_PUBLISH: review_publish_handler,
         OperationType.CACHED_PURGE: cached_purge_handler,

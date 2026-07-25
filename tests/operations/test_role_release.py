@@ -113,6 +113,7 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
                 claimed = cog._case_store.claim_operation(operation.operation_id, now)
 
                 expected_types = {
+                    honeypot.OperationType.MESSAGE_PROCESS,
                     honeypot.OperationType.REVIEW_UPDATE,
                     honeypot.OperationType.REVIEW_PUBLISH,
                     honeypot.OperationType.CACHED_PURGE,
