@@ -3263,6 +3263,130 @@ class JoinwatchSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
                 alert_channel.send.assert_not_awaited()
 
 
+class JoinwatchSelectionTests(unittest.TestCase):
+    def test_selects_due_joinwatch_work_in_source_order(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                now = datetime(2026, 7, 15, 12, tzinfo=timezone.utc)
+                malformed_assignment = {
+                    "role_id": "invalid",
+                    "apply_at": "2026-07-15T11:55:00+00:00",
+                }
+                future_assignment = {
+                    "role_id": 502,
+                    "apply_at": "2026-07-15T12:05:00+00:00",
+                }
+                due_assignment = {
+                    "role_id": "501",
+                    "apply_at": "2026-07-15T11:59:00+00:00",
+                    "retry_count": 2,
+                }
+                due_role = {
+                    "role_id": 601,
+                    "expires_at": "2026-07-15T11:58:00+00:00",
+                }
+                malformed_role = {"role_id": 602, "expires_at": "not-a-time"}
+                future_role = {
+                    "role_id": 603,
+                    "expires_at": "2026-07-15T12:10:00+00:00",
+                }
+
+                selected = honeypot.select_due_joinwatch_assignments(
+                    now=now,
+                    assignments_enabled=True,
+                    pending_assignments={
+                        "broken": malformed_assignment,
+                        "202": future_assignment,
+                        "201": due_assignment,
+                    },
+                    pending_roles={
+                        "301": due_role,
+                        "broken-role": malformed_role,
+                        "303": future_role,
+                    },
+                )
+
+                self.assertFalse(selected.clear_assignments)
+                self.assertEqual(
+                    tuple(
+                        (
+                            action.action,
+                            action.member_key,
+                            action.member_id,
+                            action.role_id,
+                            action.due_at,
+                        )
+                        for action in selected.assignment_actions
+                    ),
+                    (
+                        ("discard_assignment", "broken", None, None, None),
+                        (
+                            "apply_role",
+                            "201",
+                            201,
+                            501,
+                            datetime(2026, 7, 15, 11, 59, tzinfo=timezone.utc),
+                        ),
+                    ),
+                )
+                self.assertEqual(
+                    tuple(
+                        (
+                            action.action,
+                            action.member_key,
+                            action.member_id,
+                            action.role_id,
+                            action.due_at,
+                        )
+                        for action in selected.role_actions
+                    ),
+                    (
+                        (
+                            "expire_role",
+                            "301",
+                            301,
+                            601,
+                            datetime(2026, 7, 15, 11, 58, tzinfo=timezone.utc),
+                        ),
+                        ("discard_role", "broken-role", None, None, None),
+                    ),
+                )
+                self.assertIs(selected.assignment_actions[1].data, due_assignment)
+                self.assertIs(selected.role_actions[0].data, due_role)
+
+    def test_disabled_assignment_processing_clears_only_assignment_state(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                now = datetime(2026, 7, 15, 12, tzinfo=timezone.utc)
+                due_role = {
+                    "role_id": 601,
+                    "expires_at": "2026-07-15T11:58:00+00:00",
+                }
+
+                selected = honeypot.select_due_joinwatch_assignments(
+                    now=now,
+                    assignments_enabled=False,
+                    pending_assignments={
+                        "201": {
+                            "role_id": 501,
+                            "apply_at": "2026-07-15T11:59:00+00:00",
+                        }
+                    },
+                    pending_roles={"301": due_role},
+                )
+
+                self.assertTrue(selected.clear_assignments)
+                self.assertEqual(selected.assignment_actions, ())
+                self.assertEqual(
+                    (
+                        selected.role_actions[0].action,
+                        selected.role_actions[0].member_id,
+                        selected.role_actions[0].role_id,
+                    ),
+                    ("expire_role", 301, 601),
+                )
+
+
 class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
     class _Store:
         def __init__(self, value):
@@ -3273,6 +3397,91 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
 
         async def __aexit__(self, exc_type, exc, traceback):
             return False
+
+    async def test_loop_applies_due_assignment_and_persists_role_timer(self):
+        class Ranked:
+            def __init__(self, position):
+                self.position = position
+
+            def __le__(self, other):
+                return self.position <= other.position
+
+            def __ge__(self, other):
+                return self.position >= other.position
+
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                role = Ranked(5)
+                role.id = 501
+                role.mention = "<@&501>"
+                me = SimpleNamespace(
+                    guild_permissions=SimpleNamespace(manage_roles=True),
+                    top_role=Ranked(10),
+                )
+                guild = SimpleNamespace(
+                    id=100,
+                    me=me,
+                    get_channel=lambda channel_id: None,
+                    get_thread=lambda channel_id: None,
+                )
+                member = SimpleNamespace(
+                    id=201,
+                    guild=guild,
+                    guild_permissions=SimpleNamespace(manage_guild=False),
+                    top_role=Ranked(1),
+                    roles=[],
+                    mention="<@201>",
+                    add_roles=mock.AsyncMock(),
+                )
+                guild.get_member = lambda member_id: member if member_id == 201 else None
+                guild.fetch_member = mock.AsyncMock(return_value=member)
+                guild.get_role = lambda role_id: role if role_id == 501 else None
+                assignments = {
+                    "201": {
+                        "role_id": 501,
+                        "apply_at": "2026-07-15T11:59:00+00:00",
+                    }
+                }
+                roles = {}
+                stats = {}
+                raw_config = {
+                    "joinwatch_auto_role_enabled": True,
+                    "joinwatch_auto_role_id": 501,
+                    "joinwatch_auto_role_timer_minutes": 30,
+                    "joinwatch_pending_role_assignments": assignments,
+                    "joinwatch_pending_roles": roles,
+                }
+                guild_config = SimpleNamespace(
+                    all=mock.AsyncMock(return_value=raw_config),
+                    joinwatch_pending_role_assignments=lambda: self._Store(assignments),
+                    joinwatch_pending_roles=lambda: self._Store(roles),
+                    stats=lambda: self._Store(stats),
+                )
+                bot = _Bot()
+                bot.guilds = [guild]
+                bot.owner_ids = ()
+                bot.is_mod = mock.AsyncMock(return_value=False)
+                bot.is_admin = mock.AsyncMock(return_value=False)
+                cog = honeypot.Honeypot(bot)
+                cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
+
+                with mock.patch.object(
+                    honeypot.discord,
+                    "utils",
+                    SimpleNamespace(
+                        format_dt=lambda value, style: value.isoformat()
+                    ),
+                    create=True,
+                ):
+                    await cog.joinwatch_auto_role_loop.function(cog)
+
+                member.add_roles.assert_awaited_once_with(
+                    role,
+                    reason="Automated account status update.",
+                )
+                self.assertEqual(assignments, {})
+                self.assertEqual(roles["201"]["role_id"], 501)
+                self.assertEqual(stats["joinwatch_auto_roles"], 1)
 
     async def test_assignment_and_role_retries_are_scheduled_one_minute_later(self):
         with TemporaryDirectory() as directory:
