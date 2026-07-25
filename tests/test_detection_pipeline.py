@@ -1,6 +1,7 @@
 import asyncio
 import base64
 from contextlib import closing, contextmanager
+from dataclasses import FrozenInstanceError, fields
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from importlib import util
@@ -23,6 +24,122 @@ from tests.detection_case_fixtures import (
 
 PACKAGE_DIR = Path(__file__).resolve().parents[1] / "Honeypot"
 _MISSING = object()
+
+EXPECTED_GUILD_DEFAULTS = {
+    "enabled": False,
+    "action": None,
+    "fallback_action": "review",
+    "dry_run": False,
+    "logs_channel": None,
+    "honeypot_channel": None,
+    "honeypot_channels": [],
+    "mute_role": None,
+    "purge_backward_seconds": 60,
+    "purge_forward_seconds": 10,
+    "whitelisted_roles": [],
+    "firstpost_collect_enabled": False,
+    "firstpost_enabled": False,
+    "firstpost_action": "review",
+    "spam_enabled": False,
+    "spam_action": "review",
+    "spam_window_seconds": 10,
+    "spam_min_channels": 2,
+    "imagescan_enabled": False,
+    "imagescan_channel": None,
+    "imagescan_detector_enabled": False,
+    "imagescan_detector_action": "review",
+    "imagescan_detector_threshold": 20,
+    "review_enabled": False,
+    "review_channel": None,
+    "review_kick_fail_warning": "false",
+    "automated_kick_fail_warning": False,
+    "whitelist_mode": "bypass",
+    "stats": {
+        "detections": 0,
+        "suspicious": 0,
+        "reviewed": 0,
+        "review_expired": 0,
+        "ignored": 0,
+        "kicked": 0,
+        "banned": 0,
+        "failed_actions": 0,
+        "dry_run_actions": 0,
+        "whitelisted": 0,
+        "pending_mutes": 0,
+        "pending_mute_failures": 0,
+        "purged_messages": 0,
+        "cached_purge_deletes": 0,
+        "forward_purge_deletes": 0,
+        "forward_purge_delete_failures": 0,
+        "evidence_capture_failures": 0,
+        "delete_forbidden": 0,
+        "delete_transient_failures": 0,
+        "firstpost_seen": 0,
+        "firstpost_hits": 0,
+        "firstpost_reviews": 0,
+        "firstpost_kicks": 0,
+        "firstpost_bans": 0,
+        "early_catches": 0,
+        "spam_hits": 0,
+        "spam_reviews": 0,
+        "spam_kicks": 0,
+        "spam_bans": 0,
+        "spam_catches": 0,
+        "honeypot_hits": 0,
+        "honeypot_reviews": 0,
+        "honeypot_kicks": 0,
+        "honeypot_bans": 0,
+        "honeypot_catches": 0,
+        "image_hits": 0,
+        "image_reviews": 0,
+        "image_kicks": 0,
+        "image_bans": 0,
+        "image_catches": 0,
+        "joinwatch_total_joins": 0,
+        "joinwatch_young_joins": 0,
+        "joinwatch_auto_roles_scheduled": 0,
+        "joinwatch_auto_roles": 0,
+        "joinwatch_auto_role_failures": 0,
+        "joinwatch_auto_roles_cleared": 0,
+        "joinwatch_auto_role_punishments": 0,
+    },
+    "scam_keywords": [
+        "free nitro",
+        "giveaway",
+        "steam gift",
+        "free discord",
+        "discord.gift",
+        "claim your",
+        "you won",
+        "free vbucks",
+        "free robux",
+        "free coins",
+        "boost your server",
+        "limited time",
+        "exclusive offer",
+        "free membership",
+        "hack",
+        "crack",
+        "generator",
+    ],
+    "attachment_patterns": ["^image$", "^image ?\\(\\d+\\)$", "^\\d+$"],
+    "joinwatch_enabled": False,
+    "joinwatch_alert_enabled": True,
+    "joinwatch_channel": None,
+    "joinwatch_min_age_hours": 24,
+    "joinwatch_auto_role_enabled": False,
+    "joinwatch_auto_role_id": None,
+    "joinwatch_auto_role_timer_minutes": 1440,
+    "joinwatch_auto_role_action": "none",
+    "joinwatch_auto_role_random_delay_enabled": False,
+    "joinwatch_auto_role_random_delay_min_minutes": 1,
+    "joinwatch_auto_role_random_delay_max_minutes": 10,
+    "joinwatch_pending_role_assignments": {},
+    "joinwatch_pending_roles": {},
+    "baitrole_enabled": False,
+    "baitrole_id": None,
+    "baitrole_action": "ban",
+}
 
 
 def active_case(store, guild_id: int, user_id: int):
@@ -340,6 +457,276 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                             expected,
                         )
                         self.assertEqual(getattr(honeypot, tuple_name), expected)
+
+    async def test_empty_guild_settings_use_registered_defaults(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                settings_type = getattr(honeypot, "GuildSettings", None)
+                self.assertIsNotNone(settings_type)
+
+                guild_settings = settings_type.from_mapping({})
+
+                observed = {
+                    field.name: getattr(guild_settings, field.name)
+                    for field in fields(guild_settings)
+                }
+                self.assertEqual(observed, EXPECTED_GUILD_DEFAULTS)
+
+    async def test_guild_settings_ignore_unknown_keys_and_keep_known_values(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                guild_settings = honeypot.GuildSettings.from_mapping(
+                    {"enabled": True, "future_setting": "ignored"}
+                )
+
+                self.assertTrue(guild_settings.enabled)
+                self.assertFalse(hasattr(guild_settings, "future_setting"))
+
+    async def test_guild_settings_warn_and_default_malformed_booleans(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                with self.assertLogs("red.Honeypot", level=logging.WARNING) as captured:
+                    guild_settings = honeypot.GuildSettings.from_mapping(
+                        {"enabled": "false"}
+                    )
+
+                self.assertFalse(guild_settings.enabled)
+                self.assertIn("enabled", "\n".join(captured.output))
+
+    async def test_guild_settings_coerce_integer_fields_independently(self):
+        raw = {
+            "purge_backward_seconds": 90,
+            "purge_forward_seconds": 20,
+            "spam_window_seconds": "invalid",
+            "spam_min_channels": 3,
+            "imagescan_detector_threshold": 12,
+            "joinwatch_min_age_hours": 48,
+            "joinwatch_auto_role_timer_minutes": 60,
+            "joinwatch_auto_role_random_delay_min_minutes": 2,
+            "joinwatch_auto_role_random_delay_max_minutes": 8,
+        }
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                with self.assertLogs("red.Honeypot", level=logging.WARNING) as captured:
+                    guild_settings = honeypot.GuildSettings.from_mapping(raw)
+
+                self.assertEqual(guild_settings.purge_backward_seconds, 90)
+                self.assertEqual(guild_settings.purge_forward_seconds, 20)
+                self.assertEqual(guild_settings.spam_window_seconds, 10)
+                self.assertEqual(guild_settings.spam_min_channels, 3)
+                self.assertEqual(guild_settings.imagescan_detector_threshold, 12)
+                self.assertEqual(guild_settings.joinwatch_min_age_hours, 48)
+                self.assertEqual(guild_settings.joinwatch_auto_role_timer_minutes, 60)
+                self.assertEqual(guild_settings.joinwatch_auto_role_random_delay_min_minutes, 2)
+                self.assertEqual(guild_settings.joinwatch_auto_role_random_delay_max_minutes, 8)
+                self.assertIn("spam_window_seconds", "\n".join(captured.output))
+
+    async def test_guild_settings_preserve_every_boolean_toggle(self):
+        raw = {
+            "enabled": True,
+            "dry_run": True,
+            "firstpost_collect_enabled": True,
+            "firstpost_enabled": True,
+            "spam_enabled": True,
+            "imagescan_enabled": True,
+            "imagescan_detector_enabled": True,
+            "review_enabled": True,
+            "automated_kick_fail_warning": True,
+            "joinwatch_enabled": True,
+            "joinwatch_alert_enabled": False,
+            "joinwatch_auto_role_enabled": True,
+            "joinwatch_auto_role_random_delay_enabled": True,
+            "baitrole_enabled": True,
+        }
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                guild_settings = honeypot.GuildSettings.from_mapping(raw)
+
+                for key, expected in raw.items():
+                    with self.subTest(key=key):
+                        self.assertIs(getattr(guild_settings, key), expected)
+
+    async def test_guild_settings_coerce_optional_discord_ids(self):
+        raw = {
+            "logs_channel": 11,
+            "honeypot_channel": 22,
+            "mute_role": "invalid",
+            "imagescan_channel": 33,
+            "review_channel": 44,
+            "joinwatch_channel": 55,
+            "joinwatch_auto_role_id": 66,
+            "baitrole_id": 77,
+        }
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                with self.assertLogs("red.Honeypot", level=logging.WARNING) as captured:
+                    guild_settings = honeypot.GuildSettings.from_mapping(raw)
+
+                self.assertEqual(guild_settings.logs_channel, 11)
+                self.assertEqual(guild_settings.honeypot_channel, 22)
+                self.assertIsNone(guild_settings.mute_role)
+                self.assertEqual(guild_settings.imagescan_channel, 33)
+                self.assertEqual(guild_settings.review_channel, 44)
+                self.assertEqual(guild_settings.joinwatch_channel, 55)
+                self.assertEqual(guild_settings.joinwatch_auto_role_id, 66)
+                self.assertEqual(guild_settings.baitrole_id, 77)
+                self.assertIn("mute_role", "\n".join(captured.output))
+
+    async def test_guild_settings_copy_and_validate_list_and_set_values(self):
+        raw = {
+            "honeypot_channels": {10, 20},
+            "whitelisted_roles": (30, 40),
+            "scam_keywords": {"alpha", "beta"},
+            "attachment_patterns": [1],
+        }
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                with self.assertLogs("red.Honeypot", level=logging.WARNING) as captured:
+                    guild_settings = honeypot.GuildSettings.from_mapping(raw)
+
+                self.assertEqual(set(guild_settings.honeypot_channels), {10, 20})
+                self.assertEqual(guild_settings.whitelisted_roles, [30, 40])
+                self.assertEqual(set(guild_settings.scam_keywords), {"alpha", "beta"})
+                self.assertEqual(
+                    guild_settings.attachment_patterns,
+                    EXPECTED_GUILD_DEFAULTS["attachment_patterns"],
+                )
+                self.assertIn("attachment_patterns", "\n".join(captured.output))
+
+    async def test_guild_settings_copy_and_validate_mapping_values(self):
+        stats = {"detections": 5}
+        assignments = {"7": {"role_id": 9, "retry_count": 1}}
+        raw = {
+            "stats": stats,
+            "joinwatch_pending_role_assignments": assignments,
+            "joinwatch_pending_roles": ["invalid"],
+        }
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                with self.assertLogs("red.Honeypot", level=logging.WARNING) as captured:
+                    guild_settings = honeypot.GuildSettings.from_mapping(raw)
+
+                self.assertEqual(guild_settings.stats, stats)
+                self.assertEqual(
+                    guild_settings.joinwatch_pending_role_assignments,
+                    assignments,
+                )
+                self.assertIsNot(guild_settings.joinwatch_pending_role_assignments, assignments)
+                self.assertEqual(guild_settings.joinwatch_pending_roles, {})
+                self.assertIn("joinwatch_pending_roles", "\n".join(captured.output))
+
+    async def test_guild_settings_coerce_option_values_to_phase_one_enums(self):
+        raw = {
+            "action": "ban",
+            "fallback_action": "kick",
+            "firstpost_action": "none",
+            "spam_action": "ban",
+            "imagescan_detector_action": "kick",
+            "review_kick_fail_warning": "manual",
+            "whitelist_mode": "fallback",
+            "joinwatch_auto_role_action": "ban",
+            "baitrole_action": "kick",
+        }
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                guild_settings = honeypot.GuildSettings.from_mapping(raw)
+
+                self.assertIs(guild_settings.action, honeypot.CoreActionOption.BAN)
+                self.assertIs(
+                    guild_settings.fallback_action,
+                    honeypot.FallbackActionOption.KICK,
+                )
+                self.assertIs(
+                    guild_settings.firstpost_action,
+                    honeypot.CoreActionOption.NONE,
+                )
+                self.assertIs(guild_settings.spam_action, honeypot.CoreActionOption.BAN)
+                self.assertIs(
+                    guild_settings.imagescan_detector_action,
+                    honeypot.ImageScanDetectorActionOption.KICK,
+                )
+                self.assertIs(
+                    guild_settings.review_kick_fail_warning,
+                    honeypot.ReviewKickFailWarningMode.MANUAL,
+                )
+                self.assertIs(
+                    guild_settings.whitelist_mode,
+                    honeypot.WhitelistModeOption.FALLBACK,
+                )
+                self.assertIs(
+                    guild_settings.joinwatch_auto_role_action,
+                    honeypot.JoinwatchAutoRoleActionOption.BAN,
+                )
+                self.assertIs(
+                    guild_settings.baitrole_action,
+                    honeypot.BaitActionOption.KICK,
+                )
+
+                with self.assertLogs("red.Honeypot", level=logging.WARNING) as captured:
+                    malformed = honeypot.GuildSettings.from_mapping(
+                        {"action": "invalid", "fallback_action": "invalid"}
+                    )
+
+                self.assertIsNone(malformed.action)
+                self.assertIs(
+                    malformed.fallback_action,
+                    honeypot.FallbackActionOption.REVIEW,
+                )
+                self.assertIn("action", "\n".join(captured.output))
+
+    async def test_guild_settings_preserve_legacy_and_canonical_honeypot_channels(self):
+        canonical = [10, 20]
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                guild_settings = honeypot.GuildSettings.from_mapping(
+                    {
+                        "honeypot_channel": 30,
+                        "honeypot_channels": canonical,
+                    }
+                )
+
+                self.assertEqual(guild_settings.honeypot_channel, 30)
+                self.assertEqual(guild_settings.honeypot_channels, [10, 20])
+                self.assertIsNot(guild_settings.honeypot_channels, canonical)
+
+    async def test_guild_settings_are_frozen_snapshots(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                guild_settings = honeypot.GuildSettings.from_mapping({})
+
+                with self.assertRaises(FrozenInstanceError):
+                    guild_settings.enabled = True
+
+    async def test_guild_settings_item_access_fails_with_migration_guidance(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                guild_settings = honeypot.GuildSettings.from_mapping({})
+
+                with self.assertRaisesRegex(TypeError, r"settings\.enabled"):
+                    guild_settings["enabled"]
+
+    async def test_guild_settings_defaults_exactly_match_registered_config(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+
+                self.assertEqual(dict(honeypot.settings.DEFAULTS), EXPECTED_GUILD_DEFAULTS)
+                self.assertEqual(cog.config.defaults, EXPECTED_GUILD_DEFAULTS)
+
+    async def test_guild_settings_never_raise_for_non_mapping_config(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                with self.assertLogs("red.Honeypot", level=logging.WARNING):
+                    try:
+                        guild_settings = honeypot.GuildSettings.from_mapping(None)
+                    except Exception as exc:
+                        self.fail(f"from_mapping raised for config input: {exc!r}")
+
+                observed = {
+                    field.name: getattr(guild_settings, field.name)
+                    for field in fields(guild_settings)
+                }
+                self.assertEqual(observed, EXPECTED_GUILD_DEFAULTS)
 
     async def test_isolation_removes_new_nested_honeypot_module(self):
         module_name = "Honeypot.operations.review_update"
