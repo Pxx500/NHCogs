@@ -1284,7 +1284,9 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
 
                 await cog._process_detected_message(
                     message,
-                    {"review_enabled": True},
+                    honeypot.GuildSettings.from_mapping(
+                        {"review_enabled": True}
+                    ),
                     None,
                     (signal,),
                 )
@@ -1320,7 +1322,9 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                 cog._is_forward_purge_active = mock.Mock(return_value=True)
                 message.delete = mock.AsyncMock()
 
-                signals = await cog._collect_detection_signals(message, {})
+                signals = await cog._collect_detection_signals(
+                    message, honeypot.GuildSettings.from_mapping({})
+                )
 
                 self.assertEqual(len(signals), 1)
                 signal = signals[0]
@@ -1345,13 +1349,15 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
 
                 signals = await cog._collect_detection_signals(
                     message,
-                    {
-                        "spam_enabled": True,
-                        "spam_action": "review",
-                        "firstpost_enabled": True,
-                        "firstpost_action": "kick",
-                        "imagescan_detector_enabled": True,
-                    },
+                    honeypot.GuildSettings.from_mapping(
+                        {
+                            "spam_enabled": True,
+                            "spam_action": "review",
+                            "firstpost_enabled": True,
+                            "firstpost_action": "kick",
+                            "imagescan_detector_enabled": True,
+                        }
+                    ),
                 )
 
                 self.assertEqual(
@@ -1374,12 +1380,14 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
 
                 signals = await cog._collect_detection_signals(
                     message,
-                    {
-                        "spam_enabled": True,
-                        "spam_action": "none",
-                        "firstpost_enabled": True,
-                        "firstpost_action": "kick",
-                    },
+                    honeypot.GuildSettings.from_mapping(
+                        {
+                            "spam_enabled": True,
+                            "spam_action": "none",
+                            "firstpost_enabled": True,
+                            "firstpost_action": "kick",
+                        }
+                    ),
                 )
 
                 self.assertEqual([signal.detector for signal in signals], ["spam", "firstpost"])
@@ -1395,7 +1403,10 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                 cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
 
                 signals = await cog._collect_detection_signals(
-                    message, {"spam_enabled": True, "spam_action": "invalid"}
+                    message,
+                    honeypot.GuildSettings.from_mapping(
+                        {"spam_enabled": True, "spam_action": "invalid"}
+                    ),
                 )
 
                 self.assertEqual(signals[0].action, honeypot.ActionIntent.REVIEW)
@@ -1410,7 +1421,13 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
 
                 signals = await cog._collect_detection_signals(
                     message,
-                    {"dry_run": True, "spam_enabled": True, "spam_action": "review"},
+                    honeypot.GuildSettings.from_mapping(
+                        {
+                            "dry_run": True,
+                            "spam_enabled": True,
+                            "spam_action": "review",
+                        }
+                    ),
                 )
 
                 self.assertEqual(signals[0].action, honeypot.ActionIntent.REVIEW)
@@ -1425,7 +1442,10 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                 cog._is_protected_member = mock.AsyncMock(return_value=True)
 
                 signals = await cog._collect_detection_signals(
-                    message, {"spam_enabled": True, "spam_action": "review"}
+                    message,
+                    honeypot.GuildSettings.from_mapping(
+                        {"spam_enabled": True, "spam_action": "review"}
+                    ),
                 )
 
                 self.assertEqual([signal.detector for signal in signals], ["spam"])
@@ -1440,7 +1460,10 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                 cog._firstpost_loaded_guilds.add(message.guild.id)
 
                 signals = await cog._collect_detection_signals(
-                    message, {"firstpost_enabled": True}
+                    message,
+                    honeypot.GuildSettings.from_mapping(
+                        {"firstpost_enabled": True}
+                    ),
                 )
 
                 self.assertEqual(signals, ())
@@ -1454,7 +1477,10 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                 cog._firstpost_loaded_guilds.add(message.guild.id)
 
                 signals = await cog._collect_detection_signals(
-                    message, {"firstpost_collect_enabled": True}
+                    message,
+                    honeypot.GuildSettings.from_mapping(
+                        {"firstpost_collect_enabled": True}
+                    ),
                 )
 
                 self.assertEqual(signals, ())
@@ -1468,10 +1494,12 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                 config = {"honeypot_channels": [9], "action": "ban"}
 
                 hit = await cog._collect_detection_signals(
-                    self._message(channel_id=9), config
+                    self._message(channel_id=9),
+                    honeypot.GuildSettings.from_mapping(config),
                 )
                 miss = await cog._collect_detection_signals(
-                    self._message(channel_id=8), config
+                    self._message(channel_id=8),
+                    honeypot.GuildSettings.from_mapping(config),
                 )
 
                 self.assertEqual([signal.detector for signal in hit], ["honeypot"])
@@ -1487,12 +1515,14 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
 
                 signals = await cog._collect_detection_signals(
                     self._message(channel_id=9, roles=[role]),
-                    {
-                        "honeypot_channels": [9],
-                        "whitelisted_roles": [7],
-                        "whitelist_mode": "bypass",
-                        "action": "ban",
-                    },
+                    honeypot.GuildSettings.from_mapping(
+                        {
+                            "honeypot_channels": [9],
+                            "whitelisted_roles": [7],
+                            "whitelist_mode": "bypass",
+                            "action": "ban",
+                        }
+                    ),
                 )
 
                 self.assertEqual(signals[0].action, honeypot.ActionIntent.NONE)
@@ -1509,11 +1539,13 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
 
                 signals = await cog._collect_detection_signals(
                     message,
-                    {
-                        "honeypot_channels": [9],
-                        "whitelisted_roles": [7],
-                        "whitelist_mode": "bypass",
-                    },
+                    honeypot.GuildSettings.from_mapping(
+                        {
+                            "honeypot_channels": [9],
+                            "whitelisted_roles": [7],
+                            "whitelist_mode": "bypass",
+                        }
+                    ),
                 )
 
                 self.assertEqual(
@@ -1603,10 +1635,12 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                     signal_task = asyncio.create_task(
                         cog._collect_detection_signals(
                             message,
-                            {
-                                "imagescan_detector_enabled": True,
-                                "imagescan_detector_action": "invalid",
-                            },
+                            honeypot.GuildSettings.from_mapping(
+                                {
+                                    "imagescan_detector_enabled": True,
+                                    "imagescan_detector_action": "invalid",
+                                }
+                            ),
                         )
                     )
                     try:
@@ -1683,7 +1717,9 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     signals = await cog._collect_detection_signals(
                         message,
-                        {"imagescan_detector_enabled": True},
+                        honeypot.GuildSettings.from_mapping(
+                            {"imagescan_detector_enabled": True}
+                        ),
                     )
 
                 self.assertNotIn(
@@ -1711,11 +1747,13 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
 
                 signals = await cog._collect_detection_signals(
                     message,
-                    {
-                        "spam_enabled": True,
-                        "spam_action": "none",
-                        "imagescan_detector_enabled": True,
-                    },
+                    honeypot.GuildSettings.from_mapping(
+                        {
+                            "spam_enabled": True,
+                            "spam_action": "none",
+                            "imagescan_detector_enabled": True,
+                        }
+                    ),
                 )
 
                 self.assertEqual([signal.detector for signal in signals], ["spam"])
@@ -1748,11 +1786,11 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
 
                 cog._publish_detection_case_serial = render
                 first = asyncio.create_task(
-                    cog._publish_detection_case("case-1", {}, None)
+                    cog._publish_detection_case("case-1", None, None)
                 )
                 await asyncio.wait_for(first_started.wait(), timeout=1)
                 second = asyncio.create_task(
-                    cog._publish_detection_case("case-1", {}, None)
+                    cog._publish_detection_case("case-1", None, None)
                 )
                 await asyncio.sleep(0)
 
@@ -2317,7 +2355,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     await cog._publish_detection_case(
                         appended.case.case_id,
-                        {"review_channel": 50},
+                        50,
                         None,
                     )
 
@@ -3188,6 +3226,39 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         cog._increment_stat = mock.AsyncMock()
         cog._purge_detection_case_cached_messages = mock.AsyncMock(return_value=0)
 
+    async def test_malformed_enabled_setting_does_not_enter_detection_pipeline(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                bot = _Bot()
+                bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
+                bot.owner_ids = set()
+                bot.is_mod = mock.AsyncMock(return_value=True)
+                bot.is_admin = mock.AsyncMock(return_value=False)
+                cog = honeypot.Honeypot(bot)
+                cog.config = SimpleNamespace(
+                    guild=lambda guild: SimpleNamespace(
+                        all=mock.AsyncMock(
+                            return_value={"enabled": "true", "logs_channel": None}
+                        )
+                    )
+                )
+                message = self._message(honeypot, attachment_count=0)
+                message.guild.me = SimpleNamespace(top_role=10)
+                message.guild.get_member = lambda user_id: None
+                message.guild.fetch_member = mock.AsyncMock(
+                    return_value=SimpleNamespace(
+                        id=message.author.id,
+                        guild=message.guild,
+                        guild_permissions=SimpleNamespace(manage_guild=False),
+                        top_role=1,
+                    )
+                )
+
+                with self.assertLogs("red.Honeypot", level=logging.WARNING):
+                    await cog.on_message(message)
+
+                message.guild.fetch_member.assert_not_awaited()
+
     async def test_guild_message_from_departed_user_reaches_detection_pipeline(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -3616,6 +3687,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 message.guild.get_channel = lambda channel_id: channel
                 config = {
                     "enabled": True,
+                    "review_enabled": True,
                     "dry_run": False,
                     "logs_channel": None,
                     "review_channel": None,
@@ -3815,6 +3887,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     cog,
                     {
                         "enabled": True,
+                        "review_enabled": True,
                         "dry_run": False,
                         "logs_channel": None,
                         "review_channel": None,
@@ -4404,6 +4477,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.to_thread(cog._case_store.initialize)
                 config = {
                     "enabled": True,
+                    "review_enabled": True,
                     "dry_run": False,
                     "logs_channel": None,
                     "review_channel": None,
@@ -4689,6 +4763,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     cog,
                     {
                         "enabled": True,
+                        "review_enabled": True,
                         "dry_run": False,
                         "logs_channel": None,
                         "review_channel": None,
@@ -4730,6 +4805,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     cog,
                     {
                         "enabled": True,
+                        "review_enabled": True,
                         "dry_run": False,
                         "logs_channel": None,
                         "review_channel": None,
@@ -4820,6 +4896,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     cog,
                     {
                         "enabled": True,
+                        "review_enabled": True,
                         "dry_run": False,
                         "logs_channel": None,
                         "review_channel": None,
@@ -4893,7 +4970,9 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 cog._is_forward_purge_active = is_forward_purge_active
                 cog._scan_all_case_message_images = mock.AsyncMock()
                 cog._publish_detection_case = mock.AsyncMock()
-                cog._record_recent_user_message(previous, config)
+                cog._record_recent_user_message(
+                    previous, honeypot.GuildSettings.from_mapping(config)
+                )
 
                 await cog.on_message(message)
                 await cog.on_message(follow_up)
@@ -4989,7 +5068,8 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0)
                 config = {
-                    "enabled": True, "dry_run": False, "logs_channel": None,
+                    "enabled": True, "review_enabled": True,
+                    "dry_run": False, "logs_channel": None,
                     "review_channel": None, "spam_enabled": False,
                     "firstpost_enabled": False, "firstpost_collect_enabled": False,
                 }
@@ -5025,7 +5105,8 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 self._configure_public_boundary(
                     cog,
                     {
-                        "enabled": True, "dry_run": False, "logs_channel": None,
+                        "enabled": True, "review_enabled": True,
+                        "dry_run": False, "logs_channel": None,
                         "review_channel": None, "spam_enabled": False,
                         "firstpost_enabled": False, "firstpost_collect_enabled": False,
                     },
@@ -5326,7 +5407,8 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1)
                 self._configure_public_boundary(
-                    cog, {"enabled": True, "dry_run": False, "logs_channel": None,
+                    cog, {"enabled": True, "review_enabled": True,
+                          "dry_run": False, "logs_channel": None,
                           "review_channel": None, "spam_enabled": False,
                           "firstpost_enabled": False, "firstpost_collect_enabled": False}
                 )
@@ -5407,7 +5489,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 ):
                     await cog._publish_detection_case(
-                        appended.case.case_id, {"review_channel": 50}, None
+                        appended.case.case_id, 50, None
                     )
 
                 snapshot = await asyncio.to_thread(
@@ -5643,10 +5725,10 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     await asyncio.gather(
                         first._publish_detection_case(
-                            appended.case.case_id, {"review_channel": 50}, None
+                            appended.case.case_id, 50, None
                         ),
                         second._publish_detection_case(
-                            appended.case.case_id, {"review_channel": 50}, None
+                            appended.case.case_id, 50, None
                         ),
                     )
 
@@ -5712,7 +5794,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     with self.assertRaisesRegex(RuntimeError, "lease was lost"):
                         await loser._publish_detection_case(
-                            appended.case.case_id, {"review_channel": 50}, None
+                            appended.case.case_id, 50, None
                         )
 
                 snapshot = await asyncio.to_thread(
@@ -5782,7 +5864,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 ):
                     await cog._publish_detection_case(
-                        appended.case.case_id, {"review_channel": None}, None
+                        appended.case.case_id, None, None
                     )
 
                 existing.edit.assert_awaited_once()
@@ -5898,6 +5980,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 logs_channel = SimpleNamespace(id=700, send=mock.AsyncMock(side_effect=publish))
                 config = {
                     "enabled": True,
+                    "review_enabled": True,
                     "dry_run": False,
                     "logs_channel": 700,
                     "review_channel": None,
@@ -5943,7 +6026,9 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 )
                 second.guild = first.guild
 
-                cog._record_recent_user_message(first, config)
+                cog._record_recent_user_message(
+                    first, honeypot.GuildSettings.from_mapping(config)
+                )
                 task = asyncio.create_task(cog.on_message(second))
                 await asyncio.wait_for(publication_started.wait(), timeout=1)
                 try:
