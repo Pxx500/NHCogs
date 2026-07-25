@@ -7,8 +7,21 @@
     ],
     "description": "<@200> (200)\nAccount created <t:1783425600:R>\nJoined server <t:1783944000:R>\nStatus: Open\nMessages: 1\nExpires: <t:1784116800:R>\n\nSignals:\nMessage 1 · <#300>:\nImage could not be read",
     "expires_at": "2026-07-15T12:00:00+00:00",
-    "feedback_items": [],
-    "feedback_lines": [],
+    "feedback_items": [
+      {
+        "decision": null,
+        "detector_matched": false,
+        "filename": "publish-failed.png",
+        "key": {
+          "case_id": "{{CASE_ID}}",
+          "message_sequence": 1,
+          "position": 0
+        }
+      }
+    ],
+    "feedback_lines": [
+      "1.1 publish-failed.png: pending"
+    ],
     "fields": [
       {
         "name": "Evidence:",
@@ -16,7 +29,7 @@
       },
       {
         "name": "Warnings:",
-        "value": "Evidence unavailable for message 1, attachment 1 (missing.png)."
+        "value": "1.1 publish-failed.png: Could not publish evidence. See bot logs.\nEvidence unavailable for message 1, attachment 2 (missing.png)."
       }
     ],
     "incomplete_evidence": true,
@@ -33,7 +46,7 @@
     "moderator_id": null,
     "needs_attention": false,
     "operation_warning_lines": [
-      "Evidence unavailable for message 1, attachment 1 (missing.png)."
+      "Evidence unavailable for message 1, attachment 2 (missing.png)."
     ],
     "pages": [
       [
@@ -43,7 +56,7 @@
         },
         {
           "name": "Warnings:",
-          "value": "Evidence unavailable for message 1, attachment 1 (missing.png)."
+          "value": "1.1 publish-failed.png: Could not publish evidence. See bot logs.\nEvidence unavailable for message 1, attachment 2 (missing.png)."
         }
       ]
     ],
@@ -60,11 +73,28 @@
   "timeline": {
     "case_id": "{{CASE_ID}}",
     "case_notes": [
-      "Evidence unavailable for message 1, attachment 1 (missing.png)."
+      "Evidence unavailable for message 1, attachment 2 (missing.png)."
     ],
     "messages": [
       {
         "attachments": [
+          {
+            "capture_status": "captured",
+            "content_type": "image/png",
+            "description": null,
+            "evidence_path": "evidence/publish-failed.png",
+            "filename": "publish-failed.png",
+            "key": {
+              "case_id": "{{CASE_ID}}",
+              "message_sequence": 1,
+              "position": 0
+            },
+            "learning_decision": null,
+            "match_metadata": {},
+            "publication_error": "evidence upload failed",
+            "size": 128,
+            "spoiler": false
+          },
           {
             "capture_status": "capture_failed",
             "content_type": "image/png",
@@ -74,7 +104,7 @@
             "key": {
               "case_id": "{{CASE_ID}}",
               "message_sequence": 1,
-              "position": 0
+              "position": 1
             },
             "learning_decision": null,
             "match_metadata": {},

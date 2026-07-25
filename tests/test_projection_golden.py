@@ -111,8 +111,24 @@ class ProjectionGoldenTests(unittest.TestCase):
     def test_capture_failed_evidence_missing(self):
         result = self.builder.add_message(
             content="missing image evidence",
-            attachments=(self.builder.attachment(0, "missing.png"),),
+            attachments=(
+                self.builder.attachment(0, "publish-failed.png"),
+                self.builder.attachment(1, "missing.png"),
+            ),
             signals=(self.builder.signal("image", "Image could not be read"),),
+        )
+        self.builder.capture(
+            result.message.sequence,
+            0,
+            "evidence/publish-failed.png",
+        )
+        self.assertTrue(
+            self.builder.store.update_attachment_publication_error(
+                self.builder.case_id,
+                result.message.sequence,
+                0,
+                "evidence upload failed",
+            )
         )
         self.builder.fail_capture(result.message.sequence, "internal capture exception")
 
@@ -150,14 +166,35 @@ class ProjectionGoldenTests(unittest.TestCase):
         self.assertGolden("resolved_moderator")
 
     def test_long_content_pagination_boundary(self):
-        self.builder.add_message(
+        result = self.builder.add_message(
             channel_id=300,
             content="A" * 4500,
+            attachments=tuple(
+                self.builder.attachment(position, f"large-{position}.png")
+                for position in range(3)
+            ),
             signals=(
                 self.builder.signal("spam", "Long detector detail " + "x" * 800),
                 self.builder.signal("links", "Second detector detail " + "y" * 800),
             ),
         )
+        for position in range(3):
+            self.builder.capture(
+                result.message.sequence,
+                position,
+                f"evidence/large-{position}.png",
+            )
+            self.assertTrue(
+                self.builder.store.update_attachment_publication_error(
+                    self.builder.case_id,
+                    result.message.sequence,
+                    position,
+                    "review destination upload limit: " + "z" * 400,
+                )
+            )
+        for operation_type in ("review_publish", "role_apply", "moderation_action"):
+            self.builder.fail_operation(operation_type)
+        self.assertTrue(self.builder.store.mark_case_needs_attention(self.builder.case_id))
         for channel_id in range(301, 305):
             self.builder.add_message(
                 channel_id=channel_id,

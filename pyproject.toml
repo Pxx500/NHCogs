@@ -6,7 +6,7 @@ requires-python = ">=3.10"
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-exclude = [
+extend-exclude = [
     ".worktrees",
     "local-data",
     "tests/test_detection_pipeline.py",

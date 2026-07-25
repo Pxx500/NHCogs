@@ -120,11 +120,16 @@ def _isolated_honeypot_modules(data_path: Path):
         "case_review",
         "console_dump",
     )
-    module_paths = {
-        path.stem: path
-        for path in PACKAGE_DIR.glob("*.py")
-        if path.stem != "__init__"
-    }
+    module_paths = {}
+    for path in PACKAGE_DIR.rglob("*.py"):
+        relative = path.relative_to(PACKAGE_DIR)
+        if relative == Path("__init__.py"):
+            continue
+        if relative.name == "__init__.py":
+            qualified_name = ".".join(relative.parent.parts)
+        else:
+            qualified_name = ".".join(relative.with_suffix("").parts)
+        module_paths[qualified_name] = path
     remainder = tuple(
         sorted(
             name
@@ -133,7 +138,12 @@ def _isolated_honeypot_modules(data_path: Path):
         )
     )
     load_order = dependency_order + remainder
-    names = (
+    preexisting_honeypot_names = tuple(
+        name
+        for name in sys.modules
+        if name == "Honeypot" or name.startswith("Honeypot.")
+    )
+    names = tuple(dict.fromkeys((
         "discord",
         "discord.ext",
         "discord.ext.tasks",
@@ -147,7 +157,9 @@ def _isolated_honeypot_modules(data_path: Path):
         "redbot.core.utils.chat_formatting",
         "AAA3A_utils",
         "Honeypot",
-    ) + tuple(f"Honeypot.{name}" for name in (*load_order, "honeypot"))
+        *(f"Honeypot.{name}" for name in (*load_order, "honeypot")),
+        *preexisting_honeypot_names,
+    )))
     previous = {name: sys.modules.get(name, _MISSING) for name in names}
 
     discord = ModuleType("discord")
@@ -306,8 +318,8 @@ class _Bot:
 
 class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
-    async def test_isolation_removes_new_honeypot_modules(self):
-        module_name = "Honeypot.future_projection"
+    async def test_isolation_removes_new_nested_honeypot_module(self):
+        module_name = "Honeypot.operations.review_update"
         sys.modules.pop(module_name, None)
         try:
             with TemporaryDirectory() as directory:
@@ -317,6 +329,23 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(module_name, sys.modules)
         finally:
             sys.modules.pop(module_name, None)
+
+    async def test_isolation_restores_preexisting_nested_honeypot_module(self):
+        module_name = "Honeypot.operations.review_update"
+        previous = sys.modules.get(module_name, _MISSING)
+        sentinel = ModuleType(module_name)
+        sys.modules[module_name] = sentinel
+        try:
+            with TemporaryDirectory() as directory:
+                with _isolated_honeypot_modules(Path(directory)):
+                    pass
+
+            self.assertIs(sys.modules.get(module_name), sentinel)
+        finally:
+            if previous is _MISSING:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = previous
 
     async def test_load_ignores_stale_pending_reviews_when_there_are_no_open_cases(self):
         with TemporaryDirectory() as directory:
