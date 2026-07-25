@@ -97,6 +97,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                 evidence_cleanup = import_module(
                     "Honeypot.operations.evidence_cleanup"
                 )
+                moderation = import_module("Honeypot.operations.moderation")
                 review_update = import_module("Honeypot.operations.review_update")
                 role_apply = import_module("Honeypot.operations.role_apply")
                 role_release = import_module("Honeypot.operations.role_release")
@@ -155,6 +156,9 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                         honeypot.OperationType.ROLE_APPLY: (
                             role_apply.role_apply_handler
                         ),
+                        honeypot.OperationType.MODERATION_ACTION: (
+                            moderation.moderation_action_handler
+                        ),
                     },
                 )
                 for operation_type in honeypot.OperationType:
@@ -166,6 +170,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                         honeypot.OperationType.EVIDENCE_CLEANUP,
                         honeypot.OperationType.ROLE_RELEASE,
                         honeypot.OperationType.ROLE_APPLY,
+                        honeypot.OperationType.MODERATION_ACTION,
                     }:
                         continue
                     self.assertIsNone(

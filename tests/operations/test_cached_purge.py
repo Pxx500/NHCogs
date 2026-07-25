@@ -60,6 +60,7 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
                 evidence_cleanup = import_module(
                     "Honeypot.operations.evidence_cleanup"
                 )
+                moderation = import_module("Honeypot.operations.moderation")
                 review_publish = import_module("Honeypot.operations.review_publish")
                 review_update = import_module("Honeypot.operations.review_update")
                 role_apply = import_module("Honeypot.operations.role_apply")
@@ -118,6 +119,9 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
                         ),
                         honeypot.OperationType.ROLE_APPLY: (
                             role_apply.role_apply_handler
+                        ),
+                        honeypot.OperationType.MODERATION_ACTION: (
+                            moderation.moderation_action_handler
                         ),
                     },
                 )
