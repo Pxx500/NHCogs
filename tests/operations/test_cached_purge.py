@@ -64,6 +64,9 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
                 moderator_decision = import_module(
                     "Honeypot.operations.moderator_decision"
                 )
+                message_process = import_module(
+                    "Honeypot.operations.message_process"
+                )
                 review_publish = import_module("Honeypot.operations.review_publish")
                 review_update = import_module("Honeypot.operations.review_update")
                 role_apply = import_module("Honeypot.operations.role_apply")
@@ -102,6 +105,9 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     dict(operations.HANDLERS),
                     {
+                        honeypot.OperationType.MESSAGE_PROCESS: (
+                            message_process.message_process_handler
+                        ),
                         honeypot.OperationType.REVIEW_UPDATE: (
                             review_update.review_update_handler
                         ),

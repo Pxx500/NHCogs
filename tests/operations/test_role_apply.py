@@ -158,6 +158,7 @@ class RoleApplyHandlerTests(unittest.IsolatedAsyncioTestCase):
                 operations = import_module("Honeypot.operations")
                 cog = honeypot.Honeypot(_Bot())
                 expected_types = {
+                    honeypot.OperationType.MESSAGE_PROCESS,
                     honeypot.OperationType.REVIEW_UPDATE,
                     honeypot.OperationType.REVIEW_PUBLISH,
                     honeypot.OperationType.CACHED_PURGE,

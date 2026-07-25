@@ -4,7 +4,7 @@ from contextlib import closing, contextmanager
 from dataclasses import FrozenInstanceError, fields
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-from importlib import util
+from importlib import import_module, util
 import logging
 from pathlib import Path
 import sqlite3
@@ -4896,9 +4896,14 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
                 cog._publish_detection_case = mock.AsyncMock()
+                message_process = import_module(
+                    "Honeypot.operations.message_process"
+                )
 
                 with mock.patch.object(
-                    honeypot, "DETECTION_CAPTURE_START_TIMEOUT_SECONDS", 0.01
+                    message_process,
+                    "DETECTION_CAPTURE_START_TIMEOUT_SECONDS",
+                    0.01,
                 ):
                     await cog.on_message(message)
 
@@ -4969,6 +4974,18 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = honeypot.Honeypot(_Bot())
+                try:
+                    handler_module = import_module(
+                        "Honeypot.operations.message_process"
+                    )
+                except ModuleNotFoundError:
+                    self.fail("message_process has no dedicated handler module")
+                self.assertIs(
+                    cog._detection_operation_handlers.resolve(
+                        honeypot.OperationType.MESSAGE_PROCESS
+                    ),
+                    handler_module.message_process_handler,
+                )
                 await asyncio.to_thread(cog._case_store.initialize)
                 now = datetime.now(timezone.utc)
                 appended = await asyncio.to_thread(
