@@ -3059,6 +3059,63 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 )
 
 
+class JoinwatchSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_malformed_disabled_setting_does_not_publish_join_alert(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                bot = _Bot()
+                bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
+                cog = honeypot.Honeypot(bot)
+                config = {
+                    "joinwatch_enabled": "false",
+                    "joinwatch_channel": 300,
+                    "joinwatch_min_age_hours": 24,
+                    "joinwatch_auto_role_enabled": False,
+                    "joinwatch_alert_enabled": True,
+                }
+                cog.config = SimpleNamespace(
+                    guild=lambda guild: SimpleNamespace(
+                        all=mock.AsyncMock(return_value=config)
+                    )
+                )
+                alert_channel = SimpleNamespace(send=mock.AsyncMock())
+                cog._get_text_channel_or_thread = mock.Mock(
+                    return_value=alert_channel
+                )
+                cog._increment_stat = mock.AsyncMock()
+                cog._store_joinwatch_pending_role_alert = mock.AsyncMock()
+                guild = SimpleNamespace(id=100)
+                member = SimpleNamespace(
+                    id=200,
+                    guild=guild,
+                    bot=False,
+                    created_at=datetime.now(timezone.utc) - timedelta(hours=1),
+                    joined_at=datetime.now(timezone.utc),
+                    display_name="New Member",
+                    display_avatar=None,
+                    mention="<@200>",
+                    roles=[],
+                )
+                embed = SimpleNamespace(
+                    set_author=mock.Mock(),
+                    set_thumbnail=mock.Mock(),
+                    add_field=mock.Mock(),
+                )
+
+                with mock.patch.object(
+                    honeypot.discord,
+                    "Embed",
+                    return_value=embed,
+                ), mock.patch.object(
+                    honeypot.discord,
+                    "Color",
+                    SimpleNamespace(orange=mock.Mock(return_value=None)),
+                ):
+                    await cog.on_member_join(member)
+
+                alert_channel.send.assert_not_awaited()
+
+
 class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
     class _Store:
         def __init__(self, value):

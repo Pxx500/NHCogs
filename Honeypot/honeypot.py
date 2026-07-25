@@ -222,11 +222,8 @@ def is_purgeable_message_channel(channel: object) -> bool:
     return callable(getattr(channel, "purge", None))
 
 
-def joinwatch_channel_id(config: dict) -> int | None:
-    channel_id = config.get("joinwatch_channel")
-    return channel_id if isinstance(channel_id, int) else None
-
-
+def joinwatch_channel_id(settings: GuildSettings) -> int | None:
+    return settings.joinwatch_channel
 
 
 def is_image_attachment(attachment: discord.Attachment) -> bool:
@@ -6693,13 +6690,13 @@ class Honeypot(Cog):
         guild: discord.Guild,
         member: discord.Member | None,
         member_id: int,
-        config: dict,
+        settings: GuildSettings,
         reason: str,
     ) -> tuple[str | None, str | None]:
-        action = config.get("joinwatch_auto_role_action", "none")
+        action = settings.joinwatch_auto_role_action.value
         if action not in ("kick", "ban"):
             return (_("No joinwatch punishment configured."), None)
-        if config.get("dry_run"):
+        if settings.dry_run:
             await self._increment_stat(guild, "dry_run_actions")
             return (self._dry_run_label(action), None)
         missing_permission = self._missing_action_permission(guild, action)
@@ -6710,7 +6707,7 @@ class Honeypot(Cog):
             if action == "kick":
                 if member is None:
                     if self._automated_kick_fail_warning_enabled(
-                        bool(config.get("automated_kick_fail_warning", False))
+                        settings.automated_kick_fail_warning
                     ):
                         return await self._create_kick_fail_warning(guild, member_id)
                     return (_("The member is no longer in the server."), None)
@@ -6718,7 +6715,7 @@ class Honeypot(Cog):
                     await member.kick(reason=reason)
                 except discord.NotFound:
                     if self._automated_kick_fail_warning_enabled(
-                        bool(config.get("automated_kick_fail_warning", False))
+                        settings.automated_kick_fail_warning
                     ):
                         return await self._create_kick_fail_warning(guild, member_id)
                     raise
@@ -6755,23 +6752,26 @@ class Honeypot(Cog):
         now = datetime.now(timezone.utc)
         for guild in self.bot.guilds:
             try:
-                config = await self.config.guild(guild).all()
-                pending_assignments = config.get("joinwatch_pending_role_assignments", {})
-                pending_roles = config.get("joinwatch_pending_roles", {})
-                if pending_assignments and not config.get("joinwatch_auto_role_enabled", False):
+                raw_config = await self.config.guild(guild).all()
+                guild_settings = GuildSettings.from_mapping(raw_config)
+                pending_assignments = guild_settings.joinwatch_pending_role_assignments
+                pending_roles = guild_settings.joinwatch_pending_roles
+                if pending_assignments and not guild_settings.joinwatch_auto_role_enabled:
                     async with self.config.guild(guild).joinwatch_pending_role_assignments() as stored_assignments:
                         stored_assignments.clear()
                     pending_assignments = {}
                 if not pending_assignments and not pending_roles:
                     continue
                 joinwatch_channel = self._get_text_channel_or_thread(
-                    guild, joinwatch_channel_id(config)
+                    guild, joinwatch_channel_id(guild_settings)
                 )
                 for member_id_str, data in list(pending_assignments.items()):
                     try:
                         member_id = int(member_id_str)
-                        role_id = int(data["role_id"])
-                        apply_at = datetime.fromisoformat(data["apply_at"])
+                        role_id = int(typing.cast(typing.Any, data["role_id"]))
+                        apply_at = datetime.fromisoformat(
+                            typing.cast(str, data["apply_at"])
+                        )
                     except (KeyError, TypeError, ValueError):
                         async with self.config.guild(guild).joinwatch_pending_role_assignments() as stored_assignments:
                             stored_assignments.pop(str(member_id_str), None)
@@ -6785,7 +6785,7 @@ class Honeypot(Cog):
                             guild,
                             None,
                             member_id,
-                            config,
+                            guild_settings,
                             reason="Suspicious Account",
                         )
                         if failed:
@@ -6797,9 +6797,15 @@ class Honeypot(Cog):
                                 failed,
                             )
                             continue
-                        if config.get("joinwatch_auto_role_action") == "ban":
+                        if (
+                            guild_settings.joinwatch_auto_role_action
+                            is JoinwatchAutoRoleActionOption.BAN
+                        ):
                             await self._edit_joinwatch_alert_auto_role(guild, data, _("Banned."))
-                        elif config.get("joinwatch_auto_role_action") == "kick":
+                        elif (
+                            guild_settings.joinwatch_auto_role_action
+                            is JoinwatchAutoRoleActionOption.KICK
+                        ):
                             await self._edit_joinwatch_alert_auto_role(
                                 guild,
                                 data,
@@ -6869,15 +6875,19 @@ class Honeypot(Cog):
                             )
                             continue
                     expires_at = now + timedelta(
-                        minutes=config.get("joinwatch_auto_role_timer_minutes", 1440)
+                        minutes=guild_settings.joinwatch_auto_role_timer_minutes
                     )
                     await self._store_joinwatch_pending_role(
                         member,
                         role.id,
                         expires_at,
                         applied_at=now,
-                        alert_channel_id=data.get("alert_channel_id"),
-                        alert_message_id=data.get("alert_message_id"),
+                        alert_channel_id=typing.cast(
+                            int | None, data.get("alert_channel_id")
+                        ),
+                        alert_message_id=typing.cast(
+                            int | None, data.get("alert_message_id")
+                        ),
                     )
                     await self._edit_joinwatch_alert_auto_role(
                         guild,
@@ -6891,13 +6901,15 @@ class Honeypot(Cog):
                 for member_id_str, data in list(pending_roles.items()):
                     try:
                         member_id = int(member_id_str)
-                        role_id = int(data["role_id"])
+                        role_id = int(typing.cast(typing.Any, data["role_id"]))
                     except (KeyError, TypeError, ValueError):
                         async with self.config.guild(guild).joinwatch_pending_roles() as stored_pending_roles:
                             stored_pending_roles.pop(str(member_id_str), None)
                         continue
                     try:
-                        expires_at = datetime.fromisoformat(data["expires_at"])
+                        expires_at = datetime.fromisoformat(
+                            typing.cast(str, data["expires_at"])
+                        )
                     except (KeyError, TypeError, ValueError):
                         async with self.config.guild(guild).joinwatch_pending_roles() as stored_pending_roles:
                             stored_pending_roles.pop(str(member_id_str), None)
@@ -6911,7 +6923,7 @@ class Honeypot(Cog):
                             guild,
                             None,
                             member_id,
-                            config,
+                            guild_settings,
                             reason="Suspicious Account",
                         )
                         if failed:
@@ -6923,9 +6935,15 @@ class Honeypot(Cog):
                                 failed,
                             )
                         else:
-                            if config.get("joinwatch_auto_role_action") == "ban":
+                            if (
+                                guild_settings.joinwatch_auto_role_action
+                                is JoinwatchAutoRoleActionOption.BAN
+                            ):
                                 await self._edit_joinwatch_alert_auto_role(guild, data, _("Banned."))
-                            elif config.get("joinwatch_auto_role_action") == "kick":
+                            elif (
+                                guild_settings.joinwatch_auto_role_action
+                                is JoinwatchAutoRoleActionOption.KICK
+                            ):
                                 await self._edit_joinwatch_alert_auto_role(
                                     guild,
                                     data,
@@ -6982,7 +7000,7 @@ class Honeypot(Cog):
                         guild,
                         member,
                         member_id,
-                        config,
+                        guild_settings,
                         reason="Suspicious Account",
                     )
                     if failed:
@@ -6994,9 +7012,15 @@ class Honeypot(Cog):
                             failed,
                         )
                     else:
-                        if config.get("joinwatch_auto_role_action") == "ban":
+                        if (
+                            guild_settings.joinwatch_auto_role_action
+                            is JoinwatchAutoRoleActionOption.BAN
+                        ):
                             await self._edit_joinwatch_alert_auto_role(guild, data, _("Banned."))
-                        elif config.get("joinwatch_auto_role_action") == "kick":
+                        elif (
+                            guild_settings.joinwatch_auto_role_action
+                            is JoinwatchAutoRoleActionOption.KICK
+                        ):
                             await self._edit_joinwatch_alert_auto_role(
                                 guild,
                                 data,
@@ -7050,13 +7074,16 @@ class Honeypot(Cog):
             return
         if member.bot:
             return
-        config = await self.config.guild(member.guild).all()
-        if not config["joinwatch_enabled"]:
+        raw_config = await self.config.guild(member.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
+        if not guild_settings.joinwatch_enabled:
             return
         await self._increment_stat(member.guild, "joinwatch_total_joins")
-        channel = self._get_text_channel_or_thread(member.guild, config["joinwatch_channel"])
+        channel = self._get_text_channel_or_thread(
+            member.guild, guild_settings.joinwatch_channel
+        )
         now = datetime.now(timezone.utc)
-        min_age = timedelta(hours=config["joinwatch_min_age_hours"])
+        min_age = timedelta(hours=guild_settings.joinwatch_min_age_hours)
         if member.created_at > now - min_age:
             await self._increment_stat(member.guild, "joinwatch_young_joins")
             hours = max(1, round((now - member.created_at).total_seconds() / 3600))
@@ -7071,8 +7098,11 @@ class Honeypot(Cog):
             )
             embed.set_author(name=f"{member.display_name} ({member.id})", icon_url=member.display_avatar)
             embed.set_thumbnail(url=member.display_avatar)
-            if config.get("joinwatch_auto_role_enabled") and config.get("joinwatch_auto_role_id") is not None:
-                role = member.guild.get_role(config["joinwatch_auto_role_id"])
+            if (
+                guild_settings.joinwatch_auto_role_enabled
+                and guild_settings.joinwatch_auto_role_id is not None
+            ):
+                role = member.guild.get_role(guild_settings.joinwatch_auto_role_id)
                 if role is not None and role not in member.roles and not await self._is_protected_member(member):
                     role_permission_error = self._missing_role_assignment_permission(member.guild, role)
                     if role_permission_error is not None:
@@ -7089,11 +7119,14 @@ class Honeypot(Cog):
                             inline=False,
                         )
                     else:
-                        if config.get("joinwatch_auto_role_random_delay_enabled", False):
-                            min_delay = max(1, int(config.get("joinwatch_auto_role_random_delay_min_minutes", 1)))
+                        if guild_settings.joinwatch_auto_role_random_delay_enabled:
+                            min_delay = max(
+                                1,
+                                guild_settings.joinwatch_auto_role_random_delay_min_minutes,
+                            )
                             max_delay = max(
                                 min_delay,
-                                int(config.get("joinwatch_auto_role_random_delay_max_minutes", 10)),
+                                guild_settings.joinwatch_auto_role_random_delay_max_minutes,
                             )
                             delay_minutes = random.randint(min_delay, max_delay)
                             apply_at = now + timedelta(minutes=delay_minutes)
@@ -7112,7 +7145,7 @@ class Honeypot(Cog):
                                 await member.add_roles(role, reason="Automated account status update.")
                                 await self._increment_stat(member.guild, "joinwatch_auto_roles")
                                 expires_at = now + timedelta(
-                                    minutes=config.get("joinwatch_auto_role_timer_minutes", 1440)
+                                    minutes=guild_settings.joinwatch_auto_role_timer_minutes
                                 )
                                 await self._store_joinwatch_pending_role(
                                     member,
@@ -7141,10 +7174,10 @@ class Honeypot(Cog):
                                     value=_("I couldn't apply the configured joinwatch auto-role."),
                                     inline=False,
                                 )
-            if config.get("joinwatch_alert_enabled", True) and channel is not None:
+            if guild_settings.joinwatch_alert_enabled and channel is not None:
                 try:
                     alert_message = await channel.send(embed=embed)
-                    if config.get("joinwatch_auto_role_random_delay_enabled", False):
+                    if guild_settings.joinwatch_auto_role_random_delay_enabled:
                         await self._store_joinwatch_pending_assignment_alert(
                             member.guild,
                             member.id,
@@ -7175,12 +7208,15 @@ class Honeypot(Cog):
             return
         if after.bot:
             return
-        config = await self.config.guild(after.guild).all()
-        pending_roles = config.get("joinwatch_pending_roles", {})
+        raw_config = await self.config.guild(after.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
+        pending_roles = guild_settings.joinwatch_pending_roles
         pending_role = pending_roles.get(str(after.id))
         if pending_role is not None:
             try:
-                pending_role_id = int(pending_role["role_id"])
+                pending_role_id = int(
+                    typing.cast(typing.Any, pending_role["role_id"])
+                )
             except (KeyError, TypeError, ValueError):
                 await self._delete_joinwatch_pending_role(after.guild, after.id)
             else:
@@ -7195,15 +7231,15 @@ class Honeypot(Cog):
                     )
                     await self._delete_joinwatch_pending_role(after.guild, after.id)
                     await self._increment_stat(after.guild, "joinwatch_auto_roles_cleared")
-        if not config["baitrole_enabled"] or config["baitrole_id"] is None:
+        if not guild_settings.baitrole_enabled or guild_settings.baitrole_id is None:
             return
-        bait_role = after.guild.get_role(config["baitrole_id"])
+        bait_role = after.guild.get_role(guild_settings.baitrole_id)
         if bait_role is None:
             return
         if bait_role not in before.roles and bait_role in after.roles:
             if await self._is_protected_member(after):
                 return
-            action = config["baitrole_action"]
+            action = guild_settings.baitrole_action.value
             reason = "Took the bait role - potential DM bot/scammer."
             try:
                 if action == "ban":
@@ -7224,7 +7260,7 @@ class Honeypot(Cog):
                     f"Could not {action} bait-role target {after.id}: {exc}",
                     terminal=True,
                 )
-            logs_channel_id = config.get("logs_channel")
+            logs_channel_id = guild_settings.logs_channel
             logs_channel = self._get_text_channel_or_thread(after.guild, logs_channel_id)
             if logs_channel is not None:
                 embed = discord.Embed(
