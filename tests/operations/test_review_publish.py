@@ -94,6 +94,9 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                     self.fail("review_publish has no dedicated handler module")
                 operations = import_module("Honeypot.operations")
                 cached_purge = import_module("Honeypot.operations.cached_purge")
+                evidence_cleanup = import_module(
+                    "Honeypot.operations.evidence_cleanup"
+                )
                 review_update = import_module("Honeypot.operations.review_update")
                 source_delete = import_module("Honeypot.operations.source_delete")
                 now = datetime.now(timezone.utc)
@@ -141,6 +144,9 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                         honeypot.OperationType.SOURCE_DELETE: (
                             source_delete.source_delete_handler
                         ),
+                        honeypot.OperationType.EVIDENCE_CLEANUP: (
+                            evidence_cleanup.evidence_cleanup_handler
+                        ),
                     },
                 )
                 for operation_type in honeypot.OperationType:
@@ -149,6 +155,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                         honeypot.OperationType.REVIEW_PUBLISH,
                         honeypot.OperationType.CACHED_PURGE,
                         honeypot.OperationType.SOURCE_DELETE,
+                        honeypot.OperationType.EVIDENCE_CLEANUP,
                     }:
                         continue
                     self.assertIsNone(
