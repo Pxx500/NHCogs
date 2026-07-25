@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 from threading import Barrier, Event
 import sqlite3
 import sys
+import types
 import unittest
 from unittest import mock
 
@@ -16,7 +17,11 @@ from tests.detection_case_fixtures import capture_attachment, publish_primary
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "Honeypot" / "detection_cases.py"
-spec = util.spec_from_file_location("detection_cases_under_test", MODULE_PATH)
+PACKAGE_NAME = "_honeypot_detection_cases_tests"
+package = types.ModuleType(PACKAGE_NAME)
+package.__path__ = [str(MODULE_PATH.parent)]
+sys.modules[PACKAGE_NAME] = package
+spec = util.spec_from_file_location(f"{PACKAGE_NAME}.detection_cases", MODULE_PATH)
 detection_cases_under_test = util.module_from_spec(spec)
 sys.modules[spec.name] = detection_cases_under_test
 assert spec.loader is not None
@@ -376,6 +381,37 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.store = DetectionCaseStore(self.database_path)
         self.store.initialize()
 
+    def test_initialize_sets_the_detection_schema_version_on_an_empty_database(self):
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+
+        self.assertEqual(version, 1)
+        self.assertIn("detection_cases", tables)
+        self.assertIn("detection_attachments", tables)
+
+    def test_initialize_preserves_current_schema_data_when_backfilling_version(self):
+        now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
+        stored_case = self.store.append_message(self.message(40, now), ()).case
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
+            connection.execute("PRAGMA user_version = 0")
+
+        DetectionCaseStore(self.database_path).initialize()
+
+        reopened = DetectionCaseStore(self.database_path)
+        snapshot = reopened.get_case(stored_case.case_id)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+
+        self.assertEqual(snapshot.case.case_id, stored_case.case_id)
+        self.assertEqual(snapshot.messages[0].message_id, 40)
+        self.assertEqual(version, 1)
+
     def test_case_subject_identity_survives_store_restart(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
         message = NewMessage(
@@ -515,6 +551,13 @@ class DetectionCaseStoreTests(unittest.TestCase):
                     PRIMARY KEY(case_id, message_sequence, position)
                 )"""
             )
+            connection.execute(
+                """INSERT INTO detection_attachments (
+                    case_id, message_sequence, position, filename, size,
+                    source_url, capture_status, match_metadata, learning_metadata
+                ) VALUES ('legacy-case', 1, 0, 'legacy.png', 128,
+                          'https://cdn.test/legacy.png', 'captured', '{}', '{}')"""
+            )
 
         DetectionCaseStore(legacy_path).initialize()
 
@@ -522,8 +565,16 @@ class DetectionCaseStoreTests(unittest.TestCase):
             columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(detection_attachments)")
             }
+            row = connection.execute(
+                """SELECT filename, description, spoiler
+                   FROM detection_attachments
+                   WHERE case_id = 'legacy-case'"""
+            ).fetchone()
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
         self.assertIn("description", columns)
         self.assertIn("spoiler", columns)
+        self.assertEqual(row, ("legacy.png", None, 0))
+        self.assertEqual(version, 1)
 
     def test_projection_endpoint_survives_store_restart(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)

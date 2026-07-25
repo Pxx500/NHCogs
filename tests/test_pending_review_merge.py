@@ -1,7 +1,6 @@
 import importlib.util
 import asyncio
 import sys
-import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,12 +11,10 @@ from tests.detection_case_fixtures import capture_attachment, publish_evidence
 
 
 def _load_case_review():
-    name = "Honeypot.case_review"
+    package_name = cases.__package__
+    name = f"{package_name}.case_review"
     path = Path(__file__).parents[1] / "Honeypot" / "case_review.py"
-    package = types.ModuleType("Honeypot")
-    package.__path__ = [str(path.parent)]
-    sys.modules.setdefault("Honeypot", package)
-    sys.modules["Honeypot.detection_cases"] = cases
+    sys.modules[f"{package_name}.detection_cases"] = cases
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
