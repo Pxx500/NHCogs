@@ -281,3 +281,7 @@ msgstr ""
 #: honeypot\honeypot.py:602
 msgid "**Whitelisted roles:**\n{lines}"
 msgstr ""
+
+#: honeypot\views.py:310
+msgid "Choose the result for the selected image."
+msgstr ""

@@ -236,6 +236,7 @@ def _isolated_honeypot_modules(data_path: Path):
         "detection_runtime",
         "case_review",
         "console_dump",
+        "views",
     )
     module_paths = {}
     for path in PACKAGE_DIR.rglob("*.py"):
@@ -760,6 +761,33 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 sys.modules.pop(module_name, None)
             else:
                 sys.modules[module_name] = previous
+
+    async def test_each_isolated_load_owns_one_detection_view_identity(self):
+        module_name = "Honeypot.views"
+        previous = sys.modules.get(module_name, _MISSING)
+
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as first_honeypot:
+                self.assertTrue(module_name in sys.modules)
+                first_view = first_honeypot.DetectionCaseView
+                self.assertIs(
+                    first_view,
+                    sys.modules[module_name].DetectionCaseView,
+                )
+
+            self.assertIs(sys.modules.get(module_name, _MISSING), previous)
+
+            with _isolated_honeypot_modules(Path(directory)) as second_honeypot:
+                self.assertTrue(module_name in sys.modules)
+                second_view = second_honeypot.DetectionCaseView
+                self.assertIs(
+                    second_view,
+                    sys.modules[module_name].DetectionCaseView,
+                )
+
+            self.assertIs(sys.modules.get(module_name, _MISSING), previous)
+
+        self.assertIsNot(first_view, second_view)
 
     async def test_load_ignores_stale_pending_reviews_when_there_are_no_open_cases(self):
         with TemporaryDirectory() as directory:
