@@ -14,6 +14,7 @@ import typing
 import zipfile
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager, closing
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -67,6 +68,16 @@ from .case_review import (
     validate_image_review_action,
 )
 from .console_dump import ReadOnlyLogBuffer, build_log_dump
+from .detection_operations import (
+    CompletionMode,
+    FollowUpKind,
+    OperationContext,
+    OperationHandlerRegistry,
+    OperationLease,
+    OperationOutcome,
+    apply_operation_policy,
+    executor_operation_policy,
+)
 from . import detection_runtime
 from .image_detector import (
     ImageSample,
@@ -737,6 +748,7 @@ class Honeypot(Cog):
         self._detection_admission_locks = tuple(asyncio.Lock() for _ in range(64))
         self._detection_publication_locks = tuple(asyncio.Lock() for _ in range(64))
         self._detection_heartbeat_interval_seconds = DETECTION_HEARTBEAT_INTERVAL_SECONDS
+        self._detection_operation_handlers = OperationHandlerRegistry()
 
     def _delete_detection_case_evidence(
         self, cases: tuple[tuple[int, str], ...]
@@ -2979,6 +2991,166 @@ class Honeypot(Cog):
                 capture_task.cancel()
             await asyncio.gather(capture_task, return_exceptions=True)
 
+    @asynccontextmanager
+    async def _operation_lease(
+        self, operation
+    ) -> typing.AsyncIterator[OperationLease]:
+        heartbeat = asyncio.create_task(self._renew_detection_operation(operation))
+        try:
+            yield OperationLease(
+                operation_id=operation.operation_id,
+                claim_token=operation.claim_token,
+            )
+        finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+
+    async def _settle_detection_operation_failure(
+        self,
+        operation,
+        lease: OperationLease,
+        now: datetime,
+        snapshot,
+        outcome: OperationOutcome,
+        error: Exception,
+        operation_type_value: str,
+    ) -> None:
+        retry_at = now + (
+            timedelta(seconds=DETECTION_FAST_RETRY_SECONDS)
+            if operation.attempts <= DETECTION_FAST_RETRY_LIMIT
+            else timedelta(minutes=DETECTION_SLOW_RETRY_MINUTES)
+        )
+        if operation.operation_type == OperationType.SOURCE_DELETE:
+            retry_at = now + timedelta(seconds=DETECTION_FAST_RETRY_SECONDS)
+        cached_purge_exhausted = (
+            operation.operation_type == OperationType.CACHED_PURGE
+            and outcome.result == DeleteStatus.TRANSIENT_FAILURE.value
+            and operation.attempts >= 3
+        )
+        if operation.operation_type == OperationType.CACHED_PURGE and (
+            outcome.result
+            in (
+                DeleteStatus.FORBIDDEN.value,
+                OPERATION_RESULT_CHANNEL_UNAVAILABLE,
+                OPERATION_RESULT_UNSUPPORTED_CHANNEL,
+            )
+            or cached_purge_exhausted
+        ):
+            retry_at = None
+            await asyncio.to_thread(
+                self._case_store.mark_case_needs_attention, operation.case_id
+            )
+        failure = await asyncio.to_thread(
+            self._case_store.fail_operation,
+            lease.operation_id,
+            lease.claim_token,
+            f"{type(error).__name__}: {error}",
+            now,
+            retry_at,
+            outcome.result,
+        )
+        if failure and snapshot is not None:
+            await self._record_operational_failure(
+                snapshot.case.guild_id,
+                operation.operation_type,
+                f"{type(error).__name__}: {error}",
+                case_id=operation.case_id,
+                operation_id=operation.operation_id,
+                attempts=operation.attempts,
+                terminal=retry_at is None,
+            )
+        if operation.operation_type == OperationType.ROLE_APPLY:
+            await self._case_review_rerender_safely(operation.case_id)
+        if operation.operation_type == OperationType.ROLE_APPLY and snapshot is not None:
+            failed_guild = self.bot.get_guild(snapshot.case.guild_id)
+            if failed_guild is not None:
+                await self._increment_stat(failed_guild, "pending_mute_failures")
+        log.warning(
+            "Detection case operation failed case=%s operation=%s kind=%s error=%s",
+            operation.case_id,
+            operation.operation_id,
+            operation_type_value,
+            error,
+        )
+
+    async def _settle_detection_operation_success(
+        self,
+        context: OperationContext,
+        outcome: OperationOutcome,
+    ) -> OperationOutcome:
+        operation = context.operation
+        if outcome.completion_mode is CompletionMode.MODERATOR_ACTION:
+            completed = await asyncio.to_thread(
+                self._case_store.complete_moderator_action,
+                context.lease.operation_id,
+                context.lease.claim_token,
+                context.now,
+                outcome.result,
+            )
+        else:
+            completed = await asyncio.to_thread(
+                self._case_store.complete_operation,
+                context.lease.operation_id,
+                context.lease.claim_token,
+                context.now,
+                outcome.result,
+            )
+        if not completed:
+            current_case = await asyncio.to_thread(
+                self._case_store.get_case, operation.case_id
+            )
+            if current_case is not None:
+                raise RuntimeError(
+                    "detection case operation lease was lost before completion"
+                )
+        elif context.snapshot is not None and (
+            operation.attempts > 1 or outcome.resolve_failure_on_first_attempt
+        ):
+            recovered = await asyncio.to_thread(
+                self._case_store.resolve_operational_failure,
+                operation.operation_id,
+                context.now,
+            )
+            if recovered and operation.attempts > 1:
+                await self._send_operational_alert(
+                    context.snapshot.case.guild_id,
+                    f"✅ Recovered: {operation.operation_type.value} succeeded after "
+                    f"{operation.attempts} attempts.",
+                )
+        elif outcome.role_was_added and context.snapshot is not None:
+            guild = self.bot.get_guild(context.snapshot.case.guild_id)
+            if guild is not None:
+                await self._increment_stat(guild, "pending_mutes")
+        return replace(outcome, completed=completed)
+
+    async def _run_detection_operation_follow_ups(
+        self,
+        context: OperationContext,
+        outcome: OperationOutcome,
+    ) -> None:
+        operation = context.operation
+        for follow_up in outcome.follow_ups:
+            if follow_up.requires_completion and not outcome.completed:
+                continue
+            if follow_up.kind is FollowUpKind.ROLE_APPLY_RERENDER:
+                if operation.attempts > 1 or outcome.result in {
+                    OPERATION_RESULT_SUPERSEDED_BY_MODERATION,
+                    OPERATION_RESULT_MEMBER_UNAVAILABLE,
+                }:
+                    await self._case_review_rerender_safely(operation.case_id)
+            elif follow_up.kind is FollowUpKind.COMPACT_TERMINAL_CASE:
+                await asyncio.to_thread(
+                    self._case_store.compact_terminal_case, operation.case_id
+                )
+            elif follow_up.kind is FollowUpKind.FINISH_MODERATION:
+                await self._finish_case_review_if_ready(
+                    operation.case_id,
+                    operation.actor_id,
+                )
+                await self._case_review_rerender_safely(operation.case_id)
+            elif follow_up.kind is FollowUpKind.FINISH_MESSAGE_PROCESS:
+                await self._finish_case_review_if_ready(operation.case_id, None)
+
     async def _execute_detection_case_operation(
         self,
         operation,
@@ -2988,7 +3160,8 @@ class Honeypot(Cog):
         live_message=None,
         timings: dict[str, float] | None = None,
     ) -> None:
-        heartbeat = asyncio.create_task(self._renew_detection_operation(operation))
+        lease_context = self._operation_lease(operation)
+        lease = await lease_context.__aenter__()
         operation_type_value = (
             operation.operation_type.value
             if isinstance(operation.operation_type, OperationType)
@@ -2997,13 +3170,38 @@ class Honeypot(Cog):
         operation_result = None
         role_was_added = False
         snapshot = None
+        operation_outcome = OperationOutcome()
+        operation_error = None
+        cancellation = None
+        operation_policy = None
         try:
             snapshot = await asyncio.to_thread(self._case_store.get_case, operation.case_id)
             if snapshot is None:
-                heartbeat.cancel()
-                await asyncio.gather(heartbeat, return_exceptions=True)
                 return
-            if operation.operation_type == OperationType.MESSAGE_PROCESS:
+            operation_policy = executor_operation_policy(operation.operation_type)
+            handler = (
+                self._detection_operation_handlers.resolve(operation.operation_type)
+                if operation_policy is not None
+                else None
+            )
+            if handler is not None:
+                context = OperationContext(
+                    operation=operation,
+                    snapshot=snapshot,
+                    lease=lease,
+                    now=now,
+                    publication_channel=publication_channel,
+                    live_message=live_message,
+                    timings=timings,
+                )
+                operation_outcome = apply_operation_policy(
+                    await handler(self, context), operation_policy
+                )
+                operation_result = operation_outcome.result
+                role_was_added = operation_outcome.role_was_added
+                if operation_outcome.error is not None:
+                    raise operation_outcome.error
+            elif operation.operation_type == OperationType.MESSAGE_PROCESS:
                 if snapshot.case.status not in {
                     CaseStatus.PENDING,
                     CaseStatus.RESOLVING,
@@ -3524,153 +3722,54 @@ class Honeypot(Cog):
                     "unsupported detection case operation: "
                     f"{operation_type_value}"
                 )
-        except asyncio.CancelledError:
-            heartbeat.cancel()
-            await asyncio.gather(heartbeat, return_exceptions=True)
-            raise
+        except asyncio.CancelledError as error:
+            cancellation = error
         except Exception as error:
-            heartbeat.cancel()
-            await asyncio.gather(heartbeat, return_exceptions=True)
-            retry_at = now + (
-                timedelta(seconds=DETECTION_FAST_RETRY_SECONDS)
-                if operation.attempts <= DETECTION_FAST_RETRY_LIMIT
-                else timedelta(minutes=DETECTION_SLOW_RETRY_MINUTES)
+            operation_error = error
+        finally:
+            await lease_context.__aexit__(None, None, None)
+        if cancellation is not None:
+            raise cancellation
+        if operation_error is not None:
+            operation_outcome = replace(
+                operation_outcome,
+                result=operation_result,
+                role_was_added=role_was_added,
+                error=operation_error,
             )
-            if operation.operation_type == OperationType.SOURCE_DELETE:
-                retry_at = now + timedelta(seconds=DETECTION_FAST_RETRY_SECONDS)
-            cached_purge_exhausted = (
-                operation.operation_type == OperationType.CACHED_PURGE
-                and operation_result == DeleteStatus.TRANSIENT_FAILURE.value
-                and operation.attempts >= 3
-            )
-            if operation.operation_type == OperationType.CACHED_PURGE and (
-                operation_result
-                in (
-                    DeleteStatus.FORBIDDEN.value,
-                    OPERATION_RESULT_CHANNEL_UNAVAILABLE,
-                    OPERATION_RESULT_UNSUPPORTED_CHANNEL,
-                )
-                or cached_purge_exhausted
-            ):
-                retry_at = None
-                await asyncio.to_thread(
-                    self._case_store.mark_case_needs_attention, operation.case_id
-                )
-            failure = await asyncio.to_thread(
-                self._case_store.fail_operation,
-                operation.operation_id,
-                operation.claim_token,
-                f"{type(error).__name__}: {error}",
+            await self._settle_detection_operation_failure(
+                operation,
+                lease,
                 now,
-                retry_at,
-                operation_result,
-            )
-            if failure and snapshot is not None:
-                await self._record_operational_failure(
-                    snapshot.case.guild_id,
-                    operation.operation_type,
-                    f"{type(error).__name__}: {error}",
-                    case_id=operation.case_id,
-                    operation_id=operation.operation_id,
-                    attempts=operation.attempts,
-                    terminal=retry_at is None,
-                )
-            if operation.operation_type == OperationType.ROLE_APPLY:
-                await self._case_review_rerender_safely(operation.case_id)
-            if (
-                operation.operation_type == OperationType.ROLE_APPLY
-                and snapshot is not None
-            ):
-                failed_guild = self.bot.get_guild(snapshot.case.guild_id)
-                if failed_guild is not None:
-                    await self._increment_stat(
-                        failed_guild, "pending_mute_failures"
-                    )
-            log.warning(
-                "Detection case operation failed case=%s operation=%s kind=%s error=%s",
-                operation.case_id,
-                operation.operation_id,
+                snapshot,
+                operation_outcome,
+                operation_error,
                 operation_type_value,
-                error,
             )
             return
-        heartbeat.cancel()
-        await asyncio.gather(heartbeat, return_exceptions=True)
-        if operation.operation_type in {
-            OperationType.MODERATOR_BAN,
-            OperationType.MODERATOR_KICK,
-        }:
-            completed = await asyncio.to_thread(
-                self._case_store.complete_moderator_action,
-                operation.operation_id,
-                operation.claim_token,
-                now,
-                operation_result,
+        if operation_policy is not None:
+            operation_outcome = apply_operation_policy(
+                replace(
+                    operation_outcome,
+                    result=operation_result,
+                    role_was_added=role_was_added,
+                ),
+                operation_policy,
             )
-        else:
-            completed = await asyncio.to_thread(
-                self._case_store.complete_operation,
-                operation.operation_id,
-                operation.claim_token,
-                now,
-                operation_result,
-            )
-        if not completed:
-            current_case = await asyncio.to_thread(
-                self._case_store.get_case, operation.case_id
-            )
-            if current_case is not None:
-                raise RuntimeError(
-                    "detection case operation lease was lost before completion"
-                )
-        elif snapshot is not None and (
-            operation.attempts > 1
-            or operation.operation_type == OperationType.REVIEW_PUBLISH
-        ):
-            recovered = await asyncio.to_thread(
-                self._case_store.resolve_operational_failure,
-                operation.operation_id,
-                now,
-            )
-            if recovered and operation.attempts > 1:
-                await self._send_operational_alert(
-                    snapshot.case.guild_id,
-                    f"✅ Recovered: {operation.operation_type.value} succeeded after "
-                    f"{operation.attempts} attempts.",
-                )
-        elif role_was_added and snapshot is not None:
-            guild = self.bot.get_guild(snapshot.case.guild_id)
-            if guild is not None:
-                await self._increment_stat(guild, "pending_mutes")
-        if completed and operation.operation_type == OperationType.ROLE_APPLY and (
-            operation.attempts > 1
-            or operation_result
-            in {
-                OPERATION_RESULT_SUPERSEDED_BY_MODERATION,
-                OPERATION_RESULT_MEMBER_UNAVAILABLE,
-            }
-        ):
-            await self._case_review_rerender_safely(operation.case_id)
-        if operation.operation_type in {
-            OperationType.REVIEW_UPDATE,
-            OperationType.ROLE_RELEASE,
-            OperationType.EVIDENCE_CLEANUP,
-        }:
-            await asyncio.to_thread(
-                self._case_store.compact_terminal_case, operation.case_id
-            )
-        elif completed and operation.operation_type in {
-            OperationType.MODERATION_ACTION,
-            OperationType.MODERATOR_BAN,
-            OperationType.MODERATOR_KICK,
-        }:
-            await self._finish_case_review_if_ready(
-                operation.case_id,
-                operation.actor_id,
-            )
-            await self._case_review_rerender_safely(operation.case_id)
-        elif completed and operation.operation_type == OperationType.MESSAGE_PROCESS:
-            await self._finish_case_review_if_ready(operation.case_id, None)
+        context = OperationContext(
+            operation=operation,
+            snapshot=snapshot,
+            lease=lease,
+            now=now,
+            publication_channel=publication_channel,
+            live_message=live_message,
+            timings=timings,
+        )
+        operation_outcome = await self._settle_detection_operation_success(
+            context,
+            operation_outcome,
+        )
+        await self._run_detection_operation_follow_ups(context, operation_outcome)
 
     async def _renew_detection_operation(self, operation) -> None:
         while True:
