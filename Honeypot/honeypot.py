@@ -5747,6 +5747,300 @@ class Honeypot(Cog):
         label = _("The member has been kicked.") if action == "kick" else _("The member has been banned.")
         return (label, None)
 
+    async def _apply_joinwatch_assignment_actions(
+        self,
+        guild,
+        guild_settings: GuildSettings,
+        actions: tuple[JoinwatchSelectedAction, ...],
+        now: datetime,
+        joinwatch_channel: discord.TextChannel | discord.Thread | None,
+    ) -> None:
+        for selected_action in actions:
+            if selected_action.action == "discard_assignment":
+                async with self.config.guild(guild).joinwatch_pending_role_assignments() as stored_assignments:
+                    stored_assignments.pop(selected_action.member_key, None)
+                continue
+            member_id_str = selected_action.member_key
+            data = typing.cast(dict, selected_action.data)
+            member_id = typing.cast(int, selected_action.member_id)
+            role_id = typing.cast(int, selected_action.role_id)
+            member = await self._get_member_or_fetch(guild, member_id)
+            role = guild.get_role(role_id)
+            if member is None:
+                action_label, failed = await self._execute_joinwatch_action(
+                    guild,
+                    None,
+                    member_id,
+                    guild_settings,
+                    reason="Suspicious Account",
+                )
+                if failed:
+                    await self._reschedule_joinwatch_assignment_retry(
+                        guild,
+                        member_id_str,
+                        data,
+                        now,
+                        failed,
+                    )
+                    continue
+                if (
+                    guild_settings.joinwatch_auto_role_action
+                    is JoinwatchAutoRoleActionOption.BAN
+                ):
+                    await self._edit_joinwatch_alert_auto_role(guild, data, _("Banned."))
+                elif (
+                    guild_settings.joinwatch_auto_role_action
+                    is JoinwatchAutoRoleActionOption.KICK
+                ):
+                    await self._edit_joinwatch_alert_auto_role(
+                        guild,
+                        data,
+                        self._joinwatch_kick_status_value(action_label, _("Left server.")),
+                    )
+                else:
+                    await self._edit_joinwatch_alert_auto_role(guild, data, _("Auto-role timer expired."))
+                await self._delete_joinwatch_pending_assignment(guild, member_id)
+                if joinwatch_channel is not None:
+                    embed = discord.Embed(
+                        title=_("Joinwatch auto-role timer expired"),
+                        description=_("{mention} ({id}) left before the scheduled role could be applied.").format(
+                            mention=f"<@{member_id}>",
+                            id=member_id,
+                        ),
+                        color=discord.Color.dark_red() if failed else discord.Color.orange(),
+                        timestamp=now,
+                    )
+                    embed.add_field(
+                        name=_("Action:"),
+                        value=failed if failed else action_label,
+                        inline=False,
+                    )
+                    try:
+                        await joinwatch_channel.send(embed=embed)
+                    except discord.HTTPException as exc:
+                        log.debug(
+                            "Failed to send joinwatch missing-member log for user %s in guild %s",
+                            member_id,
+                            guild.id,
+                        )
+                        await self._record_operational_failure(
+                            guild.id,
+                            "joinwatch_timer_alert",
+                            f"Could not publish timer result for user {member_id}: {exc}",
+                        )
+                continue
+            if role is None:
+                await self._delete_joinwatch_pending_assignment(guild, member_id)
+                continue
+            if await self._is_protected_member(member):
+                await self._delete_joinwatch_pending_assignment(guild, member_id)
+                continue
+            role_permission_error = self._missing_role_assignment_permission(guild, role)
+            if role_permission_error is not None:
+                await self._increment_stat(guild, "joinwatch_auto_role_failures")
+                await self._reschedule_joinwatch_assignment_retry(
+                    guild,
+                    member_id_str,
+                    data,
+                    now,
+                    role_permission_error,
+                )
+                continue
+            if role not in member.roles:
+                try:
+                    await member.add_roles(role, reason="Automated account status update.")
+                    await self._increment_stat(guild, "joinwatch_auto_roles")
+                except discord.HTTPException:
+                    await self._increment_stat(guild, "joinwatch_auto_role_failures")
+                    await self._reschedule_joinwatch_assignment_retry(
+                        guild,
+                        member_id_str,
+                        data,
+                        now,
+                        _("I couldn't apply the configured joinwatch auto-role."),
+                    )
+                    continue
+            expires_at = now + timedelta(
+                minutes=guild_settings.joinwatch_auto_role_timer_minutes
+            )
+            await self._store_joinwatch_pending_role(
+                member,
+                role.id,
+                expires_at,
+                applied_at=now,
+                alert_channel_id=typing.cast(
+                    int | None, data.get("alert_channel_id")
+                ),
+                alert_message_id=typing.cast(
+                    int | None, data.get("alert_message_id")
+                ),
+            )
+            await self._edit_joinwatch_alert_auto_role(
+                guild,
+                data,
+                _("{role} applied until {time}.").format(
+                    role=role.mention,
+                    time=discord.utils.format_dt(expires_at, style="R"),
+                ),
+            )
+            await self._delete_joinwatch_pending_assignment(guild, member_id)
+
+    async def _apply_joinwatch_role_actions(
+        self,
+        guild,
+        guild_settings: GuildSettings,
+        actions: tuple[JoinwatchSelectedAction, ...],
+        now: datetime,
+        joinwatch_channel: discord.TextChannel | discord.Thread | None,
+    ) -> None:
+        for selected_action in actions:
+            if selected_action.action == "discard_role":
+                async with self.config.guild(guild).joinwatch_pending_roles() as stored_pending_roles:
+                    stored_pending_roles.pop(selected_action.member_key, None)
+                continue
+            member_id_str = selected_action.member_key
+            data = typing.cast(dict, selected_action.data)
+            member_id = typing.cast(int, selected_action.member_id)
+            role_id = typing.cast(int, selected_action.role_id)
+            member = await self._get_member_or_fetch(guild, member_id)
+            role = guild.get_role(role_id)
+            if member is None:
+                action_label, failed = await self._execute_joinwatch_action(
+                    guild,
+                    None,
+                    member_id,
+                    guild_settings,
+                    reason="Suspicious Account",
+                )
+                if failed:
+                    await self._reschedule_joinwatch_role_retry(
+                        guild,
+                        member_id_str,
+                        data,
+                        now,
+                        failed,
+                    )
+                else:
+                    if (
+                        guild_settings.joinwatch_auto_role_action
+                        is JoinwatchAutoRoleActionOption.BAN
+                    ):
+                        await self._edit_joinwatch_alert_auto_role(guild, data, _("Banned."))
+                    elif (
+                        guild_settings.joinwatch_auto_role_action
+                        is JoinwatchAutoRoleActionOption.KICK
+                    ):
+                        await self._edit_joinwatch_alert_auto_role(
+                            guild,
+                            data,
+                            self._joinwatch_kick_status_value(action_label, _("Left server.")),
+                        )
+                    else:
+                        await self._edit_joinwatch_alert_auto_role(guild, data, _("Auto-role timer expired."))
+                    await self._delete_joinwatch_pending_role(guild, member_id)
+                if joinwatch_channel is not None:
+                    embed = discord.Embed(
+                        title=_("Joinwatch auto-role timer expired"),
+                        description=_("{mention} ({id}) left before the auto-role timer expired.").format(
+                            mention=f"<@{member_id}>",
+                            id=member_id,
+                        ),
+                        color=discord.Color.dark_red() if failed else discord.Color.orange(),
+                        timestamp=now,
+                    )
+                    embed.add_field(
+                        name=_("Action:"),
+                        value=failed if failed else action_label,
+                        inline=False,
+                    )
+                    try:
+                        await joinwatch_channel.send(embed=embed)
+                    except discord.HTTPException as exc:
+                        log.debug(
+                            "Failed to send joinwatch missing-member log for user %s in guild %s",
+                            member_id,
+                            guild.id,
+                        )
+                        await self._record_operational_failure(
+                            guild.id,
+                            "joinwatch_timer_alert",
+                            f"Could not publish timer result for user {member_id}: {exc}",
+                        )
+                continue
+            if role is None:
+                await self._delete_joinwatch_pending_role(guild, member_id)
+                continue
+            if role not in member.roles:
+                await self._edit_joinwatch_alert_auto_role(
+                    guild,
+                    data,
+                    _("Role manually removed."),
+                )
+                await self._delete_joinwatch_pending_role(guild, member_id)
+                await self._increment_stat(guild, "joinwatch_auto_roles_cleared")
+                continue
+            if await self._is_protected_member(member):
+                await self._delete_joinwatch_pending_role(guild, member_id)
+                continue
+            action_label, failed = await self._execute_joinwatch_action(
+                guild,
+                member,
+                member_id,
+                guild_settings,
+                reason="Suspicious Account",
+            )
+            if failed:
+                await self._reschedule_joinwatch_role_retry(
+                    guild,
+                    member_id_str,
+                    data,
+                    now,
+                    failed,
+                )
+            else:
+                if (
+                    guild_settings.joinwatch_auto_role_action
+                    is JoinwatchAutoRoleActionOption.BAN
+                ):
+                    await self._edit_joinwatch_alert_auto_role(guild, data, _("Banned."))
+                elif (
+                    guild_settings.joinwatch_auto_role_action
+                    is JoinwatchAutoRoleActionOption.KICK
+                ):
+                    await self._edit_joinwatch_alert_auto_role(
+                        guild,
+                        data,
+                        self._joinwatch_kick_status_value(action_label, _("Kicked.")),
+                    )
+                else:
+                    await self._edit_joinwatch_alert_auto_role(guild, data, _("Auto-role timer expired."))
+                await self._delete_joinwatch_pending_role(guild, member_id)
+            if joinwatch_channel is not None:
+                embed = discord.Embed(
+                    title=_("Joinwatch auto-role timer expired"),
+                    description=_("{mention} ({id}) still had {role} when the timer expired.").format(
+                        mention=member.mention,
+                        id=member.id,
+                        role=role.mention if role is not None else _("the auto-role"),
+                    ),
+                    color=discord.Color.dark_red() if failed else discord.Color.orange(),
+                    timestamp=now,
+                )
+                embed.add_field(
+                    name=_("Action:"),
+                    value=failed if failed else action_label,
+                    inline=False,
+                )
+                try:
+                    await joinwatch_channel.send(embed=embed)
+                except discord.HTTPException as exc:
+                    log.debug("Failed to send joinwatch auto-role log for user %s in guild %s", member.id, guild.id)
+                    await self._record_operational_failure(
+                        guild.id,
+                        "joinwatch_timer_alert",
+                        f"Could not publish timer result for user {member.id}: {exc}",
+                    )
+
     async def _apply_joinwatch_selected_work(
         self,
         guild,
@@ -5768,282 +6062,20 @@ class Honeypot(Cog):
                 joinwatch_channel = self._get_text_channel_or_thread(
                     guild, joinwatch_channel_id(guild_settings)
                 )
-                for selected_action in selected.assignment_actions:
-                    if selected_action.action == "discard_assignment":
-                        async with self.config.guild(guild).joinwatch_pending_role_assignments() as stored_assignments:
-                            stored_assignments.pop(selected_action.member_key, None)
-                        continue
-                    member_id_str = selected_action.member_key
-                    data = typing.cast(dict, selected_action.data)
-                    member_id = typing.cast(int, selected_action.member_id)
-                    role_id = typing.cast(int, selected_action.role_id)
-                    member = await self._get_member_or_fetch(guild, member_id)
-                    role = guild.get_role(role_id)
-                    if member is None:
-                        action_label, failed = await self._execute_joinwatch_action(
-                            guild,
-                            None,
-                            member_id,
-                            guild_settings,
-                            reason="Suspicious Account",
-                        )
-                        if failed:
-                            await self._reschedule_joinwatch_assignment_retry(
-                                guild,
-                                member_id_str,
-                                data,
-                                now,
-                                failed,
-                            )
-                            continue
-                        if (
-                            guild_settings.joinwatch_auto_role_action
-                            is JoinwatchAutoRoleActionOption.BAN
-                        ):
-                            await self._edit_joinwatch_alert_auto_role(guild, data, _("Banned."))
-                        elif (
-                            guild_settings.joinwatch_auto_role_action
-                            is JoinwatchAutoRoleActionOption.KICK
-                        ):
-                            await self._edit_joinwatch_alert_auto_role(
-                                guild,
-                                data,
-                                self._joinwatch_kick_status_value(action_label, _("Left server.")),
-                            )
-                        else:
-                            await self._edit_joinwatch_alert_auto_role(guild, data, _("Auto-role timer expired."))
-                        await self._delete_joinwatch_pending_assignment(guild, member_id)
-                        if joinwatch_channel is not None:
-                            embed = discord.Embed(
-                                title=_("Joinwatch auto-role timer expired"),
-                                description=_("{mention} ({id}) left before the scheduled role could be applied.").format(
-                                    mention=f"<@{member_id}>",
-                                    id=member_id,
-                                ),
-                                color=discord.Color.dark_red() if failed else discord.Color.orange(),
-                                timestamp=now,
-                            )
-                            embed.add_field(
-                                name=_("Action:"),
-                                value=failed if failed else action_label,
-                                inline=False,
-                            )
-                            try:
-                                await joinwatch_channel.send(embed=embed)
-                            except discord.HTTPException as exc:
-                                log.debug(
-                                    "Failed to send joinwatch missing-member log for user %s in guild %s",
-                                    member_id,
-                                    guild.id,
-                                )
-                                await self._record_operational_failure(
-                                    guild.id,
-                                    "joinwatch_timer_alert",
-                                    f"Could not publish timer result for user {member_id}: {exc}",
-                                )
-                        continue
-                    if role is None:
-                        await self._delete_joinwatch_pending_assignment(guild, member_id)
-                        continue
-                    if await self._is_protected_member(member):
-                        await self._delete_joinwatch_pending_assignment(guild, member_id)
-                        continue
-                    role_permission_error = self._missing_role_assignment_permission(guild, role)
-                    if role_permission_error is not None:
-                        await self._increment_stat(guild, "joinwatch_auto_role_failures")
-                        await self._reschedule_joinwatch_assignment_retry(
-                            guild,
-                            member_id_str,
-                            data,
-                            now,
-                            role_permission_error,
-                        )
-                        continue
-                    if role not in member.roles:
-                        try:
-                            await member.add_roles(role, reason="Automated account status update.")
-                            await self._increment_stat(guild, "joinwatch_auto_roles")
-                        except discord.HTTPException:
-                            await self._increment_stat(guild, "joinwatch_auto_role_failures")
-                            await self._reschedule_joinwatch_assignment_retry(
-                                guild,
-                                member_id_str,
-                                data,
-                                now,
-                                _("I couldn't apply the configured joinwatch auto-role."),
-                            )
-                            continue
-                    expires_at = now + timedelta(
-                        minutes=guild_settings.joinwatch_auto_role_timer_minutes
-                    )
-                    await self._store_joinwatch_pending_role(
-                        member,
-                        role.id,
-                        expires_at,
-                        applied_at=now,
-                        alert_channel_id=typing.cast(
-                            int | None, data.get("alert_channel_id")
-                        ),
-                        alert_message_id=typing.cast(
-                            int | None, data.get("alert_message_id")
-                        ),
-                    )
-                    await self._edit_joinwatch_alert_auto_role(
-                        guild,
-                        data,
-                        _("{role} applied until {time}.").format(
-                            role=role.mention,
-                            time=discord.utils.format_dt(expires_at, style="R"),
-                        ),
-                    )
-                    await self._delete_joinwatch_pending_assignment(guild, member_id)
-                for selected_action in selected.role_actions:
-                    if selected_action.action == "discard_role":
-                        async with self.config.guild(guild).joinwatch_pending_roles() as stored_pending_roles:
-                            stored_pending_roles.pop(selected_action.member_key, None)
-                        continue
-                    member_id_str = selected_action.member_key
-                    data = typing.cast(dict, selected_action.data)
-                    member_id = typing.cast(int, selected_action.member_id)
-                    role_id = typing.cast(int, selected_action.role_id)
-                    member = await self._get_member_or_fetch(guild, member_id)
-                    role = guild.get_role(role_id)
-                    if member is None:
-                        action_label, failed = await self._execute_joinwatch_action(
-                            guild,
-                            None,
-                            member_id,
-                            guild_settings,
-                            reason="Suspicious Account",
-                        )
-                        if failed:
-                            await self._reschedule_joinwatch_role_retry(
-                                guild,
-                                member_id_str,
-                                data,
-                                now,
-                                failed,
-                            )
-                        else:
-                            if (
-                                guild_settings.joinwatch_auto_role_action
-                                is JoinwatchAutoRoleActionOption.BAN
-                            ):
-                                await self._edit_joinwatch_alert_auto_role(guild, data, _("Banned."))
-                            elif (
-                                guild_settings.joinwatch_auto_role_action
-                                is JoinwatchAutoRoleActionOption.KICK
-                            ):
-                                await self._edit_joinwatch_alert_auto_role(
-                                    guild,
-                                    data,
-                                    self._joinwatch_kick_status_value(action_label, _("Left server.")),
-                                )
-                            else:
-                                await self._edit_joinwatch_alert_auto_role(guild, data, _("Auto-role timer expired."))
-                            await self._delete_joinwatch_pending_role(guild, member_id)
-                        if joinwatch_channel is not None:
-                            embed = discord.Embed(
-                                title=_("Joinwatch auto-role timer expired"),
-                                description=_("{mention} ({id}) left before the auto-role timer expired.").format(
-                                    mention=f"<@{member_id}>",
-                                    id=member_id,
-                                ),
-                                color=discord.Color.dark_red() if failed else discord.Color.orange(),
-                                timestamp=now,
-                            )
-                            embed.add_field(
-                                name=_("Action:"),
-                                value=failed if failed else action_label,
-                                inline=False,
-                            )
-                            try:
-                                await joinwatch_channel.send(embed=embed)
-                            except discord.HTTPException as exc:
-                                log.debug(
-                                    "Failed to send joinwatch missing-member log for user %s in guild %s",
-                                    member_id,
-                                    guild.id,
-                                )
-                                await self._record_operational_failure(
-                                    guild.id,
-                                    "joinwatch_timer_alert",
-                                    f"Could not publish timer result for user {member_id}: {exc}",
-                                )
-                        continue
-                    if role is None:
-                        await self._delete_joinwatch_pending_role(guild, member_id)
-                        continue
-                    if role not in member.roles:
-                        await self._edit_joinwatch_alert_auto_role(
-                            guild,
-                            data,
-                            _("Role manually removed."),
-                        )
-                        await self._delete_joinwatch_pending_role(guild, member_id)
-                        await self._increment_stat(guild, "joinwatch_auto_roles_cleared")
-                        continue
-                    if await self._is_protected_member(member):
-                        await self._delete_joinwatch_pending_role(guild, member_id)
-                        continue
-                    action_label, failed = await self._execute_joinwatch_action(
-                        guild,
-                        member,
-                        member_id,
-                        guild_settings,
-                        reason="Suspicious Account",
-                    )
-                    if failed:
-                        await self._reschedule_joinwatch_role_retry(
-                            guild,
-                            member_id_str,
-                            data,
-                            now,
-                            failed,
-                        )
-                    else:
-                        if (
-                            guild_settings.joinwatch_auto_role_action
-                            is JoinwatchAutoRoleActionOption.BAN
-                        ):
-                            await self._edit_joinwatch_alert_auto_role(guild, data, _("Banned."))
-                        elif (
-                            guild_settings.joinwatch_auto_role_action
-                            is JoinwatchAutoRoleActionOption.KICK
-                        ):
-                            await self._edit_joinwatch_alert_auto_role(
-                                guild,
-                                data,
-                                self._joinwatch_kick_status_value(action_label, _("Kicked.")),
-                            )
-                        else:
-                            await self._edit_joinwatch_alert_auto_role(guild, data, _("Auto-role timer expired."))
-                        await self._delete_joinwatch_pending_role(guild, member_id)
-                    if joinwatch_channel is not None:
-                        embed = discord.Embed(
-                            title=_("Joinwatch auto-role timer expired"),
-                            description=_("{mention} ({id}) still had {role} when the timer expired.").format(
-                                mention=member.mention,
-                                id=member.id,
-                                role=role.mention if role is not None else _("the auto-role"),
-                            ),
-                            color=discord.Color.dark_red() if failed else discord.Color.orange(),
-                            timestamp=now,
-                        )
-                        embed.add_field(
-                            name=_("Action:"),
-                            value=failed if failed else action_label,
-                            inline=False,
-                        )
-                        try:
-                            await joinwatch_channel.send(embed=embed)
-                        except discord.HTTPException as exc:
-                            log.debug("Failed to send joinwatch auto-role log for user %s in guild %s", member.id, guild.id)
-                            await self._record_operational_failure(
-                                guild.id,
-                                "joinwatch_timer_alert",
-                                f"Could not publish timer result for user {member.id}: {exc}",
-                            )
+                await self._apply_joinwatch_assignment_actions(
+                    guild,
+                    guild_settings,
+                    selected.assignment_actions,
+                    now,
+                    joinwatch_channel,
+                )
+                await self._apply_joinwatch_role_actions(
+                    guild,
+                    guild_settings,
+                    selected.role_actions,
+                    now,
+                    joinwatch_channel,
+                )
             except Exception as exc:
                 log.exception("Failed to process joinwatch auto-role timers for guild %s", guild.id)
                 await self._record_operational_failure(
