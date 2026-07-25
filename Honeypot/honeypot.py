@@ -3132,6 +3132,11 @@ class Honeypot(Cog):
         timings: dict[str, float] | None = None,
     ) -> None:
         heartbeat = asyncio.create_task(self._renew_detection_operation(operation))
+        operation_type_value = (
+            operation.operation_type.value
+            if isinstance(operation.operation_type, OperationType)
+            else operation.operation_type
+        )
         operation_result = None
         role_was_added = False
         snapshot = None
@@ -3651,7 +3656,7 @@ class Honeypot(Cog):
             else:
                 raise RuntimeError(
                     "unsupported detection case operation: "
-                    f"{operation.operation_type.value}"
+                    f"{operation_type_value}"
                 )
         except asyncio.CancelledError:
             heartbeat.cancel()
@@ -3719,7 +3724,7 @@ class Honeypot(Cog):
                 "Detection case operation failed case=%s operation=%s kind=%s error=%s",
                 operation.case_id,
                 operation.operation_id,
-                operation.operation_type.value,
+                operation_type_value,
                 error,
             )
             return
