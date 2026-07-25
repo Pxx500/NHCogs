@@ -7794,6 +7794,50 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                     "RuntimeError: unsupported detection case operation: moderator_ignore",
                 )
 
+    async def test_unknown_persisted_operation_fails_without_escaping_worker(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                now = datetime.now(timezone.utc)
+                cog = honeypot.Honeypot(_Bot())
+                appended = self._append_case(honeypot, cog, now)
+
+                with self.assertLogs(level="WARNING") as store_logs:
+                    operation = cog._case_store.ensure_operation(
+                        appended.case.case_id,
+                        "future_operation",
+                        f"future:{appended.case.case_id}",
+                    )
+                    reopened = honeypot.DetectionCaseStore(
+                        cog._case_store.database_path
+                    )
+                    reopened.initialize()
+                    claimed = reopened.claim_operation(operation.operation_id, now)
+                cog._case_store = reopened
+
+                self.assertEqual(claimed.operation_type, "future_operation")
+                self.assertIn("future_operation", "\n".join(store_logs.output))
+                try:
+                    with self.assertLogs(level="WARNING") as operation_logs:
+                        await cog._execute_detection_case_operation(claimed, now)
+                except Exception as error:
+                    self.fail(f"operation worker raised {error!r}")
+
+                failed = next(
+                    item
+                    for item in reopened.get_case(appended.case.case_id).operations
+                    if item.operation_id == operation.operation_id
+                )
+                self.assertIs(failed.status, honeypot.OperationStatus.FAILED)
+                self.assertEqual(failed.operation_type, "future_operation")
+                self.assertEqual(
+                    failed.last_error,
+                    "RuntimeError: unsupported detection case operation: future_operation",
+                )
+                self.assertIn(
+                    "kind=future_operation",
+                    "\n".join(operation_logs.output),
+                )
+
     async def test_recovered_operation_alert_uses_persisted_value(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
