@@ -3259,6 +3259,50 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
                 message.guild.fetch_member.assert_not_awaited()
 
+    async def test_malformed_dry_run_setting_does_not_suppress_source_deletion(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                bot = _Bot()
+                bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
+                bot.owner_ids = set()
+                bot.is_mod = mock.AsyncMock(return_value=False)
+                bot.is_admin = mock.AsyncMock(return_value=False)
+                cog = honeypot.Honeypot(bot)
+                await asyncio.to_thread(cog._case_store.initialize)
+                config = {
+                    "enabled": True,
+                    "dry_run": "false",
+                    "honeypot_channels": [400],
+                    "logs_channel": None,
+                    "review_enabled": False,
+                    "review_channel": None,
+                }
+                stats_context = mock.MagicMock()
+                stats_context.__aenter__ = mock.AsyncMock(return_value={})
+                stats_context.__aexit__ = mock.AsyncMock(return_value=False)
+                guild_config = SimpleNamespace(
+                    all=mock.AsyncMock(return_value=config),
+                    stats=mock.Mock(return_value=stats_context),
+                )
+                cog.config = SimpleNamespace(
+                    guild=lambda guild: guild_config,
+                    guild_from_id=lambda guild_id: SimpleNamespace(
+                        all=mock.AsyncMock(return_value=config)
+                    ),
+                )
+                message = self._message(honeypot, attachment_count=0)
+                message.guild.me = SimpleNamespace(top_role=10)
+                message.author.guild = message.guild
+                message.author.guild_permissions = SimpleNamespace(
+                    manage_guild=False
+                )
+                message.author.top_role = 1
+                message.guild.get_member = lambda user_id: message.author
+
+                await cog.on_message(message)
+
+                message.delete.assert_awaited_once()
+
     async def test_guild_message_from_departed_user_reaches_detection_pipeline(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -7549,7 +7593,9 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     await cog._scan_case_message_images(
                         message.guild.id,
                         tuple(message.attachments),
-                        {"imagescan_detector_threshold": 20},
+                        honeypot.GuildSettings.from_mapping(
+                            {"imagescan_detector_threshold": 20}
+                        ),
                         case_id,
                         1,
                         (),
@@ -8844,7 +8890,7 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                 cog._activate_forward_purge(
                     appended.case.guild_id,
                     appended.case.user_id,
-                    {"purge_forward_seconds": 60},
+                    60,
                 )
                 self.assertTrue(
                     cog._is_forward_purge_active(
