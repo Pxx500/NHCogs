@@ -13,8 +13,12 @@ from .detection_cases import (
     DeleteStatus,
     DetectionCaseStore,
     MessageRecord,
+    OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP,
+    OPERATION_RESULT_CHANNEL_UNAVAILABLE,
+    OPERATION_RESULT_UNSUPPORTED_CHANNEL,
     OperationRecord,
     OperationStatus,
+    OperationType,
 )
 
 
@@ -48,9 +52,9 @@ def _cached_purge_status(operation: OperationRecord) -> str:
     )
     if delete_status is not None:
         return _DELETE_STATUS_LABELS[delete_status]
-    if operation.result == "channel_unavailable":
+    if operation.result == OPERATION_RESULT_CHANNEL_UNAVAILABLE:
         return "Could not delete: channel unavailable"
-    if operation.result == "unsupported_channel":
+    if operation.result == OPERATION_RESULT_UNSUPPORTED_CHANNEL:
         return "Could not delete: unsupported channel"
     if operation.status is OperationStatus.PENDING:
         return "Waiting for deletion"
@@ -423,7 +427,7 @@ def render_timeline(snapshot: CaseSnapshot) -> CaseTimelineProjection:
             (
                 operation
                 for operation in snapshot.operations
-                if operation.operation_type == "cached_purge"
+                if operation.operation_type == OperationType.CACHED_PURGE
                 and operation.status.value in {"failed", "abandoned"}
             ),
             start=1,
@@ -432,16 +436,16 @@ def render_timeline(snapshot: CaseSnapshot) -> CaseTimelineProjection:
     operation_notes = tuple(
         _operation_warning(operation)
         for operation in snapshot.operations
-        if operation.result == "ambiguous_role_ownership"
+        if operation.result == OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP
         or (
             operation.operation_type
             in {
-                "review_publish",
-                "role_apply",
-                "role_release",
-                "moderation_action",
-                "moderator_ban",
-                "moderator_kick",
+                OperationType.REVIEW_PUBLISH,
+                OperationType.ROLE_APPLY,
+                OperationType.ROLE_RELEASE,
+                OperationType.MODERATION_ACTION,
+                OperationType.MODERATOR_BAN,
+                OperationType.MODERATOR_KICK,
             }
             and operation.status.value in {"failed", "abandoned"}
         )
@@ -469,18 +473,22 @@ def _resolution_label(resolution: str) -> str:
 
 
 def _operation_warning(operation: OperationRecord) -> str:
-    if operation.result == "ambiguous_role_ownership":
+    if operation.result == OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP:
         return (
             "Bot could not confirm that this case applied the temporary mute role. "
             "Review it manually."
         )
-    if operation.operation_type == "role_release":
+    if operation.operation_type == OperationType.ROLE_RELEASE:
         return "Temporary mute could not be removed. See bot logs."
-    if operation.operation_type == "role_apply":
+    if operation.operation_type == OperationType.ROLE_APPLY:
         if operation.status is OperationStatus.FAILED:
             return "Temporary mute could not be applied; retry scheduled. See bot logs."
         return "Temporary mute could not be applied. Review it manually."
-    if operation.operation_type in {"moderation_action", "moderator_ban", "moderator_kick"}:
+    if operation.operation_type in {
+        OperationType.MODERATION_ACTION,
+        OperationType.MODERATOR_BAN,
+        OperationType.MODERATOR_KICK,
+    }:
         return "Moderation action failed. See bot logs."
     return "Case publication failed. See bot logs."
 
@@ -510,18 +518,27 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
     moderation_operations = tuple(
         operation
         for operation in snapshot.operations
-        if operation.operation_type == "moderation_action"
+        if operation.operation_type == OperationType.MODERATION_ACTION
         or operation.operation_type
-        in {"moderator_ban", "moderator_kick", "moderator_ignore"}
+        in {
+            OperationType.MODERATOR_BAN,
+            OperationType.MODERATOR_KICK,
+            OperationType.MODERATOR_IGNORE,
+        }
     )
     moderation_actions = ("ban", "kick", "ignore")
     moderation_completed = False
     if moderation_operations:
         moderation = moderation_operations[-1]
+        moderation_type = (
+            moderation.operation_type.value
+            if isinstance(moderation.operation_type, OperationType)
+            else moderation.operation_type
+        )
         moderation_completed = moderation.status is OperationStatus.SUCCEEDED
         action = moderation.result
-        if action is None and moderation.operation_type.startswith("moderator_"):
-            action = moderation.operation_type.removeprefix("moderator_")
+        if action is None and moderation_type.startswith("moderator_"):
+            action = moderation_type.removeprefix("moderator_")
         if moderation.result is not None and moderation.result.startswith("planned_"):
             moderation_status = (
                 moderation.result.removeprefix("planned_").capitalize()
@@ -534,10 +551,11 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
             moderation_status = "Action failed. See bot logs"
             if (
                 moderation.status is OperationStatus.FAILED
-                and moderation.operation_type in {"moderator_ban", "moderator_kick"}
+                and moderation.operation_type
+                in {OperationType.MODERATOR_BAN, OperationType.MODERATOR_KICK}
             ):
                 moderation_actions = (
-                    moderation.operation_type.removeprefix("moderator_"),
+                    moderation_type.removeprefix("moderator_"),
                 )
             elif not (
                 moderation.status is OperationStatus.ABANDONED
@@ -567,7 +585,7 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
     cached_purge_operations = tuple(
         operation
         for operation in snapshot.operations
-        if operation.operation_type == "cached_purge"
+        if operation.operation_type == OperationType.CACHED_PURGE
     )
     cached_purge_lines = tuple(
         f"{index}. <#{operation.idempotency_key.rsplit(':', 2)[-2]}>: "
@@ -583,16 +601,16 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
     operation_warning_lines = tuple(
         _operation_warning(operation)
         for operation in snapshot.operations
-        if operation.result == "ambiguous_role_ownership"
+        if operation.result == OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP
         or (
             operation.operation_type
             in {
-                "review_publish",
-                "role_apply",
-                "role_release",
-                "moderation_action",
-                "moderator_ban",
-                "moderator_kick",
+                OperationType.REVIEW_PUBLISH,
+                OperationType.ROLE_APPLY,
+                OperationType.ROLE_RELEASE,
+                OperationType.MODERATION_ACTION,
+                OperationType.MODERATOR_BAN,
+                OperationType.MODERATOR_KICK,
             }
             and operation.status.value in {"failed", "abandoned"}
         )
@@ -630,7 +648,7 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
     automatic_resolution = False
     if snapshot.case.resolution is not None:
         automatic_resolution = any(
-            operation.operation_type == "moderation_action"
+            operation.operation_type == OperationType.MODERATION_ACTION
             and operation.status is OperationStatus.SUCCEEDED
             and operation.result == snapshot.case.resolution
             for operation in moderation_operations

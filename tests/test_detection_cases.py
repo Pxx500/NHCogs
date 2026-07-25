@@ -28,6 +28,7 @@ CaseStatus = detection_cases_under_test.CaseStatus
 ActionIntent = detection_cases_under_test.ActionIntent
 DeleteStatus = detection_cases_under_test.DeleteStatus
 OperationStatus = detection_cases_under_test.OperationStatus
+OperationType = detection_cases_under_test.OperationType
 ACTION_PRIORITY = detection_cases_under_test.ACTION_PRIORITY
 DetectionSignal = detection_cases_under_test.DetectionSignal
 effective_action = detection_cases_under_test.effective_action
@@ -81,6 +82,28 @@ class DetectionCaseDomainTests(unittest.TestCase):
         self.assertEqual(
             tuple(status.value for status in OperationStatus),
             ("pending", "running", "succeeded", "failed", "abandoned"),
+        )
+
+    def test_operation_type_values_are_stable_storage_vocabulary(self):
+        operation_type = getattr(detection_cases_under_test, "OperationType", None)
+
+        self.assertIsNotNone(operation_type)
+        self.assertEqual(
+            tuple(member.value for member in operation_type),
+            (
+                "message_process",
+                "role_apply",
+                "role_release",
+                "review_update",
+                "review_publish",
+                "source_delete",
+                "evidence_cleanup",
+                "cached_purge",
+                "moderation_action",
+                "moderator_ban",
+                "moderator_kick",
+                "moderator_ignore",
+            ),
         )
 
     def test_action_priority_is_immutable(self):
@@ -1452,6 +1475,53 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertEqual(first.status, OperationStatus.PENDING)
         self.assertEqual(first.attempts, 0)
         self.assertEqual(first.created_at, first.updated_at)
+
+    def test_operation_type_enum_roundtrips_through_store_restart(self):
+        created_at = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
+        case_id = self.store.append_message(
+            self.message(40, created_at), ()
+        ).case.case_id
+
+        self.store.ensure_operation(
+            case_id,
+            OperationType.ROLE_APPLY,
+            f"role-apply:{case_id}:55",
+        )
+        reopened = DetectionCaseStore(self.database_path)
+        reopened.initialize()
+        operation = reopened.get_case(case_id).operations[0]
+
+        self.assertIs(operation.operation_type, OperationType.ROLE_APPLY)
+
+    def test_unknown_persisted_operation_type_warns_and_remains_available(self):
+        created_at = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
+        case_id = self.store.append_message(
+            self.message(40, created_at), ()
+        ).case.case_id
+        self.store.ensure_operation(case_id, "future_operation", "future:operation")
+        reopened = DetectionCaseStore(self.database_path)
+        reopened.initialize()
+
+        with self.assertLogs(level="WARNING") as captured:
+            operation = reopened.get_case(case_id).operations[0]
+
+        self.assertEqual(operation.operation_type, "future_operation")
+        self.assertIn("future_operation", "\n".join(captured.output))
+
+    def test_known_operational_failure_source_returns_operation_type(self):
+        occurred_at = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
+
+        self.store.record_operational_failure(
+            guild_id=10,
+            source=OperationType.ROLE_APPLY,
+            summary="temporary",
+            occurred_at=occurred_at,
+        )
+        reopened = DetectionCaseStore(self.database_path)
+        reopened.initialize()
+        failure = reopened.list_operational_failures(10)[0]
+
+        self.assertIs(failure.source, OperationType.ROLE_APPLY)
 
     def test_publication_claim_renewal_prevents_stale_reclaim(self):
         now = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)

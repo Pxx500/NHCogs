@@ -6,10 +6,14 @@ from enum import Enum
 from collections.abc import Callable, Mapping
 from contextlib import closing
 import json
+import logging
 from pathlib import Path
 import sqlite3
 from types import MappingProxyType
 from uuid import uuid4
+
+
+log = logging.getLogger(__name__)
 
 
 def _freeze(value: object) -> object:
@@ -51,6 +55,35 @@ class OperationStatus(str, Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     ABANDONED = "abandoned"
+
+
+class OperationType(str, Enum):
+    MESSAGE_PROCESS = "message_process"
+    ROLE_APPLY = "role_apply"
+    ROLE_RELEASE = "role_release"
+    REVIEW_UPDATE = "review_update"
+    REVIEW_PUBLISH = "review_publish"
+    SOURCE_DELETE = "source_delete"
+    EVIDENCE_CLEANUP = "evidence_cleanup"
+    CACHED_PURGE = "cached_purge"
+    MODERATION_ACTION = "moderation_action"
+    MODERATOR_BAN = "moderator_ban"
+    MODERATOR_KICK = "moderator_kick"
+    MODERATOR_IGNORE = "moderator_ignore"
+
+
+OPERATION_RESULT_CASE_TERMINAL = "case_terminal"
+OPERATION_RESULT_SUPERSEDED_BY_MODERATION = "superseded_by_moderation"
+OPERATION_RESULT_MEMBER_UNAVAILABLE = "member_unavailable"
+OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP = "ambiguous_role_ownership"
+OPERATION_RESULT_TRANSFERRED_ROLE_OWNERSHIP = "transferred_role_ownership"
+OPERATION_RESULT_ROLE_ALREADY_OWNED = "role_already_owned"
+OPERATION_RESULT_PREEXISTING_ROLE = "preexisting_role"
+OPERATION_RESULT_KICK_MISSING = "kick_missing"
+OPERATION_RESULT_CHANNEL_UNAVAILABLE = "channel_unavailable"
+OPERATION_RESULT_UNSUPPORTED_CHANNEL = "unsupported_channel"
+OPERATION_RESULT_OWNERSHIP_TRANSFERRED = "ownership_transferred"
+PLANNED_PREFIX = "planned_"
 
 
 @dataclass(frozen=True)
@@ -164,7 +197,7 @@ class OperationRecord:
     operation_id: str
     case_id: str
     message_sequence: int | None
-    operation_type: str
+    operation_type: OperationType | str
     status: OperationStatus
     attempts: int
     created_at: datetime
@@ -182,7 +215,7 @@ class OperationRecord:
 class OperationalFailureRecord:
     failure_id: str
     guild_id: int
-    source: str
+    source: OperationType | str
     summary: str
     first_seen_at: datetime
     last_seen_at: datetime
@@ -907,8 +940,11 @@ class DetectionCaseStore:
         self,
         new_message: NewMessage,
         signals: tuple[DetectionSignal, ...],
-        initial_operations: tuple[tuple[str, str], ...]
-        | Callable[[tuple[DetectionSignal, ...]], tuple[tuple[str, str], ...]] = (),
+        initial_operations: tuple[tuple[OperationType | str, str], ...]
+        | Callable[
+            [tuple[DetectionSignal, ...]],
+            tuple[tuple[OperationType | str, str], ...],
+        ] = (),
         *,
         claim_firstpost: bool = False,
     ) -> AppendResult | None:
@@ -1147,7 +1183,11 @@ class DetectionCaseStore:
                         str(uuid4()),
                         case_id,
                         sequence,
-                        operation_type,
+                        (
+                            operation_type.value
+                            if isinstance(operation_type, OperationType)
+                            else operation_type
+                        ),
                         operation_time,
                         operation_time,
                         resolved_key,
@@ -2658,11 +2698,14 @@ class DetectionCaseStore:
         ).fetchone() is not None:
             return False
         final_operations = [
-            ("review_update", f"review-update:{case_id}"),
-            ("evidence_cleanup", f"evidence-cleanup:{case_id}"),
+            (OperationType.REVIEW_UPDATE, f"review-update:{case_id}"),
+            (OperationType.EVIDENCE_CLEANUP, f"evidence-cleanup:{case_id}"),
         ]
         final_operations.extend(
-            ("role_release", f"role-release:{case_id}:{int(row[0])}")
+            (
+                OperationType.ROLE_RELEASE,
+                f"role-release:{case_id}:{int(row[0])}",
+            )
             for row in connection.execute(
                 """SELECT role_id FROM detection_role_ownership
                    WHERE case_id = ? ORDER BY role_id""",
@@ -2677,7 +2720,7 @@ class DetectionCaseStore:
                     idempotency_key, claim_token, claimed_at)
                    VALUES (?, ?, NULL, ?, 'pending', 0, ?, ?, NULL, NULL, ?, NULL, NULL)""",
                 (
-                    str(uuid4()), case_id, operation_type,
+                    str(uuid4()), case_id, operation_type.value,
                     now_value, now_value, idempotency_key,
                 ),
             )
@@ -2701,7 +2744,7 @@ class DetectionCaseStore:
     def ensure_operation(
         self,
         case_id: str,
-        kind: str,
+        kind: OperationType | str,
         idempotency_key: str,
         message_sequence: int | None = None,
         actor_id: int | None = None,
@@ -2717,7 +2760,8 @@ class DetectionCaseStore:
                     claim_token, claimed_at)
                    VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, NULL, NULL, NULL, ?, ?, NULL, NULL)""",
                 (
-                    str(uuid4()), case_id, message_sequence, kind,
+                    str(uuid4()), case_id, message_sequence,
+                    kind.value if isinstance(kind, OperationType) else kind,
                     created_at, created_at, actor_id, idempotency_key,
                 ),
             )
@@ -3106,12 +3150,13 @@ class DetectionCaseStore:
         self,
         *,
         guild_id: int,
-        source: str,
+        source: OperationType | str,
         summary: str,
         occurred_at: datetime,
         case_id: str | None = None,
         operation_id: str | None = None,
     ) -> OperationalFailureRecord:
+        source_value = source.value if isinstance(source, OperationType) else source
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -3120,7 +3165,7 @@ class DetectionCaseStore:
                      AND COALESCE(operation_id, '') = COALESCE(?, '')
                      AND COALESCE(case_id, '') = COALESCE(?, '')
                      AND resolved_at IS NULL""",
-                (guild_id, source, operation_id, case_id),
+                (guild_id, source_value, operation_id, case_id),
             ).fetchone()
             timestamp = _to_timestamp(occurred_at)
             if row is None:
@@ -3133,7 +3178,7 @@ class DetectionCaseStore:
                     (
                         failure_id,
                         guild_id,
-                        source,
+                        source_value,
                         summary[:1000],
                         timestamp,
                         timestamp,
@@ -3357,9 +3402,14 @@ class DetectionCaseStore:
 
     @staticmethod
     def _operation_from_row(row: sqlite3.Row) -> OperationRecord:
+        operation_type = row["operation_type"]
+        try:
+            operation_type = OperationType(operation_type)
+        except ValueError:
+            log.warning("Unknown persisted detection operation type: %s", operation_type)
         return OperationRecord(
             row["operation_id"], row["case_id"], row["message_sequence"],
-            row["operation_type"], OperationStatus(row["status"]), row["attempts"],
+            operation_type, OperationStatus(row["status"]), row["attempts"],
             _from_timestamp(row["created_at"]), _from_timestamp(row["updated_at"]),
             _from_timestamp(row["retry_at"]), row["last_error"], row["result"],
             row["actor_id"], row["idempotency_key"],
@@ -3368,8 +3418,16 @@ class DetectionCaseStore:
 
     @staticmethod
     def _operational_failure_from_row(row: sqlite3.Row) -> OperationalFailureRecord:
+        source = next(
+            (
+                operation_type
+                for operation_type in OperationType
+                if operation_type.value == row["source"]
+            ),
+            row["source"],
+        )
         return OperationalFailureRecord(
-            row["failure_id"], row["guild_id"], row["source"], row["summary"],
+            row["failure_id"], row["guild_id"], source, row["summary"],
             _from_timestamp(row["first_seen_at"]), _from_timestamp(row["last_seen_at"]),
             row["occurrences"], row["case_id"], row["operation_id"],
             _from_timestamp(row["resolved_at"]), _from_timestamp(row["acknowledged_at"]),
