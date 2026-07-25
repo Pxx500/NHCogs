@@ -93,6 +93,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                 except ModuleNotFoundError:
                     self.fail("review_publish has no dedicated handler module")
                 operations = import_module("Honeypot.operations")
+                cached_purge = import_module("Honeypot.operations.cached_purge")
                 review_update = import_module("Honeypot.operations.review_update")
                 now = datetime.now(timezone.utc)
                 guild = object()
@@ -133,12 +134,16 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                         honeypot.OperationType.REVIEW_PUBLISH: (
                             handler_module.review_publish_handler
                         ),
+                        honeypot.OperationType.CACHED_PURGE: (
+                            cached_purge.cached_purge_handler
+                        ),
                     },
                 )
                 for operation_type in honeypot.OperationType:
                     if operation_type in {
                         honeypot.OperationType.REVIEW_UPDATE,
                         honeypot.OperationType.REVIEW_PUBLISH,
+                        honeypot.OperationType.CACHED_PURGE,
                     }:
                         continue
                     self.assertIsNone(
