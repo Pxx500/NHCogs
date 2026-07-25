@@ -1,78 +1,21 @@
-"""Shared execution policy for durable detection-case operations."""
+"""Canonical handlers and execution policy for detection-case operations."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
-from datetime import datetime
-from enum import Enum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Protocol
 
-from .detection_cases import CaseSnapshot, OperationRecord, OperationType
-
-if TYPE_CHECKING:
-    from .honeypot import Honeypot
-
-
-class CompletionMode(str, Enum):
-    OPERATION = "operation"
-    MODERATOR_ACTION = "moderator_action"
+from ..detection_cases import OperationType
+from .context import (
+    CompletionMode,
+    FollowUpKind,
+    OperationFollowUp,
+    OperationHandler,
+    OperationPolicy,
+)
 
 
-class FollowUpKind(str, Enum):
-    ROLE_APPLY_RERENDER = "role_apply_rerender"
-    COMPACT_TERMINAL_CASE = "compact_terminal_case"
-    FINISH_MODERATION = "finish_moderation"
-    FINISH_MESSAGE_PROCESS = "finish_message_process"
-
-
-@dataclass(frozen=True)
-class OperationLease:
-    operation_id: str
-    claim_token: str | None
-
-
-@dataclass(frozen=True)
-class OperationContext:
-    operation: OperationRecord
-    snapshot: CaseSnapshot
-    lease: OperationLease
-    now: datetime
-    publication_channel: object | None = None
-    live_message: object | None = None
-    timings: dict[str, float] | None = None
-
-
-@dataclass(frozen=True)
-class OperationFollowUp:
-    kind: FollowUpKind
-    requires_completion: bool = True
-
-
-@dataclass(frozen=True)
-class OperationOutcome:
-    result: str | None = None
-    role_was_added: bool = False
-    follow_ups: tuple[OperationFollowUp, ...] = ()
-    completed: bool = False
-    completion_mode: CompletionMode = CompletionMode.OPERATION
-    resolve_failure_on_first_attempt: bool = False
-    error: Exception | None = None
-
-
-@dataclass(frozen=True)
-class OperationPolicy:
-    completion_mode: CompletionMode = CompletionMode.OPERATION
-    follow_ups: tuple[OperationFollowUp, ...] = ()
-    resolve_failure_on_first_attempt: bool = False
-
-
-class OperationHandler(Protocol):
-    async def __call__(
-        self, cog: Honeypot, context: OperationContext
-    ) -> OperationOutcome: ...
-
+HANDLERS: Mapping[OperationType, OperationHandler] = MappingProxyType({})
 
 _ROLE_APPLY_FOLLOW_UP = OperationFollowUp(FollowUpKind.ROLE_APPLY_RERENDER)
 _TERMINAL_COMPACTION_FOLLOW_UP = OperationFollowUp(
@@ -133,21 +76,11 @@ def executor_operation_policy(
     return EXECUTOR_OPERATION_POLICIES.get(canonical_type)
 
 
-def apply_operation_policy(
-    outcome: OperationOutcome, policy: OperationPolicy
-) -> OperationOutcome:
-    return replace(
-        outcome,
-        follow_ups=policy.follow_ups,
-        completed=False,
-        completion_mode=policy.completion_mode,
-        resolve_failure_on_first_attempt=policy.resolve_failure_on_first_attempt,
-    )
-
-
 class OperationHandlerRegistry:
-    def __init__(self) -> None:
-        self._handlers: dict[OperationType, OperationHandler] = {}
+    def __init__(
+        self, handlers: Mapping[OperationType, OperationHandler] = HANDLERS
+    ) -> None:
+        self._handlers = dict(handlers)
 
     def register(
         self,

@@ -68,15 +68,14 @@ from .case_review import (
     validate_image_review_action,
 )
 from .console_dump import ReadOnlyLogBuffer, build_log_dump
-from .detection_operations import (
+from .operations import OperationHandlerRegistry, executor_operation_policy
+from .operations.context import (
     CompletionMode,
     FollowUpKind,
     OperationContext,
-    OperationHandlerRegistry,
     OperationLease,
     OperationOutcome,
     apply_operation_policy,
-    executor_operation_policy,
 )
 from . import detection_runtime
 from .image_detector import (
