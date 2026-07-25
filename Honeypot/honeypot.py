@@ -174,6 +174,106 @@ DoctorCheck = typing.Callable[
 ]
 
 
+@dataclass(frozen=True, slots=True)
+class JoinwatchSelectedAction:
+    action: typing.Literal[
+        "discard_assignment", "apply_role", "discard_role", "expire_role"
+    ]
+    member_key: str
+    member_id: int | None
+    role_id: int | None
+    due_at: datetime | None
+    data: typing.Any
+
+
+@dataclass(frozen=True, slots=True)
+class JoinwatchSelection:
+    clear_assignments: bool
+    assignment_actions: tuple[JoinwatchSelectedAction, ...]
+    role_actions: tuple[JoinwatchSelectedAction, ...]
+
+
+def select_due_joinwatch_assignments(
+    *,
+    now: datetime,
+    assignments_enabled: bool,
+    pending_assignments: typing.Mapping[str, typing.Any],
+    pending_roles: typing.Mapping[str, typing.Any],
+) -> JoinwatchSelection:
+    assignment_actions: list[JoinwatchSelectedAction] = []
+    if assignments_enabled:
+        for member_key_value, data in pending_assignments.items():
+            member_key = str(member_key_value)
+            try:
+                member_id = int(member_key_value)
+                role_id = int(typing.cast(typing.Any, data["role_id"]))
+                due_at = datetime.fromisoformat(
+                    typing.cast(str, data["apply_at"])
+                )
+            except (KeyError, TypeError, ValueError):
+                assignment_actions.append(
+                    JoinwatchSelectedAction(
+                        "discard_assignment",
+                        member_key,
+                        None,
+                        None,
+                        None,
+                        data,
+                    )
+                )
+                continue
+            if due_at <= now:
+                assignment_actions.append(
+                    JoinwatchSelectedAction(
+                        "apply_role",
+                        member_key,
+                        member_id,
+                        role_id,
+                        due_at,
+                        data,
+                    )
+                )
+
+    role_actions: list[JoinwatchSelectedAction] = []
+    for member_key_value, data in pending_roles.items():
+        member_key = str(member_key_value)
+        try:
+            member_id = int(member_key_value)
+            role_id = int(typing.cast(typing.Any, data["role_id"]))
+            due_at = datetime.fromisoformat(
+                typing.cast(str, data["expires_at"])
+            )
+        except (KeyError, TypeError, ValueError):
+            role_actions.append(
+                JoinwatchSelectedAction(
+                    "discard_role",
+                    member_key,
+                    None,
+                    None,
+                    None,
+                    data,
+                )
+            )
+            continue
+        if due_at <= now:
+            role_actions.append(
+                JoinwatchSelectedAction(
+                    "expire_role",
+                    member_key,
+                    member_id,
+                    role_id,
+                    due_at,
+                    data,
+                )
+            )
+
+    return JoinwatchSelection(
+        clear_assignments=bool(pending_assignments and not assignments_enabled),
+        assignment_actions=tuple(assignment_actions),
+        role_actions=tuple(role_actions),
+    )
+
+
 class ImageScanDecision(str, Enum):
     TRUE_POSITIVE = "true_positive"
     FALSE_POSITIVE = "false_positive"
@@ -5647,37 +5747,36 @@ class Honeypot(Cog):
         label = _("The member has been kicked.") if action == "kick" else _("The member has been banned.")
         return (label, None)
 
-    @tasks.loop(minutes=1)
-    async def joinwatch_auto_role_loop(self) -> None:
-        now = datetime.now(timezone.utc)
-        for guild in self.bot.guilds:
+    async def _apply_joinwatch_selected_work(
+        self,
+        guild,
+        guild_settings: GuildSettings,
+        selected: JoinwatchSelection,
+        now: datetime,
+    ) -> None:
+        if (
+            selected.clear_assignments
+            or selected.assignment_actions
+            or selected.role_actions
+        ):
             try:
-                raw_config = await self.config.guild(guild).all()
-                guild_settings = GuildSettings.from_mapping(raw_config)
-                pending_assignments = guild_settings.joinwatch_pending_role_assignments
-                pending_roles = guild_settings.joinwatch_pending_roles
-                if pending_assignments and not guild_settings.joinwatch_auto_role_enabled:
+                if selected.clear_assignments:
                     async with self.config.guild(guild).joinwatch_pending_role_assignments() as stored_assignments:
                         stored_assignments.clear()
-                    pending_assignments = {}
-                if not pending_assignments and not pending_roles:
-                    continue
+                if not selected.assignment_actions and not selected.role_actions:
+                    return
                 joinwatch_channel = self._get_text_channel_or_thread(
                     guild, joinwatch_channel_id(guild_settings)
                 )
-                for member_id_str, data in list(pending_assignments.items()):
-                    try:
-                        member_id = int(member_id_str)
-                        role_id = int(typing.cast(typing.Any, data["role_id"]))
-                        apply_at = datetime.fromisoformat(
-                            typing.cast(str, data["apply_at"])
-                        )
-                    except (KeyError, TypeError, ValueError):
+                for selected_action in selected.assignment_actions:
+                    if selected_action.action == "discard_assignment":
                         async with self.config.guild(guild).joinwatch_pending_role_assignments() as stored_assignments:
-                            stored_assignments.pop(str(member_id_str), None)
+                            stored_assignments.pop(selected_action.member_key, None)
                         continue
-                    if apply_at > now:
-                        continue
+                    member_id_str = selected_action.member_key
+                    data = typing.cast(dict, selected_action.data)
+                    member_id = typing.cast(int, selected_action.member_id)
+                    role_id = typing.cast(int, selected_action.role_id)
                     member = await self._get_member_or_fetch(guild, member_id)
                     role = guild.get_role(role_id)
                     if member is None:
@@ -5798,24 +5897,15 @@ class Honeypot(Cog):
                         ),
                     )
                     await self._delete_joinwatch_pending_assignment(guild, member_id)
-                for member_id_str, data in list(pending_roles.items()):
-                    try:
-                        member_id = int(member_id_str)
-                        role_id = int(typing.cast(typing.Any, data["role_id"]))
-                    except (KeyError, TypeError, ValueError):
+                for selected_action in selected.role_actions:
+                    if selected_action.action == "discard_role":
                         async with self.config.guild(guild).joinwatch_pending_roles() as stored_pending_roles:
-                            stored_pending_roles.pop(str(member_id_str), None)
+                            stored_pending_roles.pop(selected_action.member_key, None)
                         continue
-                    try:
-                        expires_at = datetime.fromisoformat(
-                            typing.cast(str, data["expires_at"])
-                        )
-                    except (KeyError, TypeError, ValueError):
-                        async with self.config.guild(guild).joinwatch_pending_roles() as stored_pending_roles:
-                            stored_pending_roles.pop(str(member_id_str), None)
-                        continue
-                    if expires_at > now:
-                        continue
+                    member_id_str = selected_action.member_key
+                    data = typing.cast(dict, selected_action.data)
+                    member_id = typing.cast(int, selected_action.member_id)
+                    role_id = typing.cast(int, selected_action.role_id)
                     member = await self._get_member_or_fetch(guild, member_id)
                     role = guild.get_role(role_id)
                     if member is None:
@@ -5961,6 +6051,37 @@ class Honeypot(Cog):
                     "joinwatch_timer_processing",
                     f"Could not process joinwatch timers: {exc}",
                 )
+
+    @tasks.loop(minutes=1)
+    async def joinwatch_auto_role_loop(self) -> None:
+        now = datetime.now(timezone.utc)
+        for guild in self.bot.guilds:
+            try:
+                raw_config = await self.config.guild(guild).all()
+                guild_settings = GuildSettings.from_mapping(raw_config)
+                selected = select_due_joinwatch_assignments(
+                    now=now,
+                    assignments_enabled=guild_settings.joinwatch_auto_role_enabled,
+                    pending_assignments=guild_settings.joinwatch_pending_role_assignments,
+                    pending_roles=guild_settings.joinwatch_pending_roles,
+                )
+            except Exception as exc:
+                log.exception(
+                    "Failed to process joinwatch auto-role timers for guild %s",
+                    guild.id,
+                )
+                await self._record_operational_failure(
+                    guild.id,
+                    "joinwatch_timer_processing",
+                    f"Could not process joinwatch timers: {exc}",
+                )
+                continue
+            await self._apply_joinwatch_selected_work(
+                guild,
+                guild_settings,
+                selected,
+                now,
+            )
 
     @joinwatch_auto_role_loop.before_loop
     async def before_joinwatch_auto_role(self) -> None:
