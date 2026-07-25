@@ -1701,9 +1701,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(
                     all(thread_id != event_loop_thread for thread_id in match_threads)
                 )
-                profile = await asyncio.to_thread(
-                    cog._imagescan_profile_sync, message.guild.id
-                )
+                profile = await cog._imagescan_profile(message.guild.id)
                 self.assertEqual(profile["messages_scanned"], 1)
                 self.assertEqual(profile["messages_with_images"], 1)
                 self.assertGreaterEqual(profile["images_considered"], 1)
@@ -12746,7 +12744,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
                 cog = honeypot.Honeypot(_Bot())
-                cog._init_imagescan_store_sync()
+                await cog._init_imagescan_store()
                 source = data_path / "source.png"
                 source.write_bytes(
                     base64.b64decode(
@@ -12779,7 +12777,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
                 cog = honeypot.Honeypot(_Bot())
-                cog._init_imagescan_store_sync()
+                await cog._init_imagescan_store()
                 source = data_path / "source.png"
                 source.write_bytes(
                     base64.b64decode(
@@ -12854,7 +12852,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
                 cog = honeypot.Honeypot(_Bot())
-                cog._init_imagescan_store_sync()
+                await cog._init_imagescan_store()
                 payload = base64.b64decode(
                     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
                     "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
