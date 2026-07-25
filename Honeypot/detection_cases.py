@@ -85,6 +85,27 @@ OPERATION_RESULT_UNSUPPORTED_CHANNEL = "unsupported_channel"
 OPERATION_RESULT_OWNERSHIP_TRANSFERRED = "ownership_transferred"
 PLANNED_PREFIX = "planned_"
 
+MODERATOR_DECISION_TYPES = frozenset(
+    {
+        OperationType.MODERATOR_BAN,
+        OperationType.MODERATOR_KICK,
+        OperationType.MODERATOR_IGNORE,
+    }
+)
+MODERATION_SUPERSEDING_TYPES = MODERATOR_DECISION_TYPES | {
+    OperationType.MODERATION_ACTION
+}
+MODERATION_SUPERSEDING_RESULTS = frozenset(
+    {
+        "ban",
+        "kick",
+        OPERATION_RESULT_KICK_MISSING,
+        "ignore",
+        "planned_ban",
+        "planned_kick",
+    }
+)
+
 
 @dataclass(frozen=True)
 class AttachmentKey:

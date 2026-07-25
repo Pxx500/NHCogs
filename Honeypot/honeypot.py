@@ -37,17 +37,15 @@ from .detection_cases import (
     DeleteStatus,
     DetectionCaseStore,
     DetectionSignal,
+    MODERATION_SUPERSEDING_RESULTS,
+    MODERATION_SUPERSEDING_TYPES,
     NewAttachment,
     NewMessage,
-    OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP,
     OPERATION_RESULT_CASE_TERMINAL,
     OPERATION_RESULT_CHANNEL_UNAVAILABLE,
     OPERATION_RESULT_KICK_MISSING,
     OPERATION_RESULT_MEMBER_UNAVAILABLE,
-    OPERATION_RESULT_PREEXISTING_ROLE,
-    OPERATION_RESULT_ROLE_ALREADY_OWNED,
     OPERATION_RESULT_SUPERSEDED_BY_MODERATION,
-    OPERATION_RESULT_TRANSFERRED_ROLE_OWNERSHIP,
     OPERATION_RESULT_UNSUPPORTED_CHANNEL,
     OperationStatus,
     OperationType,
@@ -184,37 +182,6 @@ IMAGE_SCAN_PROFILE_COLUMNS = (
 )
 KICK_FAIL_WARNING_REASON = "Suspicious activity: target left before the kick could be applied."
 BOOL_OPTIONS = ("false", "true")
-MODERATOR_DECISION_TYPES = frozenset(
-    {
-        OperationType.MODERATOR_BAN,
-        OperationType.MODERATOR_KICK,
-        OperationType.MODERATOR_IGNORE,
-    }
-)
-MODERATION_SUPERSEDING_TYPES = MODERATOR_DECISION_TYPES | {
-    OperationType.MODERATION_ACTION
-}
-MODERATION_SUPERSEDING_RESULTS = frozenset(
-    {
-        "ban",
-        "kick",
-        OPERATION_RESULT_KICK_MISSING,
-        "ignore",
-        "planned_ban",
-        "planned_kick",
-    }
-)
-
-
-def _is_superseded_by_moderation(snapshot) -> bool:
-    return any(
-        operation.operation_type in MODERATION_SUPERSEDING_TYPES
-        and operation.status is OperationStatus.SUCCEEDED
-        and operation.result in MODERATION_SUPERSEDING_RESULTS
-        for operation in snapshot.operations
-    )
-
-
 def missing_purge_permissions(permissions: object) -> list[str]:
     if not bool(getattr(permissions, "view_channel", False)):
         return ["View Channel"]
@@ -3221,133 +3188,6 @@ class Honeypot(Cog):
                         publication_channel=publication_channel,
                         timings=timings,
                     )
-            elif (
-                operation.operation_type == OperationType.ROLE_APPLY
-                and _is_superseded_by_moderation(snapshot)
-            ):
-                operation_result = OPERATION_RESULT_SUPERSEDED_BY_MODERATION
-            elif (
-                operation.operation_type == OperationType.ROLE_APPLY
-                and snapshot.case.status is not CaseStatus.PENDING
-            ):
-                operation_result = OPERATION_RESULT_CASE_TERMINAL
-            elif operation.operation_type == OperationType.ROLE_APPLY:
-                guild = self.bot.get_guild(snapshot.case.guild_id)
-                if guild is None:
-                    raise RuntimeError("detection case guild is unavailable")
-                role_id = int(operation.idempotency_key.rsplit(":", 1)[1])
-                member = guild.get_member(snapshot.case.user_id)
-                role = guild.get_role(role_id)
-                if member is None:
-                    fetch_member = getattr(guild, "fetch_member", None)
-                    if not callable(fetch_member):
-                        raise RuntimeError(
-                            "detection case member lookup is unavailable"
-                        )
-                    try:
-                        member = await fetch_member(snapshot.case.user_id)
-                    except discord.NotFound:
-                        operation_result = OPERATION_RESULT_MEMBER_UNAVAILABLE
-                    except discord.HTTPException as error:
-                        raise RuntimeError(
-                            "detection case member lookup failed"
-                        ) from error
-                if operation_result != OPERATION_RESULT_MEMBER_UNAVAILABLE:
-                    if role is None:
-                        raise RuntimeError("detection case role is unavailable")
-                    effect_started = await asyncio.to_thread(
-                        self._case_store.operation_effect_started,
-                        operation.operation_id,
-                    )
-                    if role not in member.roles:
-                        started = await asyncio.to_thread(
-                            self._case_store.start_role_apply_effect,
-                            operation.operation_id,
-                            operation.claim_token,
-                            datetime.now(timezone.utc),
-                        )
-                        if not started:
-                            raise RuntimeError("detection operation lease was lost")
-                        await member.add_roles(
-                            role, reason="Detection case pending moderator review."
-                        )
-                        role_was_added = True
-                        ownership_result = await asyncio.to_thread(
-                            self._case_store.record_operation_role_ownership,
-                            operation.operation_id,
-                            operation.claim_token,
-                            operation.case_id,
-                            snapshot.case.guild_id,
-                            snapshot.case.user_id,
-                            role_id,
-                            datetime.now(timezone.utc),
-                        )
-                        if ownership_result is None:
-                            operation_result = OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP
-                            await asyncio.to_thread(
-                                self._case_store.mark_case_needs_attention,
-                                operation.case_id,
-                            )
-                        elif ownership_result == "release_required":
-                            terminal_snapshot = await asyncio.to_thread(
-                                self._case_store.get_case, operation.case_id
-                            )
-                            release = next(
-                                (
-                                    item
-                                    for item in terminal_snapshot.operations
-                                    if item.operation_type == OperationType.ROLE_RELEASE
-                                    and item.idempotency_key
-                                    == f"role-release:{operation.case_id}:{role_id}"
-                                ),
-                                None,
-                            )
-                            if release is not None:
-                                claimed_release = await asyncio.to_thread(
-                                    self._case_store.claim_operation,
-                                    release.operation_id,
-                                    datetime.now(timezone.utc),
-                                )
-                                if claimed_release is not None:
-                                    await self._execute_detection_case_operation(
-                                        claimed_release, datetime.now(timezone.utc)
-                                    )
-                    elif effect_started:
-                        operation_result = OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP
-                        await asyncio.to_thread(
-                            self._case_store.mark_case_needs_attention,
-                            operation.case_id,
-                        )
-                    else:
-                        owner_case_id = await asyncio.to_thread(
-                            self._case_store.role_owner_case,
-                            snapshot.case.guild_id,
-                            snapshot.case.user_id,
-                            role_id,
-                        )
-                        transferred = await asyncio.to_thread(
-                            self._case_store.transfer_terminal_role_ownership,
-                            operation.operation_id,
-                            operation.claim_token,
-                            operation.case_id,
-                            snapshot.case.guild_id,
-                            snapshot.case.user_id,
-                            role_id,
-                            datetime.now(timezone.utc),
-                        )
-                        if transferred:
-                            operation_result = OPERATION_RESULT_TRANSFERRED_ROLE_OWNERSHIP
-                        elif (
-                            owner_case_id is not None
-                            and owner_case_id != operation.case_id
-                        ):
-                            raise RuntimeError(
-                                "previous detection case role release is still in progress"
-                            )
-                        elif owner_case_id == operation.case_id:
-                            operation_result = OPERATION_RESULT_ROLE_ALREADY_OWNED
-                        else:
-                            operation_result = OPERATION_RESULT_PREEXISTING_ROLE
             elif operation.operation_type == OperationType.MODERATION_ACTION:
                 source = next(
                     (

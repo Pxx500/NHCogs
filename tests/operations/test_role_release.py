@@ -119,6 +119,7 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
                     honeypot.OperationType.SOURCE_DELETE,
                     honeypot.OperationType.EVIDENCE_CLEANUP,
                     honeypot.OperationType.ROLE_RELEASE,
+                    honeypot.OperationType.ROLE_APPLY,
                 }
                 self.assertEqual(set(operations.HANDLERS), expected_types)
                 self.assertIs(
