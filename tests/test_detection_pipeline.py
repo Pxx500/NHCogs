@@ -318,6 +318,29 @@ class _Bot:
 
 class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
+    async def test_configuration_option_enums_preserve_public_values(self):
+        expected_options = (
+            ("CoreActionOption", "CORE_ACTION_OPTIONS", ("kick", "ban", "review", "none")),
+            ("FallbackActionOption", "FALLBACK_ACTION_OPTIONS", ("review", "kick", "ban", "none")),
+            ("WhitelistModeOption", "WHITELIST_MODE_OPTIONS", ("bypass", "review", "fallback", "none")),
+            ("JoinwatchAutoRoleActionOption", "JOINWATCH_AUTO_ROLE_ACTION_OPTIONS", ("none", "kick", "ban")),
+            ("BaitActionOption", "BAIT_ACTION_OPTIONS", ("kick", "ban")),
+            ("ImageScanDecision", "IMAGE_SCAN_DECISIONS", ("true_positive", "false_positive")),
+            ("ImageScanDetectorActionOption", "IMAGE_SCAN_DETECTOR_ACTION_OPTIONS", ("none", "review", "kick", "ban")),
+            ("ReviewKickFailWarningMode", "REVIEW_KICK_FAIL_WARNING_MODES", ("false", "true", "manual")),
+        )
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                for enum_name, tuple_name, expected in expected_options:
+                    with self.subTest(enum_name=enum_name):
+                        enum_type = getattr(honeypot, enum_name, None)
+                        self.assertIsNotNone(enum_type)
+                        self.assertEqual(
+                            tuple(member.value for member in enum_type),
+                            expected,
+                        )
+                        self.assertEqual(getattr(honeypot, tuple_name), expected)
+
     async def test_isolation_removes_new_nested_honeypot_module(self):
         module_name = "Honeypot.operations.review_update"
         sys.modules.pop(module_name, None)
@@ -6064,6 +6087,13 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                         cog._case_store.get_case,
                         admitted_case_ids[0],
                     )
+                    moderation = next(
+                        operation
+                        for operation in snapshot.operations
+                        if operation.operation_type
+                        is honeypot.OperationType.MODERATION_ACTION
+                    )
+                    self.assertEqual(moderation.result, f"planned_{action}")
                     self.assertEqual(snapshot.case.status.value, "resolved")
                     cog._execute_action.assert_not_awaited()
 
@@ -7732,6 +7762,90 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                         call.args[1] == "pending_mute_failures"
                         for call in cog._increment_stat.await_args_list
                     )
+                )
+
+    async def test_unsupported_operation_error_uses_persisted_value(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                now = datetime.now(timezone.utc)
+                cog = honeypot.Honeypot(_Bot())
+                appended = self._append_case(honeypot, cog, now)
+                operation = cog._case_store.ensure_operation(
+                    appended.case.case_id,
+                    honeypot.OperationType.MODERATOR_IGNORE,
+                    f"unsupported:{appended.case.case_id}",
+                )
+                claimed = cog._case_store.claim_operation(
+                    operation.operation_id,
+                    now,
+                )
+
+                await cog._execute_detection_case_operation(claimed, now)
+
+                failed = next(
+                    item
+                    for item in cog._case_store.get_case(
+                        appended.case.case_id
+                    ).operations
+                    if item.operation_id == operation.operation_id
+                )
+                self.assertEqual(
+                    failed.last_error,
+                    "RuntimeError: unsupported detection case operation: moderator_ignore",
+                )
+
+    async def test_recovered_operation_alert_uses_persisted_value(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                now = datetime.now(timezone.utc)
+                channel = SimpleNamespace(send=mock.AsyncMock())
+                guild = SimpleNamespace(
+                    id=10,
+                    get_channel=lambda channel_id: channel,
+                )
+                bot = _Bot()
+                bot.get_guild = lambda guild_id: guild
+                cog = honeypot.Honeypot(bot)
+                cog.config = self._config({"logs_channel": 30})
+                honeypot.discord.AllowedMentions = SimpleNamespace(none=lambda: None)
+                appended = self._append_case(honeypot, cog, now)
+                operation = cog._case_store.ensure_operation(
+                    appended.case.case_id,
+                    honeypot.OperationType.EVIDENCE_CLEANUP,
+                    f"evidence-cleanup:{appended.case.case_id}",
+                )
+                first = cog._case_store.claim_operation(operation.operation_id, now)
+                self.assertTrue(
+                    cog._case_store.fail_operation(
+                        first.operation_id,
+                        first.claim_token,
+                        "temporary",
+                        now,
+                        now,
+                    )
+                )
+                cog._case_store.record_operational_failure(
+                    guild_id=10,
+                    source=honeypot.OperationType.EVIDENCE_CLEANUP,
+                    summary="temporary",
+                    occurred_at=now,
+                    case_id=appended.case.case_id,
+                    operation_id=operation.operation_id,
+                )
+                retried = cog._case_store.claim_operation(
+                    operation.operation_id,
+                    now + timedelta(seconds=1),
+                )
+
+                await cog._execute_detection_case_operation(
+                    retried,
+                    now + timedelta(seconds=1),
+                )
+
+                channel.send.assert_awaited_once()
+                self.assertEqual(
+                    channel.send.await_args.args[0],
+                    "✅ Recovered: evidence_cleanup succeeded after 2 attempts.",
                 )
 
     async def test_role_apply_fetches_cache_miss_and_terminalizes_not_found(self):
@@ -11205,6 +11319,31 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_honeypot_errors_uses_persisted_operation_value(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                occurred_at = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
+                cog = honeypot.Honeypot(_Bot())
+                cog._case_store.initialize()
+                cog._case_store.record_operational_failure(
+                    guild_id=10,
+                    source=honeypot.OperationType.ROLE_APPLY,
+                    summary="temporary",
+                    occurred_at=occurred_at,
+                )
+                ctx = SimpleNamespace(
+                    guild=SimpleNamespace(id=10),
+                    send=mock.AsyncMock(),
+                )
+
+                await cog.honeypot_errors(ctx)
+
+                ctx.send.assert_awaited_once_with(
+                    "**Honeypot operational errors:**\n"
+                    f"- <t:{int(occurred_at.timestamp())}:R> "
+                    "`role_apply` (active, x1): temporary"
+                )
+
     @staticmethod
     def _append_case(
         honeypot,

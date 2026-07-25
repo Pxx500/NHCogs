@@ -15,6 +15,7 @@ import zipfile
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager, closing
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -37,6 +38,20 @@ from .detection_cases import (
     DetectionSignal,
     NewAttachment,
     NewMessage,
+    OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP,
+    OPERATION_RESULT_CASE_TERMINAL,
+    OPERATION_RESULT_CHANNEL_UNAVAILABLE,
+    OPERATION_RESULT_KICK_MISSING,
+    OPERATION_RESULT_MEMBER_UNAVAILABLE,
+    OPERATION_RESULT_OWNERSHIP_TRANSFERRED,
+    OPERATION_RESULT_PREEXISTING_ROLE,
+    OPERATION_RESULT_ROLE_ALREADY_OWNED,
+    OPERATION_RESULT_SUPERSEDED_BY_MODERATION,
+    OPERATION_RESULT_TRANSFERRED_ROLE_OWNERSHIP,
+    OPERATION_RESULT_UNSUPPORTED_CHANNEL,
+    OperationStatus,
+    OperationType,
+    PLANNED_PREFIX,
     effective_action,
 )
 from .case_review import (
@@ -165,8 +180,62 @@ DETECTION_EVIDENCE_RESERVATION_STALE_SECONDS = 5 * 60
 DETECTION_CAPTURE_CONCURRENCY = 4
 DETECTION_HEARTBEAT_INTERVAL_SECONDS = 60.0
 IMAGE_SCAN_FEEDBACK_BULK_LABELS = ("All TP", "All FP", "Ignore all", "Individual")
-IMAGE_SCAN_DECISIONS = ("true_positive", "false_positive")
-IMAGE_SCAN_DETECTOR_ACTION_OPTIONS = ("none", "review", "kick", "ban")
+
+
+class ImageScanDecision(str, Enum):
+    TRUE_POSITIVE = "true_positive"
+    FALSE_POSITIVE = "false_positive"
+
+
+class ImageScanDetectorActionOption(str, Enum):
+    NONE = "none"
+    REVIEW = "review"
+    KICK = "kick"
+    BAN = "ban"
+
+
+class ReviewKickFailWarningMode(str, Enum):
+    FALSE = "false"
+    TRUE = "true"
+    MANUAL = "manual"
+
+
+class CoreActionOption(str, Enum):
+    KICK = "kick"
+    BAN = "ban"
+    REVIEW = "review"
+    NONE = "none"
+
+
+class FallbackActionOption(str, Enum):
+    REVIEW = "review"
+    KICK = "kick"
+    BAN = "ban"
+    NONE = "none"
+
+
+class WhitelistModeOption(str, Enum):
+    BYPASS = "bypass"
+    REVIEW = "review"
+    FALLBACK = "fallback"
+    NONE = "none"
+
+
+class JoinwatchAutoRoleActionOption(str, Enum):
+    NONE = "none"
+    KICK = "kick"
+    BAN = "ban"
+
+
+class BaitActionOption(str, Enum):
+    KICK = "kick"
+    BAN = "ban"
+
+
+IMAGE_SCAN_DECISIONS = tuple(member.value for member in ImageScanDecision)
+IMAGE_SCAN_DETECTOR_ACTION_OPTIONS = tuple(
+    member.value for member in ImageScanDetectorActionOption
+)
 IMAGE_SCAN_PROFILE_COLUMNS = (
     "messages_scanned",
     "messages_with_images",
@@ -183,14 +252,47 @@ IMAGE_SCAN_PROFILE_COLUMNS = (
     "decision_ms_total",
     "decision_ms_count",
 )
-REVIEW_KICK_FAIL_WARNING_MODES = ("false", "true", "manual")
+REVIEW_KICK_FAIL_WARNING_MODES = tuple(
+    member.value for member in ReviewKickFailWarningMode
+)
 KICK_FAIL_WARNING_REASON = "Suspicious activity: target left before the kick could be applied."
-CORE_ACTION_OPTIONS = ("kick", "ban", "review", "none")
-FALLBACK_ACTION_OPTIONS = ("review", "kick", "ban", "none")
-WHITELIST_MODE_OPTIONS = ("bypass", "review", "fallback", "none")
-JOINWATCH_AUTO_ROLE_ACTION_OPTIONS = ("none", "kick", "ban")
-BAIT_ACTION_OPTIONS = ("kick", "ban")
+CORE_ACTION_OPTIONS = tuple(member.value for member in CoreActionOption)
+FALLBACK_ACTION_OPTIONS = tuple(member.value for member in FallbackActionOption)
+WHITELIST_MODE_OPTIONS = tuple(member.value for member in WhitelistModeOption)
+JOINWATCH_AUTO_ROLE_ACTION_OPTIONS = tuple(
+    member.value for member in JoinwatchAutoRoleActionOption
+)
+BAIT_ACTION_OPTIONS = tuple(member.value for member in BaitActionOption)
 BOOL_OPTIONS = ("false", "true")
+MODERATOR_DECISION_TYPES = frozenset(
+    {
+        OperationType.MODERATOR_BAN,
+        OperationType.MODERATOR_KICK,
+        OperationType.MODERATOR_IGNORE,
+    }
+)
+MODERATION_SUPERSEDING_TYPES = MODERATOR_DECISION_TYPES | {
+    OperationType.MODERATION_ACTION
+}
+MODERATION_SUPERSEDING_RESULTS = frozenset(
+    {
+        "ban",
+        "kick",
+        OPERATION_RESULT_KICK_MISSING,
+        "ignore",
+        "planned_ban",
+        "planned_kick",
+    }
+)
+
+
+def _is_superseded_by_moderation(snapshot) -> bool:
+    return any(
+        operation.operation_type in MODERATION_SUPERSEDING_TYPES
+        and operation.status is OperationStatus.SUCCEEDED
+        and operation.result in MODERATION_SUPERSEDING_RESULTS
+        for operation in snapshot.operations
+    )
 
 
 def missing_purge_permissions(permissions: object) -> list[str]:
@@ -2435,7 +2537,7 @@ class Honeypot(Cog):
     async def _record_operational_failure(
         self,
         guild_id: int,
-        source: str,
+        source: OperationType | str,
         summary: str,
         *,
         case_id: str | None = None,
@@ -2443,6 +2545,7 @@ class Honeypot(Cog):
         attempts: int = 1,
         terminal: bool = False,
     ) -> None:
+        source_value = source.value if isinstance(source, OperationType) else source
         try:
             failure = await asyncio.to_thread(
                 self._case_store.record_operational_failure,
@@ -2468,7 +2571,7 @@ class Honeypot(Cog):
                 state = "will retry"
             await self._send_operational_alert(
                 guild_id,
-                f"⚠️ Honeypot operation failed ({source}, attempt {attempts}, {state}): "
+                f"⚠️ Honeypot operation failed ({source_value}, attempt {attempts}, {state}): "
                 f"{summary[:500]}",
             )
 
@@ -2540,12 +2643,15 @@ class Honeypot(Cog):
                 self._case_store.owned_role_ids, case_id
             )
             final_operations = [
-                ("review_update", f"review-update:{case_id}"),
-                ("evidence_cleanup", f"evidence-cleanup:{case_id}"),
+                (OperationType.REVIEW_UPDATE, f"review-update:{case_id}"),
+                (OperationType.EVIDENCE_CLEANUP, f"evidence-cleanup:{case_id}"),
             ]
             for role_id in owned_role_ids:
                 final_operations.append(
-                    ("role_release", f"role-release:{case_id}:{int(role_id)}")
+                    (
+                        OperationType.ROLE_RELEASE,
+                        f"role-release:{case_id}:{int(role_id)}",
+                    )
                 )
             finished = await asyncio.to_thread(
                 self._case_store.finish_resolution,
@@ -2581,10 +2687,10 @@ class Honeypot(Cog):
         snapshot = await asyncio.to_thread(self._case_store.get_case, case_id)
         if snapshot is None:
             return
-        final_operation_priority = {
-            "review_update": 0,
-            "role_release": 1,
-            "evidence_cleanup": 2,
+        final_operation_priority: dict[OperationType | str, int] = {
+            OperationType.REVIEW_UPDATE: 0,
+            OperationType.ROLE_RELEASE: 1,
+            OperationType.EVIDENCE_CLEANUP: 2,
         }
         for operation in sorted(
             snapshot.operations,
@@ -2594,7 +2700,9 @@ class Honeypot(Cog):
             ),
         ):
             if operation.operation_type not in {
-                "review_update", "role_release", "evidence_cleanup"
+                OperationType.REVIEW_UPDATE,
+                OperationType.ROLE_RELEASE,
+                OperationType.EVIDENCE_CLEANUP,
             }:
                 continue
             claimed = await asyncio.to_thread(
@@ -2606,7 +2714,7 @@ class Honeypot(Cog):
     async def _execute_detection_message_child(
         self,
         snapshot,
-        operation_type: str,
+        operation_type: OperationType,
         sequence: int,
         now: datetime,
         *,
@@ -2646,7 +2754,7 @@ class Honeypot(Cog):
             operation = await asyncio.to_thread(
                 self._case_store.ensure_operation,
                 case_id,
-                "role_release",
+                OperationType.ROLE_RELEASE,
                 f"role-release:{case_id}:{int(role_id)}",
             )
             claimed = await asyncio.to_thread(
@@ -2810,7 +2918,7 @@ class Honeypot(Cog):
                     retry = await asyncio.to_thread(
                         self._case_store.ensure_operation,
                         operation.case_id,
-                        "source_delete",
+                        OperationType.SOURCE_DELETE,
                         (
                             f"source-delete:{operation.case_id}:"
                             f"{source.channel_id}:{source.message_id}"
@@ -2835,7 +2943,7 @@ class Honeypot(Cog):
                         if failed_retry:
                             await self._record_operational_failure(
                                 snapshot.case.guild_id,
-                                "source_delete",
+                                OperationType.SOURCE_DELETE,
                                 delete_result.error or delete_result.status.value,
                                 case_id=operation.case_id,
                                 operation_id=claimed_retry.operation_id,
@@ -2878,11 +2986,11 @@ class Honeypot(Cog):
                 return "case_deleted"
             if action in {ActionIntent.KICK, ActionIntent.BAN}:
                 await self._execute_detection_message_child(
-                    refreshed, "moderation_action", source.sequence, now
+                    refreshed, OperationType.MODERATION_ACTION, source.sequence, now
                 )
             elif action is ActionIntent.REVIEW:
                 await self._execute_detection_message_child(
-                    refreshed, "role_apply", source.sequence, now
+                    refreshed, OperationType.ROLE_APPLY, source.sequence, now
                 )
             timings["containment_ms"] = (
                 perf_counter() - containment_started
@@ -2896,7 +3004,7 @@ class Honeypot(Cog):
                 (
                     item
                     for item in refreshed.operations
-                    if item.operation_type == "review_publish"
+                    if item.operation_type == OperationType.REVIEW_PUBLISH
                     and item.message_sequence == source.sequence
                 ),
                 None,
@@ -2915,7 +3023,7 @@ class Honeypot(Cog):
                 except Exception as error:
                     await self._record_operational_failure(
                         snapshot.case.guild_id,
-                        "review_publish",
+                        OperationType.REVIEW_PUBLISH,
                         f"{type(error).__name__}: {error}",
                         case_id=operation.case_id,
                         operation_id=review_publication.operation_id,
@@ -2991,7 +3099,7 @@ class Honeypot(Cog):
             refresh_started = perf_counter()
             review_executed = await self._execute_detection_message_child(
                 refreshed,
-                "review_publish",
+                OperationType.REVIEW_PUBLISH,
                 source.sequence,
                 now,
                 publication_channel=publication_channel,
@@ -3033,7 +3141,7 @@ class Honeypot(Cog):
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)
                 return
-            if operation.operation_type == "message_process":
+            if operation.operation_type == OperationType.MESSAGE_PROCESS:
                 if snapshot.case.status not in {
                     CaseStatus.PENDING,
                     CaseStatus.RESOLVING,
@@ -3045,7 +3153,7 @@ class Honeypot(Cog):
                             operation.message_sequence,
                             "case closed before attachment capture completed",
                         )
-                    operation_result = "case_terminal"
+                    operation_result = OPERATION_RESULT_CASE_TERMINAL
                 else:
                     operation_result = await self._execute_detection_message_process(
                         operation,
@@ -3055,35 +3163,19 @@ class Honeypot(Cog):
                         publication_channel=publication_channel,
                         timings=timings,
                     )
-            elif operation.operation_type == "role_apply" and any(
-                item.operation_type
-                in {
-                    "moderation_action",
-                    "moderator_ban",
-                    "moderator_kick",
-                    "moderator_ignore",
-                }
-                and item.status.value == "succeeded"
-                and item.result
-                in {
-                    "ban",
-                    "kick",
-                    "kick_missing",
-                    "ignore",
-                    "planned_ban",
-                    "planned_kick",
-                }
-                for item in snapshot.operations
-            ):
-                operation_result = "superseded_by_moderation"
             elif (
-                operation.operation_type == "role_apply"
+                operation.operation_type == OperationType.ROLE_APPLY
+                and _is_superseded_by_moderation(snapshot)
+            ):
+                operation_result = OPERATION_RESULT_SUPERSEDED_BY_MODERATION
+            elif (
+                operation.operation_type == OperationType.ROLE_APPLY
                 and snapshot.case.status is not CaseStatus.PENDING
             ):
-                operation_result = "case_terminal"
-            elif operation.operation_type == "review_update":
+                operation_result = OPERATION_RESULT_CASE_TERMINAL
+            elif operation.operation_type == OperationType.REVIEW_UPDATE:
                 await self._case_review_rerender(operation.case_id)
-            elif operation.operation_type == "role_apply":
+            elif operation.operation_type == OperationType.ROLE_APPLY:
                 guild = self.bot.get_guild(snapshot.case.guild_id)
                 if guild is None:
                     raise RuntimeError("detection case guild is unavailable")
@@ -3099,12 +3191,12 @@ class Honeypot(Cog):
                     try:
                         member = await fetch_member(snapshot.case.user_id)
                     except discord.NotFound:
-                        operation_result = "member_unavailable"
+                        operation_result = OPERATION_RESULT_MEMBER_UNAVAILABLE
                     except discord.HTTPException as error:
                         raise RuntimeError(
                             "detection case member lookup failed"
                         ) from error
-                if operation_result != "member_unavailable":
+                if operation_result != OPERATION_RESULT_MEMBER_UNAVAILABLE:
                     if role is None:
                         raise RuntimeError("detection case role is unavailable")
                     effect_started = await asyncio.to_thread(
@@ -3135,7 +3227,7 @@ class Honeypot(Cog):
                             datetime.now(timezone.utc),
                         )
                         if ownership_result is None:
-                            operation_result = "ambiguous_role_ownership"
+                            operation_result = OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP
                             await asyncio.to_thread(
                                 self._case_store.mark_case_needs_attention,
                                 operation.case_id,
@@ -3148,7 +3240,7 @@ class Honeypot(Cog):
                                 (
                                     item
                                     for item in terminal_snapshot.operations
-                                    if item.operation_type == "role_release"
+                                    if item.operation_type == OperationType.ROLE_RELEASE
                                     and item.idempotency_key
                                     == f"role-release:{operation.case_id}:{role_id}"
                                 ),
@@ -3165,7 +3257,7 @@ class Honeypot(Cog):
                                         claimed_release, datetime.now(timezone.utc)
                                     )
                     elif effect_started:
-                        operation_result = "ambiguous_role_ownership"
+                        operation_result = OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP
                         await asyncio.to_thread(
                             self._case_store.mark_case_needs_attention,
                             operation.case_id,
@@ -3188,7 +3280,7 @@ class Honeypot(Cog):
                             datetime.now(timezone.utc),
                         )
                         if transferred:
-                            operation_result = "transferred_role_ownership"
+                            operation_result = OPERATION_RESULT_TRANSFERRED_ROLE_OWNERSHIP
                         elif (
                             owner_case_id is not None
                             and owner_case_id != operation.case_id
@@ -3197,10 +3289,10 @@ class Honeypot(Cog):
                                 "previous detection case role release is still in progress"
                             )
                         elif owner_case_id == operation.case_id:
-                            operation_result = "role_already_owned"
+                            operation_result = OPERATION_RESULT_ROLE_ALREADY_OWNED
                         else:
-                            operation_result = "preexisting_role"
-            elif operation.operation_type == "review_publish":
+                            operation_result = OPERATION_RESULT_PREEXISTING_ROLE
+            elif operation.operation_type == OperationType.REVIEW_PUBLISH:
                 config = await self.config.guild_from_id(snapshot.case.guild_id).all()
                 guild = self.bot.get_guild(snapshot.case.guild_id)
                 logs_channel = publication_channel or (
@@ -3216,7 +3308,7 @@ class Honeypot(Cog):
                     logs_channel,
                     message_sequence=operation.message_sequence,
                 )
-            elif operation.operation_type == "moderation_action":
+            elif operation.operation_type == OperationType.MODERATION_ACTION:
                 source = next(
                     (
                         message
@@ -3239,7 +3331,7 @@ class Honeypot(Cog):
                     )
                 config = await self.config.guild_from_id(snapshot.case.guild_id).all()
                 if config.get("dry_run"):
-                    operation_result = f"planned_{action.value}"
+                    operation_result = f"{PLANNED_PREFIX}{action.value}"
                 else:
                     guild = self.bot.get_guild(snapshot.case.guild_id)
                     if guild is None:
@@ -3265,7 +3357,7 @@ class Honeypot(Cog):
                         try:
                             member = await guild.fetch_member(snapshot.case.user_id)
                         except discord.NotFound:
-                            operation_result = "kick_missing"
+                            operation_result = OPERATION_RESULT_KICK_MISSING
                             effect_confirmed = True
                     if not effect_confirmed:
                         if member is None:
@@ -3292,7 +3384,7 @@ class Honeypot(Cog):
                         operation_result = action.value
                     elif operation_result is None:
                         operation_result = action.value
-            elif operation.operation_type == "cached_purge":
+            elif operation.operation_type == OperationType.CACHED_PURGE:
                 guild = self.bot.get_guild(snapshot.case.guild_id)
                 if guild is None:
                     raise RuntimeError("detection case guild is unavailable")
@@ -3301,11 +3393,11 @@ class Honeypot(Cog):
                     raise RuntimeError("cached purge operation case identity does not match")
                 channel = self._get_cached_message_channel(guild, int(channel_id))
                 if channel is None:
-                    operation_result = "channel_unavailable"
+                    operation_result = OPERATION_RESULT_CHANNEL_UNAVAILABLE
                     raise RuntimeError("cached purge channel is unavailable")
                 get_partial_message = getattr(channel, "get_partial_message", None)
                 if not callable(get_partial_message):
-                    operation_result = "unsupported_channel"
+                    operation_result = OPERATION_RESULT_UNSUPPORTED_CHANNEL
                     raise RuntimeError("cached purge channel cannot resolve messages")
                 result = await detection_runtime.delete_message(
                     get_partial_message(int(message_id))
@@ -3316,7 +3408,7 @@ class Honeypot(Cog):
                     DeleteStatus.ALREADY_GONE,
                 ):
                     raise RuntimeError(result.error or result.status.value)
-            elif operation.operation_type == "source_delete":
+            elif operation.operation_type == OperationType.SOURCE_DELETE:
                 guild = self.bot.get_guild(snapshot.case.guild_id)
                 if guild is None:
                     raise RuntimeError("detection case guild is unavailable")
@@ -3363,11 +3455,16 @@ class Honeypot(Cog):
                         for signal in source_signals
                     ):
                         await self._increment_stat(guild, "forward_purge_deletes")
-            elif operation.operation_type in {"moderator_ban", "moderator_kick"}:
-                action = operation.operation_type.removeprefix("moderator_")
+            elif operation.operation_type in {
+                OperationType.MODERATOR_BAN,
+                OperationType.MODERATOR_KICK,
+            }:
+                action = ActionIntent(
+                    operation.operation_type.value.removeprefix("moderator_")
+                )
                 config = await self.config.guild_from_id(snapshot.case.guild_id).all()
                 if config.get("dry_run"):
-                    operation_result = f"planned_{action}"
+                    operation_result = f"{PLANNED_PREFIX}{action.value}"
                 else:
                     guild = self.bot.get_guild(snapshot.case.guild_id)
                     if guild is None:
@@ -3376,7 +3473,7 @@ class Honeypot(Cog):
                         self._case_store.operation_effect_started, operation.operation_id
                     )
                     effect_confirmed = False
-                    if effect_started and action == "ban":
+                    if effect_started and action is ActionIntent.BAN:
                         target = guild.get_member(snapshot.case.user_id)
                         if target is None:
                             target = await self._get_user_or_object(snapshot.case.user_id)
@@ -3388,13 +3485,13 @@ class Honeypot(Cog):
                             effect_confirmed = True
                     if not effect_confirmed:
                         member = guild.get_member(snapshot.case.user_id)
-                        if member is None and action == "ban":
+                        if member is None and action is ActionIntent.BAN:
                             member = await self._get_user_or_object(snapshot.case.user_id)
-                        if member is None and action == "kick":
+                        if member is None and action is ActionIntent.KICK:
                             try:
                                 member = await guild.fetch_member(snapshot.case.user_id)
                             except discord.NotFound:
-                                operation_result = "kick_missing"
+                                operation_result = OPERATION_RESULT_KICK_MISSING
                                 effect_confirmed = True
                     if not effect_confirmed:
                         if member is None:
@@ -3416,15 +3513,15 @@ class Honeypot(Cog):
                             member,
                             effect_started_at,
                             config,
-                            reason=f"Honeypot review: {action.title()}",
-                            action=action,
+                            reason=f"Honeypot review: {action.value.title()}",
+                            action=action.value,
                             moderator=moderator,
                         )
                         if failed is not None:
                             raise RuntimeError(failed)
                     if operation_result is None:
-                        operation_result = action
-            elif operation.operation_type == "role_release":
+                        operation_result = action.value
+            elif operation.operation_type == OperationType.ROLE_RELEASE:
                 guild = self.bot.get_guild(snapshot.case.guild_id)
                 if guild is None:
                     raise RuntimeError("detection case guild is unavailable")
@@ -3433,7 +3530,7 @@ class Honeypot(Cog):
                     self._case_store.owned_role_ids, operation.case_id
                 )
                 if role_id not in owned_role_ids:
-                    operation_result = "ownership_transferred"
+                    operation_result = OPERATION_RESULT_OWNERSHIP_TRANSFERRED
                 else:
                     started = await asyncio.to_thread(
                         self._case_store.start_role_release_effect,
@@ -3451,10 +3548,10 @@ class Honeypot(Cog):
                             role_id,
                         )
                         if owner_case_id != operation.case_id:
-                            operation_result = "ownership_transferred"
+                            operation_result = OPERATION_RESULT_OWNERSHIP_TRANSFERRED
                         else:
                             raise RuntimeError("detection operation lease was lost")
-                    if operation_result != "ownership_transferred":
+                    if operation_result != OPERATION_RESULT_OWNERSHIP_TRANSFERRED:
                         role = guild.get_role(role_id)
                         member = None
                         if role is not None:
@@ -3486,12 +3583,12 @@ class Honeypot(Cog):
                             operation.case_id,
                             role_id,
                         )
-            elif operation.operation_type == "evidence_cleanup":
+            elif operation.operation_type == OperationType.EVIDENCE_CLEANUP:
                 review_update = next(
                     (
                         item
                         for item in snapshot.operations
-                        if item.operation_type == "review_update"
+                        if item.operation_type == OperationType.REVIEW_UPDATE
                     ),
                     None,
                 )
@@ -3553,7 +3650,8 @@ class Honeypot(Cog):
                     case_root.rmdir()
             else:
                 raise RuntimeError(
-                    f"unsupported detection case operation: {operation.operation_type}"
+                    "unsupported detection case operation: "
+                    f"{operation.operation_type.value}"
                 )
         except asyncio.CancelledError:
             heartbeat.cancel()
@@ -3567,17 +3665,20 @@ class Honeypot(Cog):
                 if operation.attempts <= DETECTION_FAST_RETRY_LIMIT
                 else timedelta(minutes=DETECTION_SLOW_RETRY_MINUTES)
             )
-            if operation.operation_type == "source_delete":
+            if operation.operation_type == OperationType.SOURCE_DELETE:
                 retry_at = now + timedelta(seconds=DETECTION_FAST_RETRY_SECONDS)
             cached_purge_exhausted = (
-                operation.operation_type == "cached_purge"
+                operation.operation_type == OperationType.CACHED_PURGE
                 and operation_result == DeleteStatus.TRANSIENT_FAILURE.value
                 and operation.attempts >= 3
             )
-            if operation.operation_type == "cached_purge" and (
-                operation_result == DeleteStatus.FORBIDDEN.value
-                or operation_result == "channel_unavailable"
-                or operation_result == "unsupported_channel"
+            if operation.operation_type == OperationType.CACHED_PURGE and (
+                operation_result
+                in (
+                    DeleteStatus.FORBIDDEN.value,
+                    OPERATION_RESULT_CHANNEL_UNAVAILABLE,
+                    OPERATION_RESULT_UNSUPPORTED_CHANNEL,
+                )
                 or cached_purge_exhausted
             ):
                 retry_at = None
@@ -3603,9 +3704,12 @@ class Honeypot(Cog):
                     attempts=operation.attempts,
                     terminal=retry_at is None,
                 )
-            if operation.operation_type == "role_apply":
+            if operation.operation_type == OperationType.ROLE_APPLY:
                 await self._case_review_rerender_safely(operation.case_id)
-            if operation.operation_type == "role_apply" and snapshot is not None:
+            if (
+                operation.operation_type == OperationType.ROLE_APPLY
+                and snapshot is not None
+            ):
                 failed_guild = self.bot.get_guild(snapshot.case.guild_id)
                 if failed_guild is not None:
                     await self._increment_stat(
@@ -3615,13 +3719,16 @@ class Honeypot(Cog):
                 "Detection case operation failed case=%s operation=%s kind=%s error=%s",
                 operation.case_id,
                 operation.operation_id,
-                operation.operation_type,
+                operation.operation_type.value,
                 error,
             )
             return
         heartbeat.cancel()
         await asyncio.gather(heartbeat, return_exceptions=True)
-        if operation.operation_type in {"moderator_ban", "moderator_kick"}:
+        if operation.operation_type in {
+            OperationType.MODERATOR_BAN,
+            OperationType.MODERATOR_KICK,
+        }:
             completed = await asyncio.to_thread(
                 self._case_store.complete_moderator_action,
                 operation.operation_id,
@@ -3647,7 +3754,7 @@ class Honeypot(Cog):
                 )
         elif snapshot is not None and (
             operation.attempts > 1
-            or operation.operation_type == "review_publish"
+            or operation.operation_type == OperationType.REVIEW_PUBLISH
         ):
             recovered = await asyncio.to_thread(
                 self._case_store.resolve_operational_failure,
@@ -3657,38 +3764,41 @@ class Honeypot(Cog):
             if recovered and operation.attempts > 1:
                 await self._send_operational_alert(
                     snapshot.case.guild_id,
-                    f"✅ Recovered: {operation.operation_type} succeeded after "
+                    f"✅ Recovered: {operation.operation_type.value} succeeded after "
                     f"{operation.attempts} attempts.",
                 )
         elif role_was_added and snapshot is not None:
             guild = self.bot.get_guild(snapshot.case.guild_id)
             if guild is not None:
                 await self._increment_stat(guild, "pending_mutes")
-        if completed and operation.operation_type == "role_apply" and (
+        if completed and operation.operation_type == OperationType.ROLE_APPLY and (
             operation.attempts > 1
             or operation_result
-            in {"superseded_by_moderation", "member_unavailable"}
+            in {
+                OPERATION_RESULT_SUPERSEDED_BY_MODERATION,
+                OPERATION_RESULT_MEMBER_UNAVAILABLE,
+            }
         ):
             await self._case_review_rerender_safely(operation.case_id)
         if operation.operation_type in {
-            "review_update",
-            "role_release",
-            "evidence_cleanup",
+            OperationType.REVIEW_UPDATE,
+            OperationType.ROLE_RELEASE,
+            OperationType.EVIDENCE_CLEANUP,
         }:
             await asyncio.to_thread(
                 self._case_store.compact_terminal_case, operation.case_id
             )
         elif completed and operation.operation_type in {
-            "moderation_action",
-            "moderator_ban",
-            "moderator_kick",
+            OperationType.MODERATION_ACTION,
+            OperationType.MODERATOR_BAN,
+            OperationType.MODERATOR_KICK,
         }:
             await self._finish_case_review_if_ready(
                 operation.case_id,
                 operation.actor_id,
             )
             await self._case_review_rerender_safely(operation.case_id)
-        elif completed and operation.operation_type == "message_process":
+        elif completed and operation.operation_type == OperationType.MESSAGE_PROCESS:
             await self._finish_case_review_if_ready(operation.case_id, None)
 
     async def _renew_detection_operation(self, operation) -> None:
@@ -5606,22 +5716,9 @@ class Honeypot(Cog):
                 operation
                 for operation in reversed(snapshot.operations)
                 if operation.operation_type
-                in {
-                    "moderation_action",
-                    "moderator_ban",
-                    "moderator_kick",
-                    "moderator_ignore",
-                }
-                and operation.status.value == "succeeded"
-                and operation.result
-                in {
-                    "ban",
-                    "kick",
-                    "kick_missing",
-                    "ignore",
-                    "planned_ban",
-                    "planned_kick",
-                }
+                in MODERATION_SUPERSEDING_TYPES
+                and operation.status is OperationStatus.SUCCEEDED
+                and operation.result in MODERATION_SUPERSEDING_RESULTS
             ),
             None,
         )
@@ -5648,7 +5745,11 @@ class Honeypot(Cog):
                 refreshed is not None
                 and refreshed.case.status.value in {"resolved", "expired"}
             )
-        resolution = "kick" if completed.result == "kick_missing" else completed.result
+        resolution = (
+            "kick"
+            if completed.result == OPERATION_RESULT_KICK_MISSING
+            else completed.result
+        )
         if defer_final_operations:
             return await self.resolve_detection_case(
                 case_id,
@@ -5980,16 +6081,22 @@ class Honeypot(Cog):
             operations = []
             if publish_review:
                 operations.append(
-                    ("review_publish", "review_publish:{case_id}:{sequence}")
+                    (
+                        OperationType.REVIEW_PUBLISH,
+                        "review_publish:{case_id}:{sequence}",
+                    )
                 )
             if containment or message.attachments:
                 operations.append(
-                    ("message_process", "message-process:{case_id}:{sequence}")
+                    (
+                        OperationType.MESSAGE_PROCESS,
+                        "message-process:{case_id}:{sequence}",
+                    )
                 )
             if action in {ActionIntent.KICK, ActionIntent.BAN}:
                 operations.append(
                     (
-                        "moderation_action",
+                        OperationType.MODERATION_ACTION,
                         f"moderation_action:{{case_id}}:{{sequence}}:{action.value}",
                     )
                 )
@@ -5999,7 +6106,10 @@ class Honeypot(Cog):
                 and not config.get("dry_run")
             ):
                 operations.append(
-                    ("role_apply", f"role-apply:{{case_id}}:{int(role_id)}")
+                    (
+                        OperationType.ROLE_APPLY,
+                        f"role-apply:{{case_id}}:{int(role_id)}",
+                    )
                 )
             return tuple(operations)
 
@@ -6063,7 +6173,7 @@ class Honeypot(Cog):
             (
                 operation
                 for operation in admitted_snapshot.operations
-                if operation.operation_type == "message_process"
+                if operation.operation_type == OperationType.MESSAGE_PROCESS
                 and operation.message_sequence == append.message.sequence
             ),
             None,
@@ -6084,9 +6194,9 @@ class Honeypot(Cog):
                     and pipeline_operation.status.value == "succeeded"
                 ):
                     for child_type in (
-                        "moderation_action",
-                        "role_apply",
-                        "review_publish",
+                        OperationType.MODERATION_ACTION,
+                        OperationType.ROLE_APPLY,
+                        OperationType.REVIEW_PUBLISH,
                     ):
                         await self._execute_detection_message_child(
                             admitted_snapshot,
@@ -6096,7 +6206,7 @@ class Honeypot(Cog):
                             publication_channel=logs_channel,
                         )
                     if any(
-                        operation.operation_type == "review_publish"
+                        operation.operation_type == OperationType.REVIEW_PUBLISH
                         and operation.message_sequence == append.message.sequence
                         for operation in admitted_snapshot.operations
                     ):
@@ -6117,7 +6227,7 @@ class Honeypot(Cog):
             (
                 operation
                 for operation in admitted_snapshot.operations
-                if operation.operation_type == "review_publish"
+                if operation.operation_type == OperationType.REVIEW_PUBLISH
                 and operation.message_sequence == append.message.sequence
             ),
             None,
@@ -6395,7 +6505,7 @@ class Honeypot(Cog):
             operation = await asyncio.to_thread(
                 self._case_store.ensure_operation,
                 case_id,
-                "cached_purge",
+                OperationType.CACHED_PURGE,
                 f"cached_purge:{case_id}:{ref.channel_id}:{ref.message_id}",
                 message_sequence,
             )
@@ -9290,9 +9400,14 @@ class Honeypot(Cog):
         lines = []
         for failure in failures:
             state = "recovered" if failure.resolved_at is not None else "active"
+            source = (
+                failure.source.value
+                if isinstance(failure.source, OperationType)
+                else failure.source
+            )
             lines.append(
                 f"- <t:{int(failure.last_seen_at.timestamp())}:R> "
-                f"`{failure.source}` ({state}, x{failure.occurrences}): "
+                f"`{source}` ({state}, x{failure.occurrences}): "
                 f"{failure.summary[:500]}"
             )
         body = "\n".join(lines)
