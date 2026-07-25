@@ -9146,9 +9146,16 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                 )
 
                 snapshot = cog._case_store.get_case(appended.case.case_id)
+                operation = next(
+                    item
+                    for item in snapshot.operations
+                    if item.operation_type == "moderator_ignore"
+                )
                 interaction.response.defer.assert_not_awaited()
                 self.assertEqual(snapshot.case.status.value, "resolved")
                 self.assertEqual(snapshot.case.resolution, "ignore")
+                self.assertEqual(operation.actor_id, interaction.user.id)
+                self.assertEqual(snapshot.case.moderator_id, interaction.user.id)
                 self.assertEqual(
                     [item.learning_decision for item in snapshot.attachments], []
                 )
@@ -10306,11 +10313,20 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
     async def test_moderator_actor_survives_failed_action_retry_and_resolution(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                member = SimpleNamespace(id=20, roles=[])
+                target = SimpleNamespace(id=20, roles=[])
+                actor = SimpleNamespace(
+                    id=99,
+                    guild_permissions=SimpleNamespace(
+                        manage_messages=False,
+                        ban_members=True,
+                        kick_members=False,
+                    ),
+                )
+                members = {target.id: target, actor.id: actor}
                 guild = SimpleNamespace(
                     id=10,
                     me=SimpleNamespace(id=1),
-                    get_member=lambda user_id: member,
+                    get_member=members.get,
                     fetch_ban=mock.AsyncMock(
                         side_effect=honeypot.discord.NotFound("not banned")
                     ),
@@ -10327,14 +10343,7 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                     honeypot, cog, datetime.now(timezone.utc)
                 )
                 interaction = SimpleNamespace(
-                    user=SimpleNamespace(
-                        id=99,
-                        guild_permissions=SimpleNamespace(
-                            manage_messages=False,
-                            ban_members=True,
-                            kick_members=False,
-                        ),
-                    ),
+                    user=actor,
                     response=SimpleNamespace(
                         defer=mock.AsyncMock(), is_done=lambda: True
                     ),
@@ -10371,6 +10380,13 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(resolved.case.status.value, "resolved")
                 self.assertEqual(resolved.case.resolution, "ban")
                 self.assertEqual(resolved.case.moderator_id, 99)
+                self.assertEqual(cog._execute_action.await_count, 2)
+                self.assertTrue(
+                    all(
+                        call.kwargs["moderator"] is actor
+                        for call in cog._execute_action.await_args_list
+                    )
+                )
 
     async def test_moderator_ban_intent_fences_concurrent_ignore(self):
         with TemporaryDirectory() as directory:
