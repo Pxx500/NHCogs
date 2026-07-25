@@ -63,6 +63,7 @@ from .case_review import (
     validate_image_review_action,
 )
 from .console_dump import ReadOnlyLogBuffer, build_log_dump
+from .firstpost_store import FirstPostStore
 from .operations import OperationHandlerRegistry, executor_operation_policy
 from .operations.context import (
     CompletionMode,
@@ -498,6 +499,7 @@ class Honeypot(Cog):
         )
         self._hot_purge_users: dict[int, dict[int, datetime]] = defaultdict(dict)
         self._firstpost_db_path = cog_data_path(self) / "firstpost_seen.sqlite"
+        self._firstpost_store = FirstPostStore(self._firstpost_db_path)
         self._firstpost_db_lock: asyncio.Lock = asyncio.Lock()
         self._firstpost_seen_authors: dict[int, set[int]] = defaultdict(set)
         self._firstpost_dirty_seen_authors: dict[int, set[int]] = defaultdict(set)
@@ -811,22 +813,8 @@ class Honeypot(Cog):
                 if intent in intents:
                     await self._increment_stat(guild, f"{prefix}_{suffix}")
 
-    def _init_firstpost_seen_store_sync(self) -> None:
-        self._firstpost_db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self._firstpost_db_path) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS firstpost_seen_authors (
-                    guild_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    first_seen_at INTEGER NOT NULL,
-                    PRIMARY KEY (guild_id, user_id)
-                )
-                """
-            )
-
     async def _init_firstpost_seen_store(self) -> None:
-        await asyncio.to_thread(self._init_firstpost_seen_store_sync)
+        await asyncio.to_thread(self._firstpost_store.initialize)
 
     def _init_imagescan_store_sync(self) -> None:
         self._imagescan_db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1404,24 +1392,8 @@ class Honeypot(Cog):
                 pass
         return status, sample
 
-    def _load_firstpost_seen_authors_sync(self, guild_id: int) -> set[int]:
-        with sqlite3.connect(self._firstpost_db_path) as conn:
-            rows = conn.execute(
-                "SELECT user_id FROM firstpost_seen_authors WHERE guild_id = ?",
-                (str(guild_id),),
-            ).fetchall()
-        return {int(row[0]) for row in rows}
-
-    def _count_firstpost_seen_authors_sync(self, guild_id: int) -> int:
-        with sqlite3.connect(self._firstpost_db_path) as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) FROM firstpost_seen_authors WHERE guild_id = ?",
-                (str(guild_id),),
-            ).fetchone()
-        return int(row[0]) if row else 0
-
     async def _count_firstpost_seen_authors(self, guild_id: int) -> int:
-        return await asyncio.to_thread(self._count_firstpost_seen_authors_sync, guild_id)
+        return await asyncio.to_thread(self._firstpost_store.count, guild_id)
 
     async def _ensure_firstpost_seen_loaded(self, guild_id: int) -> None:
         if guild_id in self._firstpost_loaded_guilds:
@@ -1429,29 +1401,9 @@ class Honeypot(Cog):
         async with self._firstpost_db_lock:
             if guild_id in self._firstpost_loaded_guilds:
                 return
-            seen = await asyncio.to_thread(self._load_firstpost_seen_authors_sync, guild_id)
+            seen = await asyncio.to_thread(self._firstpost_store.load_guild, guild_id)
             self._firstpost_seen_authors[guild_id].update(seen)
             self._firstpost_loaded_guilds.add(guild_id)
-
-    def _flush_firstpost_seen_authors_sync(
-        self, dirty: dict[int, set[int]], first_seen_at: int
-    ) -> None:
-        rows = [
-            (str(guild_id), str(user_id), first_seen_at)
-            for guild_id, user_ids in dirty.items()
-            for user_id in user_ids
-        ]
-        if not rows:
-            return
-        with sqlite3.connect(self._firstpost_db_path) as conn:
-            conn.executemany(
-                """
-                INSERT OR IGNORE INTO firstpost_seen_authors
-                (guild_id, user_id, first_seen_at)
-                VALUES (?, ?, ?)
-                """,
-                rows,
-            )
 
     async def _flush_firstpost_seen_authors(self) -> None:
         async with self._firstpost_db_lock:
@@ -1462,11 +1414,8 @@ class Honeypot(Cog):
             }
         if not dirty:
             return
-        await asyncio.to_thread(
-            self._flush_firstpost_seen_authors_sync,
-            dirty,
-            int(datetime.now(timezone.utc).timestamp()),
-        )
+        for guild_id, user_ids in dirty.items():
+            await asyncio.to_thread(self._firstpost_store.flush, guild_id, user_ids)
         async with self._firstpost_db_lock:
             for guild_id, user_ids in dirty.items():
                 remaining = self._firstpost_dirty_seen_authors.get(guild_id)
