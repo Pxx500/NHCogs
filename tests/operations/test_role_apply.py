@@ -152,7 +152,7 @@ class RoleApplyHandlerTests(unittest.IsolatedAsyncioTestCase):
             now=now,
         )
 
-    async def test_role_apply_is_the_seventh_isolated_handler(self):
+    async def test_registry_includes_automatic_moderation_handler(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 operations = import_module("Honeypot.operations")
@@ -165,6 +165,7 @@ class RoleApplyHandlerTests(unittest.IsolatedAsyncioTestCase):
                     honeypot.OperationType.EVIDENCE_CLEANUP,
                     honeypot.OperationType.ROLE_RELEASE,
                     honeypot.OperationType.ROLE_APPLY,
+                    honeypot.OperationType.MODERATION_ACTION,
                 }
 
                 self.assertEqual(set(operations.HANDLERS), expected_types)
