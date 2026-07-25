@@ -74,6 +74,7 @@ from .operations.context import (
     OperationOutcome,
     apply_operation_policy,
 )
+from .operations.moderator_decision import apply_moderator_ignore
 from . import detection_runtime
 from .image_detector import (
     ImageSample,
@@ -3188,75 +3189,6 @@ class Honeypot(Cog):
                         publication_channel=publication_channel,
                         timings=timings,
                     )
-            elif operation.operation_type in {
-                OperationType.MODERATOR_BAN,
-                OperationType.MODERATOR_KICK,
-            }:
-                action = ActionIntent(
-                    operation.operation_type.value.removeprefix("moderator_")
-                )
-                raw_config = await self.config.guild_from_id(
-                    snapshot.case.guild_id
-                ).all()
-                guild_settings = GuildSettings.from_mapping(raw_config)
-                if guild_settings.dry_run:
-                    operation_result = f"{PLANNED_PREFIX}{action.value}"
-                else:
-                    guild = self.bot.get_guild(snapshot.case.guild_id)
-                    if guild is None:
-                        raise RuntimeError("detection case guild is unavailable")
-                    effect_started = await asyncio.to_thread(
-                        self._case_store.operation_effect_started, operation.operation_id
-                    )
-                    effect_confirmed = False
-                    if effect_started and action is ActionIntent.BAN:
-                        target = guild.get_member(snapshot.case.user_id)
-                        if target is None:
-                            target = await self._get_user_or_object(snapshot.case.user_id)
-                        try:
-                            await guild.fetch_ban(target)
-                        except discord.NotFound:
-                            pass
-                        else:
-                            effect_confirmed = True
-                    if not effect_confirmed:
-                        member = guild.get_member(snapshot.case.user_id)
-                        if member is None and action is ActionIntent.BAN:
-                            member = await self._get_user_or_object(snapshot.case.user_id)
-                        if member is None and action is ActionIntent.KICK:
-                            try:
-                                member = await guild.fetch_member(snapshot.case.user_id)
-                            except discord.NotFound:
-                                operation_result = OPERATION_RESULT_KICK_MISSING
-                                effect_confirmed = True
-                    if not effect_confirmed:
-                        if member is None:
-                            raise RuntimeError("detection case member is unavailable")
-                        moderator = guild.get_member(operation.actor_id)
-                        if moderator is None:
-                            moderator = await self._get_user_or_object(operation.actor_id)
-                        effect_started_at = datetime.now(timezone.utc)
-                        started = await asyncio.to_thread(
-                            self._case_store.start_operation_effect,
-                            operation.operation_id,
-                            operation.claim_token,
-                            effect_started_at,
-                        )
-                        if not started:
-                            raise RuntimeError("moderator action operation lease was lost")
-                        _, failed = await self._execute_action(
-                            guild,
-                            member,
-                            effect_started_at,
-                            guild_settings,
-                            reason=f"Honeypot review: {action.value.title()}",
-                            action=action.value,
-                            moderator=moderator,
-                        )
-                        if failed is not None:
-                            raise RuntimeError(failed)
-                    if operation_result is None:
-                        operation_result = action.value
             else:
                 raise RuntimeError(
                     "unsupported detection case operation: "
@@ -5474,26 +5406,13 @@ class Honeypot(Cog):
         await self._case_review_defer(interaction)
         try:
             if action == "ignore":
-                snapshot = await asyncio.to_thread(self._case_store.get_case, case_id)
                 moderated_at = datetime.now(timezone.utc)
-                operation = await asyncio.to_thread(
-                    self._case_store.record_moderator_ignore,
+                await apply_moderator_ignore(
+                    self,
                     case_id,
                     interaction.user.id,
                     moderated_at,
                 )
-                if operation is None:
-                    raise ValueError("detection case is already resolving or resolved")
-                if snapshot is not None:
-                    self._deactivate_forward_purge(
-                        snapshot.case.guild_id, snapshot.case.user_id
-                    )
-                    guild = self.bot.get_guild(snapshot.case.guild_id)
-                    if guild is not None:
-                        await self._increment_stat(guild, "ignored")
-                await self._release_detection_case_roles(case_id, moderated_at)
-                await self._finish_case_review_if_ready(case_id, interaction.user.id)
-                await self._case_review_rerender_if_open(case_id)
                 return True
             if action not in {"ban", "kick"}:
                 raise ValueError("unsupported detection case moderation action")
