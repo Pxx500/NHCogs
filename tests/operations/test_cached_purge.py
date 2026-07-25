@@ -57,6 +57,9 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
                 except ModuleNotFoundError:
                     self.fail("cached_purge has no dedicated handler module")
                 operations = import_module("Honeypot.operations")
+                evidence_cleanup = import_module(
+                    "Honeypot.operations.evidence_cleanup"
+                )
                 review_publish = import_module("Honeypot.operations.review_publish")
                 review_update = import_module("Honeypot.operations.review_update")
                 source_delete = import_module("Honeypot.operations.source_delete")
@@ -104,6 +107,9 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
                         ),
                         honeypot.OperationType.SOURCE_DELETE: (
                             source_delete.source_delete_handler
+                        ),
+                        honeypot.OperationType.EVIDENCE_CLEANUP: (
+                            evidence_cleanup.evidence_cleanup_handler
                         ),
                     },
                 )
