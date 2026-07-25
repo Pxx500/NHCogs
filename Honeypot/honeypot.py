@@ -2132,12 +2132,15 @@ class Honeypot(Cog):
             return f"{channel.mention} ({channel.id})"
         return _("not set") if channel_id is None else _("missing ({id})").format(id=channel_id)
 
-    def _honeypot_channel_ids_from_config(self, config: dict) -> list[int]:
+    def _honeypot_channel_ids(
+        self,
+        honeypot_channels: typing.Iterable[object],
+        legacy_channel_id: object,
+    ) -> list[int]:
         channel_ids: list[int] = []
-        for channel_id in config.get("honeypot_channels") or []:
+        for channel_id in honeypot_channels:
             if isinstance(channel_id, int) and channel_id not in channel_ids:
                 channel_ids.append(channel_id)
-        legacy_channel_id = config.get("honeypot_channel")
         if isinstance(legacy_channel_id, int) and legacy_channel_id not in channel_ids:
             channel_ids.append(legacy_channel_id)
         return channel_ids
@@ -2866,7 +2869,7 @@ class Honeypot(Cog):
                 try:
                     preview_published = await self._publish_detection_case(
                         operation.case_id,
-                        config,
+                        config.get("review_channel"),
                         logs_channel,
                         message_sequence=source.sequence,
                         skip_if_done=capture_task,
@@ -2958,7 +2961,7 @@ class Honeypot(Cog):
             if has_review_publication and not review_executed:
                 await self._publish_detection_case(
                     operation.case_id,
-                    config,
+                    config.get("review_channel"),
                     logs_channel,
                     message_sequence=source.sequence,
                 )
@@ -3160,7 +3163,7 @@ class Honeypot(Cog):
                 )
                 await self._publish_detection_case(
                     operation.case_id,
-                    config,
+                    config.get("review_channel"),
                     logs_channel,
                     message_sequence=operation.message_sequence,
                 )
@@ -3713,25 +3716,29 @@ class Honeypot(Cog):
         action = value if value in valid_actions else "review"
         return ActionIntent(typing.cast(str, action))
 
-    def _spam_signal(self, message: discord.Message, config: dict) -> DetectionSignal | None:
-        if not config.get("spam_enabled", False):
+    def _spam_signal(
+        self, message: discord.Message, guild_settings: GuildSettings
+    ) -> DetectionSignal | None:
+        if not guild_settings.spam_enabled:
             return None
-        reasons = self._spam_suspicion_reasons(message, config)
+        reasons = self._spam_suspicion_reasons(message, guild_settings)
         if not reasons:
             return None
         return DetectionSignal(
             detector="spam",
             reason="\n".join(reasons),
-            action=self._signal_action(config.get("spam_action", "review"), CORE_ACTION_OPTIONS),
+            action=self._signal_action(
+                guild_settings.spam_action.value, CORE_ACTION_OPTIONS
+            ),
             decisive=True,
             metadata={"reasons": tuple(reasons)},
         )
 
     async def _firstpost_signal(
-        self, message: discord.Message, config: dict
+        self, message: discord.Message, guild_settings: GuildSettings
     ) -> DetectionSignal | None:
-        firstpost_enabled = config.get("firstpost_enabled", False)
-        collect_enabled = config.get("firstpost_collect_enabled", False)
+        firstpost_enabled = guild_settings.firstpost_enabled
+        collect_enabled = guild_settings.firstpost_collect_enabled
         if not firstpost_enabled and not collect_enabled:
             return None
         await self._ensure_firstpost_seen_loaded(message.guild.id)
@@ -3739,30 +3746,32 @@ class Honeypot(Cog):
             return None
         if not firstpost_enabled:
             return None
-        reasons = self._firstpost_suspicion_reasons(message, config)
-        if not reasons:
-            return None
-        return DetectionSignal(
-            detector="firstpost",
-            reason="\n".join(reasons),
-            action=self._signal_action(config.get("firstpost_action", "review"), CORE_ACTION_OPTIONS),
-            decisive=True,
-            metadata={"reasons": tuple(reasons)},
-        )
-
-    def _firstpost_candidate(
-        self, message: discord.Message, config: dict
-    ) -> DetectionSignal | None:
-        if not config.get("firstpost_enabled", False):
-            return None
-        reasons = self._firstpost_suspicion_reasons(message, config)
+        reasons = self._firstpost_suspicion_reasons(message, guild_settings)
         if not reasons:
             return None
         return DetectionSignal(
             detector="firstpost",
             reason="\n".join(reasons),
             action=self._signal_action(
-                config.get("firstpost_action", "review"), CORE_ACTION_OPTIONS
+                guild_settings.firstpost_action.value, CORE_ACTION_OPTIONS
+            ),
+            decisive=True,
+            metadata={"reasons": tuple(reasons)},
+        )
+
+    def _firstpost_candidate(
+        self, message: discord.Message, guild_settings: GuildSettings
+    ) -> DetectionSignal | None:
+        if not guild_settings.firstpost_enabled:
+            return None
+        reasons = self._firstpost_suspicion_reasons(message, guild_settings)
+        if not reasons:
+            return None
+        return DetectionSignal(
+            detector="firstpost",
+            reason="\n".join(reasons),
+            action=self._signal_action(
+                guild_settings.firstpost_action.value, CORE_ACTION_OPTIONS
             ),
             decisive=True,
             metadata={"reasons": tuple(reasons)},
@@ -3772,18 +3781,21 @@ class Honeypot(Cog):
     async def _honeypot_signals(
         self,
         message: discord.Message,
-        config: dict,
+        guild_settings: GuildSettings,
         *,
         image_evidence: DetectionSignal | None = None,
     ) -> tuple[DetectionSignal, ...]:
-        if message.channel.id not in self._honeypot_channel_ids_from_config(config):
+        if message.channel.id not in self._honeypot_channel_ids(
+            guild_settings.honeypot_channels,
+            guild_settings.honeypot_channel,
+        ):
             return ()
-        whitelisted_role_ids = set(config.get("whitelisted_roles", ()))
+        whitelisted_role_ids = set(guild_settings.whitelisted_roles)
         has_whitelist_role = any(
             role.id in whitelisted_role_ids for role in message.author.roles
         )
-        whitelist_mode = config.get("whitelist_mode", "bypass") if has_whitelist_role else None
-        if whitelist_mode == "bypass":
+        whitelist_mode = guild_settings.whitelist_mode if has_whitelist_role else None
+        if whitelist_mode is WhitelistModeOption.BYPASS:
             return (
                 DetectionSignal(
                     detector="honeypot",
@@ -3793,12 +3805,15 @@ class Honeypot(Cog):
                     metadata={"whitelist_bypass": True},
                 ),
             )
-        reasons = await self._suspicion_reasons(message, config)
+        reasons = await self._suspicion_reasons(message, guild_settings)
         if image_evidence is not None:
             reasons.append(_("Known suspicious image match"))
         second_strike_role_ids = {
             role_id
-            for role_id in (config.get("mute_role"), config.get("joinwatch_auto_role_id"))
+            for role_id in (
+                guild_settings.mute_role,
+                guild_settings.joinwatch_auto_role_id,
+            )
             if role_id
         }
         second_strike = bool(second_strike_role_ids) and any(
@@ -3806,18 +3821,25 @@ class Honeypot(Cog):
         )
         if second_strike:
             reasons.append(_("Repeat honeypot activity"))
-        force_review = whitelist_mode == "review"
-        force_fallback = whitelist_mode == "fallback"
+        force_review = whitelist_mode is WhitelistModeOption.REVIEW
+        force_fallback = whitelist_mode is WhitelistModeOption.FALLBACK
         if second_strike and not force_review and not force_fallback:
             action = ActionIntent.BAN
         elif force_review:
             action = ActionIntent.REVIEW
         elif force_fallback or not reasons:
             action = self._signal_action(
-                config.get("fallback_action", "review"), FALLBACK_ACTION_OPTIONS
+                guild_settings.fallback_action.value, FALLBACK_ACTION_OPTIONS
             )
         else:
-            action = self._signal_action(config.get("action", "review"), CORE_ACTION_OPTIONS)
+            action = self._signal_action(
+                (
+                    guild_settings.action.value
+                    if guild_settings.action is not None
+                    else None
+                ),
+                CORE_ACTION_OPTIONS,
+            )
         return (
             DetectionSignal(
                 detector="honeypot",
@@ -3836,11 +3858,11 @@ class Honeypot(Cog):
     async def _initial_image_signal(
         self,
         message: discord.Message,
-        config: dict,
+        guild_settings: GuildSettings,
         *,
         action_override: ActionIntent | None = None,
     ) -> DetectionSignal | None:
-        if not config.get("imagescan_detector_enabled", False):
+        if not guild_settings.imagescan_detector_enabled:
             return None
         image_count = sum(
             1 for attachment in message.attachments if is_image_attachment(attachment)
@@ -3861,7 +3883,7 @@ class Honeypot(Cog):
             await self._imagescan_increment_profile(message.guild.id, profile)
             return None
         state = await self._imagescan_model_state(
-            message.guild.id, int(config.get("imagescan_detector_threshold", 20))
+            message.guild.id, guild_settings.imagescan_detector_threshold
         )
         if not state["valid"]:
             await self._imagescan_increment_profile(message.guild.id, profile)
@@ -3919,7 +3941,7 @@ class Honeypot(Cog):
                 action_override
                 if action_override is not None
                 else self._signal_action(
-                    config.get("imagescan_detector_action", "review"),
+                    guild_settings.imagescan_detector_action.value,
                     IMAGE_SCAN_DETECTOR_ACTION_OPTIONS,
                 )
             ),
@@ -3928,41 +3950,45 @@ class Honeypot(Cog):
         )
 
     async def _collect_detection_signals(
-        self, message: discord.Message, config: dict
+        self, message: discord.Message, guild_settings: GuildSettings
     ) -> tuple[DetectionSignal, ...]:
         forward = self._forward_purge_signal(message)
         signals: list[DetectionSignal] = []
         if forward is not None:
             signals.append(forward)
         in_honeypot = (
-            message.channel.id in self._honeypot_channel_ids_from_config(config)
+            message.channel.id
+            in self._honeypot_channel_ids(
+                guild_settings.honeypot_channels,
+                guild_settings.honeypot_channel,
+            )
         )
         if in_honeypot:
             image = None
             if not any(signal.decisive for signal in signals):
                 image = await self._initial_image_signal(
                     message,
-                    config,
+                    guild_settings,
                     action_override=ActionIntent.NONE,
                 )
             signals.extend(
                 await self._honeypot_signals(
                     message,
-                    config,
+                    guild_settings,
                     image_evidence=image,
                 )
             )
             if image is not None:
                 signals.append(image)
         else:
-            spam = self._spam_signal(message, config)
+            spam = self._spam_signal(message, guild_settings)
             if spam is not None:
                 signals.append(spam)
-            firstpost = await self._firstpost_signal(message, config)
+            firstpost = await self._firstpost_signal(message, guild_settings)
             if firstpost is not None:
                 signals.append(firstpost)
             if not any(signal.decisive for signal in signals):
-                image = await self._initial_image_signal(message, config)
+                image = await self._initial_image_signal(message, guild_settings)
                 if image is not None:
                     signals.append(image)
         return tuple(signals)
@@ -3997,19 +4023,21 @@ class Honeypot(Cog):
 
     @classmethod
     def _resolve_unavailable_review_signals(
-        cls, config: dict, signals: tuple[DetectionSignal, ...]
+        cls,
+        guild_settings: GuildSettings,
+        signals: tuple[DetectionSignal, ...],
     ) -> tuple[DetectionSignal, ...]:
         review_available = bool(
-            config.get("review_enabled", True)
+            guild_settings.review_enabled
             and (
-                config.get("review_channel") is not None
-                or config.get("logs_channel") is not None
+                guild_settings.review_channel is not None
+                or guild_settings.logs_channel is not None
             )
         )
         if review_available:
             return signals
         fallback = cls._signal_action(
-            config.get("fallback_action", "review"), FALLBACK_ACTION_OPTIONS
+            guild_settings.fallback_action.value, FALLBACK_ACTION_OPTIONS
         )
         if fallback is ActionIntent.REVIEW:
             fallback = ActionIntent.NONE
@@ -5222,7 +5250,7 @@ class Honeypot(Cog):
     async def _publish_detection_case(
         self,
         case_id: str,
-        config: dict,
+        review_channel_id: int | None,
         logs_channel: discord.TextChannel | discord.Thread | None,
         *,
         message_sequence: int | None = None,
@@ -5237,7 +5265,7 @@ class Honeypot(Cog):
                 return False
             await self._publish_detection_case_serial(
                 case_id,
-                config,
+                review_channel_id,
                 logs_channel,
                 message_sequence=message_sequence,
             )
@@ -5261,7 +5289,7 @@ class Honeypot(Cog):
     async def _publish_detection_case_serial(
         self,
         case_id: str,
-        config: dict,
+        review_channel_id: int | None,
         logs_channel: discord.TextChannel | discord.Thread | None,
         *,
         message_sequence: int | None = None,
@@ -5270,13 +5298,14 @@ class Honeypot(Cog):
         if snapshot is None:
             return
         guild = None
-        if config.get("review_channel") is not None or snapshot.case.review_channel_id is not None:
+        if (
+            review_channel_id is not None
+            or snapshot.case.review_channel_id is not None
+        ):
             guild = self.bot.get_guild(snapshot.case.guild_id)
         review_channel = (
-            await self._fetch_text_channel_or_thread(
-                guild, config.get("review_channel")
-            )
-            if guild is not None and config.get("review_channel") is not None
+            await self._fetch_text_channel_or_thread(guild, review_channel_id)
+            if guild is not None and review_channel_id is not None
             else None
         )
         if review_channel is not None and not isinstance(
@@ -5506,7 +5535,9 @@ class Honeypot(Cog):
         if snapshot is None:
             return
         config = await self.config.guild_from_id(snapshot.case.guild_id).all()
-        await self._publish_detection_case(case_id, config, None)
+        await self._publish_detection_case(
+            case_id, config.get("review_channel"), None
+        )
 
     async def _case_review_rerender_if_open(self, case_id: str) -> None:
         snapshot = await asyncio.to_thread(self._case_store.get_case, case_id)
@@ -5908,7 +5939,7 @@ class Honeypot(Cog):
     async def _process_detected_message(
         self,
         message: discord.Message,
-        config: dict,
+        guild_settings: GuildSettings,
         logs_channel: discord.TextChannel | discord.Thread | None,
         signals: tuple[DetectionSignal, ...],
         *,
@@ -5916,15 +5947,15 @@ class Honeypot(Cog):
         admission_lock: asyncio.Lock | None = None,
     ) -> None:
         timings = timings if timings is not None else {}
-        signals = self._resolve_unavailable_review_signals(config, signals)
-        role_id = config.get("mute_role")
+        signals = self._resolve_unavailable_review_signals(guild_settings, signals)
+        role_id = guild_settings.mute_role
 
         def initial_operations(owned_signals):
             action = effective_action(owned_signals)
             whitelist_bypass = bool(owned_signals) and all(
                 signal.metadata.get("whitelist_bypass") for signal in owned_signals
             )
-            publish_review = config.get("review_enabled", True) and not whitelist_bypass
+            publish_review = guild_settings.review_enabled and not whitelist_bypass
             containment = any(
                 signal.action != ActionIntent.NONE
                 or (
@@ -5959,7 +5990,7 @@ class Honeypot(Cog):
             if (
                 role_id is not None
                 and action is ActionIntent.REVIEW
-                and not config.get("dry_run")
+                and not guild_settings.dry_run
             ):
                 operations.append(
                     (
@@ -5969,8 +6000,9 @@ class Honeypot(Cog):
                 )
             return tuple(operations)
 
-        tracking_firstpost = config.get("firstpost_enabled", False) or config.get(
-            "firstpost_collect_enabled", False
+        tracking_firstpost = (
+            guild_settings.firstpost_enabled
+            or guild_settings.firstpost_collect_enabled
         )
         admission_started = perf_counter()
         try:
@@ -6067,7 +6099,9 @@ class Honeypot(Cog):
                         for operation in admitted_snapshot.operations
                     ):
                         await self._publish_detection_case(
-                            append.case.case_id, config, logs_channel
+                            append.case.case_id,
+                            guild_settings.review_channel,
+                            logs_channel,
                         )
                 return
             await self._execute_detection_case_operation(
@@ -6105,15 +6139,19 @@ class Honeypot(Cog):
                 and review_operation.status.value == "succeeded"
             ):
                 await self._publish_detection_case(
-                    append.case.case_id, config, logs_channel
+                    append.case.case_id,
+                    guild_settings.review_channel,
+                    logs_channel,
                 )
         return
-    async def _suspicion_reasons(self, message: discord.Message, config: dict) -> list[str]:
+    async def _suspicion_reasons(
+        self, message: discord.Message, guild_settings: GuildSettings
+    ) -> list[str]:
         reasons: list[str] = []
         content = message.content.lower()
         if message.author.created_at > datetime.now(timezone.utc) - timedelta(days=7):
             reasons.append(_("Account is under 7 days old"))
-        scam_keywords = config.get("scam_keywords") or SCAM_KEYWORDS
+        scam_keywords = guild_settings.scam_keywords or SCAM_KEYWORDS
         matched_keywords = matched_scam_keywords(scam_keywords, content)
         if matched_keywords:
             reasons.append(_("Matched keywords: {keywords}").format(keywords=", ".join(matched_keywords[:5])))
@@ -6122,7 +6160,9 @@ class Honeypot(Cog):
         image_attachment_count = sum(1 for attachment in message.attachments if is_image_attachment(attachment))
         if image_attachment_count >= 4:
             reasons.append(_("Multiple image attachments: {count}").format(count=image_attachment_count))
-        attachment_patterns = config.get("attachment_patterns") or DEFAULT_ATTACHMENT_PATTERNS
+        attachment_patterns = (
+            guild_settings.attachment_patterns or DEFAULT_ATTACHMENT_PATTERNS
+        )
         filename_bases = [attachment.filename.rsplit(".", 1)[0].lower() for attachment in message.attachments]
         generic_attachment_count = sum(1 for filename_base in filename_bases if GENERIC_ATTACHMENT_NAME_RE.fullmatch(filename_base))
         if generic_attachment_count >= 2:
@@ -6145,7 +6185,9 @@ class Honeypot(Cog):
             reasons.append(_("Matched attachment rules: {patterns}").format(patterns=", ".join(matched_patterns[:3])))
         return reasons
 
-    def _record_recent_user_message(self, message: discord.Message, config: dict) -> None:
+    def _record_recent_user_message(
+        self, message: discord.Message, guild_settings: GuildSettings
+    ) -> None:
         if message.guild is None:
             return
         refs = self._recent_user_messages[message.guild.id][message.author.id]
@@ -6160,24 +6202,27 @@ class Honeypot(Cog):
         self._prune_recent_user_messages(
             message.guild.id,
             message.author.id,
-            retention_seconds=self._purge_retention_seconds(config),
+            retention_seconds=self._purge_retention_seconds(
+                guild_settings.purge_backward_seconds
+            ),
         )
 
     @staticmethod
-    def _purge_backward_seconds(config: dict) -> int:
-        value = int(config.get("purge_backward_seconds", PURGE_BACKWARD_DEFAULT_SECONDS) or 0)
+    def _purge_backward_seconds(value: int) -> int:
         return max(PURGE_MIN_RETENTION_SECONDS, min(value, PURGE_BACKWARD_MAX_SECONDS))
 
     @staticmethod
-    def _purge_forward_seconds(config: dict) -> int:
-        value = int(config.get("purge_forward_seconds", PURGE_FORWARD_DEFAULT_SECONDS) or 0)
+    def _purge_forward_seconds(value: int) -> int:
         return max(0, min(value, PURGE_FORWARD_MAX_SECONDS))
 
     @staticmethod
-    def _purge_retention_seconds(config: dict | None = None) -> int:
-        if config is None:
+    def _purge_retention_seconds(purge_backward_seconds: int | None = None) -> int:
+        if purge_backward_seconds is None:
             return PURGE_MIN_RETENTION_SECONDS
-        return max(PURGE_MIN_RETENTION_SECONDS, Honeypot._purge_backward_seconds(config))
+        return max(
+            PURGE_MIN_RETENTION_SECONDS,
+            Honeypot._purge_backward_seconds(purge_backward_seconds),
+        )
 
     def _prune_recent_user_messages(
         self, guild_id: int, user_id: int, *, retention_seconds: int = PURGE_MIN_RETENTION_SECONDS
@@ -6194,8 +6239,17 @@ class Honeypot(Cog):
     def _prune_purge_cache(self, configs_by_guild_id: dict[int, dict] | None = None) -> None:
         now = datetime.now(timezone.utc)
         for guild_id, users in list(self._recent_user_messages.items()):
+            guild_config = (configs_by_guild_id or {}).get(guild_id)
             retention_seconds = self._purge_retention_seconds(
-                (configs_by_guild_id or {}).get(guild_id)
+                int(
+                    guild_config.get(
+                        "purge_backward_seconds",
+                        PURGE_BACKWARD_DEFAULT_SECONDS,
+                    )
+                    or 0
+                )
+                if guild_config is not None
+                else None
             )
             for user_id in list(users):
                 self._prune_recent_user_messages(
@@ -6213,7 +6267,9 @@ class Honeypot(Cog):
     def _activate_forward_purge(
         self, guild_id: int, user_id: int, config: dict
     ) -> None:
-        forward_seconds = self._purge_forward_seconds(config)
+        forward_seconds = self._purge_forward_seconds(
+            int(config.get("purge_forward_seconds", PURGE_FORWARD_DEFAULT_SECONDS) or 0)
+        )
         if forward_seconds <= 0:
             self._deactivate_forward_purge(guild_id, user_id)
             return
@@ -6301,7 +6357,14 @@ class Honeypot(Cog):
             guild,
             user_id,
             exclude_message_id=exclude_message_id,
-            retention_seconds=self._purge_retention_seconds(config),
+            retention_seconds=self._purge_retention_seconds(
+                int(
+                    config.get(
+                        "purge_backward_seconds", PURGE_BACKWARD_DEFAULT_SECONDS
+                    )
+                    or 0
+                )
+            ),
         )
         self._activate_forward_purge(guild.id, user_id, config)
         return deleted
@@ -6349,7 +6412,14 @@ class Honeypot(Cog):
         *,
         exclude_message_id: int | None = None,
     ) -> int:
-        retention_seconds = self._purge_retention_seconds(config)
+        retention_seconds = self._purge_retention_seconds(
+            int(
+                config.get(
+                    "purge_backward_seconds", PURGE_BACKWARD_DEFAULT_SECONDS
+                )
+                or 0
+            )
+        )
         self._prune_recent_user_messages(
             guild.id, user_id, retention_seconds=retention_seconds
         )
@@ -6399,7 +6469,7 @@ class Honeypot(Cog):
         return deleted
 
     def _firstpost_suspicion_reasons(
-        self, message: discord.Message, config: dict
+        self, message: discord.Message, guild_settings: GuildSettings
     ) -> list[str]:
         attachment_count = len(message.attachments)
         reasons: list[str] = []
@@ -6407,7 +6477,7 @@ class Honeypot(Cog):
         if attachment_count == 4:
             reasons.append(_("First post with four attachments"))
         elif attachment_count == 2:
-            scam_keywords = config.get("scam_keywords") or SCAM_KEYWORDS
+            scam_keywords = guild_settings.scam_keywords or SCAM_KEYWORDS
             matched_keywords = matched_scam_keywords(
                 scam_keywords,
                 content,
@@ -6421,13 +6491,15 @@ class Honeypot(Cog):
                 )
         return reasons
 
-    def _spam_suspicion_reasons(self, message: discord.Message, config: dict) -> list[str]:
-        window_seconds = int(config.get("spam_window_seconds", 10) or 10)
+    def _spam_suspicion_reasons(
+        self, message: discord.Message, guild_settings: GuildSettings
+    ) -> list[str]:
+        window_seconds = guild_settings.spam_window_seconds or 10
         window_seconds = max(SPAM_WINDOW_MIN_SECONDS, min(window_seconds, SPAM_WINDOW_MAX_SECONDS))
-        min_channels = int(config.get("spam_min_channels", 2) or 2)
+        min_channels = guild_settings.spam_min_channels or 2
         min_channels = max(SPAM_CHANNEL_MIN, min(min_channels, SPAM_CHANNEL_MAX))
         content = message.content.strip().lower()
-        scam_keywords = config.get("scam_keywords") or SCAM_KEYWORDS
+        scam_keywords = guild_settings.scam_keywords or SCAM_KEYWORDS
         has_signal = bool(message.attachments) or bool(matched_scam_keywords(scam_keywords, content))
         if not has_signal:
             return []
@@ -6551,17 +6623,20 @@ class Honeypot(Cog):
                 queue_wait_ms = (perf_counter() - pipeline_started) * 1000
                 if await self.bot.cog_disabled_in_guild(self, message.guild):
                     return
-                config = await self.config.guild(message.guild).all()
-                if not config["enabled"]:
+                raw_config = await self.config.guild(message.guild).all()
+                guild_settings = GuildSettings.from_mapping(raw_config)
+                if not guild_settings.enabled:
                     return
                 logs_channel = self._get_text_channel_or_thread(
-                    message.guild, config.get("logs_channel")
+                    message.guild, guild_settings.logs_channel
                 )
                 if await self._is_protected_member(message.author, message.guild):
                     return
-                self._record_recent_user_message(message, config)
+                self._record_recent_user_message(message, guild_settings)
                 signals_started = perf_counter()
-                signals = await self._collect_detection_signals(message, config)
+                signals = await self._collect_detection_signals(
+                    message, guild_settings
+                )
                 timings = {
                     "queue_wait_ms": queue_wait_ms,
                     "signals_ms": (perf_counter() - signals_started) * 1000,
@@ -6571,7 +6646,7 @@ class Honeypot(Cog):
                 admission_lock_owned = False
                 await self._process_detected_message(
                     message,
-                    config,
+                    guild_settings,
                     logs_channel,
                     signals,
                     timings=timings,
@@ -7785,7 +7860,10 @@ class Honeypot(Cog):
         if missing is not None:
             raise commands.UserFeedbackCheckFailure(missing)
         config = await self.config.guild(ctx.guild).all()
-        if target.id in self._honeypot_channel_ids_from_config(config):
+        if target.id in self._honeypot_channel_ids(
+            config.get("honeypot_channels") or [],
+            config.get("honeypot_channel"),
+        ):
             raise commands.UserFeedbackCheckFailure(_("That channel is already a honeypot channel."))
         async with self.config.guild(ctx.guild).honeypot_channels() as channel_ids:
             channel_ids.append(target.id)
@@ -7810,7 +7888,10 @@ class Honeypot(Cog):
     async def channel_list(self, ctx: commands.Context) -> None:
         """List registered honeypot channels."""
         config = await self.config.guild(ctx.guild).all()
-        channel_ids = self._honeypot_channel_ids_from_config(config)
+        channel_ids = self._honeypot_channel_ids(
+            config.get("honeypot_channels") or [],
+            config.get("honeypot_channel"),
+        )
         await ctx.send(
             _("Honeypot channels:\n{channels}").format(
                 channels=self._format_honeypot_channel_list(ctx.guild, channel_ids),
@@ -7864,7 +7945,15 @@ class Honeypot(Cog):
             config = await self.config.guild(ctx.guild).all()
             await ctx.send(
                 _("Backward purge window: {seconds}s").format(
-                    seconds=self._purge_backward_seconds(config),
+                    seconds=self._purge_backward_seconds(
+                        int(
+                            config.get(
+                                "purge_backward_seconds",
+                                PURGE_BACKWARD_DEFAULT_SECONDS,
+                            )
+                            or 0
+                        )
+                    ),
                 )
             )
         elif seconds < PURGE_MIN_RETENTION_SECONDS or seconds > PURGE_BACKWARD_MAX_SECONDS:
@@ -7885,7 +7974,15 @@ class Honeypot(Cog):
             config = await self.config.guild(ctx.guild).all()
             await ctx.send(
                 _("Forward purge window: {seconds}s").format(
-                    seconds=self._purge_forward_seconds(config),
+                    seconds=self._purge_forward_seconds(
+                        int(
+                            config.get(
+                                "purge_forward_seconds",
+                                PURGE_FORWARD_DEFAULT_SECONDS,
+                            )
+                            or 0
+                        )
+                    ),
                 )
             )
         elif seconds < 0 or seconds > PURGE_FORWARD_MAX_SECONDS:
@@ -9027,7 +9124,16 @@ class Honeypot(Cog):
             ctx,
             _("Channel config"),
             [
-                (_("Honeypot channels"), self._format_honeypot_channel_list(ctx.guild, self._honeypot_channel_ids_from_config(config))),
+                (
+                    _("Honeypot channels"),
+                    self._format_honeypot_channel_list(
+                        ctx.guild,
+                        self._honeypot_channel_ids(
+                            config.get("honeypot_channels") or [],
+                            config.get("honeypot_channel"),
+                        ),
+                    ),
+                ),
                 (_("Logs channel"), self._format_channel_setting(ctx.guild, config.get("logs_channel"))),
             ],
         )
@@ -9053,8 +9159,34 @@ class Honeypot(Cog):
             _("Purge config"),
             [
                 (_("Mode"), _("Event registry purge")),
-                (_("Backward window"), _("{seconds}s").format(seconds=self._purge_backward_seconds(config))),
-                (_("Forward window"), _("{seconds}s").format(seconds=self._purge_forward_seconds(config))),
+                (
+                    _("Backward window"),
+                    _("{seconds}s").format(
+                        seconds=self._purge_backward_seconds(
+                            int(
+                                config.get(
+                                    "purge_backward_seconds",
+                                    PURGE_BACKWARD_DEFAULT_SECONDS,
+                                )
+                                or 0
+                            )
+                        )
+                    ),
+                ),
+                (
+                    _("Forward window"),
+                    _("{seconds}s").format(
+                        seconds=self._purge_forward_seconds(
+                            int(
+                                config.get(
+                                    "purge_forward_seconds",
+                                    PURGE_FORWARD_DEFAULT_SECONDS,
+                                )
+                                or 0
+                            )
+                        )
+                    ),
+                ),
                 (_("Minimum retention"), _("{seconds}s").format(seconds=PURGE_MIN_RETENTION_SECONDS)),
             ],
         )
@@ -9229,7 +9361,16 @@ class Honeypot(Cog):
             _("Honeypot config summary"),
             [
                 (_("Honeypot"), self._format_bool_setting(config.get("enabled", False))),
-                (_("Honeypot channels"), self._format_honeypot_channel_list(ctx.guild, self._honeypot_channel_ids_from_config(config))),
+                (
+                    _("Honeypot channels"),
+                    self._format_honeypot_channel_list(
+                        ctx.guild,
+                        self._honeypot_channel_ids(
+                            config.get("honeypot_channels") or [],
+                            config.get("honeypot_channel"),
+                        ),
+                    ),
+                ),
                 (_("Logs channel"), self._format_channel_setting(ctx.guild, config.get("logs_channel"))),
                 (_("Review"), self._format_bool_setting(config.get("review_enabled", False))),
                 (_("Spam"), self._format_bool_setting(config.get("spam_enabled", False))),
@@ -9506,7 +9647,10 @@ class Honeypot(Cog):
             return
         honeypot_channels = [
             channel
-            for channel_id in self._honeypot_channel_ids_from_config(config)
+            for channel_id in self._honeypot_channel_ids(
+                config.get("honeypot_channels") or [],
+                config.get("honeypot_channel"),
+            )
             if (channel := self._get_text_channel_or_thread(ctx.guild, channel_id)) is not None
         ]
         logs_channel_id = config.get("logs_channel")
