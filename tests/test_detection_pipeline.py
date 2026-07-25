@@ -113,6 +113,26 @@ class _Cog:
 
 @contextmanager
 def _isolated_honeypot_modules(data_path: Path):
+    dependency_order = (
+        "image_detector",
+        "detection_cases",
+        "detection_runtime",
+        "case_review",
+        "console_dump",
+    )
+    module_paths = {
+        path.stem: path
+        for path in PACKAGE_DIR.glob("*.py")
+        if path.stem != "__init__"
+    }
+    remainder = tuple(
+        sorted(
+            name
+            for name in module_paths
+            if name not in dependency_order and name != "honeypot"
+        )
+    )
+    load_order = dependency_order + remainder
     names = (
         "discord",
         "discord.ext",
@@ -127,13 +147,7 @@ def _isolated_honeypot_modules(data_path: Path):
         "redbot.core.utils.chat_formatting",
         "AAA3A_utils",
         "Honeypot",
-        "Honeypot.image_detector",
-        "Honeypot.detection_cases",
-        "Honeypot.detection_runtime",
-        "Honeypot.case_review",
-        "Honeypot.console_dump",
-        "Honeypot.honeypot",
-    )
+    ) + tuple(f"Honeypot.{name}" for name in (*load_order, "honeypot"))
     previous = {name: sys.modules.get(name, _MISSING) for name in names}
 
     discord = ModuleType("discord")
@@ -246,22 +260,27 @@ def _isolated_honeypot_modules(data_path: Path):
                 "Honeypot": package,
             }
         )
-        _load_module("Honeypot.image_detector", PACKAGE_DIR / "image_detector.py")
-        _load_module("Honeypot.detection_cases", PACKAGE_DIR / "detection_cases.py")
-        runtime = _load_module(
-            "Honeypot.detection_runtime", PACKAGE_DIR / "detection_runtime.py"
-        )
-        _load_module("Honeypot.case_review", PACKAGE_DIR / "case_review.py")
-        _load_module("Honeypot.console_dump", PACKAGE_DIR / "console_dump.py")
+        loaded = {
+            name: _load_module(f"Honeypot.{name}", module_paths[name])
+            for name in load_order
+        }
+        runtime = loaded["detection_runtime"]
 
         async def test_bounded_reader(attachment, max_bytes):
             data = await attachment.read(use_cached=True)
             return data[: max_bytes + 1]
 
         runtime.read_attachment_bounded = test_bounded_reader
-        yield _load_module("Honeypot.honeypot", PACKAGE_DIR / "honeypot.py")
+        yield _load_module("Honeypot.honeypot", module_paths["honeypot"])
     finally:
-        for name, module in previous.items():
+        touched_names = set(previous)
+        touched_names.update(
+            name
+            for name in sys.modules
+            if name == "Honeypot" or name.startswith("Honeypot.")
+        )
+        for name in touched_names:
+            module = previous.get(name, _MISSING)
             if module is _MISSING:
                 sys.modules.pop(name, None)
             else:
@@ -286,6 +305,18 @@ class _Bot:
 
 
 class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
+
+    async def test_isolation_removes_new_honeypot_modules(self):
+        module_name = "Honeypot.future_projection"
+        sys.modules.pop(module_name, None)
+        try:
+            with TemporaryDirectory() as directory:
+                with _isolated_honeypot_modules(Path(directory)):
+                    sys.modules[module_name] = ModuleType(module_name)
+
+            self.assertNotIn(module_name, sys.modules)
+        finally:
+            sys.modules.pop(module_name, None)
 
     async def test_load_ignores_stale_pending_reviews_when_there_are_no_open_cases(self):
         with TemporaryDirectory() as directory:
