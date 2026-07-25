@@ -13,11 +13,15 @@ from .context import (
     OperationHandler,
     OperationPolicy,
 )
+from .review_publish import review_publish_handler
 from .review_update import review_update_handler
 
 
 HANDLERS: Mapping[OperationType, OperationHandler] = MappingProxyType(
-    {OperationType.REVIEW_UPDATE: review_update_handler}
+    {
+        OperationType.REVIEW_UPDATE: review_update_handler,
+        OperationType.REVIEW_PUBLISH: review_publish_handler,
+    }
 )
 
 _ROLE_APPLY_FOLLOW_UP = OperationFollowUp(FollowUpKind.ROLE_APPLY_RERENDER)

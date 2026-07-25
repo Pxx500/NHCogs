@@ -3349,25 +3349,6 @@ class Honeypot(Cog):
                             operation_result = OPERATION_RESULT_ROLE_ALREADY_OWNED
                         else:
                             operation_result = OPERATION_RESULT_PREEXISTING_ROLE
-            elif operation.operation_type == OperationType.REVIEW_PUBLISH:
-                raw_config = await self.config.guild_from_id(
-                    snapshot.case.guild_id
-                ).all()
-                guild_settings = GuildSettings.from_mapping(raw_config)
-                guild = self.bot.get_guild(snapshot.case.guild_id)
-                logs_channel = publication_channel or (
-                    self._get_text_channel_or_thread(
-                        guild, guild_settings.logs_channel
-                    )
-                    if guild is not None
-                    else None
-                )
-                await self._publish_detection_case(
-                    operation.case_id,
-                    guild_settings.review_channel,
-                    logs_channel,
-                    message_sequence=operation.message_sequence,
-                )
             elif operation.operation_type == OperationType.MODERATION_ACTION:
                 source = next(
                     (
