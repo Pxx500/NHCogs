@@ -3232,8 +3232,6 @@ class Honeypot(Cog):
                 and snapshot.case.status is not CaseStatus.PENDING
             ):
                 operation_result = OPERATION_RESULT_CASE_TERMINAL
-            elif operation.operation_type == OperationType.REVIEW_UPDATE:
-                await self._case_review_rerender(operation.case_id)
             elif operation.operation_type == OperationType.ROLE_APPLY:
                 guild = self.bot.get_guild(snapshot.case.guild_id)
                 if guild is None:
