@@ -12245,6 +12245,32 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         )
         return SimpleNamespace(guild=guild, send=mock.AsyncMock())
 
+    async def test_doctor_command_output_matches_golden(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog.config = SimpleNamespace(
+                    guild=lambda guild: SimpleNamespace(
+                        all=mock.AsyncMock(
+                            return_value={
+                                "enabled": False,
+                                "action": "invalid",
+                                "fallback_action": "review",
+                                "whitelist_mode": "bypass",
+                            }
+                        )
+                    )
+                )
+                ctx = self._doctor_context()
+
+                await cog.honeypot_doctor(ctx)
+
+                actual = "".join(call.args[0] for call in ctx.send.await_args_list)
+                expected = (
+                    Path(__file__).with_name("golden") / "honeypot_doctor.txt"
+                ).read_text(encoding="utf-8").removesuffix("\n")
+                self.assertEqual(actual, expected)
+
     async def test_logs_rejects_thread_destination(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
