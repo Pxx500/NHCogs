@@ -95,6 +95,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                 operations = import_module("Honeypot.operations")
                 cached_purge = import_module("Honeypot.operations.cached_purge")
                 review_update = import_module("Honeypot.operations.review_update")
+                source_delete = import_module("Honeypot.operations.source_delete")
                 now = datetime.now(timezone.utc)
                 guild = object()
                 configured_logs_channel = object()
@@ -137,6 +138,9 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                         honeypot.OperationType.CACHED_PURGE: (
                             cached_purge.cached_purge_handler
                         ),
+                        honeypot.OperationType.SOURCE_DELETE: (
+                            source_delete.source_delete_handler
+                        ),
                     },
                 )
                 for operation_type in honeypot.OperationType:
@@ -144,6 +148,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                         honeypot.OperationType.REVIEW_UPDATE,
                         honeypot.OperationType.REVIEW_PUBLISH,
                         honeypot.OperationType.CACHED_PURGE,
+                        honeypot.OperationType.SOURCE_DELETE,
                     }:
                         continue
                     self.assertIsNone(

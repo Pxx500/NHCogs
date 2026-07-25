@@ -16,6 +16,7 @@ from .context import (
 )
 from .review_publish import review_publish_handler
 from .review_update import review_update_handler
+from .source_delete import source_delete_handler
 
 
 HANDLERS: Mapping[OperationType, OperationHandler] = MappingProxyType(
@@ -23,6 +24,7 @@ HANDLERS: Mapping[OperationType, OperationHandler] = MappingProxyType(
         OperationType.REVIEW_UPDATE: review_update_handler,
         OperationType.REVIEW_PUBLISH: review_publish_handler,
         OperationType.CACHED_PURGE: cached_purge_handler,
+        OperationType.SOURCE_DELETE: source_delete_handler,
     }
 )
 

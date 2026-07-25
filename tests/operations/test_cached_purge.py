@@ -59,6 +59,7 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
                 operations = import_module("Honeypot.operations")
                 review_publish = import_module("Honeypot.operations.review_publish")
                 review_update = import_module("Honeypot.operations.review_update")
+                source_delete = import_module("Honeypot.operations.source_delete")
                 now = datetime.now(timezone.utc)
                 resolved_message_ids = []
                 deleted_message_ids = []
@@ -100,6 +101,9 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
                         ),
                         honeypot.OperationType.CACHED_PURGE: (
                             handler_module.cached_purge_handler
+                        ),
+                        honeypot.OperationType.SOURCE_DELETE: (
+                            source_delete.source_delete_handler
                         ),
                     },
                 )
