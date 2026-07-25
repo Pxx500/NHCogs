@@ -74,6 +74,29 @@ from .image_detector import (
     match_image,
     rebuild_model_state,
 )
+from . import settings
+from .settings import (
+    BAIT_ACTION_OPTIONS,
+    CORE_ACTION_OPTIONS,
+    DEFAULT_ATTACHMENT_PATTERNS,
+    DEFAULT_STATS,
+    FALLBACK_ACTION_OPTIONS,
+    IMAGE_SCAN_DETECTOR_ACTION_OPTIONS,
+    JOINWATCH_AUTO_ROLE_ACTION_OPTIONS,
+    PURGE_BACKWARD_DEFAULT_SECONDS,
+    PURGE_FORWARD_DEFAULT_SECONDS,
+    REVIEW_KICK_FAIL_WARNING_MODES,
+    SCAM_KEYWORDS,
+    WHITELIST_MODE_OPTIONS,
+    BaitActionOption,
+    CoreActionOption,
+    FallbackActionOption,
+    GuildSettings,
+    ImageScanDetectorActionOption,
+    JoinwatchAutoRoleActionOption,
+    ReviewKickFailWarningMode,
+    WhitelistModeOption,
+)
 
 _ = Translator("Honeypot", __file__)
 log = logging.getLogger("red.Honeypot")
@@ -103,63 +126,11 @@ PURGE_PERMISSION_REQUIREMENTS = (
     ("Read Message History", "read_message_history"),
     ("Manage Messages", "manage_messages"),
 )
-DEFAULT_STATS = {
-    "detections": 0,
-    "suspicious": 0,
-    "reviewed": 0,
-    "review_expired": 0,
-    "ignored": 0,
-    "kicked": 0,
-    "banned": 0,
-    "failed_actions": 0,
-    "dry_run_actions": 0,
-    "whitelisted": 0,
-    "pending_mutes": 0,
-    "pending_mute_failures": 0,
-    "purged_messages": 0,
-    "cached_purge_deletes": 0,
-    "forward_purge_deletes": 0,
-    "forward_purge_delete_failures": 0,
-    "evidence_capture_failures": 0,
-    "delete_forbidden": 0,
-    "delete_transient_failures": 0,
-    "firstpost_seen": 0,
-    "firstpost_hits": 0,
-    "firstpost_reviews": 0,
-    "firstpost_kicks": 0,
-    "firstpost_bans": 0,
-    "early_catches": 0,
-    "spam_hits": 0,
-    "spam_reviews": 0,
-    "spam_kicks": 0,
-    "spam_bans": 0,
-    "spam_catches": 0,
-    "honeypot_hits": 0,
-    "honeypot_reviews": 0,
-    "honeypot_kicks": 0,
-    "honeypot_bans": 0,
-    "honeypot_catches": 0,
-    "image_hits": 0,
-    "image_reviews": 0,
-    "image_kicks": 0,
-    "image_bans": 0,
-    "image_catches": 0,
-    "joinwatch_total_joins": 0,
-    "joinwatch_young_joins": 0,
-    "joinwatch_auto_roles_scheduled": 0,
-    "joinwatch_auto_roles": 0,
-    "joinwatch_auto_role_failures": 0,
-    "joinwatch_auto_roles_cleared": 0,
-    "joinwatch_auto_role_punishments": 0,
-}
-
 JOINWATCH_RETRY_DELAY_MINUTES = 1
 JOINWATCH_MAX_RETRIES = 5
 POST_BAN_SWEEP_DELAY_SECONDS = 5
 PURGE_MIN_RETENTION_SECONDS = 60
-PURGE_BACKWARD_DEFAULT_SECONDS = 60
 PURGE_BACKWARD_MAX_SECONDS = 3600
-PURGE_FORWARD_DEFAULT_SECONDS = 10
 PURGE_FORWARD_MAX_SECONDS = 300
 SPAM_WINDOW_MIN_SECONDS = 3
 SPAM_WINDOW_MAX_SECONDS = 60
@@ -187,55 +158,7 @@ class ImageScanDecision(str, Enum):
     FALSE_POSITIVE = "false_positive"
 
 
-class ImageScanDetectorActionOption(str, Enum):
-    NONE = "none"
-    REVIEW = "review"
-    KICK = "kick"
-    BAN = "ban"
-
-
-class ReviewKickFailWarningMode(str, Enum):
-    FALSE = "false"
-    TRUE = "true"
-    MANUAL = "manual"
-
-
-class CoreActionOption(str, Enum):
-    KICK = "kick"
-    BAN = "ban"
-    REVIEW = "review"
-    NONE = "none"
-
-
-class FallbackActionOption(str, Enum):
-    REVIEW = "review"
-    KICK = "kick"
-    BAN = "ban"
-    NONE = "none"
-
-
-class WhitelistModeOption(str, Enum):
-    BYPASS = "bypass"
-    REVIEW = "review"
-    FALLBACK = "fallback"
-    NONE = "none"
-
-
-class JoinwatchAutoRoleActionOption(str, Enum):
-    NONE = "none"
-    KICK = "kick"
-    BAN = "ban"
-
-
-class BaitActionOption(str, Enum):
-    KICK = "kick"
-    BAN = "ban"
-
-
 IMAGE_SCAN_DECISIONS = tuple(member.value for member in ImageScanDecision)
-IMAGE_SCAN_DETECTOR_ACTION_OPTIONS = tuple(
-    member.value for member in ImageScanDetectorActionOption
-)
 IMAGE_SCAN_PROFILE_COLUMNS = (
     "messages_scanned",
     "messages_with_images",
@@ -252,17 +175,7 @@ IMAGE_SCAN_PROFILE_COLUMNS = (
     "decision_ms_total",
     "decision_ms_count",
 )
-REVIEW_KICK_FAIL_WARNING_MODES = tuple(
-    member.value for member in ReviewKickFailWarningMode
-)
 KICK_FAIL_WARNING_REASON = "Suspicious activity: target left before the kick could be applied."
-CORE_ACTION_OPTIONS = tuple(member.value for member in CoreActionOption)
-FALLBACK_ACTION_OPTIONS = tuple(member.value for member in FallbackActionOption)
-WHITELIST_MODE_OPTIONS = tuple(member.value for member in WhitelistModeOption)
-JOINWATCH_AUTO_ROLE_ACTION_OPTIONS = tuple(
-    member.value for member in JoinwatchAutoRoleActionOption
-)
-BAIT_ACTION_OPTIONS = tuple(member.value for member in BaitActionOption)
 BOOL_OPTIONS = ("false", "true")
 MODERATOR_DECISION_TYPES = frozenset(
     {
@@ -419,20 +332,6 @@ class MessageRef(typing.NamedTuple):
     created_at: datetime
     fingerprint: str
 
-
-SCAM_KEYWORDS = [
-    "free nitro", "giveaway", "steam gift", "free discord",
-    "discord.gift", "claim your", "you won", "free vbucks",
-    "free robux", "free coins", "boost your server",
-    "limited time", "exclusive offer", "free membership",
-    "hack", "crack", "generator",
-]
-
-DEFAULT_ATTACHMENT_PATTERNS = [
-    r"^image$",
-    r"^image ?\(\d+\)$",
-    r"^\d+$",
-]
 
 GENERIC_ATTACHMENT_NAME_RE = re.compile(r"^(?:image(?: ?\(\d+\))?|\d+)$", re.IGNORECASE)
 ATTACHMENT_ONLY_SCAM_KEYWORDS = {"bro"}
@@ -808,55 +707,7 @@ class Honeypot(Cog):
             identifier=205192943327321000143939875896557571750,
             force_registration=True,
         )
-        self.config.register_guild(
-            enabled=False,
-            action=None,
-            fallback_action="review",
-            dry_run=False,
-            logs_channel=None,
-            honeypot_channel=None,
-            honeypot_channels=[],
-            mute_role=None,
-            purge_backward_seconds=PURGE_BACKWARD_DEFAULT_SECONDS,
-            purge_forward_seconds=PURGE_FORWARD_DEFAULT_SECONDS,
-            whitelisted_roles=[],
-            firstpost_collect_enabled=False,
-            firstpost_enabled=False,
-            firstpost_action="review",
-            spam_enabled=False,
-            spam_action="review",
-            spam_window_seconds=10,
-            spam_min_channels=2,
-            imagescan_enabled=False,
-            imagescan_channel=None,
-            imagescan_detector_enabled=False,
-            imagescan_detector_action="review",
-            imagescan_detector_threshold=20,
-            review_enabled=False,
-            review_channel=None,
-            review_kick_fail_warning="false",
-            automated_kick_fail_warning=False,
-            whitelist_mode="bypass",
-            stats=DEFAULT_STATS.copy(),
-            scam_keywords=SCAM_KEYWORDS.copy(),
-            attachment_patterns=DEFAULT_ATTACHMENT_PATTERNS.copy(),
-            joinwatch_enabled=False,
-            joinwatch_alert_enabled=True,
-            joinwatch_channel=None,
-            joinwatch_min_age_hours=24,
-            joinwatch_auto_role_enabled=False,
-            joinwatch_auto_role_id=None,
-            joinwatch_auto_role_timer_minutes=1440,
-            joinwatch_auto_role_action="none",
-            joinwatch_auto_role_random_delay_enabled=False,
-            joinwatch_auto_role_random_delay_min_minutes=1,
-            joinwatch_auto_role_random_delay_max_minutes=10,
-            joinwatch_pending_role_assignments={},
-            joinwatch_pending_roles={},
-            baitrole_enabled=False,
-            baitrole_id=None,
-            baitrole_action="ban",
-        )
+        self.config.register_guild(**settings.DEFAULTS)
 
         self._console_log_buffer = ReadOnlyLogBuffer()
         self._post_ban_sweep_tasks: set[asyncio.Task] = set()
