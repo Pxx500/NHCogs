@@ -5,12 +5,13 @@ from dataclasses import FrozenInstanceError, fields
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from importlib import import_module, util
+import json
 import logging
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
 from threading import Event, get_ident
-from types import ModuleType, SimpleNamespace
+from types import MethodType, ModuleType, SimpleNamespace
 from unittest import mock
 import sys
 import unittest
@@ -218,6 +219,27 @@ class _Config:
 
 
 class _Cog:
+    @staticmethod
+    def listener(*args, **kwargs):
+        return _listener(*args, **kwargs)
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        commands = []
+        listeners = []
+        seen_commands = set()
+        seen_listeners = set()
+        for base in reversed(cls.__mro__[:-1]):
+            for name, value in base.__dict__.items():
+                if isinstance(value, _CommandStub) and id(value) not in seen_commands:
+                    seen_commands.add(id(value))
+                    commands.append(value)
+                elif getattr(value, "__cog_listener__", False) and name not in seen_listeners:
+                    seen_listeners.add(name)
+                    listeners.append(name)
+        cls.__cog_commands__ = tuple(commands)
+        cls.__cog_listeners__ = tuple(listeners)
+
     def __init__(self, *, bot):
         self.bot = bot
 
@@ -226,6 +248,50 @@ class _Cog:
 
     async def cog_unload(self):
         self.base_unloaded = True
+
+
+class _CommandStub:
+    def __init__(self, callback, *, kind, name, parent, invoke_without_command=False):
+        self.callback = callback
+        self.kind = kind
+        self.name = name
+        self.parent = parent
+        self.invoke_without_command = invoke_without_command
+        self.qualified_name = (
+            name if parent is None else f"{parent.qualified_name} {name}"
+        )
+
+    def __call__(self, *args, **kwargs):
+        return self.callback(*args, **kwargs)
+
+    def __get__(self, instance, owner):
+        if instance is None:
+            return self
+        return MethodType(self, instance)
+
+    def command(self, *args, **kwargs):
+        return _command_decorator("command", parent=self, **kwargs)
+
+    def group(self, *args, **kwargs):
+        return _command_decorator("group", parent=self, **kwargs)
+
+
+class _GroupStub(_CommandStub):
+    pass
+
+
+def _command_decorator(kind, *, parent=None, **options):
+    def apply(function):
+        command_type = _GroupStub if kind == "group" else _CommandStub
+        return command_type(
+            function,
+            kind=kind,
+            name=options.get("name") or function.__name__,
+            parent=parent,
+            invoke_without_command=options.get("invoke_without_command", False),
+        )
+
+    return apply
 
 
 @contextmanager
@@ -319,21 +385,13 @@ def _isolated_honeypot_modules(data_path: Path):
     )
     discord.ext.tasks = tasks
 
-    def decorator(*args, **kwargs):
-        def apply(function):
-            function.command = decorator
-            function.group = decorator
-            return function
-
-        return apply
-
     commands = SimpleNamespace(
-        Cog=SimpleNamespace(listener=_listener),
+        Cog=_Cog,
         Context=object,
-        Group=type("Group", (), {}),
+        Group=_GroupStub,
         UserFeedbackCheckFailure=Exception,
-        group=decorator,
-        command=decorator,
+        group=lambda *args, **kwargs: _command_decorator("group", **kwargs),
+        command=lambda *args, **kwargs: _command_decorator("command", **kwargs),
         guild_only=lambda: (lambda function: function),
         admin_or_permissions=lambda **kwargs: (lambda function: function),
         bot_has_guild_permissions=lambda **kwargs: (lambda function: function),
@@ -439,6 +497,100 @@ class _Bot:
 
 
 class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
+
+    def test_command_listener_and_loop_assembly_matches_contract(self):
+        contract = json.loads(
+            (Path(__file__).with_name("honeypot_command_contract.json")).read_text(
+                encoding="utf-8"
+            )
+        )
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                registered = getattr(honeypot.Honeypot, "__cog_commands__", ())
+                self.assertEqual(len(registered), contract["command_count"])
+                structure = sorted(
+                    (
+                        {
+                            "kind": command.kind,
+                            "name": command.qualified_name,
+                            "parent": (
+                                command.parent.qualified_name
+                                if command.parent is not None
+                                else None
+                            ),
+                        }
+                        for command in registered
+                    ),
+                    key=lambda item: item["name"],
+                )
+                encoded = json.dumps(
+                    structure,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+
+                self.assertEqual(
+                    sha256(encoded).hexdigest(),
+                    contract["command_structure_sha256"],
+                )
+                self.assertEqual(
+                    sorted(honeypot.Honeypot.__cog_listeners__),
+                    contract["listeners"],
+                )
+                self.assertEqual(
+                    sorted(
+                        name
+                        for name, value in honeypot.Honeypot.__dict__.items()
+                        if isinstance(value, _LoopStub)
+                    ),
+                    contract["loops"],
+                )
+                for command in registered:
+                    with self.subTest(command=command.qualified_name):
+                        self.assertEqual(command.callback.__module__, "Honeypot.honeypot")
+                        self.assertTrue(
+                            command.callback.__qualname__.startswith("Honeypot.")
+                        )
+                        self.assertEqual(
+                            isinstance(command, honeypot.commands.Group),
+                            command.kind == "group",
+                        )
+
+    def test_fallback_keeps_diagnostic_commands_on_cog_and_exposes_implementations(self):
+        implementation_names = (
+            "config_dump",
+            "console_dump",
+            "honeypot_doctor",
+            "honeypot_errors",
+            "honeypot_errors_clear",
+            "honeypot_mod_stats",
+            "honeypot_reset_stats",
+            "honeypot_stats",
+            "review_dump",
+        )
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                diagnostics = getattr(honeypot, "diagnostics", None)
+                self.assertIsNotNone(diagnostics)
+                for name in implementation_names:
+                    with self.subTest(command=name):
+                        command = getattr(honeypot.Honeypot, name)
+                        self.assertEqual(command.callback.__module__, "Honeypot.honeypot")
+                        self.assertTrue(callable(getattr(diagnostics, name, None)))
+
+    async def test_cog_after_invoke_keeps_group_cleanup_override(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = object.__new__(honeypot.Honeypot)
+                ctx = SimpleNamespace(
+                    command=honeypot.Honeypot.debug,
+                    invoked_subcommand=None,
+                )
+                self.assertTrue(hasattr(ctx.command, "invoke_without_command"))
+
+                result = await cog.cog_after_invoke(ctx)
+
+                self.assertIsNone(result)
 
     async def test_configuration_option_enums_preserve_public_values(self):
         expected_options = (
