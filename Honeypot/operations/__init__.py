@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 from ..detection_cases import OperationType
+from .cached_purge import cached_purge_handler
 from .context import (
     CompletionMode,
     FollowUpKind,
@@ -21,6 +22,7 @@ HANDLERS: Mapping[OperationType, OperationHandler] = MappingProxyType(
     {
         OperationType.REVIEW_UPDATE: review_update_handler,
         OperationType.REVIEW_PUBLISH: review_publish_handler,
+        OperationType.CACHED_PURGE: cached_purge_handler,
     }
 )
 

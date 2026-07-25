@@ -3428,30 +3428,6 @@ class Honeypot(Cog):
                         operation_result = action.value
                     elif operation_result is None:
                         operation_result = action.value
-            elif operation.operation_type == OperationType.CACHED_PURGE:
-                guild = self.bot.get_guild(snapshot.case.guild_id)
-                if guild is None:
-                    raise RuntimeError("detection case guild is unavailable")
-                _, case_id, channel_id, message_id = operation.idempotency_key.split(":")
-                if case_id != operation.case_id:
-                    raise RuntimeError("cached purge operation case identity does not match")
-                channel = self._get_cached_message_channel(guild, int(channel_id))
-                if channel is None:
-                    operation_result = OPERATION_RESULT_CHANNEL_UNAVAILABLE
-                    raise RuntimeError("cached purge channel is unavailable")
-                get_partial_message = getattr(channel, "get_partial_message", None)
-                if not callable(get_partial_message):
-                    operation_result = OPERATION_RESULT_UNSUPPORTED_CHANNEL
-                    raise RuntimeError("cached purge channel cannot resolve messages")
-                result = await detection_runtime.delete_message(
-                    get_partial_message(int(message_id))
-                )
-                operation_result = result.status.value
-                if result.status not in (
-                    DeleteStatus.DELETED,
-                    DeleteStatus.ALREADY_GONE,
-                ):
-                    raise RuntimeError(result.error or result.status.value)
             elif operation.operation_type == OperationType.SOURCE_DELETE:
                 guild = self.bot.get_guild(snapshot.case.guild_id)
                 if guild is None:
