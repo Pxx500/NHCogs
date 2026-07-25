@@ -8184,17 +8184,18 @@ class Honeypot(Cog):
                 conflicts += 1
             else:
                 errors += 1
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         state = await self._imagescan_model_state(
             ctx.guild.id,
-            int(config.get("imagescan_detector_threshold", 20)),
+            guild_settings.imagescan_detector_threshold,
         )
         if not state["valid"]:
             for sample_id in inserted_sample_ids:
                 await self._imagescan_deactivate_sample(ctx.guild.id, sample_id)
             await self._imagescan_model_state(
                 ctx.guild.id,
-                int(config.get("imagescan_detector_threshold", 20)),
+                guild_settings.imagescan_detector_threshold,
             )
             await ctx.send(_("Rejected: TP/FP overlap.\nModel unchanged."))
             return
@@ -8263,10 +8264,11 @@ class Honeypot(Cog):
                     await ctx.send(_("Failed to delete sample file."))
                     return
         await self._imagescan_delete_sample(ctx.guild.id, str(sample["sample_id"]))
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         state = await self._imagescan_model_state(
             ctx.guild.id,
-            int(config.get("imagescan_detector_threshold", 20)),
+            guild_settings.imagescan_detector_threshold,
         )
         await ctx.send(
             _(
@@ -8359,10 +8361,11 @@ class Honeypot(Cog):
     async def imagescan_detector_threshold(self, ctx: commands.Context, value: int = None) -> None:
         """Set maximum image hash distance."""
         if value is None:
-            config = await self.config.guild(ctx.guild).all()
+            raw_config = await self.config.guild(ctx.guild).all()
+            guild_settings = GuildSettings.from_mapping(raw_config)
             state = await self._imagescan_model_state(
                 ctx.guild.id,
-                int(config.get("imagescan_detector_threshold", 20)),
+                guild_settings.imagescan_detector_threshold,
             )
             await ctx.send(
                 _("Threshold: {configured} effective {effective}").format(
@@ -8381,10 +8384,11 @@ class Honeypot(Cog):
     @imagescan.command(name="rebuild")
     async def imagescan_model_rebuild(self, ctx: commands.Context) -> None:
         """Recompute image detector threshold state."""
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         state = await self._imagescan_model_state(
             ctx.guild.id,
-            int(config.get("imagescan_detector_threshold", 20)),
+            guild_settings.imagescan_detector_threshold,
         )
         if not state["valid"]:
             await ctx.send(_("Rejected: TP/FP overlap.\nModel unchanged."))
@@ -8398,10 +8402,11 @@ class Honeypot(Cog):
     @imagescan.command(name="status")
     async def imagescan_status(self, ctx: commands.Context) -> None:
         """Show image detector settings, samples, and timing."""
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         state = await self._imagescan_model_state(
             ctx.guild.id,
-            int(config.get("imagescan_detector_threshold", 20)),
+            guild_settings.imagescan_detector_threshold,
         )
         profile = await self._imagescan_profile(ctx.guild.id)
         total_samples = int(state["sample_count_tp"]) + int(state["sample_count_fp"])
@@ -8413,8 +8418,8 @@ class Honeypot(Cog):
             return int(profile.get(total_key, 0) / count) if count else 0
 
         lines = [
-            f"Enabled: {self._format_bool_setting(config.get('imagescan_detector_enabled', False))}",
-            f"Action: {config.get('imagescan_detector_action', 'review')}",
+            f"Enabled: {self._format_bool_setting(guild_settings.imagescan_detector_enabled)}",
+            f"Action: {guild_settings.imagescan_detector_action.value}",
             f"Threshold: {state['configured_threshold']} effective {state['effective_threshold']}",
             f"Samples: {state['sample_count_tp']} TP, {state['sample_count_fp']} FP, {total_samples} total",
             (
@@ -8549,17 +8554,18 @@ class Honeypot(Cog):
                         except discord.HTTPException:
                             pass
                         await asyncio.sleep(0)
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         state = await self._imagescan_model_state(
             ctx.guild.id,
-            int(config.get("imagescan_detector_threshold", 20)),
+            guild_settings.imagescan_detector_threshold,
         )
         if not state["valid"]:
             for sample_id in inserted_sample_ids:
                 await self._imagescan_deactivate_sample(ctx.guild.id, sample_id)
             await self._imagescan_model_state(
                 ctx.guild.id,
-                int(config.get("imagescan_detector_threshold", 20)),
+                guild_settings.imagescan_detector_threshold,
             )
             await progress.edit(content=_("Rejected: TP/FP overlap.\nModel unchanged."))
             return
