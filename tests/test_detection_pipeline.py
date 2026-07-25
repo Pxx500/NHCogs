@@ -3122,6 +3122,31 @@ class PurgeMaintenanceSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
                 )
 
 
+class DiagnosticSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_malformed_dry_run_defaults_in_owner_config_output(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog.config = SimpleNamespace(
+                    guild=lambda guild: SimpleNamespace(
+                        all=mock.AsyncMock(
+                            return_value={
+                                "dry_run": "false",
+                            }
+                        )
+                    )
+                )
+                ctx = SimpleNamespace(
+                    guild=SimpleNamespace(id=100),
+                    send=mock.AsyncMock(),
+                )
+
+                await cog.config_honeypot(ctx)
+
+                output = ctx.send.await_args.args[0]
+                self.assertIn("Dry run: disabled", output)
+
+
 class JoinwatchSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_disabled_setting_does_not_publish_join_alert(self):
         with TemporaryDirectory() as directory:

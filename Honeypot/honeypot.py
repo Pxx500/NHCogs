@@ -2381,8 +2381,11 @@ class Honeypot(Cog):
             guild = self.bot.get_guild(guild_id)
             if guild is None:
                 return
-            config = await self.config.guild_from_id(guild_id).all()
-            channel = self._get_text_channel_or_thread(guild, config.get("logs_channel"))
+            raw_config = await self.config.guild_from_id(guild_id).all()
+            guild_settings = GuildSettings.from_mapping(raw_config)
+            channel = self._get_text_channel_or_thread(
+                guild, guild_settings.logs_channel
+            )
             if channel is None:
                 return
             await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
@@ -5545,9 +5548,10 @@ class Honeypot(Cog):
         snapshot = await asyncio.to_thread(self._case_store.get_case, case_id)
         if snapshot is None:
             return
-        config = await self.config.guild_from_id(snapshot.case.guild_id).all()
+        raw_config = await self.config.guild_from_id(snapshot.case.guild_id).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         await self._publish_detection_case(
-            case_id, config.get("review_channel"), None
+            case_id, guild_settings.review_channel, None
         )
 
     async def _case_review_rerender_if_open(self, case_id: str) -> None:
@@ -9170,24 +9174,36 @@ class Honeypot(Cog):
     @config_dump.command(name="honeypot")
     async def config_honeypot(self, ctx: commands.Context) -> None:
         """Show main honeypot detection settings."""
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         await self._send_config_dump(
             ctx,
             _("Honeypot config"),
             [
-                (_("Enabled"), self._format_bool_setting(config.get("enabled", False))),
-                (_("Action"), config.get("action") or _("not set")),
-                (_("Fallback action"), config.get("fallback_action")),
-                (_("Dry run"), self._format_bool_setting(config.get("dry_run", False))),
-                (_("Whitelist mode"), config.get("whitelist_mode")),
-                (_("Warn on automated kick fail"), self._format_bool_setting(config.get("automated_kick_fail_warning", False))),
+                (_("Enabled"), self._format_bool_setting(guild_settings.enabled)),
+                (
+                    _("Action"),
+                    guild_settings.action.value
+                    if guild_settings.action is not None
+                    else _("not set"),
+                ),
+                (_("Fallback action"), guild_settings.fallback_action.value),
+                (_("Dry run"), self._format_bool_setting(guild_settings.dry_run)),
+                (_("Whitelist mode"), guild_settings.whitelist_mode.value),
+                (
+                    _("Warn on automated kick fail"),
+                    self._format_bool_setting(
+                        guild_settings.automated_kick_fail_warning
+                    ),
+                ),
             ],
         )
 
     @config_dump.command(name="channel")
     async def config_channel(self, ctx: commands.Context) -> None:
         """Show honeypot and log channel settings."""
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         await self._send_config_dump(
             ctx,
             _("Channel config"),
@@ -9197,31 +9213,41 @@ class Honeypot(Cog):
                     self._format_honeypot_channel_list(
                         ctx.guild,
                         self._honeypot_channel_ids(
-                            config.get("honeypot_channels") or [],
-                            config.get("honeypot_channel"),
+                            guild_settings.honeypot_channels,
+                            guild_settings.honeypot_channel,
                         ),
                     ),
                 ),
-                (_("Logs channel"), self._format_channel_setting(ctx.guild, config.get("logs_channel"))),
+                (
+                    _("Logs channel"),
+                    self._format_channel_setting(
+                        ctx.guild, guild_settings.logs_channel
+                    ),
+                ),
             ],
         )
 
     @config_dump.command(name="punishment")
     async def config_punishment(self, ctx: commands.Context) -> None:
         """Show review punishment settings."""
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         await self._send_config_dump(
             ctx,
             _("Punishment config"),
             [
-                (_("Mute role"), self._format_role_setting(ctx.guild, config.get("mute_role"))),
+                (
+                    _("Mute role"),
+                    self._format_role_setting(ctx.guild, guild_settings.mute_role),
+                ),
             ],
         )
 
     @config_dump.command(name="purge")
     async def config_purge(self, ctx: commands.Context) -> None:
         """Show message purge behavior."""
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         await self._send_config_dump(
             ctx,
             _("Purge config"),
@@ -9231,13 +9257,7 @@ class Honeypot(Cog):
                     _("Backward window"),
                     _("{seconds}s").format(
                         seconds=self._purge_backward_seconds(
-                            int(
-                                config.get(
-                                    "purge_backward_seconds",
-                                    PURGE_BACKWARD_DEFAULT_SECONDS,
-                                )
-                                or 0
-                            )
+                            guild_settings.purge_backward_seconds
                         )
                     ),
                 ),
@@ -9245,13 +9265,7 @@ class Honeypot(Cog):
                     _("Forward window"),
                     _("{seconds}s").format(
                         seconds=self._purge_forward_seconds(
-                            int(
-                                config.get(
-                                    "purge_forward_seconds",
-                                    PURGE_FORWARD_DEFAULT_SECONDS,
-                                )
-                                or 0
-                            )
+                            guild_settings.purge_forward_seconds
                         )
                     ),
                 ),
@@ -9262,15 +9276,24 @@ class Honeypot(Cog):
     @config_dump.command(name="firstpost")
     async def config_firstpost(self, ctx: commands.Context) -> None:
         """Show first-message detection settings."""
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         seen_count = await self._count_firstpost_seen_authors(ctx.guild.id)
         await self._send_config_dump(
             ctx,
             _("Firstpost config"),
             [
-                (_("Enabled"), self._format_bool_setting(config.get("firstpost_enabled", False))),
-                (_("Warmup"), self._format_bool_setting(config.get("firstpost_collect_enabled", False))),
-                (_("Action"), config.get("firstpost_action", "review")),
+                (
+                    _("Enabled"),
+                    self._format_bool_setting(guild_settings.firstpost_enabled),
+                ),
+                (
+                    _("Warmup"),
+                    self._format_bool_setting(
+                        guild_settings.firstpost_collect_enabled
+                    ),
+                ),
+                (_("Action"), guild_settings.firstpost_action.value),
                 (_("Seen authors"), seen_count),
             ],
         )
@@ -9278,17 +9301,23 @@ class Honeypot(Cog):
     @config_dump.command(name="imagescan")
     async def config_imagescan(self, ctx: commands.Context) -> None:
         """Show image detector settings."""
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         state = await self._imagescan_model_state(
             ctx.guild.id,
-            int(config.get("imagescan_detector_threshold", 20)),
+            guild_settings.imagescan_detector_threshold,
         )
         await self._send_config_dump(
             ctx,
             _("Image scan config"),
             [
-                (_("Enabled"), self._format_bool_setting(config.get("imagescan_detector_enabled", False))),
-                (_("Action"), config.get("imagescan_detector_action", "review")),
+                (
+                    _("Enabled"),
+                    self._format_bool_setting(
+                        guild_settings.imagescan_detector_enabled
+                    ),
+                ),
+                (_("Action"), guild_settings.imagescan_detector_action.value),
                 (_("Threshold"), f"{state['configured_threshold']} effective {state['effective_threshold']}"),
             ],
         )
@@ -9296,44 +9325,62 @@ class Honeypot(Cog):
     @config_dump.command(name="spam")
     async def config_spam(self, ctx: commands.Context) -> None:
         """Show duplicate-message spam settings."""
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         await self._send_config_dump(
             ctx,
             _("Spam config"),
             [
-                (_("Enabled"), self._format_bool_setting(config.get("spam_enabled", False))),
-                (_("Action"), config.get("spam_action", "review")),
-                (_("Window"), _("{seconds}s").format(seconds=config.get("spam_window_seconds", 10))),
-                (_("Channels"), config.get("spam_min_channels", 2)),
+                (_("Enabled"), self._format_bool_setting(guild_settings.spam_enabled)),
+                (_("Action"), guild_settings.spam_action.value),
+                (
+                    _("Window"),
+                    _("{seconds}s").format(
+                        seconds=guild_settings.spam_window_seconds
+                    ),
+                ),
+                (_("Channels"), guild_settings.spam_min_channels),
             ],
         )
 
     @config_dump.command(name="review")
     async def config_review(self, ctx: commands.Context) -> None:
         """Show moderator review settings."""
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         await self._send_config_dump(
             ctx,
             _("Review config"),
             [
-                (_("Enabled"), self._format_bool_setting(config.get("review_enabled", False))),
-                (_("Channel"), self._format_channel_setting(ctx.guild, config.get("review_channel"))),
+                (_("Enabled"), self._format_bool_setting(guild_settings.review_enabled)),
+                (
+                    _("Channel"),
+                    self._format_channel_setting(
+                        ctx.guild, guild_settings.review_channel
+                    ),
+                ),
                 (_("Case lifetime"), _("24 hours (fixed)")),
-                (_("Kick fail warning"), config.get("review_kick_fail_warning", "false")),
+                (
+                    _("Kick fail warning"),
+                    guild_settings.review_kick_fail_warning.value,
+                ),
             ],
         )
 
     @config_dump.command(name="roles")
     async def config_roles(self, ctx: commands.Context) -> None:
         """Show honeypot whitelist role settings."""
-        config = await self.config.guild(ctx.guild).all()
-        role_ids = config.get("whitelisted_roles", [])
-        roles = [self._format_role_setting(ctx.guild, role_id) for role_id in role_ids]
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
+        roles = [
+            self._format_role_setting(ctx.guild, role_id)
+            for role_id in guild_settings.whitelisted_roles
+        ]
         await self._send_config_dump(
             ctx,
             _("Roles config"),
             [
-                (_("Whitelist mode"), config.get("whitelist_mode")),
+                (_("Whitelist mode"), guild_settings.whitelist_mode.value),
                 (_("Whitelisted roles"), ", ".join(roles) if roles else _("none")),
             ],
         )
@@ -9341,61 +9388,72 @@ class Honeypot(Cog):
     @config_dump.command(name="keywords")
     async def config_keywords(self, ctx: commands.Context) -> None:
         """Show honeypot keyword and attachment pattern counts."""
-        config = await self.config.guild(ctx.guild).all()
-        keywords = config.get("scam_keywords") or []
-        attachment_patterns = config.get("attachment_patterns") or []
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         await self._send_config_dump(
             ctx,
             _("Keywords config"),
             [
-                (_("Scam keywords"), len(keywords)),
-                (_("Attachment patterns"), len(attachment_patterns)),
+                (_("Scam keywords"), len(guild_settings.scam_keywords)),
+                (
+                    _("Attachment patterns"),
+                    len(guild_settings.attachment_patterns),
+                ),
             ],
         )
 
     @config_dump.command(name="joinwatch")
     async def config_joinwatch(self, ctx: commands.Context) -> None:
         """Show joinwatch settings."""
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         lines = [
             _("Joinwatch:"),
-            f"  {_('Enabled')}: {self._format_bool_setting(config.get('joinwatch_enabled', False))}",
-            f"  {_('Alerts')}: {self._format_bool_setting(config.get('joinwatch_alert_enabled', True))}",
-            f"  {_('Channel')}: {self._format_channel_setting(ctx.guild, config.get('joinwatch_channel'))}",
-            f"  {_('Maximum account age')}: {_('{hours} hours').format(hours=config.get('joinwatch_min_age_hours'))}",
+            f"  {_('Enabled')}: {self._format_bool_setting(guild_settings.joinwatch_enabled)}",
+            f"  {_('Alerts')}: {self._format_bool_setting(guild_settings.joinwatch_alert_enabled)}",
+            f"  {_('Channel')}: {self._format_channel_setting(ctx.guild, guild_settings.joinwatch_channel)}",
+            f"  {_('Maximum account age')}: {_('{hours} hours').format(hours=guild_settings.joinwatch_min_age_hours)}",
             "",
             _("Auto-role:"),
-            f"  {_('Enabled')}: {self._format_bool_setting(config.get('joinwatch_auto_role_enabled', False))}",
-            f"  {_('Role')}: {self._format_role_setting(ctx.guild, config.get('joinwatch_auto_role_id'))}",
-            f"  {_('Timer')}: {_('{minutes} minutes').format(minutes=config.get('joinwatch_auto_role_timer_minutes'))}",
-            f"  {_('Action')}: {config.get('joinwatch_auto_role_action')}",
-            f"  {_('Randomized delay')}: {self._format_bool_setting(config.get('joinwatch_auto_role_random_delay_enabled', False))}",
-            f"  {_('Delay range')}: {_('{min} to {max} minutes').format(min=config.get('joinwatch_auto_role_random_delay_min_minutes', 1), max=config.get('joinwatch_auto_role_random_delay_max_minutes', 10))}",
-            f"  {_('Pending role applications')}: {len(config.get('joinwatch_pending_role_assignments', {}))}",
-            f"  {_('Active joinwatch timers')}: {len(config.get('joinwatch_pending_roles', {}))}",
+            f"  {_('Enabled')}: {self._format_bool_setting(guild_settings.joinwatch_auto_role_enabled)}",
+            f"  {_('Role')}: {self._format_role_setting(ctx.guild, guild_settings.joinwatch_auto_role_id)}",
+            f"  {_('Timer')}: {_('{minutes} minutes').format(minutes=guild_settings.joinwatch_auto_role_timer_minutes)}",
+            f"  {_('Action')}: {guild_settings.joinwatch_auto_role_action.value}",
+            f"  {_('Randomized delay')}: {self._format_bool_setting(guild_settings.joinwatch_auto_role_random_delay_enabled)}",
+            f"  {_('Delay range')}: {_('{min} to {max} minutes').format(min=guild_settings.joinwatch_auto_role_random_delay_min_minutes, max=guild_settings.joinwatch_auto_role_random_delay_max_minutes)}",
+            f"  {_('Pending role applications')}: {len(guild_settings.joinwatch_pending_role_assignments)}",
+            f"  {_('Active joinwatch timers')}: {len(guild_settings.joinwatch_pending_roles)}",
         ]
         await ctx.send(_("Joinwatch config:\n") + box("\n".join(lines)))
 
     @config_dump.command(name="bait_role")
     async def config_bait(self, ctx: commands.Context) -> None:
         """Show bait role trap settings."""
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         await self._send_config_dump(
             ctx,
             _("Bait config"),
             [
-                (_("Enabled"), self._format_bool_setting(config.get("baitrole_enabled", False))),
-                (_("Role"), self._format_role_setting(ctx.guild, config.get("baitrole_id"))),
-                (_("Action"), config.get("baitrole_action")),
+                (
+                    _("Enabled"),
+                    self._format_bool_setting(guild_settings.baitrole_enabled),
+                ),
+                (
+                    _("Role"),
+                    self._format_role_setting(ctx.guild, guild_settings.baitrole_id),
+                ),
+                (_("Action"), guild_settings.baitrole_action.value),
             ],
         )
 
     @config_dump.command(name="stats")
     async def config_stats(self, ctx: commands.Context) -> None:
         """Show stored stat and pending timer counts."""
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         stats = DEFAULT_STATS.copy()
-        stats.update(config.get("stats", {}))
+        stats.update(guild_settings.stats)
         now = datetime.now(timezone.utc)
         case_counts = await asyncio.to_thread(
             self._case_store.operational_counts,
@@ -9408,8 +9466,14 @@ class Honeypot(Cog):
             _("Stats config"),
             [
                 (_("Stored stats"), len(stats)),
-                (_("Pending joinwatch role applications"), len(config.get("joinwatch_pending_role_assignments", {}))),
-                (_("Active joinwatch auto-role timers"), len(config.get("joinwatch_pending_roles", {}))),
+                (
+                    _("Pending joinwatch role applications"),
+                    len(guild_settings.joinwatch_pending_role_assignments),
+                ),
+                (
+                    _("Active joinwatch auto-role timers"),
+                    len(guild_settings.joinwatch_pending_roles),
+                ),
                 (_("Active detection cases"), case_counts["active_cases"]),
                 (_("Due detection cases"), case_counts["due_cases"]),
                 (_("Stale resolving cases"), case_counts["stale_resolving_cases"]),
@@ -9423,31 +9487,59 @@ class Honeypot(Cog):
     @config_dump.command(name="all")
     async def config_all(self, ctx: commands.Context) -> None:
         """Show a compact summary of all honeypot settings."""
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         await self._send_config_dump(
             ctx,
             _("Honeypot config summary"),
             [
-                (_("Honeypot"), self._format_bool_setting(config.get("enabled", False))),
+                (_("Honeypot"), self._format_bool_setting(guild_settings.enabled)),
                 (
                     _("Honeypot channels"),
                     self._format_honeypot_channel_list(
                         ctx.guild,
                         self._honeypot_channel_ids(
-                            config.get("honeypot_channels") or [],
-                            config.get("honeypot_channel"),
+                            guild_settings.honeypot_channels,
+                            guild_settings.honeypot_channel,
                         ),
                     ),
                 ),
-                (_("Logs channel"), self._format_channel_setting(ctx.guild, config.get("logs_channel"))),
-                (_("Review"), self._format_bool_setting(config.get("review_enabled", False))),
-                (_("Spam"), self._format_bool_setting(config.get("spam_enabled", False))),
-                (_("Image scan"), self._format_bool_setting(config.get("imagescan_detector_enabled", False))),
-                (_("Joinwatch"), self._format_bool_setting(config.get("joinwatch_enabled", False))),
-                (_("Joinwatch auto-role"), self._format_bool_setting(config.get("joinwatch_auto_role_enabled", False))),
-                (_("Bait role"), self._format_bool_setting(config.get("baitrole_enabled", False))),
-                (_("Pending joinwatch role applications"), len(config.get("joinwatch_pending_role_assignments", {}))),
-                (_("Active joinwatch auto-role timers"), len(config.get("joinwatch_pending_roles", {}))),
+                (
+                    _("Logs channel"),
+                    self._format_channel_setting(
+                        ctx.guild, guild_settings.logs_channel
+                    ),
+                ),
+                (_("Review"), self._format_bool_setting(guild_settings.review_enabled)),
+                (_("Spam"), self._format_bool_setting(guild_settings.spam_enabled)),
+                (
+                    _("Image scan"),
+                    self._format_bool_setting(
+                        guild_settings.imagescan_detector_enabled
+                    ),
+                ),
+                (
+                    _("Joinwatch"),
+                    self._format_bool_setting(guild_settings.joinwatch_enabled),
+                ),
+                (
+                    _("Joinwatch auto-role"),
+                    self._format_bool_setting(
+                        guild_settings.joinwatch_auto_role_enabled
+                    ),
+                ),
+                (
+                    _("Bait role"),
+                    self._format_bool_setting(guild_settings.baitrole_enabled),
+                ),
+                (
+                    _("Pending joinwatch role applications"),
+                    len(guild_settings.joinwatch_pending_role_assignments),
+                ),
+                (
+                    _("Active joinwatch auto-role timers"),
+                    len(guild_settings.joinwatch_pending_roles),
+                ),
             ],
         )
 
@@ -9645,7 +9737,8 @@ class Honeypot(Cog):
     @honeypot.command(name="doctor")
     async def honeypot_doctor(self, ctx: commands.Context) -> None:
         """Check honeypot configuration and required permissions."""
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         checks: list[tuple[str, bool, str]] = []
         warnings: list[str] = []
         case_database_ok = True
@@ -9716,12 +9809,12 @@ class Honeypot(Cog):
         honeypot_channels = [
             channel
             for channel_id in self._honeypot_channel_ids(
-                config.get("honeypot_channels") or [],
-                config.get("honeypot_channel"),
+                guild_settings.honeypot_channels,
+                guild_settings.honeypot_channel,
             )
             if (channel := self._get_text_channel_or_thread(ctx.guild, channel_id)) is not None
         ]
-        logs_channel_id = config.get("logs_channel")
+        logs_channel_id = guild_settings.logs_channel
         configured_logs_channel = (
             self._get_cached_message_channel(ctx.guild, logs_channel_id)
             if isinstance(logs_channel_id, int)
@@ -9735,16 +9828,18 @@ class Honeypot(Cog):
         logs_channel_invalid = (
             configured_logs_channel is not None and logs_channel is None
         )
-        review_channel = self._get_text_channel_or_thread(ctx.guild, config.get("review_channel"))
-        if not config.get("enabled"):
+        review_channel = self._get_text_channel_or_thread(
+            ctx.guild, guild_settings.review_channel
+        )
+        if not guild_settings.enabled:
             warnings.append("⚠️ Honeypot is disabled.")
-        if config.get("action") not in CORE_ACTION_OPTIONS:
+        if guild_settings.action is None:
             checks.append(("Honeypot action is invalid", False, "Run `honeypot honeypot action`."))
-        if config.get("firstpost_action", "review") not in CORE_ACTION_OPTIONS:
+        if guild_settings.firstpost_action.value not in CORE_ACTION_OPTIONS:
             checks.append(("Firstpost action is invalid", False, "Run `honeypot firstpost action`."))
-        if config.get("spam_action", "review") not in CORE_ACTION_OPTIONS:
+        if guild_settings.spam_action.value not in CORE_ACTION_OPTIONS:
             checks.append(("Spam action is invalid", False, "Run `honeypot spam action`."))
-        if config.get("enabled") and not honeypot_channels:
+        if guild_settings.enabled and not honeypot_channels:
             checks.append(("No honeypot channel exists", False, "Run `honeypot channel add`."))
         if logs_channel_invalid:
             checks.append(
@@ -9754,40 +9849,42 @@ class Honeypot(Cog):
                     "Run `honeypot channel logs` with a normal text channel.",
                 )
             )
-        if config.get("enabled") and logs_channel is None and not logs_channel_invalid:
+        if guild_settings.enabled and logs_channel is None and not logs_channel_invalid:
             checks.append(("Logs channel is missing", False, "Run `honeypot channel logs`."))
         if (
-            config.get("fallback_action") == "review"
-            or config.get("review_enabled")
-            or config.get("whitelist_mode") == "review"
+            guild_settings.fallback_action.value == "review"
+            or guild_settings.review_enabled
+            or guild_settings.whitelist_mode.value == "review"
             or (
-                config.get("firstpost_enabled", False)
-                and config.get("firstpost_action", "review") == "review"
+                guild_settings.firstpost_enabled
+                and guild_settings.firstpost_action.value == "review"
             )
             or (
-                config.get("spam_enabled", False)
-                and config.get("spam_action", "review") == "review"
+                guild_settings.spam_enabled
+                and guild_settings.spam_action.value == "review"
             )
         ):
             if review_channel is None:
                 checks.append(("Review channel is missing", False, "Run `honeypot review channel`."))
-        if config.get("mute_role"):
-            mute_role = ctx.guild.get_role(config["mute_role"])
+        if guild_settings.mute_role:
+            mute_role = ctx.guild.get_role(guild_settings.mute_role)
             if mute_role is None:
                 checks.append(("Mute role is missing", False, "Run `honeypot punishment mute_role`."))
             if mute_role is not None:
                 if not me.top_role > mute_role:
                     checks.append(("Bot is not above mute role", False, "Move bot role above mute role."))
-        if config.get("joinwatch_auto_role_enabled"):
-            auto_role_id = config.get("joinwatch_auto_role_id")
+        if guild_settings.joinwatch_auto_role_enabled:
+            auto_role_id = guild_settings.joinwatch_auto_role_id
             auto_role = ctx.guild.get_role(auto_role_id) if auto_role_id else None
             if auto_role is None:
                 checks.append(("Joinwatch auto-role is missing", False, "Run `honeypot joinwatch autorole role`."))
             if auto_role is not None:
                 if not me.top_role > auto_role:
                     checks.append(("Bot is not above joinwatch auto-role", False, "Move bot role above the joinwatch auto-role."))
-        if config.get("joinwatch_enabled") and config.get("joinwatch_alert_enabled", True):
-            joinwatch_channel = self._get_text_channel_or_thread(ctx.guild, config.get("joinwatch_channel"))
+        if guild_settings.joinwatch_enabled and guild_settings.joinwatch_alert_enabled:
+            joinwatch_channel = self._get_text_channel_or_thread(
+                ctx.guild, guild_settings.joinwatch_channel
+            )
             if joinwatch_channel is None:
                 checks.append(("Joinwatch alert channel is missing", False, "Run `honeypot joinwatch channel`."))
             if joinwatch_channel is not None:
@@ -9878,17 +9975,22 @@ class Honeypot(Cog):
                 )
         guild_perms = me.guild_permissions
         configured_actions = {
-            config.get("action"),
-            config.get("fallback_action"),
-            config.get("firstpost_action"),
-            config.get("spam_action"),
-            config.get("imagescan_detector_action"),
+            guild_settings.action.value
+            if guild_settings.action is not None
+            else None,
+            guild_settings.fallback_action.value,
+            guild_settings.firstpost_action.value,
+            guild_settings.spam_action.value,
+            guild_settings.imagescan_detector_action.value,
         }
         if "kick" in configured_actions and not guild_perms.kick_members:
             checks.append(("Cannot kick members", False, "Grant Kick Members."))
         if "ban" in configured_actions and not guild_perms.ban_members:
             checks.append(("Cannot ban members", False, "Grant Ban Members."))
-        if (config.get("mute_role") or config.get("joinwatch_auto_role_enabled")) and not guild_perms.manage_roles:
+        if (
+            guild_settings.mute_role
+            or guild_settings.joinwatch_auto_role_enabled
+        ) and not guild_perms.manage_roles:
             checks.append(("Cannot manage configured roles", False, "Grant Manage Roles."))
         failed = [
             f"❌ {name}{hint}" if hint.startswith("\n") else f"❌ {name} - {hint}"
