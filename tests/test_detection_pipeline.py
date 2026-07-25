@@ -3147,6 +3147,33 @@ class DiagnosticSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Dry run: disabled", output)
 
 
+class SettingCommandSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_malformed_backward_window_defaults_in_owner_query(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog.config = SimpleNamespace(
+                    guild=lambda guild: SimpleNamespace(
+                        all=mock.AsyncMock(
+                            return_value={
+                                "purge_backward_seconds": "999",
+                            }
+                        )
+                    )
+                )
+                ctx = SimpleNamespace(
+                    guild=SimpleNamespace(id=100),
+                    send=mock.AsyncMock(),
+                )
+
+                with self.assertLogs("red.Honeypot", level=logging.WARNING):
+                    await cog.purge_backward(ctx)
+
+                ctx.send.assert_awaited_once_with(
+                    "Backward purge window: 60s"
+                )
+
+
 class JoinwatchSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_disabled_setting_does_not_publish_join_alert(self):
         with TemporaryDirectory() as directory:

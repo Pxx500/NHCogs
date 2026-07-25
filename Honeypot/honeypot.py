@@ -83,18 +83,16 @@ from .settings import (
     FALLBACK_ACTION_OPTIONS,
     IMAGE_SCAN_DETECTOR_ACTION_OPTIONS,
     JOINWATCH_AUTO_ROLE_ACTION_OPTIONS,
-    PURGE_BACKWARD_DEFAULT_SECONDS,
-    PURGE_FORWARD_DEFAULT_SECONDS,
     REVIEW_KICK_FAIL_WARNING_MODES,
     SCAM_KEYWORDS,
     WHITELIST_MODE_OPTIONS,
-    BaitActionOption,
-    CoreActionOption,
-    FallbackActionOption,
+    BaitActionOption,  # noqa: F401 - public module re-export
+    CoreActionOption,  # noqa: F401 - public module re-export
+    FallbackActionOption,  # noqa: F401 - public module re-export
     GuildSettings,
-    ImageScanDetectorActionOption,
+    ImageScanDetectorActionOption,  # noqa: F401 - public module re-export
     JoinwatchAutoRoleActionOption,
-    ReviewKickFailWarningMode,
+    ReviewKickFailWarningMode,  # noqa: F401 - public module re-export
     WhitelistModeOption,
 )
 
@@ -7925,10 +7923,11 @@ class Honeypot(Cog):
         )
         if missing is not None:
             raise commands.UserFeedbackCheckFailure(missing)
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         if target.id in self._honeypot_channel_ids(
-            config.get("honeypot_channels") or [],
-            config.get("honeypot_channel"),
+            guild_settings.honeypot_channels,
+            guild_settings.honeypot_channel,
         ):
             raise commands.UserFeedbackCheckFailure(_("That channel is already a honeypot channel."))
         async with self.config.guild(ctx.guild).honeypot_channels() as channel_ids:
@@ -7953,10 +7952,11 @@ class Honeypot(Cog):
     @channels.command(name="list")
     async def channel_list(self, ctx: commands.Context) -> None:
         """List registered honeypot channels."""
-        config = await self.config.guild(ctx.guild).all()
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
         channel_ids = self._honeypot_channel_ids(
-            config.get("honeypot_channels") or [],
-            config.get("honeypot_channel"),
+            guild_settings.honeypot_channels,
+            guild_settings.honeypot_channel,
         )
         await ctx.send(
             _("Honeypot channels:\n{channels}").format(
@@ -8008,17 +8008,12 @@ class Honeypot(Cog):
     async def purge_backward(self, ctx: commands.Context, seconds: int = None) -> None:
         """Set how far back cached message purge can delete."""
         if seconds is None:
-            config = await self.config.guild(ctx.guild).all()
+            raw_config = await self.config.guild(ctx.guild).all()
+            guild_settings = GuildSettings.from_mapping(raw_config)
             await ctx.send(
                 _("Backward purge window: {seconds}s").format(
                     seconds=self._purge_backward_seconds(
-                        int(
-                            config.get(
-                                "purge_backward_seconds",
-                                PURGE_BACKWARD_DEFAULT_SECONDS,
-                            )
-                            or 0
-                        )
+                        guild_settings.purge_backward_seconds
                     ),
                 )
             )
@@ -8037,17 +8032,12 @@ class Honeypot(Cog):
     async def purge_forward(self, ctx: commands.Context, seconds: int = None) -> None:
         """Set how long future messages are purged after a trigger."""
         if seconds is None:
-            config = await self.config.guild(ctx.guild).all()
+            raw_config = await self.config.guild(ctx.guild).all()
+            guild_settings = GuildSettings.from_mapping(raw_config)
             await ctx.send(
                 _("Forward purge window: {seconds}s").format(
                     seconds=self._purge_forward_seconds(
-                        int(
-                            config.get(
-                                "purge_forward_seconds",
-                                PURGE_FORWARD_DEFAULT_SECONDS,
-                            )
-                            or 0
-                        )
+                        guild_settings.purge_forward_seconds
                     ),
                 )
             )
@@ -8979,8 +8969,9 @@ class Honeypot(Cog):
     @joinwatch_autorole.command(name="bantimers")
     async def joinwatch_autorole_bantimers(self, ctx: commands.Context) -> None:
         """List active joinwatch auto-role timers."""
-        config = await self.config.guild(ctx.guild).all()
-        pending_roles = config.get("joinwatch_pending_roles", {})
+        raw_config = await self.config.guild(ctx.guild).all()
+        guild_settings = GuildSettings.from_mapping(raw_config)
+        pending_roles = guild_settings.joinwatch_pending_roles
         if not pending_roles:
             await ctx.send(_("No active joinwatch punishment timers."))
             return
@@ -8991,7 +8982,9 @@ class Honeypot(Cog):
         for member_id_str, data in pending_roles.items():
             try:
                 member_id = int(member_id_str)
-                expires_at = datetime.fromisoformat(data["expires_at"])
+                expires_at = datetime.fromisoformat(
+                    typing.cast(str, data["expires_at"])
+                )
             except (KeyError, TypeError, ValueError):
                 invalid += 1
                 continue
@@ -9005,7 +8998,9 @@ class Honeypot(Cog):
             applied_at = None
             if data.get("applied_at") is not None:
                 try:
-                    applied_at = datetime.fromisoformat(data["applied_at"])
+                    applied_at = datetime.fromisoformat(
+                        typing.cast(str, data["applied_at"])
+                    )
                 except (TypeError, ValueError):
                     applied_at = None
             deadline = (
