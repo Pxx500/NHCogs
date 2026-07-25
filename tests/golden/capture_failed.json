@@ -1,0 +1,99 @@
+{
+  "case": {
+    "cached_purge_lines": [],
+    "case_id": "{{CASE_ID}}",
+    "channel_ids": [
+      300
+    ],
+    "description": "<@200> (200)\nAccount created <t:1783425600:R>\nJoined server <t:1783944000:R>\nStatus: Open\nMessages: 1\nExpires: <t:1784116800:R>\n\nSignals:\nMessage 1 · <#300>:\nImage could not be read",
+    "expires_at": "2026-07-15T12:00:00+00:00",
+    "feedback_items": [],
+    "feedback_lines": [],
+    "fields": [
+      {
+        "name": "Evidence:",
+        "value": "Capture incomplete"
+      },
+      {
+        "name": "Warnings:",
+        "value": "Evidence unavailable for message 1, attachment 1 (missing.png)."
+      }
+    ],
+    "incomplete_evidence": true,
+    "message_count": 1,
+    "message_lines": [
+      "Message 1 in <#300>: Deletion not attempted yet"
+    ],
+    "moderation_actions": [
+      "ban",
+      "kick",
+      "ignore"
+    ],
+    "moderation_status": "none",
+    "moderator_id": null,
+    "needs_attention": false,
+    "operation_warning_lines": [
+      "Evidence unavailable for message 1, attachment 1 (missing.png)."
+    ],
+    "pages": [
+      [
+        {
+          "name": "Evidence:",
+          "value": "Capture incomplete"
+        },
+        {
+          "name": "Warnings:",
+          "value": "Evidence unavailable for message 1, attachment 1 (missing.png)."
+        }
+      ]
+    ],
+    "resolution": null,
+    "resolved_at": null,
+    "signal_lines": [
+      "<#300>: Image could not be read"
+    ],
+    "status": "pending",
+    "thumbnail_url": "https://cdn.example.test/avatar.png",
+    "title": "Detection case",
+    "user_id": 200
+  },
+  "timeline": {
+    "case_id": "{{CASE_ID}}",
+    "case_notes": [
+      "Evidence unavailable for message 1, attachment 1 (missing.png)."
+    ],
+    "messages": [
+      {
+        "attachments": [
+          {
+            "capture_status": "capture_failed",
+            "content_type": "image/png",
+            "description": null,
+            "evidence_path": null,
+            "filename": "missing.png",
+            "key": {
+              "case_id": "{{CASE_ID}}",
+              "message_sequence": 1,
+              "position": 0
+            },
+            "learning_decision": null,
+            "match_metadata": {},
+            "publication_error": null,
+            "size": 128,
+            "spoiler": false
+          }
+        ],
+        "channel_id": 300,
+        "content": "missing image evidence",
+        "created_at": "2026-07-14T12:00:00+00:00",
+        "delete_status": "Deletion not attempted yet",
+        "jump_url": null,
+        "sequence": 1,
+        "signal_reasons": [
+          "Image could not be read"
+        ],
+        "source_message_id": 1001
+      }
+    ]
+  }
+}
