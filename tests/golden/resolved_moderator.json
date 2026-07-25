@@ -1,0 +1,69 @@
+{
+  "case": {
+    "cached_purge_lines": [],
+    "case_id": "{{CASE_ID}}",
+    "channel_ids": [
+      300
+    ],
+    "description": "<@200> (200)\nAccount created <t:1783425600:R>\nJoined server <t:1783944000:R>\nStatus: Closed\nMessages: 1\n\nSignals:\nMessage 1 · <#300>:\nRepeated message",
+    "expires_at": "2026-07-15T12:00:00+00:00",
+    "feedback_items": [],
+    "feedback_lines": [],
+    "fields": [
+      {
+        "name": "Resolution:",
+        "value": "Kicked\n<@9001> • <t:1784030700:F>"
+      }
+    ],
+    "incomplete_evidence": false,
+    "message_count": 1,
+    "message_lines": [
+      "Message 1 in <#300>: Deleted"
+    ],
+    "moderation_actions": [
+      "ban",
+      "kick",
+      "ignore"
+    ],
+    "moderation_status": "none",
+    "moderator_id": 9001,
+    "needs_attention": false,
+    "operation_warning_lines": [],
+    "pages": [
+      [
+        {
+          "name": "Resolution:",
+          "value": "Kicked\n<@9001> • <t:1784030700:F>"
+        }
+      ]
+    ],
+    "resolution": "kick",
+    "resolved_at": "2026-07-14T12:05:00+00:00",
+    "signal_lines": [
+      "<#300>: Repeated message"
+    ],
+    "status": "resolved",
+    "thumbnail_url": "https://cdn.example.test/avatar.png",
+    "title": "Detection case",
+    "user_id": 200
+  },
+  "timeline": {
+    "case_id": "{{CASE_ID}}",
+    "case_notes": [],
+    "messages": [
+      {
+        "attachments": [],
+        "channel_id": 300,
+        "content": "resolved case",
+        "created_at": "2026-07-14T12:00:00+00:00",
+        "delete_status": "Deleted",
+        "jump_url": null,
+        "sequence": 1,
+        "signal_reasons": [
+          "Repeated message"
+        ],
+        "source_message_id": 1001
+      }
+    ]
+  }
+}

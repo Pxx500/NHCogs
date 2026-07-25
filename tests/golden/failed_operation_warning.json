@@ -1,0 +1,73 @@
+{
+  "case": {
+    "cached_purge_lines": [],
+    "case_id": "{{CASE_ID}}",
+    "channel_ids": [
+      300
+    ],
+    "description": "<@200> (200)\nAccount created <t:1783425600:R>\nJoined server <t:1783944000:R>\nStatus: Open\nMessages: 1\nExpires: <t:1784116800:R>\n\nSignals:\nMessage 1 · <#300>:\nRepeated message",
+    "expires_at": "2026-07-15T12:00:00+00:00",
+    "feedback_items": [],
+    "feedback_lines": [],
+    "fields": [
+      {
+        "name": "Warnings:",
+        "value": "Case publication failed. See bot logs."
+      }
+    ],
+    "incomplete_evidence": false,
+    "message_count": 1,
+    "message_lines": [
+      "Message 1 in <#300>: Deletion not attempted yet"
+    ],
+    "moderation_actions": [
+      "ban",
+      "kick",
+      "ignore"
+    ],
+    "moderation_status": "none",
+    "moderator_id": null,
+    "needs_attention": false,
+    "operation_warning_lines": [
+      "Case publication failed. See bot logs."
+    ],
+    "pages": [
+      [
+        {
+          "name": "Warnings:",
+          "value": "Case publication failed. See bot logs."
+        }
+      ]
+    ],
+    "resolution": null,
+    "resolved_at": null,
+    "signal_lines": [
+      "<#300>: Repeated message"
+    ],
+    "status": "pending",
+    "thumbnail_url": "https://cdn.example.test/avatar.png",
+    "title": "Detection case",
+    "user_id": 200
+  },
+  "timeline": {
+    "case_id": "{{CASE_ID}}",
+    "case_notes": [
+      "Case publication failed. See bot logs."
+    ],
+    "messages": [
+      {
+        "attachments": [],
+        "channel_id": 300,
+        "content": "publication will fail",
+        "created_at": "2026-07-14T12:00:00+00:00",
+        "delete_status": "Deletion not attempted yet",
+        "jump_url": null,
+        "sequence": 1,
+        "signal_reasons": [
+          "Repeated message"
+        ],
+        "source_message_id": 1001
+      }
+    ]
+  }
+}
