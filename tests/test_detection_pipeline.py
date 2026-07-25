@@ -9998,7 +9998,7 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                 cog._schedule_case_review_followup = mock.Mock()
                 interaction = SimpleNamespace(
                     user=SimpleNamespace(
-                        id=99,
+                        id=999,
                         guild_permissions=SimpleNamespace(manage_messages=True),
                     ),
                     response=SimpleNamespace(
@@ -10026,14 +10026,15 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                 snapshot = cog._case_store.get_case(appended.case.case_id)
                 self.assertEqual(snapshot.case.status.value, "resolved")
                 self.assertEqual(snapshot.case.resolution, "ban")
-                self.assertIsNone(snapshot.case.moderator_id)
+                resolved = cog._case_store.get_case(appended.case.case_id)
+                self.assertIsNone(resolved.case.moderator_id)
                 self.assertEqual(
                     snapshot.attachments[0].learning_decision,
                     "true_positive",
                 )
                 self.assertEqual(
                     snapshot.attachments[0].learning_metadata["moderator_id"],
-                    99,
+                    999,
                 )
 
     async def test_dismissed_confirmation_reports_failure_in_new_ephemeral_message(self):
