@@ -62,6 +62,7 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 review_publish = import_module("Honeypot.operations.review_publish")
                 review_update = import_module("Honeypot.operations.review_update")
+                role_release = import_module("Honeypot.operations.role_release")
                 source_delete = import_module("Honeypot.operations.source_delete")
                 now = datetime.now(timezone.utc)
                 resolved_message_ids = []
@@ -110,6 +111,9 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
                         ),
                         honeypot.OperationType.EVIDENCE_CLEANUP: (
                             evidence_cleanup.evidence_cleanup_handler
+                        ),
+                        honeypot.OperationType.ROLE_RELEASE: (
+                            role_release.role_release_handler
                         ),
                     },
                 )

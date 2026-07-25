@@ -98,6 +98,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                     "Honeypot.operations.evidence_cleanup"
                 )
                 review_update = import_module("Honeypot.operations.review_update")
+                role_release = import_module("Honeypot.operations.role_release")
                 source_delete = import_module("Honeypot.operations.source_delete")
                 now = datetime.now(timezone.utc)
                 guild = object()
@@ -147,6 +148,9 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                         honeypot.OperationType.EVIDENCE_CLEANUP: (
                             evidence_cleanup.evidence_cleanup_handler
                         ),
+                        honeypot.OperationType.ROLE_RELEASE: (
+                            role_release.role_release_handler
+                        ),
                     },
                 )
                 for operation_type in honeypot.OperationType:
@@ -156,6 +160,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                         honeypot.OperationType.CACHED_PURGE,
                         honeypot.OperationType.SOURCE_DELETE,
                         honeypot.OperationType.EVIDENCE_CLEANUP,
+                        honeypot.OperationType.ROLE_RELEASE,
                     }:
                         continue
                     self.assertIsNone(
