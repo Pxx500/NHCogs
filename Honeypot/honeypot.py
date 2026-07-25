@@ -1991,8 +1991,8 @@ class Honeypot(Cog):
             return discord.Object(id=user_id)
 
 
-    def _automated_kick_fail_warning_enabled(self, config: dict) -> bool:
-        return bool(config.get("automated_kick_fail_warning", False))
+    def _automated_kick_fail_warning_enabled(self, enabled: bool) -> bool:
+        return enabled
 
     async def _create_kick_fail_warning(
         self,
@@ -2179,7 +2179,7 @@ class Honeypot(Cog):
         return _("Dry run: I would not take action.")
 
     @staticmethod
-    def _ban_delete_message_seconds(config: dict) -> int:
+    def _ban_delete_message_seconds() -> int:
         return 0
 
     def _missing_action_permission(self, guild: discord.Guild, action: str) -> str | None:
@@ -3241,7 +3241,7 @@ class Honeypot(Cog):
                             guild,
                             member,
                             source.created_at,
-                            raw_config,
+                            guild_settings,
                             reason=public_reason,
                             action=action.value,
                         )
@@ -3381,7 +3381,7 @@ class Honeypot(Cog):
                             guild,
                             member,
                             effect_started_at,
-                            raw_config,
+                            guild_settings,
                             reason=f"Honeypot review: {action.value.title()}",
                             action=action.value,
                             moderator=moderator,
@@ -6542,7 +6542,7 @@ class Honeypot(Cog):
         guild: discord.Guild,
         member: discord.Member | discord.User | discord.Object,
         created_at: datetime,
-        config: dict,
+        settings: GuildSettings,
         reason: str,
         action: str | None = None,
         moderator: discord.Member | discord.User | discord.Object | None = None,
@@ -6550,10 +6550,12 @@ class Honeypot(Cog):
         """Execute the configured action (kick/ban) against a guild member.
         Returns (action_label, failed_message) where failed_message is None on success.
         """
-        action = action or config["action"]
+        action = action or (
+            settings.action.value if settings.action is not None else None
+        )
         if action not in ("kick", "ban"):
             return (_("No action configured."), None)
-        if config.get("dry_run"):
+        if settings.dry_run:
             await self._increment_stat(guild, "dry_run_actions")
             return (self._dry_run_label(action), None)
         missing_permission = self._missing_action_permission(guild, action)
@@ -6565,18 +6567,14 @@ class Honeypot(Cog):
                 self._activate_forward_purge(
                     guild.id,
                     member.id,
-                    int(
-                        config.get(
-                            "purge_forward_seconds",
-                            PURGE_FORWARD_DEFAULT_SECONDS,
-                        )
-                        or 0
-                    ),
+                    settings.purge_forward_seconds,
                 )
                 try:
                     await member.kick(reason=reason)
                 except discord.NotFound:
-                    if self._automated_kick_fail_warning_enabled(config):
+                    if self._automated_kick_fail_warning_enabled(
+                        settings.automated_kick_fail_warning
+                    ):
                         self._deactivate_forward_purge(guild.id, member.id)
                         return await self._create_kick_fail_warning(guild, member.id)
                     raise
@@ -6585,15 +6583,9 @@ class Honeypot(Cog):
                 self._activate_forward_purge(
                     guild.id,
                     member.id,
-                    int(
-                        config.get(
-                            "purge_forward_seconds",
-                            PURGE_FORWARD_DEFAULT_SECONDS,
-                        )
-                        or 0
-                    ),
+                    settings.purge_forward_seconds,
                 )
-                delete_message_seconds = self._ban_delete_message_seconds(config)
+                delete_message_seconds = self._ban_delete_message_seconds()
                 member_ban = getattr(member, "ban", None)
                 if callable(member_ban):
                     await member_ban(
@@ -6717,13 +6709,17 @@ class Honeypot(Cog):
         try:
             if action == "kick":
                 if member is None:
-                    if self._automated_kick_fail_warning_enabled(config):
+                    if self._automated_kick_fail_warning_enabled(
+                        bool(config.get("automated_kick_fail_warning", False))
+                    ):
                         return await self._create_kick_fail_warning(guild, member_id)
                     return (_("The member is no longer in the server."), None)
                 try:
                     await member.kick(reason=reason)
                 except discord.NotFound:
-                    if self._automated_kick_fail_warning_enabled(config):
+                    if self._automated_kick_fail_warning_enabled(
+                        bool(config.get("automated_kick_fail_warning", False))
+                    ):
                         return await self._create_kick_fail_warning(guild, member_id)
                     raise
             elif action == "ban":
@@ -6731,7 +6727,7 @@ class Honeypot(Cog):
                 await guild.ban(
                     target,
                     reason=reason,
-                    delete_message_seconds=self._ban_delete_message_seconds(config),
+                    delete_message_seconds=self._ban_delete_message_seconds(),
                 )
                 self._schedule_post_ban_sweep(guild, target.id)
             await self._increment_stat(guild, "joinwatch_auto_role_punishments")
@@ -7213,7 +7209,7 @@ class Honeypot(Cog):
                 if action == "ban":
                     await after.ban(
                         reason=reason,
-                        delete_message_seconds=self._ban_delete_message_seconds(config),
+                        delete_message_seconds=self._ban_delete_message_seconds(),
                     )
                     self._schedule_post_ban_sweep(after.guild, after.id)
                     await self._increment_stat(after.guild, "banned")
