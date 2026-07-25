@@ -3398,7 +3398,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
         async def __aexit__(self, exc_type, exc, traceback):
             return False
 
-    async def test_loop_applies_due_assignment_and_persists_role_timer(self):
+    async def test_loop_applies_assignment_before_expiring_active_role(self):
         class Ranked:
             def __init__(self, position):
                 self.position = position
@@ -3409,45 +3409,140 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
             def __ge__(self, other):
                 return self.position >= other.position
 
+        class FakeEmbed:
+            def __init__(self, fields=()):
+                self.fields = list(fields)
+
+            @classmethod
+            def from_dict(cls, data):
+                return cls(SimpleNamespace(**field) for field in data.get("fields", ()))
+
+            def set_field_at(self, index, *, name, value, inline):
+                self.fields[index] = SimpleNamespace(
+                    name=name,
+                    value=value,
+                    inline=inline,
+                )
+
+            def add_field(self, *, name, value, inline):
+                self.fields.append(
+                    SimpleNamespace(name=name, value=value, inline=inline)
+                )
+
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                effects = []
                 role = Ranked(5)
                 role.id = 501
                 role.mention = "<@&501>"
                 me = SimpleNamespace(
-                    guild_permissions=SimpleNamespace(manage_roles=True),
+                    guild_permissions=SimpleNamespace(
+                        manage_roles=True,
+                        kick_members=True,
+                        ban_members=False,
+                    ),
                     top_role=Ranked(10),
                 )
+                assignment_message = SimpleNamespace(
+                    embeds=[
+                        SimpleNamespace(
+                            to_dict=lambda: {
+                                "fields": [
+                                    {
+                                        "name": "Auto-role:",
+                                        "value": "Pending.",
+                                        "inline": False,
+                                    }
+                                ]
+                            }
+                        )
+                    ],
+                    edit=mock.AsyncMock(),
+                )
+                expiration_message = SimpleNamespace(
+                    embeds=[
+                        SimpleNamespace(
+                            to_dict=lambda: {
+                                "fields": [
+                                    {
+                                        "name": "Auto-role:",
+                                        "value": "Active.",
+                                        "inline": False,
+                                    }
+                                ]
+                            }
+                        )
+                    ],
+                    edit=mock.AsyncMock(),
+                )
+                channels = {
+                    601: SimpleNamespace(
+                        fetch_message=mock.AsyncMock(return_value=assignment_message)
+                    ),
+                    602: SimpleNamespace(
+                        fetch_message=mock.AsyncMock(return_value=expiration_message)
+                    ),
+                }
                 guild = SimpleNamespace(
                     id=100,
                     me=me,
-                    get_channel=lambda channel_id: None,
+                    get_channel=lambda channel_id: channels.get(channel_id),
                     get_thread=lambda channel_id: None,
                 )
-                member = SimpleNamespace(
+
+                async def add_assignment_role(*_args, **_kwargs):
+                    effects.append(("add-role", 201))
+
+                async def kick_active_member(*_args, **_kwargs):
+                    effects.append(("kick", 202))
+
+                assignment_member = SimpleNamespace(
                     id=201,
                     guild=guild,
                     guild_permissions=SimpleNamespace(manage_guild=False),
                     top_role=Ranked(1),
                     roles=[],
                     mention="<@201>",
-                    add_roles=mock.AsyncMock(),
+                    add_roles=mock.AsyncMock(side_effect=add_assignment_role),
                 )
-                guild.get_member = lambda member_id: member if member_id == 201 else None
-                guild.fetch_member = mock.AsyncMock(return_value=member)
+                active_member = SimpleNamespace(
+                    id=202,
+                    guild=guild,
+                    guild_permissions=SimpleNamespace(manage_guild=False),
+                    top_role=Ranked(1),
+                    roles=[role],
+                    mention="<@202>",
+                    kick=mock.AsyncMock(side_effect=kick_active_member),
+                )
+                members = {201: assignment_member, 202: active_member}
+                guild.get_member = lambda member_id: members.get(member_id)
+                guild.fetch_member = mock.AsyncMock(
+                    side_effect=lambda member_id: members.get(member_id)
+                )
                 guild.get_role = lambda role_id: role if role_id == 501 else None
                 assignments = {
                     "201": {
                         "role_id": 501,
                         "apply_at": "2026-07-15T11:59:00+00:00",
+                        "alert_channel_id": 601,
+                        "alert_message_id": 701,
                     }
                 }
-                roles = {}
+                roles = {
+                    "202": {
+                        "role_id": 501,
+                        "applied_at": "2026-07-15T11:00:00+00:00",
+                        "expires_at": "2026-07-15T11:59:00+00:00",
+                        "alert_channel_id": 602,
+                        "alert_message_id": 702,
+                    }
+                }
                 stats = {}
                 raw_config = {
                     "joinwatch_auto_role_enabled": True,
                     "joinwatch_auto_role_id": 501,
                     "joinwatch_auto_role_timer_minutes": 30,
+                    "joinwatch_auto_role_action": "kick",
                     "joinwatch_pending_role_assignments": assignments,
                     "joinwatch_pending_roles": roles,
                 }
@@ -3472,16 +3567,41 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                         format_dt=lambda value, style: value.isoformat()
                     ),
                     create=True,
+                ), mock.patch.object(
+                    honeypot.discord,
+                    "Embed",
+                    FakeEmbed,
+                ), mock.patch.object(
+                    honeypot.modlog,
+                    "create_case",
+                    new=mock.AsyncMock(),
+                    create=True,
                 ):
                     await cog.joinwatch_auto_role_loop.function(cog)
 
-                member.add_roles.assert_awaited_once_with(
+                self.assertEqual(effects, [("add-role", 201), ("kick", 202)])
+                assignment_member.add_roles.assert_awaited_once_with(
                     role,
                     reason="Automated account status update.",
                 )
+                active_member.kick.assert_awaited_once_with(
+                    reason="Suspicious Account"
+                )
                 self.assertEqual(assignments, {})
+                self.assertNotIn("202", roles)
                 self.assertEqual(roles["201"]["role_id"], 501)
                 self.assertEqual(stats["joinwatch_auto_roles"], 1)
+                self.assertEqual(stats["joinwatch_auto_role_punishments"], 1)
+                assignment_message.edit.assert_awaited_once()
+                expiration_message.edit.assert_awaited_once()
+                self.assertIn(
+                    "<@&501> applied until",
+                    assignment_message.edit.await_args.kwargs["embed"].fields[0].value,
+                )
+                self.assertEqual(
+                    expiration_message.edit.await_args.kwargs["embed"].fields[0].value,
+                    "Kicked.",
+                )
 
     async def test_assignment_and_role_retries_are_scheduled_one_minute_later(self):
         with TemporaryDirectory() as directory:
