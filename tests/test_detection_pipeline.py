@@ -733,7 +733,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(observed, EXPECTED_GUILD_DEFAULTS)
 
     async def test_isolation_removes_new_nested_honeypot_module(self):
-        module_name = "Honeypot.operations.review_update"
+        module_name = "Honeypot.operations.source_delete"
         sys.modules.pop(module_name, None)
         try:
             with TemporaryDirectory() as directory:
@@ -745,7 +745,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             sys.modules.pop(module_name, None)
 
     async def test_isolation_restores_preexisting_nested_honeypot_module(self):
-        module_name = "Honeypot.operations.review_update"
+        module_name = "Honeypot.operations.source_delete"
         previous = sys.modules.get(module_name, _MISSING)
         sentinel = ModuleType(module_name)
         sys.modules[module_name] = sentinel

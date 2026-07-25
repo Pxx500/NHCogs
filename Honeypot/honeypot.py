@@ -3428,53 +3428,6 @@ class Honeypot(Cog):
                         operation_result = action.value
                     elif operation_result is None:
                         operation_result = action.value
-            elif operation.operation_type == OperationType.SOURCE_DELETE:
-                guild = self.bot.get_guild(snapshot.case.guild_id)
-                if guild is None:
-                    raise RuntimeError("detection case guild is unavailable")
-                _, case_id, channel_id, message_id = operation.idempotency_key.split(":")
-                if case_id != operation.case_id:
-                    raise RuntimeError("source delete operation case identity does not match")
-                if operation.message_sequence is None:
-                    raise RuntimeError("source delete operation has no message identity")
-                channel = await self._fetch_message_channel(guild, int(channel_id))
-                if channel is None:
-                    result = detection_runtime.DeleteResult(
-                        DeleteStatus.ALREADY_GONE, 1, None
-                    )
-                else:
-                    try:
-                        message = await channel.fetch_message(int(message_id))
-                    except discord.NotFound:
-                        result = detection_runtime.DeleteResult(
-                            DeleteStatus.ALREADY_GONE, 1, None
-                        )
-                    else:
-                        result = await detection_runtime.delete_message(message)
-                operation_result = result.status.value
-                if result.status not in {
-                    DeleteStatus.DELETED,
-                    DeleteStatus.ALREADY_GONE,
-                }:
-                    raise RuntimeError(result.error or result.status.value)
-                completed_delete = await asyncio.to_thread(
-                    self._case_store.complete_message_delete_retry,
-                    operation.case_id,
-                    operation.message_sequence,
-                    result.status,
-                )
-                if completed_delete and result.status is DeleteStatus.DELETED:
-                    await self._increment_stat(guild, "purged_messages")
-                    source_signals = tuple(
-                        item.signal
-                        for item in snapshot.signals
-                        if item.message_sequence == operation.message_sequence
-                    )
-                    if any(
-                        signal.detector == "forward_purge"
-                        for signal in source_signals
-                    ):
-                        await self._increment_stat(guild, "forward_purge_deletes")
             elif operation.operation_type in {
                 OperationType.MODERATOR_BAN,
                 OperationType.MODERATOR_KICK,
