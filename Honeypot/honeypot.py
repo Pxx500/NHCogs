@@ -44,7 +44,6 @@ from .detection_cases import (
     OPERATION_RESULT_CHANNEL_UNAVAILABLE,
     OPERATION_RESULT_KICK_MISSING,
     OPERATION_RESULT_MEMBER_UNAVAILABLE,
-    OPERATION_RESULT_OWNERSHIP_TRANSFERRED,
     OPERATION_RESULT_PREEXISTING_ROLE,
     OPERATION_RESULT_ROLE_ALREADY_OWNED,
     OPERATION_RESULT_SUPERSEDED_BY_MODERATION,
@@ -3497,68 +3496,6 @@ class Honeypot(Cog):
                             raise RuntimeError(failed)
                     if operation_result is None:
                         operation_result = action.value
-            elif operation.operation_type == OperationType.ROLE_RELEASE:
-                guild = self.bot.get_guild(snapshot.case.guild_id)
-                if guild is None:
-                    raise RuntimeError("detection case guild is unavailable")
-                role_id = int(operation.idempotency_key.rsplit(":", 1)[1])
-                owned_role_ids = await asyncio.to_thread(
-                    self._case_store.owned_role_ids, operation.case_id
-                )
-                if role_id not in owned_role_ids:
-                    operation_result = OPERATION_RESULT_OWNERSHIP_TRANSFERRED
-                else:
-                    started = await asyncio.to_thread(
-                        self._case_store.start_role_release_effect,
-                        operation.operation_id,
-                        operation.claim_token,
-                        operation.case_id,
-                        role_id,
-                        datetime.now(timezone.utc),
-                    )
-                    if not started:
-                        owner_case_id = await asyncio.to_thread(
-                            self._case_store.role_owner_case,
-                            snapshot.case.guild_id,
-                            snapshot.case.user_id,
-                            role_id,
-                        )
-                        if owner_case_id != operation.case_id:
-                            operation_result = OPERATION_RESULT_OWNERSHIP_TRANSFERRED
-                        else:
-                            raise RuntimeError("detection operation lease was lost")
-                    if operation_result != OPERATION_RESULT_OWNERSHIP_TRANSFERRED:
-                        role = guild.get_role(role_id)
-                        member = None
-                        if role is not None:
-                            member = guild.get_member(snapshot.case.user_id)
-                            if member is None:
-                                fetch_member = getattr(guild, "fetch_member", None)
-                                if not callable(fetch_member):
-                                    raise RuntimeError(
-                                        "detection case member lookup is unavailable"
-                                    )
-                                try:
-                                    member = await fetch_member(snapshot.case.user_id)
-                                except discord.NotFound:
-                                    member = None
-                                except discord.HTTPException as error:
-                                    raise RuntimeError(
-                                        "detection case member lookup failed"
-                                    ) from error
-                        if member is not None and role in member.roles:
-                            removed = await self._remove_review_mute_role(
-                                member,
-                                role,
-                                "Detection case resolved; removing pending mute.",
-                            )
-                            if not removed:
-                                raise RuntimeError("failed to release detection case role")
-                        await asyncio.to_thread(
-                            self._case_store.release_role_ownership,
-                            operation.case_id,
-                            role_id,
-                        )
             else:
                 raise RuntimeError(
                     "unsupported detection case operation: "
