@@ -65,8 +65,7 @@ class StickyRoleStore:
             return await asyncio.to_thread(self._get_member_roles_sync, guild_id, user_id)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path)
-        return conn
+        return sqlite3.connect(self._path)
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:

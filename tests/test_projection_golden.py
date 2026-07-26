@@ -11,7 +11,6 @@ from tests.detection_case_fixtures import DetectionCaseBuilder
 from tests.test_detection_cases import detection_cases_under_test as cases
 from tests.test_pending_review_merge import case_review
 
-
 GOLDEN_DIR = Path(__file__).with_name("golden")
 CASE_ID_PLACEHOLDER = "{{CASE_ID}}"
 
@@ -50,7 +49,6 @@ class ProjectionGoldenTests(unittest.TestCase):
     def assertGolden(self, name):
         snapshot = self.builder.snapshot()
         actual = _projection_bytes(snapshot)
-        template = actual.replace(snapshot.case.case_id.encode(), CASE_ID_PLACEHOLDER.encode())
         path = GOLDEN_DIR / f"{name}.json"
         expected = path.read_bytes().replace(
             CASE_ID_PLACEHOLDER.encode(),

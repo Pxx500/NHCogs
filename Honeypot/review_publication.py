@@ -951,8 +951,8 @@ async def _ensure_detection_case_thread(cog, snapshot, summary_message):
                 raise
             try:
                 thread = await fetch_thread()
-            except discord.NotFound:
-                raise create_error
+            except discord.NotFound as fetch_error:
+                raise create_error from fetch_error
     parent = getattr(summary_message, "channel", None)
     parent_channel_id = getattr(parent, "id", snapshot.case.review_channel_id)
     try:

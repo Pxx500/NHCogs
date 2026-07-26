@@ -1,13 +1,12 @@
 import importlib.util
-import asyncio
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from tests.test_detection_cases import detection_cases_under_test as cases
 from tests.detection_case_fixtures import capture_attachment, publish_evidence
+from tests.test_detection_cases import detection_cases_under_test as cases
 
 
 def _load_case_review():

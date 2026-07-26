@@ -19,6 +19,9 @@ if TYPE_CHECKING:
 DETECTION_FAST_RETRY_SECONDS = 10
 DETECTION_FAST_RETRY_LIMIT = 5
 DETECTION_SLOW_RETRY_MINUTES = 5
+# Transient cached-purge failures stop retrying earlier than the generic limit:
+# once this many attempts have failed the case is flagged for attention instead.
+DETECTION_CACHED_PURGE_ATTEMPT_LIMIT = 3
 
 
 class CompletionMode(str, Enum):

@@ -7,7 +7,6 @@ from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-
 PACKAGE_NAME = "_honeypot_storage_tests"
 PACKAGE_PATH = Path(__file__).resolve().parents[1] / "Honeypot"
 

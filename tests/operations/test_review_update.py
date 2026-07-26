@@ -1,8 +1,8 @@
+import unittest
 from datetime import datetime, timezone
 from importlib import import_module
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import unittest
 
 from tests.test_detection_pipeline import _Bot, _isolated_honeypot_modules
 

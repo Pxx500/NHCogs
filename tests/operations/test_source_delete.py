@@ -1,9 +1,9 @@
+import unittest
 from datetime import datetime, timedelta, timezone
 from importlib import import_module
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-import unittest
 
 from tests.test_detection_pipeline import _Bot, _isolated_honeypot_modules
 
@@ -193,7 +193,7 @@ class SourceDeleteHandlerTests(unittest.IsolatedAsyncioTestCase):
                 TemporaryDirectory() as directory,
             ):
                 with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                    handler_module = import_module("Honeypot.operations.source_delete")
+                    import_module("Honeypot.operations.source_delete")
                     now = datetime.now(timezone.utc)
                     exception_type = getattr(honeypot.discord, exception_name)
 

@@ -24,7 +24,6 @@ import ast
 import unittest
 from pathlib import Path
 
-
 PACKAGE_DIR = Path(__file__).resolve().parent.parent / "Honeypot"
 
 
