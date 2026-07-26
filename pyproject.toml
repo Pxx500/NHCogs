@@ -161,6 +161,14 @@ ignore = [
 # for the rows that leave it `None`; that is the table's intent.
 "tests/operations/test_source_delete.py" = ["B023", "PLW2901"]
 
+# PLR0912: `test_domain_shells_delegate_to_a_matching_twin` is a single AST
+# classification walk over the cog body (13 branches, one over the limit). Its
+# branches are the guard clauses that reject a node as a delegation shell, and
+# each `continue` states one reason; hoisting them into helpers would scatter
+# the classifier the guard exists to make readable. Moved verbatim from
+# tests/test_detection_pipeline.py, where the exclusion had hidden it.
+"tests/test_cog_assembly.py" = ["PLR0912"]
+
 # ASYNC240: the tests touch `Path` directly to set up and assert on capture
 # directories; that is the assertion, not production blocking.
 "tests/test_detection_runtime.py" = ["ASYNC240"]
