@@ -759,6 +759,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         a new split row updates them deliberately.
         """
         expected_counts = {
+            "detection": 80,
             "diagnostics": 10,
             "imagescan": 23,
             "joinwatch": 16,
@@ -773,7 +774,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         # A seam can also be re-exported as `name = staticmethod(module.name)`.
         # That is an Assign, invisible to the delegation scan, so it is counted
         # and name-checked separately rather than silently escaping the guard.
-        expected_static_reexports = {"review_publication": 2}
+        expected_static_reexports = {"detection": 4, "review_publication": 2}
         static_reexports = {}
         delegations = {}
         for node in cog_class.body:
@@ -1730,7 +1731,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
 
-                await cog._record_detection_stats(guild, signals)
+                await honeypot.detection._record_detection_stats(cog, guild, signals)
 
                 keys = [call.args[1] for call in cog._increment_stat.await_args_list]
                 self.assertEqual(
@@ -6275,7 +6276,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.to_thread(
                     cog._case_store.append_message,
                     honeypot.review_publication._new_case_message(message),
-                    (cog._forward_purge_signal(message),),
+                    (honeypot.detection._forward_purge_signal(cog, message),),
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
                 cog._publish_detection_case = mock.AsyncMock()
@@ -6312,7 +6313,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 appended = await asyncio.to_thread(
                     cog._case_store.append_message,
                     honeypot.review_publication._new_case_message(first),
-                    (cog._forward_purge_signal(first),),
+                    (honeypot.detection._forward_purge_signal(cog, first),),
                 )
                 now = datetime.now(timezone.utc)
                 moderator = await asyncio.to_thread(
@@ -10010,7 +10011,8 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                 appended = self._append_case(
                     honeypot, cog, datetime.now(timezone.utc)
                 )
-                cog._activate_forward_purge(
+                honeypot.detection._activate_forward_purge(
+                    cog,
                     appended.case.guild_id,
                     appended.case.user_id,
                     60,
@@ -10501,7 +10503,7 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                 cog._increment_stat = mock.AsyncMock()
                 cog._cached_purge_user_messages = mock.AsyncMock(return_value=0)
                 honeypot.modlog.create_case = mock.AsyncMock()
-                honeypot.POST_BAN_SWEEP_DELAY_SECONDS = 0
+                honeypot.detection.POST_BAN_SWEEP_DELAY_SECONDS = 0
                 appended = self._append_case(
                     honeypot, cog, datetime.now(timezone.utc)
                 )
@@ -12427,7 +12429,7 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                 )
                 publish_primary(cog._case_store, appended.case.case_id, 30, 77)
 
-                await cog._run_detection_case_expiry()
+                await honeypot.detection._run_detection_case_expiry(cog)
                 snapshot = cog._case_store.get_case(appended.case.case_id)
 
                 self.assertEqual(snapshot.case.status.value, "expired")
