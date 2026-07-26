@@ -537,3 +537,7 @@ class _Bot:
 
     def get_guild(self, guild_id):
         return None
+
+
+async def _async_noop(*args, **kwargs):
+    return None
