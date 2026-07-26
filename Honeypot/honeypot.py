@@ -2172,45 +2172,40 @@ class Honeypot(Cog):
             if isinstance(operation.operation_type, OperationType)
             else operation.operation_type
         )
-        operation_result = None
-        role_was_added = False
         snapshot = None
+        context = None
         operation_outcome = OperationOutcome()
         operation_error = None
         cancellation = None
-        operation_policy = None
         try:
             snapshot = await asyncio.to_thread(self._case_store.get_case, operation.case_id)
             if snapshot is None:
                 return
+            context = OperationContext(
+                operation=operation,
+                snapshot=snapshot,
+                lease=lease,
+                now=now,
+                publication_channel=publication_channel,
+                live_message=live_message,
+                timings=timings,
+            )
             operation_policy = executor_operation_policy(operation.operation_type)
             handler = (
                 self._detection_operation_handlers.resolve(operation.operation_type)
                 if operation_policy is not None
                 else None
             )
-            if handler is not None:
-                context = OperationContext(
-                    operation=operation,
-                    snapshot=snapshot,
-                    lease=lease,
-                    now=now,
-                    publication_channel=publication_channel,
-                    live_message=live_message,
-                    timings=timings,
-                )
-                operation_outcome = apply_operation_policy(
-                    await handler(self, context), operation_policy
-                )
-                operation_result = operation_outcome.result
-                role_was_added = operation_outcome.role_was_added
-                if operation_outcome.error is not None:
-                    raise operation_outcome.error
-            else:
+            if handler is None:
                 raise RuntimeError(
                     "unsupported detection case operation: "
                     f"{operation_type_value}"
                 )
+            operation_outcome = apply_operation_policy(
+                await handler(self, context), operation_policy
+            )
+            if operation_outcome.error is not None:
+                raise operation_outcome.error
         except asyncio.CancelledError as error:
             cancellation = error
         except Exception as error:
@@ -2220,40 +2215,16 @@ class Honeypot(Cog):
         if cancellation is not None:
             raise cancellation
         if operation_error is not None:
-            operation_outcome = replace(
-                operation_outcome,
-                result=operation_result,
-                role_was_added=role_was_added,
-                error=operation_error,
-            )
             await self._settle_detection_operation_failure(
                 operation,
                 lease,
                 now,
                 snapshot,
-                operation_outcome,
+                replace(operation_outcome, error=operation_error),
                 operation_error,
                 operation_type_value,
             )
             return
-        if operation_policy is not None:
-            operation_outcome = apply_operation_policy(
-                replace(
-                    operation_outcome,
-                    result=operation_result,
-                    role_was_added=role_was_added,
-                ),
-                operation_policy,
-            )
-        context = OperationContext(
-            operation=operation,
-            snapshot=snapshot,
-            lease=lease,
-            now=now,
-            publication_channel=publication_channel,
-            live_message=live_message,
-            timings=timings,
-        )
         operation_outcome = await self._settle_detection_operation_success(
             context,
             operation_outcome,
