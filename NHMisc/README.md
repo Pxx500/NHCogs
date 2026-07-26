@@ -13,6 +13,30 @@ is typed as `!nhmisc status`.
 [p]load NHMisc
 ```
 
+## Forum Autopin
+
+NHMisc can automatically pin the starter message of each new post in selected Discord
+forum channels.
+
+```ini
+[p]nhmisc forumautopin add #forum
+[p]nhmisc forumautopin remove #forum
+[p]nhmisc forumautopin list
+```
+
+The commands require Manage Server permission or bot-admin status. Multiple forums can
+be enabled in the same server.
+
+The bot needs these permissions in each configured forum:
+
+- View Channel
+- Read Message History
+- Pin Messages
+
+Only posts created after the forum is enabled and while the bot is online are processed.
+NHMisc does not scan old posts or backfill posts created while offline. Removing a forum
+does not unpin starter messages that were pinned earlier.
+
 ## Voice Logging
 
 Voice logging sends messages when users join, leave, or move between voice channels.
