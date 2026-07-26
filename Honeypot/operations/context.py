@@ -13,6 +13,14 @@ if TYPE_CHECKING:
     from ..honeypot import Honeypot
 
 
+# Retry cadence for durable detection-case operations. It lives here because
+# both the cog-side executor and the message-process handler schedule retries
+# with it, and the handler cannot import the cog module without a cycle.
+DETECTION_FAST_RETRY_SECONDS = 10
+DETECTION_FAST_RETRY_LIMIT = 5
+DETECTION_SLOW_RETRY_MINUTES = 5
+
+
 class CompletionMode(str, Enum):
     OPERATION = "operation"
     MODERATOR_ACTION = "moderator_action"
