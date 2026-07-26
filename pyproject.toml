@@ -169,6 +169,18 @@ ignore = [
 # tests/test_detection_pipeline.py, where the exclusion had hidden it.
 "tests/test_cog_assembly.py" = ["PLR0912"]
 
+# ASYNC240: `Path.mkdir`/`Path.write_bytes`/`Path.glob` inside an async test
+# build and inspect the imagescan sample tree; that is the fixture and the
+# assertion, not production blocking - the same reason as
+# tests/test_detection_runtime.py below.
+# RET503: the sqlite connection stub's `__exit__` returns the wrapped
+# `__exit__` on the error path and falls through on the success path, which is
+# the protocol's "do not suppress". The fall-through statement is a `commit()`
+# that always raises the injected failure, so an explicit trailing `return` is
+# unreachable. Moved verbatim from tests/test_detection_pipeline.py, where the
+# exclusion had hidden both.
+"tests/test_detection_diagnostics.py" = ["ASYNC240", "RET503"]
+
 # ASYNC240: the tests touch `Path` directly to set up and assert on capture
 # directories; that is the assertion, not production blocking.
 "tests/test_detection_runtime.py" = ["ASYNC240"]
