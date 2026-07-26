@@ -9,6 +9,7 @@ from importlib import import_module, util
 import json
 import logging
 from pathlib import Path
+import re
 import sqlite3
 from tempfile import TemporaryDirectory
 from threading import Event, get_ident
@@ -661,6 +662,71 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                             isinstance(command, honeypot.commands.Group),
                             command.kind == "group",
                         )
+
+    def test_readme_command_divergence_matches_the_contract(self):
+        """Phase 5 rail 2, as an assertion rather than a claim in the ledger.
+
+        The plan wanted `inventory - allowlist == readme_rows`. That is not
+        reachable: the README documents whole sections under command paths that
+        do not exist (`honeypot core ...` for the `honeypot honeypot ...` group,
+        `honeypot bait ...` for `bait_role`), and several real commands have no
+        row at all. Both sets are therefore frozen exactly, so a split that
+        loses a command, or a README edit, has to face this test.
+        """
+        contract = json.loads(
+            (Path(__file__).with_name("honeypot_command_contract.json")).read_text(
+                encoding="utf-8"
+            )
+        )
+        expected = contract["readme"]
+        readme_row = re.compile(r"^\|\s*`([^`]+)`\s*\|")
+        rows = set()
+        readme_path = PACKAGE_DIR / "README.md"
+        for line in readme_path.read_text(encoding="utf-8").splitlines():
+            match = readme_row.match(line)
+            if match is None:
+                continue
+            command = match.group(1).strip()
+            if command.startswith("!"):
+                command = command[1:]
+            elif command.startswith("[p]"):
+                command = command[3:]
+            else:
+                continue
+            tokens = []
+            for token in command.split():
+                if token.startswith(("<", "[")):
+                    break
+                tokens.append(token)
+            rows.add(" ".join(tokens))
+
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                leaves = {
+                    command.qualified_name
+                    for command in honeypot.Honeypot.__cog_commands__
+                    if command.kind == "command"
+                }
+
+        self.assertEqual(len(rows), expected["row_count"])
+        self.assertEqual(len(leaves), expected["leaf_count"])
+        self.assertEqual(
+            sorted(leaves - rows),
+            expected["undocumented_commands"],
+            "a command gained or lost its README row; fix the README or update "
+            "the contract in the same commit",
+        )
+        self.assertEqual(
+            sorted(rows - leaves),
+            expected["rows_without_command"],
+            "the README documents a command path that does not exist, or a "
+            "documented command disappeared from the cog",
+        )
+        self.assertLessEqual(
+            set(contract["intentionally_undocumented_debug_commands"]),
+            leaves - rows,
+            "the debug allow-list must stay a subset of the undocumented set",
+        )
 
     def test_fallback_keeps_diagnostic_commands_on_cog_and_exposes_implementations(self):
         implementation_names = (
