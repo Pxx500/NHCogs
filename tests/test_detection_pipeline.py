@@ -758,7 +758,12 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         suite does not drive. Counts are exact so a lost delegation fails too;
         a new split row updates them deliberately.
         """
-        expected_counts = {"diagnostics": 10, "imagescan": 23, "joinwatch": 16}
+        expected_counts = {
+            "diagnostics": 10,
+            "imagescan": 23,
+            "joinwatch": 16,
+            "review_publication": 13,
+        }
         tree = ast.parse((PACKAGE_DIR / "honeypot.py").read_text(encoding="utf-8"))
         cog_class = next(
             node
@@ -2289,7 +2294,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 )
                 sent = SimpleNamespace(id=70, delete=mock.AsyncMock())
 
-                await cog._complete_case_timeline_publication(stale, sent, 60)
+                await honeypot.review_publication._complete_case_timeline_publication(cog, stale, sent, 60)
 
                 sent.delete.assert_not_awaited()
 
@@ -2313,10 +2318,10 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
 
-                await cog._compensate_case_publication(
+                await honeypot.review_publication._compensate_case_publication(cog,
                     appended.case.case_id, 60, orphan
                 )
-                await cog._compensate_case_publication(
+                await honeypot.review_publication._compensate_case_publication(cog,
                     appended.case.case_id, 60, orphan
                 )
 
@@ -2335,7 +2340,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                     return_value=channel
                 )
 
-                await cog._retry_detection_orphan_publications()
+                await honeypot.review_publication._retry_detection_orphan_publications(cog)
 
                 recovered.delete.assert_awaited_once()
                 self.assertEqual(
@@ -2476,7 +2481,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                     "AllowedMentions",
                     SimpleNamespace(none=lambda: None),
                 ):
-                    await cog._publish_case_timeline(snapshot, thread, resolved=False)
+                    await honeypot.review_publication._publish_case_timeline(cog, snapshot, thread, resolved=False)
 
                 payloads = [
                     call.args[0]
@@ -2588,7 +2593,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                     "AllowedMentions",
                     SimpleNamespace(none=lambda: None),
                 ):
-                    await cog._publish_case_timeline(snapshot, thread, resolved=False)
+                    await honeypot.review_publication._publish_case_timeline(cog, snapshot, thread, resolved=False)
 
                 message_calls = [
                     call
@@ -2654,7 +2659,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                     "AllowedMentions",
                     SimpleNamespace(none=lambda: None),
                 ):
-                    await cog._publish_case_timeline(
+                    await honeypot.review_publication._publish_case_timeline(cog,
                         snapshot, thread, resolved=False, message_sequence=2
                     )
 
@@ -2705,7 +2710,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                     "AllowedMentions",
                     SimpleNamespace(none=lambda: None),
                 ):
-                    await cog._publish_case_timeline(
+                    await honeypot.review_publication._publish_case_timeline(cog,
                         first_snapshot, thread, resolved=False, message_sequence=1
                     )
                     await asyncio.to_thread(
@@ -2719,7 +2724,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                         cog._case_store.get_case, appended.case.case_id
                     )
                     thread.fetch_message.reset_mock()
-                    await cog._publish_case_timeline(
+                    await honeypot.review_publication._publish_case_timeline(cog,
                         second_snapshot, thread, resolved=False, message_sequence=2
                     )
 
@@ -2871,7 +2876,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
 
-                adopted = await cog._ensure_detection_case_thread(snapshot, summary)
+                adopted = await honeypot.review_publication._ensure_detection_case_thread(cog, snapshot, summary)
 
                 self.assertIs(adopted, thread)
                 self.assertEqual(summary.fetch_thread.await_count, 2)
@@ -2910,7 +2915,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 )
 
                 with self.assertRaises(honeypot.discord.HTTPException) as raised:
-                    await cog._ensure_detection_case_thread(snapshot, summary)
+                    await honeypot.review_publication._ensure_detection_case_thread(cog, snapshot, summary)
 
                 self.assertIs(raised.exception, create_error)
 
@@ -2968,7 +2973,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                     guild=SimpleNamespace(filesize_limit=8 * 1024 * 1024),
                 )
 
-                batches, oversized, _limit = cog._case_timeline_evidence_batches(
+                batches, oversized, _limit = honeypot.review_publication._case_timeline_evidence_batches(
                     projected_message, thread
                 )
 
@@ -3046,7 +3051,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                         SimpleNamespace(none=lambda: None),
                     ),
                 ):
-                    await cog._publish_case_timeline(snapshot, thread, resolved=False)
+                    await honeypot.review_publication._publish_case_timeline(cog, snapshot, thread, resolved=False)
 
                 self.assertEqual(thread.send.await_count, 4)
                 self.assertNotIn("files", thread.send.await_args_list[1].kwargs)
@@ -3152,7 +3157,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                         SimpleNamespace(none=lambda: None),
                     ),
                 ):
-                    await cog._publish_case_timeline(snapshot, thread, resolved=False)
+                    await honeypot.review_publication._publish_case_timeline(cog, snapshot, thread, resolved=False)
 
                 self.assertEqual(thread.send.await_count, 3)
                 self.assertEqual(len(thread.send.await_args_list[2].kwargs["files"]), 4)
@@ -3246,7 +3251,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                         SimpleNamespace(none=lambda: None),
                     ),
                 ):
-                    await cog._publish_case_timeline(snapshot, thread, resolved=False)
+                    await honeypot.review_publication._publish_case_timeline(cog, snapshot, thread, resolved=False)
                     first_send_count = thread.send.await_count
                     self.assertTrue(
                         all(
@@ -3255,7 +3260,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                         )
                     )
                     (data_path / "proof-10.png").unlink()
-                    await cog._publish_case_timeline(snapshot, thread, resolved=True)
+                    await honeypot.review_publication._publish_case_timeline(cog, snapshot, thread, resolved=True)
 
                 receipts = await asyncio.to_thread(
                     cog._case_store.list_timeline_publications,
@@ -3408,7 +3413,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 )
                 thread.edit.return_value = thread
 
-                active = await cog._activate_detection_case_thread(thread)
+                active = await honeypot.review_publication._activate_detection_case_thread(thread)
 
                 self.assertIs(active, thread)
                 thread.edit.assert_awaited_once_with(
@@ -3423,7 +3428,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 cog = honeypot.Honeypot(_Bot())
                 thread = SimpleNamespace(edit=mock.AsyncMock())
 
-                await cog._finalize_detection_case_thread(thread)
+                await honeypot.review_publication._finalize_detection_case_thread(thread)
 
                 thread.edit.assert_awaited_once_with(
                     archived=True,
@@ -3489,10 +3494,10 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                     SimpleNamespace(none=lambda: None),
                 ):
                     await asyncio.gather(
-                        cog._publish_case_timeline(snapshot, thread, resolved=True),
-                        cog._publish_case_timeline(snapshot, thread, resolved=True),
+                        honeypot.review_publication._publish_case_timeline(cog, snapshot, thread, resolved=True),
+                        honeypot.review_publication._publish_case_timeline(cog, snapshot, thread, resolved=True),
                     )
-                    await cog._publish_case_timeline(snapshot, thread, resolved=True)
+                    await honeypot.review_publication._publish_case_timeline(cog, snapshot, thread, resolved=True)
 
                 self.assertEqual(thread.send.await_count, 2)
                 resolution_messages = [
@@ -5169,7 +5174,9 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 cog._send_operational_alert = mock.AsyncMock()
 
                 with mock.patch.object(
-                    honeypot, "DETECTION_ATTACHMENT_TIMEOUT_SECONDS", 0.01
+                    honeypot.detection_runtime,
+                    "DETECTION_ATTACHMENT_TIMEOUT_SECONDS",
+                    0.01,
                 ):
                     await cog.on_message(message)
 
@@ -5232,12 +5239,12 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
                 first = await asyncio.to_thread(
                     first_cog._case_store.append_message,
-                    first_cog._new_case_message(first_message),
+                    honeypot.review_publication._new_case_message(first_message),
                     (),
                 )
                 second = await asyncio.to_thread(
                     second_cog._case_store.append_message,
-                    second_cog._new_case_message(second_message),
+                    honeypot.review_publication._new_case_message(second_message),
                     (),
                 )
                 first_capture = asyncio.create_task(
@@ -5277,7 +5284,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 message.attachments[0].read = mock.AsyncMock(return_value=b"12345")
                 appended = await asyncio.to_thread(
                     cog._case_store.append_message,
-                    cog._new_case_message(message),
+                    honeypot.review_publication._new_case_message(message),
                     (),
                 )
 
@@ -6227,7 +6234,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await asyncio.to_thread(
                     cog._case_store.append_message,
-                    cog._new_case_message(message),
+                    honeypot.review_publication._new_case_message(message),
                     (cog._forward_purge_signal(message),),
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
@@ -6264,7 +6271,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 self._configure_public_boundary(cog, config)
                 appended = await asyncio.to_thread(
                     cog._case_store.append_message,
-                    cog._new_case_message(first),
+                    honeypot.review_publication._new_case_message(first),
                     (cog._forward_purge_signal(first),),
                 )
                 now = datetime.now(timezone.utc)
@@ -6337,12 +6344,16 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 message.attachments = [fast, slow]
                 appended = await asyncio.to_thread(
                     cog._case_store.append_message,
-                    cog._new_case_message(message),
+                    honeypot.review_publication._new_case_message(message),
                     (honeypot.DetectionSignal(
                         "forward_purge", "active", honeypot.ActionIntent.REVIEW, True, {}
                     ),),
                 )
-                with mock.patch.object(honeypot, "DETECTION_CAPTURE_DEADLINE_SECONDS", 0.05):
+                with mock.patch.object(
+                    honeypot.review_publication,
+                    "DETECTION_CAPTURE_DEADLINE_SECONDS",
+                    0.05,
+                ):
                     captures = await cog._capture_case_attachments(
                         message, appended.case.case_id, 1
                     )
@@ -6412,7 +6423,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     attachment.read = mock.AsyncMock(side_effect=blocked_read)
                 appended = await asyncio.to_thread(
                     cog._case_store.append_message,
-                    cog._new_case_message(message),
+                    honeypot.review_publication._new_case_message(message),
                     (honeypot.DetectionSignal(
                         "forward_purge", "active", honeypot.ActionIntent.REVIEW, True, {}
                     ),),
@@ -6480,12 +6491,12 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 )
                 first = await asyncio.to_thread(
                     cog._case_store.append_message,
-                    cog._new_case_message(first_message),
+                    honeypot.review_publication._new_case_message(first_message),
                     (),
                 )
                 second = await asyncio.to_thread(
                     cog._case_store.append_message,
-                    cog._new_case_message(second_message),
+                    honeypot.review_publication._new_case_message(second_message),
                     (),
                 )
                 first_task = asyncio.create_task(
@@ -6552,7 +6563,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 message = self._message(honeypot, attachment_count=0)
                 appended = await asyncio.to_thread(
                     cog._case_store.append_message,
-                    cog._new_case_message(message),
+                    honeypot.review_publication._new_case_message(message),
                     (honeypot.DetectionSignal(
                         "forward_purge", "active", honeypot.ActionIntent.REVIEW, True, {}
                     ),),
@@ -6625,7 +6636,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 message = self._message(honeypot, attachment_count=11)
                 appended = await asyncio.to_thread(
                     original._case_store.append_message,
-                    original._new_case_message(message),
+                    honeypot.review_publication._new_case_message(message),
                     (honeypot.DetectionSignal(
                         "forward_purge", "active", honeypot.ActionIntent.REVIEW, True, {}
                     ),),
@@ -6768,7 +6779,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 message = self._message(honeypot, attachment_count=1)
                 appended = await asyncio.to_thread(
                     first._case_store.append_message,
-                    first._new_case_message(message),
+                    honeypot.review_publication._new_case_message(message),
                     (honeypot.DetectionSignal(
                         "forward_purge", "active", honeypot.ActionIntent.REVIEW, True, {}
                     ),),
@@ -6868,7 +6879,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 message = self._message(honeypot, attachment_count=0)
                 appended = await asyncio.to_thread(
                     loser._case_store.append_message,
-                    loser._new_case_message(message),
+                    honeypot.review_publication._new_case_message(message),
                     (honeypot.DetectionSignal(
                         "spam", "active", honeypot.ActionIntent.REVIEW, True, {}
                     ),),
@@ -6930,7 +6941,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 message = self._message(honeypot, attachment_count=0)
                 appended = await asyncio.to_thread(
                     cog._case_store.append_message,
-                    cog._new_case_message(message),
+                    honeypot.review_publication._new_case_message(message),
                     (honeypot.DetectionSignal(
                         "forward_purge", "active", honeypot.ActionIntent.REVIEW, True, {}
                     ),),
@@ -8185,7 +8196,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 message = self._message(honeypot, attachment_count=0)
                 appended = await asyncio.to_thread(
                     cog._case_store.append_message,
-                    cog._new_case_message(message),
+                    honeypot.review_publication._new_case_message(message),
                     (),
                 )
                 operation = await asyncio.to_thread(
@@ -8232,7 +8243,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 message = self._message(honeypot, attachment_count=0)
                 appended = await asyncio.to_thread(
                     cog._case_store.append_message,
-                    cog._new_case_message(message),
+                    honeypot.review_publication._new_case_message(message),
                     (),
                 )
                 operation = await asyncio.to_thread(
@@ -12225,9 +12236,9 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
 
-                self.assertTrue(cog._case_review_has_permission(interaction))
+                self.assertTrue(honeypot.review_publication._case_review_has_permission(interaction))
                 self.assertTrue(
-                    cog._case_review_has_action_permission(interaction, "ignore")
+                    honeypot.review_publication._case_review_has_action_permission(interaction, "ignore")
                 )
 
     async def test_startup_expires_overdue_case_before_restoring_views(self):
@@ -13859,7 +13870,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(counts["privacy_deletion_jobs"], 1)
 
-                await cog._retry_detection_case_deletions()
+                await honeypot.review_publication._retry_detection_case_deletions(cog)
 
                 self.assertEqual(thread.delete.await_count, 2)
                 summary.delete.assert_awaited_once()
@@ -13888,7 +13899,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 evidence.write_bytes(b"target")
 
                 with mock.patch.object(
-                    honeypot.shutil, "rmtree", side_effect=OSError("busy")
+                    honeypot.review_publication.shutil, "rmtree", side_effect=OSError("busy")
                 ):
                     with self.assertRaises(OSError):
                         await cog.red_delete_data_for_user(

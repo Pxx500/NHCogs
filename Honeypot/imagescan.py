@@ -22,10 +22,7 @@ from redbot.core.utils.chat_formatting import box
 
 from . import detection_runtime, diagnostics
 from .detection_cases import ActionIntent, DetectionSignal
-from .detection_runtime import (
-    DETECTION_ATTACHMENT_TIMEOUT_SECONDS,
-    DETECTION_IMAGE_READ_MAX_BYTES,
-)
+from .detection_runtime import DETECTION_IMAGE_READ_MAX_BYTES
 from .diagnostics import REVIEW_DUMP_MAX_ZIP_BYTES
 from .image_detector import ImageSample, image_hashes_from_bytes, match_image
 from .settings import (
@@ -551,7 +548,7 @@ async def _scan_image_attachments(
                         capture.path,
                         DETECTION_IMAGE_READ_MAX_BYTES,
                     ),
-                    timeout=DETECTION_ATTACHMENT_TIMEOUT_SECONDS,
+                    timeout=detection_runtime.DETECTION_ATTACHMENT_TIMEOUT_SECONDS,
                 )
             elif capture is not None:
                 raise RuntimeError(capture.error or "attachment capture is unavailable")
@@ -560,7 +557,7 @@ async def _scan_image_attachments(
                     detection_runtime.read_attachment_bounded(
                         attachment, DETECTION_IMAGE_READ_MAX_BYTES
                     ),
-                    timeout=DETECTION_ATTACHMENT_TIMEOUT_SECONDS,
+                    timeout=detection_runtime.DETECTION_ATTACHMENT_TIMEOUT_SECONDS,
                 )
             download_ms = (perf_counter() - download_started) * 1000
             hash_started = perf_counter()
