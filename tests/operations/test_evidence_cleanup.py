@@ -1,11 +1,11 @@
 import asyncio
+import os
+import subprocess
+import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
-import os
 from pathlib import Path
-import subprocess
 from tempfile import TemporaryDirectory
-import unittest
 from unittest import mock
 
 from tests.detection_case_fixtures import capture_attachment, publish_primary

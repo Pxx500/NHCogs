@@ -1,15 +1,15 @@
 import asyncio
+import errno
+import sys
+import unittest
 from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
-import errno
 from importlib import util
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
 from types import ModuleType, SimpleNamespace
 from unittest import mock
-import sys
-import unittest
 
 
 class HTTPException(Exception):

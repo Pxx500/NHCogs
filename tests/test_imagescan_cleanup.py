@@ -1,9 +1,9 @@
 import shutil
 import tempfile
 import unittest
-from types import SimpleNamespace
 from importlib import util
 from pathlib import Path
+from types import SimpleNamespace
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "Honeypot" / "honeypot.py"
 spec = util.spec_from_file_location("Honeypot.honeypot", MODULE_PATH)
@@ -75,7 +75,7 @@ def _install_redbot_stubs() -> None:
             pass
 
     discord.ext.tasks = types.SimpleNamespace(
-        loop=lambda *args, **kwargs: (lambda fn: _LoopStub(fn))
+        loop=lambda *args, **kwargs: _LoopStub
     )
     sys.modules["discord"] = discord
     sys.modules["discord.ext"] = discord.ext

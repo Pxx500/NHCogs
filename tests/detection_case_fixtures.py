@@ -2,7 +2,6 @@ import json
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
-
 _TEST_EVIDENCE_LIMIT = 1 << 40
 
 

@@ -5,10 +5,10 @@ from redbot.core import errors
 
 try:
     import AAA3A_utils
-except ModuleNotFoundError:
+except ModuleNotFoundError as missing_utils:
     raise errors.CogLoadError(
         "The needed utils to run the cog were not found. Please execute the command `[p]pipinstall git+https://github.com/AAA3A-AAA3A/AAA3A_utils.git`. A restart of the bot isn't necessary.",
-    )
+    ) from missing_utils
 modules = sorted(
     [module for module in sys.modules if module.split(".")[0] == "AAA3A_utils"],
     reverse=True,

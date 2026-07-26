@@ -87,9 +87,7 @@ def _review_dump_is_banned_review(message: discord.Message) -> bool:
         return False
     fields = _review_dump_field_map(message.embeds[0])
     action = (fields.get("action taken") or fields.get("action") or "").lower()
-    if "ban" not in action or "dry-run" in action or "failed" in action:
-        return False
-    return True
+    return "ban" in action and "dry-run" not in action and "failed" not in action
 
 
 def _review_dump_message_record(

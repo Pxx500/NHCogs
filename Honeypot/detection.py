@@ -42,6 +42,7 @@ from .detection_cases import (
 )
 from .operations import executor_operation_policy
 from .operations.context import (
+    DETECTION_CACHED_PURGE_ATTEMPT_LIMIT,
     DETECTION_FAST_RETRY_LIMIT,
     DETECTION_FAST_RETRY_SECONDS,
     DETECTION_SLOW_RETRY_MINUTES,
@@ -579,7 +580,7 @@ async def _settle_detection_operation_failure(
     cached_purge_exhausted = (
         operation.operation_type == OperationType.CACHED_PURGE
         and outcome.result == DeleteStatus.TRANSIENT_FAILURE.value
-        and operation.attempts >= 3
+        and operation.attempts >= DETECTION_CACHED_PURGE_ATTEMPT_LIMIT
     )
     if operation.operation_type == OperationType.CACHED_PURGE and (
         outcome.result
@@ -2291,7 +2292,7 @@ async def keyword_attachments_add(cog, ctx: commands.Context, *, pattern: str) -
     try:
         re.compile(pattern)
     except re.error as exc:
-        raise commands.UserFeedbackCheckFailure(_("Invalid regex: {error}").format(error=exc))
+        raise commands.UserFeedbackCheckFailure(_("Invalid regex: {error}").format(error=exc)) from exc
     async with cog.config.guild(ctx.guild).attachment_patterns() as patterns:
         if pattern in patterns:
             raise commands.UserFeedbackCheckFailure(_("Pattern already exists."))

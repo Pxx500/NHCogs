@@ -22,6 +22,10 @@ from .detection_cases import (
     OperationType,
 )
 
+# Discord embed limits. An embed carries at most 25 fields and each field value
+# is capped at 1024 characters; both are platform constants, not tuning knobs.
+_EMBED_FIELD_LIMIT = 25
+_EMBED_FIELD_VALUE_LIMIT = 1024
 _DECISIONS = {
     "tp": "true_positive",
     "fp": "false_positive",
@@ -822,10 +826,13 @@ def _field_chunks(name: str, lines: tuple[str, ...]) -> tuple[CaseReviewField, .
     current: list[str] = []
     current_size = 0
     for line in lines:
-        pieces = tuple(line[index : index + 1024] for index in range(0, len(line), 1024)) or ("",)
+        pieces = tuple(
+            line[index : index + _EMBED_FIELD_VALUE_LIMIT]
+            for index in range(0, len(line), _EMBED_FIELD_VALUE_LIMIT)
+        ) or ("",)
         for piece in pieces:
             added = len(piece) + (1 if current else 0)
-            if current and current_size + added > 1024:
+            if current and current_size + added > _EMBED_FIELD_VALUE_LIMIT:
                 chunks.append(CaseReviewField(name if not chunks else f"{name} (continued)", "\n".join(current)))
                 current = []
                 current_size = 0
@@ -870,7 +877,7 @@ def _bounded_field_pages(
     budget = 6000 - len("Detection case") - 4096
     for field in fields:
         size = len(field.name) + len(field.value)
-        if current and (len(current) == 25 or size > budget):
+        if current and (len(current) == _EMBED_FIELD_LIMIT or size > budget):
             pages.append(tuple(current))
             current = []
             budget = 6000 - len("Detection case") - 4096

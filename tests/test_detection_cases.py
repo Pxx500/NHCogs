@@ -1,20 +1,19 @@
-from importlib import util
-from contextlib import closing
-from pathlib import Path
-from dataclasses import FrozenInstanceError
-from datetime import datetime, timedelta, timezone
-from concurrent.futures import ThreadPoolExecutor
-from zoneinfo import ZoneInfo
-from tempfile import TemporaryDirectory
-from threading import Barrier, Event
 import sqlite3
 import sys
 import types
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+from dataclasses import FrozenInstanceError
+from datetime import datetime, timedelta, timezone
+from importlib import util
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from threading import Barrier, Event
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 from tests.detection_case_fixtures import capture_attachment, publish_primary
-
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "Honeypot" / "detection_cases.py"
 PACKAGE_NAME = "_honeypot_detection_cases_tests"
@@ -364,11 +363,11 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertEqual(
             {
                 name
-                for name in {
+                for name in (
                     "update_attachment_capture",
                     "set_evidence_publication",
                     "set_review_message",
-                }
+                )
                 if hasattr(DetectionCaseStore, name)
             },
             set(),
@@ -1648,7 +1647,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
 
     def test_due_operations_wait_for_message_processing_dependencies(self):
         now = datetime.now(timezone.utc)
-        appended = self.store.append_message(
+        self.store.append_message(
             self.message(91, now),
             (
                 DetectionSignal(

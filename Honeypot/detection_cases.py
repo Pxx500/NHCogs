@@ -1697,7 +1697,7 @@ class DetectionCaseStore:
             if case_row is None:
                 raise KeyError(case_id)
             current_decisions: dict[AttachmentKey, str | None] = {}
-            for key, decision in decisions.items():
+            for key in decisions:
                 if key.case_id != case_id:
                     raise ValueError("attachment key belongs to another case")
                 row = connection.execute(
