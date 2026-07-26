@@ -211,6 +211,14 @@ ignore = [
 # tests/test_detection_pipeline.py, where the exclusion had hidden it.
 "tests/test_detection_signals.py" = ["PLR0915"]
 
+# PLW0108: one `lambda **kwargs: SimpleNamespace(**kwargs)` patched onto
+# `discord.ui.Button` in the isolated stub module. Inlining it would bind the
+# attribute to the `SimpleNamespace` type itself - one object shared with every
+# other widget stub - instead of a factory belonging to this one attribute.
+# Moved verbatim from tests/test_detection_pipeline.py, where the exclusion had
+# hidden it.
+"tests/test_case_moderator_decisions.py" = ["PLW0108"]
+
 # PLC0415: `PIL` is imported inside the helper so the module still imports when
 # Pillow is absent and the test skips instead of erroring at collection.
 "tests/test_image_detector_model.py" = ["PLC0415"]
