@@ -169,6 +169,17 @@ ignore = [
 # tests/test_detection_pipeline.py, where the exclusion had hidden it.
 "tests/test_cog_assembly.py" = ["PLR0912"]
 
+# B023: the four flagged closures all live in
+# `test_automatic_dry_run_preserves_planned_action_kind`, defined and consumed
+# inside the same `subTest` iteration - the same shape and the same reason as
+# tests/operations/test_cached_purge.py above.
+# PLR0915: `test_automatic_ban_case_projection_catches_up_after_early_publication`
+# and `test_blocked_review_role_starts_after_containment_before_capture_finishes`
+# are flat stub-and-assert sequences over one ordering; their statements are the
+# fixture and the ordering assertions. Moved verbatim from
+# tests/test_detection_pipeline.py, where the exclusion had hidden both.
+"tests/test_detection_actions.py" = ["B023", "PLR0915"]
+
 # ASYNC240: two `evidence_path.exists()` assertions inside async tests. The
 # blocking call is the assertion on the captured evidence file, not production
 # work - the same reason as tests/test_detection_runtime.py below. Moved
