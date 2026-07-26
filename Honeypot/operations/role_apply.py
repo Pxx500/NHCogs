@@ -9,8 +9,6 @@ from typing import TYPE_CHECKING, cast
 import discord
 
 from ..detection_cases import (
-    CaseSnapshot,
-    CaseStatus,
     MODERATION_SUPERSEDING_RESULTS,
     MODERATION_SUPERSEDING_TYPES,
     OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP,
@@ -20,6 +18,8 @@ from ..detection_cases import (
     OPERATION_RESULT_ROLE_ALREADY_OWNED,
     OPERATION_RESULT_SUPERSEDED_BY_MODERATION,
     OPERATION_RESULT_TRANSFERRED_ROLE_OWNERSHIP,
+    CaseSnapshot,
+    CaseStatus,
     OperationStatus,
     OperationType,
 )

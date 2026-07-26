@@ -303,7 +303,7 @@ def _new_case_message(message: discord.Message) -> NewMessage:
         ),
         display_name=getattr(message.author, "display_name", None),
         avatar_url=(
-            str(getattr(getattr(message.author, "display_avatar", None), "url"))
+            str(getattr(message.author, "display_avatar", None).url)
             if getattr(getattr(message.author, "display_avatar", None), "url", None)
             else None
         ),

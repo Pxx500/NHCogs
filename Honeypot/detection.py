@@ -826,7 +826,7 @@ def _spam_signal(
     return DetectionSignal(
         detector="spam",
         reason="\n".join(reasons),
-        action=cog._signal_action(
+        action=_signal_action(
             guild_settings.spam_action.value, CORE_ACTION_OPTIONS
         ),
         decisive=True,
@@ -852,7 +852,7 @@ async def _firstpost_signal(
     return DetectionSignal(
         detector="firstpost",
         reason="\n".join(reasons),
-        action=cog._signal_action(
+        action=_signal_action(
             guild_settings.firstpost_action.value, CORE_ACTION_OPTIONS
         ),
         decisive=True,
@@ -871,7 +871,7 @@ def _firstpost_candidate(
     return DetectionSignal(
         detector="firstpost",
         reason="\n".join(reasons),
-        action=cog._signal_action(
+        action=_signal_action(
             guild_settings.firstpost_action.value, CORE_ACTION_OPTIONS
         ),
         decisive=True,
@@ -929,11 +929,11 @@ async def _honeypot_signals(
     elif force_review:
         action = ActionIntent.REVIEW
     elif force_fallback or not reasons:
-        action = cog._signal_action(
+        action = _signal_action(
             guild_settings.fallback_action.value, FALLBACK_ACTION_OPTIONS
         )
     else:
-        action = cog._signal_action(
+        action = _signal_action(
             (
                 guild_settings.action.value
                 if guild_settings.action is not None

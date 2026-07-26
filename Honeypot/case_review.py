@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .detection_cases import (
+    OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP,
+    OPERATION_RESULT_CHANNEL_UNAVAILABLE,
+    OPERATION_RESULT_UNSUPPORTED_CHANNEL,
     AttachmentKey,
     AttachmentRecord,
     CaseSnapshot,
@@ -13,14 +16,10 @@ from .detection_cases import (
     DeleteStatus,
     DetectionCaseStore,
     MessageRecord,
-    OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP,
-    OPERATION_RESULT_CHANNEL_UNAVAILABLE,
-    OPERATION_RESULT_UNSUPPORTED_CHANNEL,
     OperationRecord,
     OperationStatus,
     OperationType,
 )
-
 
 _DECISIONS = {
     "tp": "true_positive",

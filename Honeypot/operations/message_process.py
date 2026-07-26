@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-import logging
 from time import perf_counter
 from typing import TYPE_CHECKING
 
@@ -13,13 +13,13 @@ import discord
 
 from .. import detection_runtime
 from ..detection_cases import (
+    OPERATION_RESULT_CASE_TERMINAL,
     ActionIntent,
     AttachmentRecord,
     CaseSnapshot,
     CaseStatus,
     DeleteStatus,
     MessageRecord,
-    OPERATION_RESULT_CASE_TERMINAL,
     OperationType,
     effective_action,
 )

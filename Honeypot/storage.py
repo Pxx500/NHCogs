@@ -1,10 +1,9 @@
 """Shared synchronous SQLite plumbing for Honeypot stores."""
 
+import sqlite3
 from collections.abc import Callable, Sequence
 from pathlib import Path
-import sqlite3
 from typing import TypeAlias
-
 
 ConnectionFactory: TypeAlias = Callable[..., sqlite3.Connection]
 Migration: TypeAlias = Callable[[sqlite3.Connection], None]

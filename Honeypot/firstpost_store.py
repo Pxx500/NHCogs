@@ -1,10 +1,10 @@
 """Synchronous persistence for first-post author history."""
 
+import sqlite3
 from collections.abc import Collection
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
-import sqlite3
 
 from .storage import Migrations, apply_migrations, connect
 

@@ -1,19 +1,18 @@
 """Discord-independent domain vocabulary for detection cases."""
 
+import json
+import logging
+import sqlite3
+from collections.abc import Callable, Mapping
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from collections.abc import Callable, Mapping
-from contextlib import closing
-import json
-import logging
 from pathlib import Path
-import sqlite3
 from types import MappingProxyType
 from uuid import uuid4
 
 from .storage import apply_migrations, connect
-
 
 log = logging.getLogger(__name__)
 

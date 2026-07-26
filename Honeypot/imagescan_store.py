@@ -1,16 +1,15 @@
 """Synchronous persistence for image-scan samples and reporting data."""
 
+import sqlite3
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from contextlib import closing
 from pathlib import Path
-import sqlite3
 from typing import Any
 from uuid import uuid4
 
 from .image_detector import ImageSample, rebuild_model_state
 from .storage import Migrations, apply_migrations, connect
-
 
 IMAGE_SCAN_PROFILE_COLUMNS = (
     "messages_scanned",
@@ -246,7 +245,7 @@ class ImageScanStore:
                 (str(guild_id),),
             ).fetchone()
         if row is None:
-            return {column: 0 for column in IMAGE_SCAN_PROFILE_COLUMNS}
+            return dict.fromkeys(IMAGE_SCAN_PROFILE_COLUMNS, 0)
         return {column: int(row[column] or 0) for column in IMAGE_SCAN_PROFILE_COLUMNS}
 
     def increment_profile(self, guild_id: int, increments: Mapping[str, int]) -> None:
