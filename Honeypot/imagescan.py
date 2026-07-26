@@ -666,7 +666,8 @@ async def _scan_case_message_images(
             if is_image_attachment(attachment):
                 await asyncio.to_thread(
                     cog._case_store.update_attachment_scan,
-                    case_id, sequence, position, None, None, {}, bounded,
+                    case_id, sequence, position, None, None,
+                    match_metadata={}, error=bounded,
                 )
         await cog._record_operational_failure(
             guild_id,
@@ -715,8 +716,8 @@ async def _scan_case_message_images(
                 position,
                 hashes.get("sha256"),
                 hashes.get("phash"),
-                scan["result"],
-                None,
+                match_metadata=scan["result"],
+                error=None,
             )
         else:
             await asyncio.to_thread(
@@ -726,8 +727,8 @@ async def _scan_case_message_images(
                 position,
                 None,
                 None,
-                {},
-                scan["error"],
+                match_metadata={},
+                error=scan["error"],
             )
     if failed_scans:
         details = "; ".join(

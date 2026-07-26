@@ -162,6 +162,7 @@ async def _capture_with_timeout(
     target_dir: Path,
     position: int,
     timeout_seconds: float,
+    *,
     max_bytes: int = 25 * 1024 * 1024,
     reader: BoundedReader = read_attachment_bounded,
 ) -> CaptureResult:
@@ -185,7 +186,12 @@ async def capture_attachment(
 ) -> CaptureResult:
     target_dir.mkdir(parents=True, exist_ok=True)
     return await _capture_with_timeout(
-        attachment, target_dir, position, timeout_seconds, max_bytes, reader
+        attachment,
+        target_dir,
+        position,
+        timeout_seconds,
+        max_bytes=max_bytes,
+        reader=reader,
     )
 
 

@@ -850,8 +850,8 @@ async def _doctor_channel_permission_checks(
     me,
     honeypot_channels: typing.Sequence,
     logs_channel,
-    review_channel,
     *,
+    review_channel,
     missing_purge_permissions,
     is_purgeable_message_channel,
 ) -> tuple[DoctorResult, ...]:

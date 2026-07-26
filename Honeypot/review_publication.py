@@ -471,7 +471,7 @@ async def _capture_case_attachments_unlocked(
                 position,
                 claim_token,
                 detection_runtime.CaptureStatus.FAILED.value,
-                "attachment capture cancelled",
+                error="attachment capture cancelled",
             )
         raise
     for task in pending:
@@ -507,8 +507,8 @@ async def _capture_case_attachments_unlocked(
                 capture.position,
                 claim_token,
                 actual_bytes,
-                str(capture.path),
-                datetime.now(timezone.utc),
+                evidence_path=str(capture.path),
+                now=datetime.now(timezone.utc),
                 max_attachment_bytes=attachment_sizes[capture.position],
                 max_case_bytes=case_declared_bytes,
             )
@@ -555,7 +555,7 @@ async def _capture_case_attachments_unlocked(
             capture.position,
             claim_token,
             capture.status.value,
-            capture.error,
+            error=capture.error,
         )
         persisted_captures.append(
             capture

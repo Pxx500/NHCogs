@@ -88,8 +88,8 @@ async def role_apply_handler(
                 context.operation.case_id,
                 context.snapshot.case.guild_id,
                 context.snapshot.case.user_id,
-                role_id,
-                datetime.now(timezone.utc),
+                role_id=role_id,
+                now=datetime.now(timezone.utc),
             )
             if ownership_result is None:
                 result = OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP
@@ -154,8 +154,8 @@ async def role_apply_handler(
         context.operation.case_id,
         context.snapshot.case.guild_id,
         context.snapshot.case.user_id,
-        role_id,
-        datetime.now(timezone.utc),
+        role_id=role_id,
+        now=datetime.now(timezone.utc),
     )
     if transferred:
         return OperationOutcome(result=OPERATION_RESULT_TRANSFERRED_ROLE_OWNERSHIP)

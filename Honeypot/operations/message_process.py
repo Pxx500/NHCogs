@@ -157,6 +157,7 @@ async def _complete_attachment_capture(
     state: _MessageProcessState,
     capture_task: asyncio.Task,
     message_attachments: tuple[AttachmentRecord, ...],
+    *,
     evidence_started: float,
 ) -> tuple[
     CaseSnapshot | None,
@@ -262,7 +263,7 @@ async def _delete_source_message(
                     context.now,
                     context.now
                     + timedelta(seconds=DETECTION_FAST_RETRY_SECONDS),
-                    delete_result.status.value,
+                    result=delete_result.status.value,
                 )
                 if failed_retry:
                     await cog._record_operational_failure(
@@ -542,7 +543,7 @@ async def _process_active_message(
             state,
             capture_task,
             message_attachments,
-            evidence_started,
+            evidence_started=evidence_started,
         )
         if refreshed is None:
             return "case_deleted"

@@ -74,8 +74,8 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
             case_id,
             10,
             20,
-            role_id,
-            now,
+            role_id=role_id,
+            now=now,
         )
         if result != "owned":
             raise AssertionError(f"unexpected ownership result: {result}")
@@ -649,8 +649,8 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
                             second.case.case_id,
                             guild.id,
                             member.id,
-                            role_id,
-                            started_at,
+                            role_id=role_id,
+                            now=started_at,
                         )
                     )
                     if ownership_result != "owned":
