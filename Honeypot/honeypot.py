@@ -132,7 +132,6 @@ IMAGE_SCAN_FEEDBACK_TIMEOUT_SECONDS = imagescan.IMAGE_SCAN_FEEDBACK_TIMEOUT_SECO
 DETECTION_CAPTURE_DEADLINE_SECONDS = review_publication.DETECTION_CAPTURE_DEADLINE_SECONDS
 DETECTION_ATTACHMENT_TIMEOUT_SECONDS = detection_runtime.DETECTION_ATTACHMENT_TIMEOUT_SECONDS
 DETECTION_IMAGE_READ_MAX_BYTES = detection_runtime.DETECTION_IMAGE_READ_MAX_BYTES
-DETECTION_CAPTURE_CONCURRENCY = review_publication.DETECTION_CAPTURE_CONCURRENCY
 DETECTION_HEARTBEAT_INTERVAL_SECONDS = 60.0
 IMAGE_SCAN_FEEDBACK_BULK_LABELS = imagescan.IMAGE_SCAN_FEEDBACK_BULK_LABELS
 
@@ -285,8 +284,10 @@ class Honeypot(Cog):
             tuple[int, int], dict[int, asyncio.Task]
         ] = {}
         self._detection_case_evidence_lock: asyncio.Lock = asyncio.Lock()
+        # Read through the module so this semaphore and the deletion barrier in
+        # review_publication.py can never be sized from two separate bindings.
         self._detection_case_capture_slots = asyncio.Semaphore(
-            DETECTION_CAPTURE_CONCURRENCY
+            review_publication.DETECTION_CAPTURE_CONCURRENCY
         )
         self._detection_admission_locks = tuple(asyncio.Lock() for _ in range(64))
         self._detection_publication_locks = tuple(asyncio.Lock() for _ in range(64))

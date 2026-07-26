@@ -770,8 +770,30 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             for node in tree.body
             if isinstance(node, ast.ClassDef) and node.name == "Honeypot"
         )
+        # A seam can also be re-exported as `name = staticmethod(module.name)`.
+        # That is an Assign, invisible to the delegation scan, so it is counted
+        # and name-checked separately rather than silently escaping the guard.
+        expected_static_reexports = {"review_publication": 2}
+        static_reexports = {}
         delegations = {}
         for node in cog_class.body:
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                call = node.value
+                is_staticmethod = (
+                    isinstance(call.func, ast.Name)
+                    and call.func.id == "staticmethod"
+                    and len(call.args) == 1
+                    and isinstance(call.args[0], ast.Attribute)
+                    and isinstance(call.args[0].value, ast.Name)
+                )
+                if is_staticmethod and len(node.targets) == 1:
+                    target = node.targets[0]
+                    owner = call.args[0].value.id
+                    if isinstance(target, ast.Name) and owner in expected_counts:
+                        static_reexports.setdefault(owner, []).append(
+                            (target.id, call.args[0].attr)
+                        )
+                continue
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             body = [
@@ -800,8 +822,26 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             {name: len(items) for name, items in sorted(delegations.items())},
             expected_counts,
         )
+        self.assertEqual(
+            {name: len(items) for name, items in sorted(static_reexports.items())},
+            expected_static_reexports,
+        )
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                for module_name, items in sorted(static_reexports.items()):
+                    module = getattr(honeypot, module_name, None)
+                    self.assertIsNotNone(module, f"{module_name} is not importable")
+                    for attribute_name, target_name in items:
+                        with self.subTest(reexport=f"{module_name}.{attribute_name}"):
+                            self.assertEqual(
+                                target_name,
+                                attribute_name,
+                                "re-export points at a differently named twin",
+                            )
+                            self.assertIs(
+                                getattr(honeypot.Honeypot, attribute_name),
+                                getattr(module, target_name),
+                            )
                 for module_name, items in sorted(delegations.items()):
                     module = getattr(honeypot, module_name, None)
                     self.assertIsNotNone(module, f"{module_name} is not importable")
