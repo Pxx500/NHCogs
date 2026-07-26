@@ -17,6 +17,8 @@ from .detection_cases import DeleteStatus
 _MAX_ERROR_LENGTH = 512
 _INVALID_FILENAME_CHARACTERS = frozenset('<>:"/\\|?*')
 BoundedReader = Callable[[object, int], Awaitable[bytes]]
+DETECTION_ATTACHMENT_TIMEOUT_SECONDS = 15.0
+DETECTION_IMAGE_READ_MAX_BYTES = 25 * 1024 * 1024
 
 
 class AttachmentTooLargeError(ValueError):
