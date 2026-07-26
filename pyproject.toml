@@ -14,10 +14,153 @@ extend-exclude = [
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RET", "ASYNC", "PL", "TRY"]
-ignore = ["E501", "PLR0913", "TRY003"]
+# Rules rejected repo-wide, not grandfathered debt. Every entry is triaged in
+# local-data/Honeypot/docs/phase6-plan.md, round D.
+ignore = [
+    "E501",
+    "PLR0913",
+    "TRY003",
+    # SIM105: `try: ... except X: pass` is kept literal. `contextlib.suppress`
+    # hides which single statement is guarded, and every site here guards one
+    # best-effort call inside a cleanup or teardown path.
+    "SIM105",
+    # TRY300: the value being returned is produced by the guarded call itself,
+    # so moving the `return` into an `else` block separates it from the call it
+    # belongs to without changing behaviour.
+    "TRY300",
+    # TRY301: raising inside `try` is the deliberate error-funnelling shape of
+    # the operation handlers and the publication path - a local `raise` is
+    # caught by the same function and converted into an operation outcome.
+    "TRY301",
+]
 
+# Per-file ignores. Each entry is a location-specific grandfathered violation
+# with a reason recorded in local-data/Honeypot/docs/phase6-plan.md, round D.
 [tool.ruff.lint.per-file-ignores]
 "tests/*.py" = ["PLR2004", "SIM117"]
+
+# E402: the redbot/Red imports must run after the AAA3A_utils availability
+# check and reload loop above them; hoisting them breaks cog loading.
+"Honeypot/__init__.py" = ["E402"]
+
+# PLR2004: Discord's select-menu option limit and the summary message preview
+# count. Naming the menu limit needs a home shared with review_publication.py.
+# PLR0911: `_cached_purge_status` is a flat guard-clause chain over purge
+# states; collapsing it would hide the state table.
+"Honeypot/case_review.py" = ["PLR0911", "PLR2004"]
+
+# PLR2004: the 24-hour window in a console retention comparison.
+"Honeypot/console_dump.py" = ["PLR2004"]
+
+# PLR2004: keyword/attachment scoring thresholds that are local tuning values,
+# each used once. PLR0911/PLR0912/PLR0915: `on_message`, `_process_detected_message`
+# and `_public_moderation_reason` are the live detection path, explicitly
+# deferred by the plan until rail-4 verification on a real bot exists.
+"Honeypot/detection.py" = ["PLR0911", "PLR0912", "PLR0915", "PLR2004"]
+
+# PLR0912: `append_message` is the single durable write path for a case; it is
+# not in the plan's approved decomposition set.
+"Honeypot/detection_cases.py" = ["PLR0912"]
+
+# ASYNC240: `target_dir.mkdir` runs on the event loop. Real, unfixed.
+# PLR2004: a retry-attempt comparison local to one reader.
+# TRY004: raising `RuntimeError` instead of `TypeError` for a non-callable
+# download interface is the established validation contract; swapping the type
+# is a behaviour change on a validation path.
+"Honeypot/detection_runtime.py" = ["ASYNC240", "PLR2004", "TRY004"]
+
+# PLR2004: doctor thresholds (24h, 30 days) used once each.
+# PLR0912/PLR0917: `_doctor_configuration_checks` was skipped in round B with a
+# reason; it is a flat checklist, and its parameters are the checklist inputs.
+"Honeypot/diagnostics.py" = ["PLR0912", "PLR0917", "PLR2004"]
+
+# PLR2004: the 1024 in a byte-size formatter, which is the unit base, not a
+# limit. PLR0911: `_is_protected_member` and `_missing_channel_permissions` are
+# guard-clause chains. PLR0917: `_scan_case_message_images` was skipped in
+# round B with a reason. TRY004: same validation contract as detection_runtime.
+"Honeypot/honeypot.py" = ["PLR0911", "PLR0917", "PLR2004", "TRY004"]
+
+# ASYNC240: `path.exists`/`path.unlink` run on the event loop in the sample
+# maintenance commands. Real, unfixed.
+# PLR0912/PLR0915/PLR0917: `imagescan_add`, `imagescan_import_tp_zip`,
+# `_imagescan_add_attachment_sample`, `_imagescan_add_bytes_sample` and
+# `_scan_image_attachments` are in the plan's `< 40%` coverage band or its
+# deferred set. PLR2004: local batch sizes.
+"Honeypot/imagescan.py" = ["ASYNC240", "PLR0912", "PLR0915", "PLR0917", "PLR2004"]
+
+# PLR0911/PLR0912/PLR0915: `on_member_join` (11%), `on_member_update` (0%),
+# `_apply_joinwatch_role_actions` (33%) and `_apply_joinwatch_assignment_actions`
+# (39%) are the plan's whole `< 40%` band - measured, and not to be touched.
+# PLR2004: the 10080-minute (7 day) joinwatch window, used once per branch.
+"Honeypot/joinwatch.py" = ["PLR0911", "PLR0912", "PLR0915", "PLR2004"]
+
+# ASYNC240: `evidence_path.exists()` runs on the event loop. The count dropped
+# from 7 to 6 in round C only because the blocking evidence tree-walk moved
+# into the sync `_contained_case_evidence_root`/`_remove_case_evidence_tree`,
+# which the async handler still calls directly - the loop still blocks and the
+# rule simply stopped seeing it. This is not an improvement.
+# PLC0415: `from ..honeypot import case_evidence_root` is deferred to call time
+# to break the cog <-> handler import cycle.
+"Honeypot/operations/evidence_cleanup.py" = ["ASYNC240", "PLC0415"]
+
+# PLR0912: `_delete_source_message` is in the plan's deferred set.
+"Honeypot/operations/message_process.py" = ["PLR0912"]
+
+# PLR0912/PLR0915: `_capture_case_attachments_unlocked`, `_publish_case_timeline`,
+# `_publish_detection_case_serial` and `_case_review_moderation_interaction` are
+# the plan's deferred set; `_case_timeline_attachment_line` and
+# `_delete_detection_case_publications` are on the same live evidence path and
+# were not in round C's approved targets.
+# PLR2004: Discord's 2000-character message limit and the 25-option select-menu
+# limit. Both are real platform constants, but they are also spelled in
+# diagnostics.py and case_review.py, so naming them needs a shared home module -
+# recorded as follow-up rather than done here.
+"Honeypot/review_publication.py" = ["PLR0912", "PLR0915", "PLR2004"]
+
+# PLR0917: NHMisc is outside this plan's scope and has no coverage in this
+# suite; the positional parameters are a stable storage signature.
+"NHMisc/activity_storage.py" = ["PLR0917"]
+
+# PLC0415: matplotlib and other optional dependencies are imported lazily so a
+# missing extra degrades one command instead of failing cog load.
+# TRY203: the `except asyncio.CancelledError: raise` in the daily loop is an
+# explicit statement that cancellation must not be swallowed there.
+# PLR0917/PLR2004: NHMisc is outside this plan's scope and untested here.
+"NHMisc/nhmisc.py" = ["PLC0415", "PLR0917", "PLR2004", "TRY203"]
+
+# PLR0917: the fixture builder mirrors the store signature it wraps.
+"tests/detection_case_fixtures.py" = ["PLR0917"]
+
+# B023: every flagged closure is a stub defined and consumed inside the same
+# subTest iteration - the loop variable is read before the next iteration
+# rebinds it, so the capture hazard cannot fire. Checked site by site; none of
+# the 23 is in Honeypot/.
+"tests/operations/test_cached_purge.py" = ["B023"]
+
+# ASYNC221: the test shells out to `mklink /J` to build a Windows junction for
+# the evidence-containment case; that is the fixture, not incidental blocking.
+"tests/operations/test_evidence_cleanup.py" = ["ASYNC221"]
+
+# PLR0917: the helper mirrors the operation signature it claims.
+"tests/operations/test_moderator_decision.py" = ["PLR0917"]
+
+# B023: same within-iteration stub closures as test_cached_purge.py.
+# PLW2901: the loop rebinds `idempotency_key` to fill in a case-derived default
+# for the rows that leave it `None`; that is the table's intent.
+"tests/operations/test_source_delete.py" = ["B023", "PLW2901"]
+
+# ASYNC240: the tests touch `Path` directly to set up and assert on capture
+# directories; that is the assertion, not production blocking.
+"tests/test_detection_runtime.py" = ["ASYNC240"]
+
+# PLC0415: `PIL` is imported inside the helper so the module still imports when
+# Pillow is absent and the test skips instead of erroring at collection.
+"tests/test_image_detector_model.py" = ["PLC0415"]
+
+# E402/PLC0415: the Honeypot imports must run after the redbot/discord stubs
+# are installed into `sys.modules`; hoisting them breaks the module.
+# PLR0915: `_install_redbot_stubs` is one long flat stub table.
+"tests/test_imagescan_cleanup.py" = ["E402", "PLC0415", "PLR0915"]
 
 [tool.mypy]
 files = ["Honeypot", "NHMisc"]
