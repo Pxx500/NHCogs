@@ -38,6 +38,133 @@ def _is_superseded_by_moderation(snapshot: CaseSnapshot) -> bool:
     )
 
 
+async def _run_pending_role_release(
+    cog: Honeypot, context: OperationContext, role_id: int
+) -> None:
+    """Drive the queued release of the role's previous detection-case owner."""
+    terminal_snapshot = cast(
+        CaseSnapshot,
+        await asyncio.to_thread(
+            cog._case_store.get_case, context.operation.case_id
+        ),
+    )
+    release = next(
+        (
+            item
+            for item in terminal_snapshot.operations
+            if item.operation_type == OperationType.ROLE_RELEASE
+            and item.idempotency_key
+            == f"role-release:{context.operation.case_id}:{role_id}"
+        ),
+        None,
+    )
+    if release is not None:
+        claimed_release = await asyncio.to_thread(
+            cog._case_store.claim_operation,
+            release.operation_id,
+            datetime.now(timezone.utc),
+        )
+        if claimed_release is not None:
+            await cog._execute_detection_case_operation(
+                claimed_release, datetime.now(timezone.utc)
+            )
+
+
+async def _add_case_role(
+    cog: Honeypot,
+    context: OperationContext,
+    *,
+    member: discord.Member,
+    role: discord.Role,
+    role_id: int,
+) -> OperationOutcome:
+    """Add the review role to the member and record this case as its owner."""
+    started = await asyncio.to_thread(
+        cog._case_store.start_role_apply_effect,
+        context.operation.operation_id,
+        cast(str, context.operation.claim_token),
+        datetime.now(timezone.utc),
+    )
+    if not started:
+        raise RuntimeError("detection operation lease was lost")
+    await member.add_roles(
+        role, reason="Detection case pending moderator review."
+    )
+    result = None
+    try:
+        ownership_result = await asyncio.to_thread(
+            cog._case_store.record_operation_role_ownership,
+            context.operation.operation_id,
+            cast(str, context.operation.claim_token),
+            context.operation.case_id,
+            context.snapshot.case.guild_id,
+            context.snapshot.case.user_id,
+            role_id=role_id,
+            now=datetime.now(timezone.utc),
+        )
+        if ownership_result is None:
+            result = OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP
+            await asyncio.to_thread(
+                cog._case_store.mark_case_needs_attention,
+                context.operation.case_id,
+            )
+        elif ownership_result == "release_required":
+            await _run_pending_role_release(cog, context, role_id)
+    except Exception as error:
+        return OperationOutcome(
+            result=result,
+            role_was_added=True,
+            error=error,
+        )
+    return OperationOutcome(result=result, role_was_added=True)
+
+
+async def _mark_ambiguous_role_ownership(
+    cog: Honeypot, context: OperationContext
+) -> OperationOutcome:
+    """Flag a case whose role was added by an attempt that never recorded ownership."""
+    result = OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP
+    try:
+        await asyncio.to_thread(
+            cog._case_store.mark_case_needs_attention,
+            context.operation.case_id,
+        )
+    except Exception as error:
+        return OperationOutcome(result=result, error=error)
+    return OperationOutcome(result=result)
+
+
+async def _reconcile_preexisting_role(
+    cog: Honeypot, context: OperationContext, role_id: int
+) -> OperationOutcome:
+    """Decide what a role the member already carries means for this case."""
+    owner_case_id = await asyncio.to_thread(
+        cog._case_store.role_owner_case,
+        context.snapshot.case.guild_id,
+        context.snapshot.case.user_id,
+        role_id,
+    )
+    transferred = await asyncio.to_thread(
+        cog._case_store.transfer_terminal_role_ownership,
+        context.operation.operation_id,
+        cast(str, context.operation.claim_token),
+        context.operation.case_id,
+        context.snapshot.case.guild_id,
+        context.snapshot.case.user_id,
+        role_id=role_id,
+        now=datetime.now(timezone.utc),
+    )
+    if transferred:
+        return OperationOutcome(result=OPERATION_RESULT_TRANSFERRED_ROLE_OWNERSHIP)
+    if owner_case_id is not None and owner_case_id != context.operation.case_id:
+        raise RuntimeError(
+            "previous detection case role release is still in progress"
+        )
+    if owner_case_id == context.operation.case_id:
+        return OperationOutcome(result=OPERATION_RESULT_ROLE_ALREADY_OWNED)
+    return OperationOutcome(result=OPERATION_RESULT_PREEXISTING_ROLE)
+
+
 async def role_apply_handler(
     cog: Honeypot, context: OperationContext
 ) -> OperationOutcome:
@@ -68,101 +195,9 @@ async def role_apply_handler(
         context.operation.operation_id,
     )
     if role not in member.roles:
-        started = await asyncio.to_thread(
-            cog._case_store.start_role_apply_effect,
-            context.operation.operation_id,
-            cast(str, context.operation.claim_token),
-            datetime.now(timezone.utc),
+        return await _add_case_role(
+            cog, context, member=member, role=role, role_id=role_id
         )
-        if not started:
-            raise RuntimeError("detection operation lease was lost")
-        await member.add_roles(
-            role, reason="Detection case pending moderator review."
-        )
-        result = None
-        try:
-            ownership_result = await asyncio.to_thread(
-                cog._case_store.record_operation_role_ownership,
-                context.operation.operation_id,
-                cast(str, context.operation.claim_token),
-                context.operation.case_id,
-                context.snapshot.case.guild_id,
-                context.snapshot.case.user_id,
-                role_id=role_id,
-                now=datetime.now(timezone.utc),
-            )
-            if ownership_result is None:
-                result = OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP
-                await asyncio.to_thread(
-                    cog._case_store.mark_case_needs_attention,
-                    context.operation.case_id,
-                )
-            elif ownership_result == "release_required":
-                terminal_snapshot = cast(
-                    CaseSnapshot,
-                    await asyncio.to_thread(
-                        cog._case_store.get_case, context.operation.case_id
-                    ),
-                )
-                release = next(
-                    (
-                        item
-                        for item in terminal_snapshot.operations
-                        if item.operation_type == OperationType.ROLE_RELEASE
-                        and item.idempotency_key
-                        == f"role-release:{context.operation.case_id}:{role_id}"
-                    ),
-                    None,
-                )
-                if release is not None:
-                    claimed_release = await asyncio.to_thread(
-                        cog._case_store.claim_operation,
-                        release.operation_id,
-                        datetime.now(timezone.utc),
-                    )
-                    if claimed_release is not None:
-                        await cog._execute_detection_case_operation(
-                            claimed_release, datetime.now(timezone.utc)
-                        )
-        except Exception as error:
-            return OperationOutcome(
-                result=result,
-                role_was_added=True,
-                error=error,
-            )
-        return OperationOutcome(result=result, role_was_added=True)
     if effect_started:
-        result = OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP
-        try:
-            await asyncio.to_thread(
-                cog._case_store.mark_case_needs_attention,
-                context.operation.case_id,
-            )
-        except Exception as error:
-            return OperationOutcome(result=result, error=error)
-        return OperationOutcome(result=result)
-    owner_case_id = await asyncio.to_thread(
-        cog._case_store.role_owner_case,
-        context.snapshot.case.guild_id,
-        context.snapshot.case.user_id,
-        role_id,
-    )
-    transferred = await asyncio.to_thread(
-        cog._case_store.transfer_terminal_role_ownership,
-        context.operation.operation_id,
-        cast(str, context.operation.claim_token),
-        context.operation.case_id,
-        context.snapshot.case.guild_id,
-        context.snapshot.case.user_id,
-        role_id=role_id,
-        now=datetime.now(timezone.utc),
-    )
-    if transferred:
-        return OperationOutcome(result=OPERATION_RESULT_TRANSFERRED_ROLE_OWNERSHIP)
-    if owner_case_id is not None and owner_case_id != context.operation.case_id:
-        raise RuntimeError(
-            "previous detection case role release is still in progress"
-        )
-    if owner_case_id == context.operation.case_id:
-        return OperationOutcome(result=OPERATION_RESULT_ROLE_ALREADY_OWNED)
-    return OperationOutcome(result=OPERATION_RESULT_PREEXISTING_ROLE)
+        return await _mark_ambiguous_role_ownership(cog, context)
+    return await _reconcile_preexisting_role(cog, context, role_id)

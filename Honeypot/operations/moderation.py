@@ -21,6 +21,26 @@ if TYPE_CHECKING:
     from ..honeypot import Honeypot
 
 
+async def _moderation_target(
+    cog: Honeypot,
+    guild: discord.Guild,
+    user_id: int,
+    action: ActionIntent,
+) -> discord.Member | discord.User | discord.Object | None:
+    """Resolve who to action, or None when a kick target already left the guild."""
+    member = guild.get_member(user_id)
+    if member is None and action is ActionIntent.BAN:
+        member = await cog._get_user_or_object(user_id)
+    if member is None and action is ActionIntent.KICK:
+        try:
+            member = await guild.fetch_member(user_id)
+        except discord.NotFound:
+            return None
+    if member is None:
+        raise RuntimeError("detection case member is unavailable")
+    return member
+
+
 async def moderation_action_handler(
     cog: Honeypot, context: OperationContext
 ) -> OperationOutcome:
@@ -67,16 +87,11 @@ async def moderation_action_handler(
             pass
         else:
             return OperationOutcome(result=action.value)
-    member = guild.get_member(context.snapshot.case.user_id)
-    if member is None and action is ActionIntent.BAN:
-        member = await cog._get_user_or_object(context.snapshot.case.user_id)
-    if member is None and action is ActionIntent.KICK:
-        try:
-            member = await guild.fetch_member(context.snapshot.case.user_id)
-        except discord.NotFound:
-            return OperationOutcome(result=OPERATION_RESULT_KICK_MISSING)
+    member = await _moderation_target(
+        cog, guild, context.snapshot.case.user_id, action
+    )
     if member is None:
-        raise RuntimeError("detection case member is unavailable")
+        return OperationOutcome(result=OPERATION_RESULT_KICK_MISSING)
     public_reason = cog._public_moderation_reason(signals, action)
     started = await asyncio.to_thread(
         cog._case_store.start_operation_effect,
