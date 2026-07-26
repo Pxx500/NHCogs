@@ -3580,6 +3580,34 @@ class JoinwatchSelectionTests(unittest.TestCase):
                 )
 
 
+class JoinwatchCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_max_age_enforces_practical_upper_boundary(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                setting = SimpleNamespace(set=mock.AsyncMock())
+                cog = object.__new__(honeypot.Honeypot)
+                cog.config = SimpleNamespace(
+                    guild=mock.Mock(
+                        return_value=SimpleNamespace(joinwatch_min_age_hours=setting)
+                    )
+                )
+                ctx = SimpleNamespace(guild=object(), send=mock.AsyncMock())
+
+                await honeypot.Honeypot.max_age.callback(cog, ctx, 1_000_000)
+
+                setting.set.assert_awaited_once_with(1_000_000)
+
+                setting.set.reset_mock()
+                ctx.send.reset_mock()
+
+                await honeypot.Honeypot.max_age.callback(cog, ctx, 1_000_001)
+
+                setting.set.assert_not_awaited()
+                ctx.send.assert_awaited_once_with(
+                    "Hours must be between 1 and 1000000."
+                )
+
+
 class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
     class _Store:
         def __init__(self, value):

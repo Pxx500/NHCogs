@@ -122,7 +122,7 @@ Detection cases expire 24 hours after the first detection. This lifetime is fixe
 | `!honeypot joinwatch toggle <bool>` | Enable or disable the joinwatch module |
 | `!honeypot joinwatch alert toggle <bool>` | Enable or disable joinwatch alert messages |
 | `!honeypot joinwatch channel <channel>` | Channel for join alerts |
-| `!honeypot joinwatch max_age <1-168>` | Max account age in hours to trigger alert |
+| `!honeypot joinwatch max_age <1-1000000>` | Max account age in hours to trigger alert |
 | `!honeypot joinwatch autorole toggle <bool>` | Enable or disable automatic role assignment for young accounts |
 | `!honeypot joinwatch autorole role <role>` | Role to apply to young accounts |
 | `!honeypot joinwatch autorole timer <1-10080>` | Minutes before punishment if the role remains |
