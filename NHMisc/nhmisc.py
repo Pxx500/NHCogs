@@ -631,6 +631,20 @@ class NHMisc(commands.Cog):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
+    @nhmisc.command(name="topyapper")
+    async def nhmisc_topyapper(
+        self, ctx: commands.Context, days: int, amount: int
+    ) -> None:
+        """Show the most active users across this server."""
+        await self._send_yapper_ranking(ctx, days, amount, guild_wide=True)
+
+    @nhmisc.command(name="channelyapper")
+    async def nhmisc_channelyapper(
+        self, ctx: commands.Context, days: int, amount: int
+    ) -> None:
+        """Show the most active users in the current channel or thread."""
+        await self._send_yapper_ranking(ctx, days, amount, guild_wide=False)
+
     @commands.command(name="selfchart")
     @commands.guild_only()
     async def selfchart(self, ctx: commands.Context) -> None:
@@ -1297,6 +1311,62 @@ class NHMisc(commands.Cog):
                 page = candidate
         if page:
             await ctx.send(page, allowed_mentions=discord.AllowedMentions.none())
+
+    async def _send_yapper_ranking(
+        self,
+        ctx: commands.Context,
+        days: int,
+        amount: int,
+        *,
+        guild_wide: bool,
+    ) -> None:
+        await self._require_activity_staff(ctx)
+        if days < 1:
+            raise commands.UserFeedbackCheckFailure("Days must be at least 1.")
+        if not 1 <= amount <= 20:
+            raise commands.UserFeedbackCheckFailure(
+                "Amount must be between 1 and 20."
+            )
+
+        await self._close_stale_activity_days_for_guild(ctx.guild, send_reports=True)
+        days = await self._cap_detail_days(ctx.guild, days)
+        end_date_utc = self._utc_today()
+        if guild_wide:
+            counts = await self._activity_store.get_guild_user_counts(
+                ctx.guild.id,
+                end_date_utc,
+                days,
+                amount,
+            )
+            scope = "server"
+        else:
+            counts = await self._activity_store.get_channel_user_counts(
+                ctx.guild.id,
+                self._activity_parent_channel_id(ctx.channel),
+                self._activity_thread_id(ctx.channel),
+                end_date_utc,
+                days,
+            )
+            counts = counts[:amount]
+            scope = "channel"
+
+        if not counts:
+            await ctx.send(
+                f"No retained activity data for this {scope} in the last {days} days.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        lines = [f"Top {len(counts)} yappers in this {scope} - last {days} days:"]
+        for rank, count in enumerate(counts, start=1):
+            member = ctx.guild.get_member(count.user_id)
+            user = (
+                f"{member.display_name} ({count.user_id})"
+                if member is not None
+                else str(count.user_id)
+            )
+            lines.append(f"{rank}. {user} — {count.message_count:,} messages")
+        await self._send_paginated_text(ctx, "\n".join(lines))
 
     async def _confirm_retention_delete(self, ctx: commands.Context, warning: str) -> bool:
         await ctx.send(warning)

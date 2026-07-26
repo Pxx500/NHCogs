@@ -1,6 +1,7 @@
 import io
 import importlib.util
 import math
+from datetime import date
 from pathlib import Path
 import sys
 import types
@@ -149,7 +150,9 @@ class FakeContext:
         self.channel = types.SimpleNamespace(id=456, name="test-channel")
         self.sent = []
 
-    async def send(self, **kwargs):
+    async def send(self, content=None, **kwargs):
+        if content is not None:
+            kwargs["content"] = content
         self.sent.append(kwargs)
 
 
@@ -216,6 +219,100 @@ class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
         for label in percentage_labels:
             self.assertAlmostEqual(math.hypot(*label.get_position()), 0.81, places=2)
         self.assertIsNone(donut_axis.get_legend())
+
+
+class YapperCommandTests(unittest.IsolatedAsyncioTestCase):
+    def build_fixture(self, counts):
+        members = {
+            10: types.SimpleNamespace(display_name="Alpha"),
+            20: types.SimpleNamespace(display_name="Beta"),
+        }
+        guild = types.SimpleNamespace(
+            id=123,
+            get_member=lambda user_id: members.get(user_id),
+        )
+        ctx = FakeContext(guild)
+        store = types.SimpleNamespace(
+            get_guild_user_counts=mock.AsyncMock(return_value=counts),
+            get_channel_user_counts=mock.AsyncMock(return_value=counts),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._require_activity_staff = mock.AsyncMock()
+        cog._close_stale_activity_days_for_guild = mock.AsyncMock()
+        cog._cap_detail_days = mock.AsyncMock(return_value=7)
+        cog._activity_parent_channel_id = lambda channel: channel.id
+        cog._activity_thread_id = lambda channel: 789
+        cog._utc_today = lambda: date(2026, 7, 27)
+        cog._activity_store = store
+        return cog, ctx, store
+
+    async def test_topyapper_returns_requested_guild_ranking_without_mentions(self):
+        counts = [
+            types.SimpleNamespace(user_id=10, message_count=120),
+            types.SimpleNamespace(user_id=20, message_count=80),
+        ]
+        cog, ctx, store = self.build_fixture(counts)
+
+        await nhmisc.NHMisc.nhmisc_topyapper.callback(cog, ctx, 30, 2)
+
+        store.get_guild_user_counts.assert_awaited_once_with(
+            123, date(2026, 7, 27), 7, 2
+        )
+        cog._require_activity_staff.assert_awaited_once_with(ctx)
+        content = ctx.sent[0]["content"]
+        self.assertIn("1. Alpha (10) — 120 messages", content)
+        self.assertIn("2. Beta (20) — 80 messages", content)
+        self.assertIs(ctx.sent[0]["allowed_mentions"], ALLOWED_MENTIONS_NONE)
+
+    async def test_channelyapper_uses_current_thread_and_limits_output(self):
+        counts = [
+            types.SimpleNamespace(user_id=10, message_count=120),
+            types.SimpleNamespace(user_id=20, message_count=80),
+            types.SimpleNamespace(user_id=30, message_count=40),
+        ]
+        cog, ctx, store = self.build_fixture(counts)
+
+        await nhmisc.NHMisc.nhmisc_channelyapper.callback(cog, ctx, 30, 2)
+
+        store.get_channel_user_counts.assert_awaited_once_with(
+            123, 456, 789, date(2026, 7, 27), 7
+        )
+        content = ctx.sent[0]["content"]
+        self.assertIn("1. Alpha (10) — 120 messages", content)
+        self.assertIn("2. Beta (20) — 80 messages", content)
+        self.assertNotIn("30", content)
+        self.assertIs(ctx.sent[0]["allowed_mentions"], ALLOWED_MENTIONS_NONE)
+
+    async def test_yapper_commands_reject_invalid_days_and_amount(self):
+        commands_to_test = (
+            nhmisc.NHMisc.nhmisc_topyapper,
+            nhmisc.NHMisc.nhmisc_channelyapper,
+        )
+        for command in commands_to_test:
+            for days, amount in ((0, 1), (1, 0), (1, 21)):
+                with self.subTest(command=command, days=days, amount=amount):
+                    cog, ctx, _ = self.build_fixture([])
+                    with self.assertRaises(UserFeedbackCheckFailure):
+                        await command.callback(cog, ctx, days, amount)
+
+    async def test_yapper_commands_report_when_no_activity_is_retained(self):
+        commands_to_test = (
+            (nhmisc.NHMisc.nhmisc_topyapper, "server"),
+            (nhmisc.NHMisc.nhmisc_channelyapper, "channel"),
+        )
+        for command, scope in commands_to_test:
+            with self.subTest(command=command):
+                cog, ctx, _ = self.build_fixture([])
+
+                await command.callback(cog, ctx, 7, 10)
+
+                self.assertIn(
+                    f"No retained activity data for this {scope}",
+                    ctx.sent[0]["content"],
+                )
+                self.assertIs(
+                    ctx.sent[0]["allowed_mentions"], ALLOWED_MENTIONS_NONE
+                )
 
 
 if __name__ == "__main__":
