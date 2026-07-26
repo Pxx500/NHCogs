@@ -1,3 +1,4 @@
+import ast
 import asyncio
 import base64
 from contextlib import closing, contextmanager
@@ -308,16 +309,76 @@ class _AAA3ACog(_Cog):
         )
 
 
+def _member_source_files(path: Path) -> list[Path]:
+    if path.name == "__init__.py":
+        return sorted(path.parent.rglob("*.py"))
+    return [path]
+
+
+def _runtime_import_targets(path: Path) -> set[str]:
+    """Top-level package members this file imports when it executes.
+
+    TYPE_CHECKING blocks are skipped: they never run, and several handlers
+    import the cog from one, which would otherwise look like a cycle.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    type_checking_lines = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and "TYPE_CHECKING" in ast.unparse(node.test):
+            type_checking_lines.update(
+                range(node.lineno, (node.end_lineno or node.lineno) + 1)
+            )
+    package_parts = path.relative_to(PACKAGE_DIR).parent.parts
+    targets = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or not node.level:
+            continue
+        if node.lineno in type_checking_lines:
+            continue
+        base = package_parts[: len(package_parts) - (node.level - 1)]
+        if node.module:
+            resolved = base + tuple(node.module.split("."))
+            targets.add(resolved[0])
+        else:
+            targets.update((base + (alias.name,))[0] for alias in node.names)
+    return targets
+
+
+def _dependency_load_order(module_paths: dict[str, Path]) -> tuple[str, ...]:
+    """Order top-level members so no module is imported before its dependencies.
+
+    Computed rather than hand-listed: the plan's Phase 0.6 requires new modules
+    to be picked up automatically, and a stale hand-written order silently
+    leaves two live copies of a module in sys.modules.
+    """
+    members = sorted(
+        name for name in module_paths if "." not in name and name != "honeypot"
+    )
+    dependencies = {}
+    for name in members:
+        required = set()
+        for path in _member_source_files(module_paths[name]):
+            required |= _runtime_import_targets(path)
+        dependencies[name] = {
+            target
+            for target in required
+            if target in members and target != name
+        }
+    order: list[str] = []
+    remaining = list(members)
+    while remaining:
+        ready = [name for name in remaining if dependencies[name] <= set(order)]
+        if not ready:
+            # A runtime import cycle: stay deterministic and let Python's own
+            # import machinery resolve the rest.
+            ready = remaining[:1]
+        order.extend(ready)
+        remaining = [name for name in remaining if name not in set(ready)]
+    return tuple(order)
+
+
 @contextmanager
 def _isolated_honeypot_modules(data_path: Path):
-    dependency_order = (
-        "image_detector",
-        "detection_cases",
-        "detection_runtime",
-        "case_review",
-        "console_dump",
-        "views",
-    )
     module_paths = {}
     for path in PACKAGE_DIR.rglob("*.py"):
         relative = path.relative_to(PACKAGE_DIR)
@@ -328,16 +389,7 @@ def _isolated_honeypot_modules(data_path: Path):
         else:
             qualified_name = ".".join(relative.with_suffix("").parts)
         module_paths[qualified_name] = path
-    remainder = tuple(
-        sorted(
-            name
-            for name in module_paths
-            if name not in dependency_order
-            and name != "honeypot"
-            and "." not in name
-        )
-    )
-    load_order = dependency_order + remainder
+    load_order = _dependency_load_order(module_paths)
     preexisting_honeypot_names = tuple(
         name
         for name in sys.modules
@@ -994,6 +1046,35 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(sys.modules.get(module_name, _MISSING), previous)
 
         self.assertIsNot(first_view, second_view)
+
+    async def test_isolated_load_keeps_one_identity_per_shared_symbol(self):
+        # A stale load order let a module be imported before its dependency, so
+        # the dependency was created twice and half the package saw the other
+        # copy. Nothing raises when that happens; identity checks are the only
+        # way to see it.
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)):
+                for symbol in (
+                    "GuildSettings",
+                    "OperationType",
+                    "DetectionCaseStore",
+                    "DeleteStatus",
+                ):
+                    with self.subTest(symbol=symbol):
+                        owners = {}
+                        for name, module in list(sys.modules.items()):
+                            if not name.startswith("Honeypot."):
+                                continue
+                            value = getattr(module, symbol, None)
+                            if value is not None:
+                                owners.setdefault(id(value), []).append(name)
+
+                        self.assertEqual(
+                            len(owners),
+                            1,
+                            f"{symbol} exists as {len(owners)} distinct objects: "
+                            f"{[sorted(names) for names in owners.values()]}",
+                        )
 
     async def test_load_ignores_stale_pending_reviews_when_there_are_no_open_cases(self):
         with TemporaryDirectory() as directory:
