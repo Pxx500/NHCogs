@@ -13,31 +13,15 @@ if TYPE_CHECKING:
     from ..honeypot import Honeypot
 
 
-async def evidence_cleanup_handler(
-    cog: Honeypot, context: OperationContext
-) -> OperationOutcome:
+def _contained_case_evidence_root(cog: Honeypot, context: OperationContext) -> Path:
+    """Resolve the case evidence directory and prove nothing escapes it."""
     from ..honeypot import case_evidence_root
 
-    operation = context.operation
     snapshot = context.snapshot
-    review_update = next(
-        (
-            item
-            for item in snapshot.operations
-            if item.operation_type == OperationType.REVIEW_UPDATE
-        ),
-        None,
-    )
-    if (
-        snapshot.case.review_message_id is not None
-        and review_update is not None
-        and review_update.status.value != "succeeded"
-    ):
-        raise RuntimeError("terminal review projection is not complete")
     case_root = case_evidence_root(
         cog._detection_case_files_path,
         snapshot.case.guild_id,
-        operation.case_id,
+        context.operation.case_id,
     ).resolve()
     evidence_root = cog._detection_case_files_path.resolve()
     if not case_root.is_relative_to(evidence_root):
@@ -48,6 +32,14 @@ async def evidence_cleanup_handler(
         path = Path(attachment.evidence_path).resolve()
         if not path.is_relative_to(case_root):
             raise RuntimeError("detection case evidence path escapes case root")
+    return case_root
+
+
+async def _promote_reviewed_evidence_samples(
+    cog: Honeypot, context: OperationContext
+) -> None:
+    """Copy moderator-classified image evidence into the learning sample set."""
+    snapshot = context.snapshot
     for attachment in snapshot.attachments:
         if (
             attachment.evidence_path is None
@@ -69,6 +61,10 @@ async def evidence_cleanup_handler(
             raise RuntimeError(
                 f"failed to copy detection evidence into learning samples: {result}"
             )
+
+
+def _remove_case_evidence_tree(case_root: Path) -> None:
+    """Delete the case evidence directory and everything beneath it."""
     if case_root.exists():
         for path in sorted(case_root.rglob("*"), reverse=True):
             resolved = path.resolve()
@@ -80,4 +76,27 @@ async def evidence_cleanup_handler(
                 path.unlink(missing_ok=True)
     if case_root.exists():
         case_root.rmdir()
+
+
+async def evidence_cleanup_handler(
+    cog: Honeypot, context: OperationContext
+) -> OperationOutcome:
+    snapshot = context.snapshot
+    review_update = next(
+        (
+            item
+            for item in snapshot.operations
+            if item.operation_type == OperationType.REVIEW_UPDATE
+        ),
+        None,
+    )
+    if (
+        snapshot.case.review_message_id is not None
+        and review_update is not None
+        and review_update.status.value != "succeeded"
+    ):
+        raise RuntimeError("terminal review projection is not complete")
+    case_root = _contained_case_evidence_root(cog, context)
+    await _promote_reviewed_evidence_samples(cog, context)
+    _remove_case_evidence_tree(case_root)
     return OperationOutcome()

@@ -1,7 +1,7 @@
 """Discord-independent review projections for persisted detection cases."""
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -13,6 +13,7 @@ from .detection_cases import (
     AttachmentRecord,
     CaseSnapshot,
     CaseStatus,
+    CaseSubjectRecord,
     DeleteStatus,
     DetectionCaseStore,
     MessageRecord,
@@ -499,32 +500,10 @@ def _publication_warning(attachment: AttachmentRecord) -> str:
     return f"{attachment.filename}: Could not publish evidence. See bot logs."
 
 
-def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
-    """Build the complete Discord-agnostic representation of one case snapshot."""
-
-    channel_ids = tuple(dict.fromkeys(message.channel_id for message in snapshot.messages))
-    needs_attention = snapshot.case.needs_attention or any(
-        message.delete_status is DeleteStatus.FORBIDDEN for message in snapshot.messages
-    )
-    message_lines = tuple(_message_review_line(message) for message in snapshot.messages)
-    reasons_by_message = _signal_reasons_by_message(snapshot)
-    sorted_messages = tuple(sorted(snapshot.messages, key=lambda item: item.sequence))
-    signal_lines = tuple(
-        f"<#{message.channel_id}>: {reason}"
-        for message in sorted_messages
-        for reason in reasons_by_message.get(message.sequence, ())
-    )
-    moderation_operations = tuple(
-        operation
-        for operation in snapshot.operations
-        if operation.operation_type == OperationType.MODERATION_ACTION
-        or operation.operation_type
-        in {
-            OperationType.MODERATOR_BAN,
-            OperationType.MODERATOR_KICK,
-            OperationType.MODERATOR_IGNORE,
-        }
-    )
+def _moderation_state(
+    snapshot: CaseSnapshot, moderation_operations: tuple[OperationRecord, ...]
+) -> tuple[str, tuple[str, ...], bool]:
+    """Derive the moderation status label, the offered actions and completion."""
     moderation_actions = ("ban", "kick", "ignore")
     moderation_completed = False
     if moderation_operations:
@@ -566,6 +545,161 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
             moderation_actions = ()
     else:
         moderation_status = "none"
+    return moderation_status, moderation_actions, moderation_completed
+
+
+def _case_resolution_lines(
+    snapshot: CaseSnapshot, moderation_operations: tuple[OperationRecord, ...]
+) -> tuple[str, ...]:
+    """Render how and by whom the case was closed."""
+    resolution_lines: tuple[str, ...] = ()
+    automatic_resolution = False
+    if snapshot.case.resolution is not None:
+        automatic_resolution = any(
+            operation.operation_type == OperationType.MODERATION_ACTION
+            and operation.status is OperationStatus.SUCCEEDED
+            and operation.result == snapshot.case.resolution
+            for operation in moderation_operations
+        )
+        resolution_label = _resolution_label(snapshot.case.resolution)
+        if automatic_resolution:
+            resolution_label += " automatically"
+        resolution_lines += (resolution_label,)
+    if snapshot.case.moderator_id is not None and not automatic_resolution:
+        reviewer = f"<@{snapshot.case.moderator_id}>"
+        if snapshot.case.resolved_at is not None:
+            reviewer += f" • <t:{int(snapshot.case.resolved_at.timestamp())}:F>"
+        resolution_lines += (reviewer,)
+    return resolution_lines
+
+
+def _summary_signal_lines(
+    sorted_messages: tuple[MessageRecord, ...],
+    reasons_by_message: Mapping[int, Sequence[str]],
+) -> tuple[str, ...]:
+    """Render the truncated per-message signal digest shown on the summary embed."""
+    summary_signal_lines_list: list[str] = []
+    for message in sorted_messages[:3]:
+        reasons = reasons_by_message.get(message.sequence, ())
+        summary_signal_lines_list.append(
+            f"Message {message.sequence} · <#{message.channel_id}>:"
+        )
+        visible_reasons = [" ".join(reason.split()) for reason in reasons[:2]]
+        if not visible_reasons:
+            visible_reasons.append("Detection signal recorded")
+        remaining = max(0, len(reasons) - len(visible_reasons))
+        for index, reason in enumerate(visible_reasons):
+            suffix = (
+                f" (+{remaining} more)"
+                if remaining and index == len(visible_reasons) - 1
+                else ""
+            )
+            available = max(0, 300 - len(suffix))
+            summary_signal_lines_list.append(f"{reason[:available]}{suffix}")
+    if len(sorted_messages) > 3:
+        summary_signal_lines_list.append(
+            f"+{len(sorted_messages) - 3} additional messages in thread"
+        )
+    return tuple(summary_signal_lines_list)
+
+
+def _optional_summary_fields(
+    feedback_items: tuple[CaseFeedbackItem, ...],
+    *,
+    moderation_status: str,
+    incomplete_evidence: bool,
+    needs_attention: bool,
+    warning_lines: tuple[str, ...],
+) -> tuple[CaseReviewField, ...]:
+    """Build the summary embed fields that only appear when they have something to say."""
+    optional_fields: list[CaseReviewField] = []
+    if moderation_status != "none":
+        optional_fields.append(CaseReviewField("Moderation:", moderation_status))
+    if sum(item.decision is None for item in feedback_items) > 25:
+        optional_fields.append(CaseReviewField(
+            "Review required:",
+            "Too many images for one menu\nReview them in the thread",
+        ))
+    if incomplete_evidence:
+        optional_fields.append(CaseReviewField("Evidence:", "Capture incomplete"))
+    if needs_attention:
+        warning_lines += ("Staff attention required",)
+    if warning_lines:
+        optional_fields.extend(_field_chunks("Warnings:", warning_lines))
+    return tuple(optional_fields)
+
+
+def _case_description(
+    snapshot: CaseSnapshot,
+    subject: CaseSubjectRecord | None,
+    *,
+    awaiting_classification: bool,
+    summary_signal_lines: tuple[str, ...],
+) -> str:
+    """Assemble the identity and summary block shown as the embed description."""
+    identity_lines = []
+    identity_lines.append(f"<@{snapshot.case.user_id}> ({snapshot.case.user_id})")
+    if subject is not None and subject.account_created_at is not None:
+        identity_lines.append(
+            f"Account created <t:{int(subject.account_created_at.timestamp())}:R>"
+        )
+    if subject is not None and subject.guild_joined_at is not None:
+        identity_lines.append(
+            f"Joined server <t:{int(subject.guild_joined_at.timestamp())}:R>"
+        )
+    status_labels = {
+        "pending": "Open",
+        "resolving": "Resolving",
+        "resolved": "Closed",
+        "expired": "Expired",
+    }
+    display_status = (
+        "Awaiting classification"
+        if awaiting_classification
+        else status_labels.get(snapshot.case.status.value, snapshot.case.status.value)
+    )
+    identity_lines.append(f"Status: {display_status}")
+    standard_lines = [f"Messages: {len(snapshot.messages)}"]
+    if snapshot.case.status.value in {"pending", "resolving"}:
+        standard_lines.append(
+            f"Expires: <t:{int(snapshot.case.expires_at.timestamp())}:R>"
+        )
+    standard_lines.append("")
+    if summary_signal_lines:
+        standard_lines.append("Signals:")
+        standard_lines.extend(summary_signal_lines)
+    return "\n".join(identity_lines + standard_lines)[:4096]
+
+
+def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
+    """Build the complete Discord-agnostic representation of one case snapshot."""
+
+    channel_ids = tuple(dict.fromkeys(message.channel_id for message in snapshot.messages))
+    needs_attention = snapshot.case.needs_attention or any(
+        message.delete_status is DeleteStatus.FORBIDDEN for message in snapshot.messages
+    )
+    message_lines = tuple(_message_review_line(message) for message in snapshot.messages)
+    reasons_by_message = _signal_reasons_by_message(snapshot)
+    sorted_messages = tuple(sorted(snapshot.messages, key=lambda item: item.sequence))
+    signal_lines = tuple(
+        f"<#{message.channel_id}>: {reason}"
+        for message in sorted_messages
+        for reason in reasons_by_message.get(message.sequence, ())
+    )
+    moderation_operations = tuple(
+        operation
+        for operation in snapshot.operations
+        if operation.operation_type == OperationType.MODERATION_ACTION
+        or operation.operation_type
+        in {
+            OperationType.MODERATOR_BAN,
+            OperationType.MODERATOR_KICK,
+            OperationType.MODERATOR_IGNORE,
+        }
+    )
+    moderation_status, moderation_actions, moderation_completed = _moderation_state(
+        snapshot, moderation_operations
+    )
     incomplete_evidence = any(
         attachment.capture_status != "captured"
         for attachment in snapshot.attachments
@@ -621,69 +755,8 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
     )
     title = "Detection case"
     subject = snapshot.subject
-    identity_lines = []
-    identity_lines.append(f"<@{snapshot.case.user_id}> ({snapshot.case.user_id})")
-    if subject is not None and subject.account_created_at is not None:
-        identity_lines.append(
-            f"Account created <t:{int(subject.account_created_at.timestamp())}:R>"
-        )
-    if subject is not None and subject.guild_joined_at is not None:
-        identity_lines.append(
-            f"Joined server <t:{int(subject.guild_joined_at.timestamp())}:R>"
-        )
-    status_labels = {
-        "pending": "Open",
-        "resolving": "Resolving",
-        "resolved": "Closed",
-        "expired": "Expired",
-    }
-    display_status = (
-        "Awaiting classification"
-        if awaiting_classification
-        else status_labels.get(snapshot.case.status.value, snapshot.case.status.value)
-    )
-    identity_lines.append(f"Status: {display_status}")
-    resolution_lines: tuple[str, ...] = ()
-    automatic_resolution = False
-    if snapshot.case.resolution is not None:
-        automatic_resolution = any(
-            operation.operation_type == OperationType.MODERATION_ACTION
-            and operation.status is OperationStatus.SUCCEEDED
-            and operation.result == snapshot.case.resolution
-            for operation in moderation_operations
-        )
-        resolution_label = _resolution_label(snapshot.case.resolution)
-        if automatic_resolution:
-            resolution_label += " automatically"
-        resolution_lines += (resolution_label,)
-    if snapshot.case.moderator_id is not None and not automatic_resolution:
-        reviewer = f"<@{snapshot.case.moderator_id}>"
-        if snapshot.case.resolved_at is not None:
-            reviewer += f" • <t:{int(snapshot.case.resolved_at.timestamp())}:F>"
-        resolution_lines += (reviewer,)
-    summary_signal_lines_list: list[str] = []
-    for message in sorted_messages[:3]:
-        reasons = reasons_by_message.get(message.sequence, ())
-        summary_signal_lines_list.append(
-            f"Message {message.sequence} · <#{message.channel_id}>:"
-        )
-        visible_reasons = [" ".join(reason.split()) for reason in reasons[:2]]
-        if not visible_reasons:
-            visible_reasons.append("Detection signal recorded")
-        remaining = max(0, len(reasons) - len(visible_reasons))
-        for index, reason in enumerate(visible_reasons):
-            suffix = (
-                f" (+{remaining} more)"
-                if remaining and index == len(visible_reasons) - 1
-                else ""
-            )
-            available = max(0, 300 - len(suffix))
-            summary_signal_lines_list.append(f"{reason[:available]}{suffix}")
-    if len(sorted_messages) > 3:
-        summary_signal_lines_list.append(
-            f"+{len(sorted_messages) - 3} additional messages in thread"
-        )
-    summary_signal_lines = tuple(summary_signal_lines_list)
+    resolution_lines = _case_resolution_lines(snapshot, moderation_operations)
+    summary_signal_lines = _summary_signal_lines(sorted_messages, reasons_by_message)
     summary_publication_warnings = tuple(
         line[:300] for line in publication_warning_lines[:3]
     )
@@ -691,31 +764,19 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
         line[:300] for line in operation_warning_lines[:3]
     )
     summary_resolution_lines = tuple(line[:300] for line in resolution_lines[:2])
-    optional_fields: list[CaseReviewField] = []
-    if moderation_status != "none":
-        optional_fields.append(CaseReviewField("Moderation:", moderation_status))
-    if sum(item.decision is None for item in feedback_items) > 25:
-        optional_fields.append(CaseReviewField(
-            "Review required:",
-            "Too many images for one menu\nReview them in the thread",
-        ))
-    if incomplete_evidence:
-        optional_fields.append(CaseReviewField("Evidence:", "Capture incomplete"))
-    warning_lines = summary_publication_warnings + summary_operation_warnings
-    if needs_attention:
-        warning_lines += ("Staff attention required",)
-    if warning_lines:
-        optional_fields.extend(_field_chunks("Warnings:", warning_lines))
-    standard_lines = [f"Messages: {len(snapshot.messages)}"]
-    if snapshot.case.status.value in {"pending", "resolving"}:
-        standard_lines.append(
-            f"Expires: <t:{int(snapshot.case.expires_at.timestamp())}:R>"
-        )
-    standard_lines.append("")
-    if summary_signal_lines:
-        standard_lines.append("Signals:")
-        standard_lines.extend(summary_signal_lines)
-    description = "\n".join(identity_lines + standard_lines)[:4096]
+    optional_fields = _optional_summary_fields(
+        feedback_items,
+        moderation_status=moderation_status,
+        incomplete_evidence=incomplete_evidence,
+        needs_attention=needs_attention,
+        warning_lines=summary_publication_warnings + summary_operation_warnings,
+    )
+    description = _case_description(
+        snapshot,
+        subject,
+        awaiting_classification=awaiting_classification,
+        summary_signal_lines=summary_signal_lines,
+    )
     pages = _bounded_field_pages(
         signal_lines=(),
         message_lines=(),
