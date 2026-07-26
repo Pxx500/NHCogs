@@ -68,6 +68,7 @@ JOINWATCH_AUTO_ROLE_ACTION_OPTIONS = tuple(
     member.value for member in JoinwatchAutoRoleActionOption
 )
 BAIT_ACTION_OPTIONS = tuple(member.value for member in BaitActionOption)
+BOOL_OPTIONS = ("false", "true")
 
 DEFAULT_STATS = {
     "detections": 0,

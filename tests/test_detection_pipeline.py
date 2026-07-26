@@ -3581,7 +3581,7 @@ class JoinwatchSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
                     return_value=alert_channel
                 )
                 cog._increment_stat = mock.AsyncMock()
-                cog._store_joinwatch_pending_role_alert = mock.AsyncMock()
+                honeypot.joinwatch._store_joinwatch_pending_role_alert = mock.AsyncMock()
                 guild = SimpleNamespace(id=100)
                 member = SimpleNamespace(
                     id=200,
@@ -4015,7 +4015,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                     joinwatch_pending_roles=lambda: self._Store(roles),
                 )
                 cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
-                cog._edit_joinwatch_alert_auto_role = mock.AsyncMock()
+                honeypot.joinwatch._edit_joinwatch_alert_auto_role = mock.AsyncMock()
                 now = datetime(2026, 7, 15, 12, tzinfo=timezone.utc)
 
                 with mock.patch.object(
@@ -4024,11 +4024,11 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                     SimpleNamespace(format_dt=lambda value, style: value.isoformat()),
                     create=True,
                 ):
-                    assignment_result = await cog._reschedule_joinwatch_assignment_retry(
-                        guild, "200", assignments["200"], now, "assignment failed"
+                    assignment_result = await honeypot.joinwatch._reschedule_joinwatch_assignment_retry(
+                        cog, guild, "200", assignments["200"], now, failure="assignment failed"
                     )
-                    role_result = await cog._reschedule_joinwatch_role_retry(
-                        guild, "200", roles["200"], now, "action failed"
+                    role_result = await honeypot.joinwatch._reschedule_joinwatch_role_retry(
+                        cog, guild, "200", roles["200"], now, failure="action failed"
                     )
 
                 self.assertTrue(assignment_result)
@@ -4061,14 +4061,15 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                     joinwatch_pending_role_assignments=lambda: self._Store(assignments),
                 )
                 cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
-                cog._edit_joinwatch_alert_auto_role = mock.AsyncMock()
+                honeypot.joinwatch._edit_joinwatch_alert_auto_role = mock.AsyncMock()
 
-                scheduled = await cog._reschedule_joinwatch_assignment_retry(
+                scheduled = await honeypot.joinwatch._reschedule_joinwatch_assignment_retry(
+                    cog,
                     guild,
                     "200",
                     assignments["200"],
                     datetime(2026, 7, 15, 12, tzinfo=timezone.utc),
-                    "still failing",
+                    failure="still failing",
                 )
 
                 self.assertFalse(scheduled)
