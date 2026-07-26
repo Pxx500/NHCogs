@@ -20,17 +20,22 @@ ignore = [
     "E501",
     "PLR0913",
     "TRY003",
-    # SIM105: `try: ... except X: pass` is kept literal. `contextlib.suppress`
-    # hides which single statement is guarded, and every site here guards one
-    # best-effort call inside a cleanup or teardown path.
+    # SIM105: `try: ... except X: pass` is kept literal. Every site guards
+    # exactly one best-effort call, and `contextlib.suppress` hides which
+    # statement that is. Most are cleanup or teardown; two are not - the
+    # AAA3A_utils reload loop at cog load and a progress-message edit inside the
+    # imagescan import loop - and they are covered by the same argument.
     "SIM105",
-    # TRY300: the value being returned is produced by the guarded call itself,
-    # so moving the `return` into an `else` block separates it from the call it
-    # belongs to without changing behaviour.
+    # TRY300: a stance on the rule, not a property of the sites. Seven of the
+    # nine return a literal (`return True`, or a bare `return`) rather than a
+    # value produced by the guarded call, so an `else:` block would add a level
+    # of indentation and separate the result from the condition that earned it.
     "TRY300",
     # TRY301: raising inside `try` is the deliberate error-funnelling shape of
-    # the operation handlers and the publication path - a local `raise` is
-    # caught by the same function and converted into an operation outcome.
+    # the operation handlers and the publication path, where a local `raise` is
+    # caught by the same function and converted into an operation outcome. Three
+    # sites are outside that shape: a diagnostics `OSError` that is stored and
+    # re-raised, one image-scan path, and a test that manufactures `exc_info`.
     "TRY301",
 ]
 
