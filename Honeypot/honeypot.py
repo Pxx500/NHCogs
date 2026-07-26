@@ -113,6 +113,7 @@ log = logging.getLogger("red.Honeypot")
 COG_AUTHOR = "Pxx500"
 COG_REPO_NAME = "NHCogs"
 COG_REPO_URL = "https://github.com/Pxx500/NHCogs"
+JOINWATCH_MAX_ACCOUNT_AGE_HOURS = 1_000_000
 _TIMELINE_VIEW_UNSET = object()
 DETECTION_FAST_RETRY_SECONDS = 10
 DETECTION_FAST_RETRY_LIMIT = 5
@@ -7216,8 +7217,12 @@ class Honeypot(Cog):
         if hours is None:
             v = await self.config.guild(ctx.guild).joinwatch_min_age_hours()
             await ctx.send(_("Joinwatch max age: {value} hours").format(value=v))
-        elif hours < 1 or hours > 168:
-            await ctx.send(_("Hours must be between 1 and 168 (1 week)."))
+        elif hours < 1 or hours > JOINWATCH_MAX_ACCOUNT_AGE_HOURS:
+            await ctx.send(
+                _("Hours must be between 1 and {maximum}.").format(
+                    maximum=JOINWATCH_MAX_ACCOUNT_AGE_HOURS
+                )
+            )
         else:
             await self.config.guild(ctx.guild).joinwatch_min_age_hours.set(hours)
             await ctx.send(_("✅ Joinwatch max age set to {value} hours").format(value=hours))
