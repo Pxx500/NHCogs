@@ -813,8 +813,8 @@ class DetectionCaseStoreTests(unittest.TestCase):
                 0,
                 "sha",
                 "phash",
-                {"matched": True},
-                None,
+                match_metadata={"matched": True},
+                error=None,
             )
         )
         self.assertTrue(
@@ -978,8 +978,8 @@ class DetectionCaseStoreTests(unittest.TestCase):
             0,
             "wrong-token",
             100,
-            "case/1/proof.png",
-            created_at + timedelta(seconds=1),
+            evidence_path="case/1/proof.png",
+            now=created_at + timedelta(seconds=1),
             max_attachment_bytes=100,
             max_case_bytes=100,
         )
@@ -989,8 +989,8 @@ class DetectionCaseStoreTests(unittest.TestCase):
             0,
             reservation.claim_token,
             100,
-            "case/1/proof.png",
-            created_at + timedelta(seconds=1),
+            evidence_path="case/1/proof.png",
+            now=created_at + timedelta(seconds=1),
             max_attachment_bytes=100,
             max_case_bytes=100,
         )
@@ -1027,8 +1027,8 @@ class DetectionCaseStoreTests(unittest.TestCase):
             0,
             reservation.claim_token,
             101,
-            "case/1/proof.png",
-            created_at + timedelta(seconds=1),
+            evidence_path="case/1/proof.png",
+            now=created_at + timedelta(seconds=1),
             max_attachment_bytes=100,
             max_case_bytes=100,
         )
@@ -1075,8 +1075,8 @@ class DetectionCaseStoreTests(unittest.TestCase):
             0,
             reservation.claim_token,
             100,
-            "case/1/proof.png",
-            created_at + timedelta(seconds=3),
+            evidence_path="case/1/proof.png",
+            now=created_at + timedelta(seconds=3),
             max_attachment_bytes=100,
             max_case_bytes=100,
         )
@@ -1111,7 +1111,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
             0,
             first.claim_token,
             "capture_failed",
-            "read failed",
+            error="read failed",
         )
         failed = self.store.get_case(appended.case.case_id).attachments[0]
         retried = self.store.reserve_attachment_capture(

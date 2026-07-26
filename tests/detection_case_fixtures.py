@@ -118,8 +118,8 @@ class DetectionCaseBuilder:
             position,
             "fixture-sha256",
             "fixture-phash",
-            {"matched": matched, "distance": 2 if matched else 12},
-            None,
+            match_metadata={"matched": matched, "distance": 2 if matched else 12},
+            error=None,
         ):
             raise AssertionError("fixture attachment scan failed")
 
@@ -207,8 +207,8 @@ def capture_attachment(store, case_id, message_sequence, position, evidence_path
         position,
         reservation.claim_token,
         attachment.size,
-        str(evidence_path),
-        now,
+        evidence_path=str(evidence_path),
+        now=now,
         max_attachment_bytes=_TEST_EVIDENCE_LIMIT,
         max_case_bytes=_TEST_EVIDENCE_LIMIT,
     ) == "captured"

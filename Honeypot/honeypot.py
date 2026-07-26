@@ -444,6 +444,7 @@ class Honeypot(Cog):
         member: discord.Member | discord.User | discord.Object,
         created_at: datetime,
         settings: GuildSettings,
+        *,
         reason: str,
         action: str | None = None,
         moderator: discord.Member | discord.User | discord.Object | None = None,
@@ -1761,7 +1762,7 @@ class Honeypot(Cog):
             me,
             honeypot_channels,
             logs_channel,
-            review_channel,
+            review_channel=review_channel,
             missing_purge_permissions=detection.missing_purge_permissions,
             is_purgeable_message_channel=detection.is_purgeable_message_channel,
         )

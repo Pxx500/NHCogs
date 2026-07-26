@@ -417,8 +417,8 @@ async def resolve_detection_case(
             resolution,
             moderator_id,
             resolved_at,
-            decisions,
-            tuple(final_operations),
+            decisions=decisions,
+            final_operations=tuple(final_operations),
         )
     except BaseException:
         await asyncio.to_thread(cog._case_store.release_resolution, lease)
@@ -564,6 +564,7 @@ async def _settle_detection_operation_failure(
     lease: OperationLease,
     now: datetime,
     snapshot,
+    *,
     outcome: OperationOutcome,
     error: Exception,
     operation_type_value: str,
@@ -600,7 +601,7 @@ async def _settle_detection_operation_failure(
         f"{type(error).__name__}: {error}",
         now,
         retry_at,
-        outcome.result,
+        result=outcome.result,
     )
     if failure and snapshot is not None:
         await cog._record_operational_failure(
@@ -772,9 +773,9 @@ async def _execute_detection_case_operation(
             lease,
             now,
             snapshot,
-            replace(operation_outcome, error=operation_error),
-            operation_error,
-            operation_type_value,
+            outcome=replace(operation_outcome, error=operation_error),
+            error=operation_error,
+            operation_type_value=operation_type_value,
         )
         return
     operation_outcome = await _settle_detection_operation_success(

@@ -130,8 +130,8 @@ class RoleApplyHandlerTests(unittest.IsolatedAsyncioTestCase):
             case_id,
             10,
             20,
-            role_id,
-            now,
+            role_id=role_id,
+            now=now,
         )
         if result != "owned":
             raise AssertionError(f"unexpected ownership result: {result}")
@@ -633,8 +633,8 @@ class RoleApplyHandlerTests(unittest.IsolatedAsyncioTestCase):
                         current.case.case_id,
                         10,
                         20,
-                        role.id,
-                        now + timedelta(seconds=2),
+                        role_id=role.id,
+                        now=now + timedelta(seconds=2),
                     )
                 )
 

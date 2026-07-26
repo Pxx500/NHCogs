@@ -717,16 +717,16 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
         standard_lines.extend(summary_signal_lines)
     description = "\n".join(identity_lines + standard_lines)[:4096]
     pages = _bounded_field_pages(
-        (),
-        (),
-        (),
-        (),
-        (),
-        (),
-        summary_resolution_lines,
-        needs_attention,
-        "",
-        tuple(optional_fields),
+        signal_lines=(),
+        message_lines=(),
+        feedback_lines=(),
+        cached_purge_lines=(),
+        publication_warning_lines=(),
+        operation_warning_lines=(),
+        resolution_lines=summary_resolution_lines,
+        needs_attention=needs_attention,
+        case_summary="",
+        optional_fields=tuple(optional_fields),
     )
     return CaseReviewProjection(
         case_id=snapshot.case.case_id,
@@ -777,6 +777,7 @@ def _field_chunks(name: str, lines: tuple[str, ...]) -> tuple[CaseReviewField, .
 
 
 def _bounded_field_pages(
+    *,
     signal_lines: tuple[str, ...],
     message_lines: tuple[str, ...],
     feedback_lines: tuple[str, ...],

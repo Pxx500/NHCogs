@@ -2497,8 +2497,8 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                     0,
                     "sha256",
                     "phash",
-                    {"matched_filename": "known-scam.png", "hash_diff": 3},
-                    None,
+                    match_metadata={"matched_filename": "known-scam.png", "hash_diff": 3},
+                    error=None,
                 )
                 snapshot = await asyncio.to_thread(
                     cog._case_store.get_case, appended.case.case_id
@@ -7413,8 +7413,8 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                             result.position,
                             f"sha-{result.position}",
                             f"phash-{result.position}",
-                            {"matched": True, "score": 0},
-                            None,
+                            match_metadata={"matched": True, "score": 0},
+                            error=None,
                         )
 
                 published = []
@@ -9225,8 +9225,8 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                         "ignore",
                         99,
                         now,
-                        None,
-                        (
+                        decisions=None,
+                        final_operations=(
                             ("review_update", f"review-update:{appended.case.case_id}"),
                             (
                                 "evidence_cleanup",
@@ -10236,8 +10236,8 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                         appended.case.case_id,
                         guild.id,
                         member.id,
-                        role.id,
-                        owned_at,
+                        role_id=role.id,
+                        now=owned_at,
                     ),
                     "owned",
                 )
@@ -10316,8 +10316,8 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                         appended.case.case_id,
                         guild.id,
                         appended.case.user_id,
-                        role.id,
-                        now,
+                        role_id=role.id,
+                        now=now,
                     ),
                     "owned",
                 )
@@ -11572,8 +11572,8 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                         0,
                         reservation.claim_token,
                         8,
-                        evidence_path,
-                        now + timedelta(seconds=3),
+                        evidence_path=evidence_path,
+                        now=now + timedelta(seconds=3),
                         max_attachment_bytes=1024,
                         max_case_bytes=2048,
                     ),
@@ -12127,8 +12127,8 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                         0,
                         "sha",
                         "phash",
-                        {"matched": True},
-                        None,
+                        match_metadata={"matched": True},
+                        error=None,
                     )
                 )
 
@@ -12476,7 +12476,7 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                 )
                 cog._case_store.record_operation_role_ownership(
                     ownership.operation_id, ownership.claim_token,
-                    appended.case.case_id, 10, 20, 55, owned_at,
+                    appended.case.case_id, 10, 20, role_id=55, now=owned_at,
                 )
                 cog._case_store.complete_operation(
                     ownership.operation_id, ownership.claim_token, owned_at
@@ -12789,8 +12789,8 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                     appended.case.case_id,
                     10,
                     20,
-                    55,
-                    now,
+                    role_id=55,
+                    now=now,
                 )
 
                 self.assertFalse(recorded)
@@ -12862,7 +12862,7 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                 )
                 cog._case_store.record_operation_role_ownership(
                     ownership.operation_id, ownership.claim_token,
-                    appended.case.case_id, 10, 20, 55, owned_at,
+                    appended.case.case_id, 10, 20, role_id=55, now=owned_at,
                 )
                 cog._case_store.complete_operation(
                     ownership.operation_id, ownership.claim_token, owned_at

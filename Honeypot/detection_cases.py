@@ -1443,9 +1443,9 @@ class DetectionCaseStore:
         position: int,
         claim_token: str,
         actual_bytes: int,
+        *,
         evidence_path: str,
         now: datetime,
-        *,
         max_attachment_bytes: int,
         max_case_bytes: int,
     ) -> str | None:
@@ -1570,6 +1570,7 @@ class DetectionCaseStore:
         position: int,
         claim_token: str,
         capture_status: str,
+        *,
         error: str | None,
     ) -> bool:
         with closing(self._connect()) as connection, connection:
@@ -1649,6 +1650,7 @@ class DetectionCaseStore:
         position: int,
         sha256: str | None,
         perceptual_hash: str | None,
+        *,
         match_metadata: Mapping[str, object],
         error: str | None,
     ) -> bool:
@@ -2419,6 +2421,7 @@ class DetectionCaseStore:
         resolution: str,
         moderator_id: int | None,
         now: datetime,
+        *,
         decisions: Mapping[AttachmentKey, str] | None = None,
         final_operations: tuple[tuple[str, str], ...] = (),
     ) -> bool:
@@ -2908,6 +2911,7 @@ class DetectionCaseStore:
         case_id: str,
         guild_id: int,
         user_id: int,
+        *,
         role_id: int,
         now: datetime,
     ) -> str | None:
@@ -2958,6 +2962,7 @@ class DetectionCaseStore:
         case_id: str,
         guild_id: int,
         user_id: int,
+        *,
         role_id: int,
         now: datetime,
     ) -> bool:
@@ -3164,7 +3169,7 @@ class DetectionCaseStore:
 
     def fail_operation(
         self, operation_id: str, token: str, error: str, now: datetime,
-        retry_at: datetime | None, result: str | None = None,
+        retry_at: datetime | None, *, result: str | None = None,
     ) -> bool:
         status = OperationStatus.FAILED if retry_at is not None else OperationStatus.ABANDONED
         with closing(self._connect()) as connection, connection:

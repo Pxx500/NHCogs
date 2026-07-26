@@ -921,8 +921,8 @@ class CaseReviewServiceTests(unittest.IsolatedAsyncioTestCase):
                 position,
                 f"sha-{position}",
                 f"phash-{position}",
-                {"matched": True},
-                None,
+                match_metadata={"matched": True},
+                error=None,
             )
         return appended.case.case_id
 
@@ -935,8 +935,8 @@ class CaseReviewServiceTests(unittest.IsolatedAsyncioTestCase):
             1,
             "sha-1",
             "phash-1",
-            {"matched": False},
-            None,
+            match_metadata={"matched": False},
+            error=None,
         )
         snapshot = self.store.get_case(case_id)
         items = case_review.case_feedback_items(snapshot)
@@ -1046,8 +1046,8 @@ class CaseReviewServiceTests(unittest.IsolatedAsyncioTestCase):
             0,
             "sha-second",
             "phash-second",
-            {"matched": True},
-            None,
+            match_metadata={"matched": True},
+            error=None,
         )
 
         snapshot = await case_review.CaseReviewService(self.store).apply_message(
@@ -1083,8 +1083,8 @@ class CaseReviewServiceTests(unittest.IsolatedAsyncioTestCase):
                 position,
                 f"sha-{position}",
                 f"phash-{position}",
-                {"matched": True},
-                None,
+                match_metadata={"matched": True},
+                error=None,
             )
         expected_keys = tuple(
             item.key for item in case_review.case_feedback_items(self.store.get_case(case_id))
