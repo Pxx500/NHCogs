@@ -173,6 +173,14 @@ ignore = [
 # directories; that is the assertion, not production blocking.
 "tests/test_detection_runtime.py" = ["ASYNC240"]
 
+# PLR0915: `test_image_signal_stops_after_first_match_and_returns_serializable_match`
+# is one flat sequence - the attachment and detector stub table, a controlled
+# scan, then a field-by-field assertion on the serialized match. Its statements
+# are the fixture and the assertions; extracting helpers would separate each
+# assertion from the state it describes. Moved verbatim from
+# tests/test_detection_pipeline.py, where the exclusion had hidden it.
+"tests/test_detection_signals.py" = ["PLR0915"]
+
 # PLC0415: `PIL` is imported inside the helper so the module still imports when
 # Pillow is absent and the test skips instead of erroring at collection.
 "tests/test_image_detector_model.py" = ["PLC0415"]
