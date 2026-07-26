@@ -154,23 +154,24 @@ async def _review_dump_collect_case(
     root_dir: Path,
 ) -> dict[str, typing.Any]:
     embed = review_message.embeds[0]
-    fields = cog._review_dump_field_map(embed)
+    fields = _review_dump_field_map(embed)
     attachment_dir = root_dir / "cases" / str(review_message.id) / "attachments"
     attachment_dir.mkdir(parents=True, exist_ok=True)
     attachments: list[dict[str, typing.Any]] = []
     for index, attachment in enumerate(review_message.attachments, 1):
         attachments.append(
-            await cog._review_dump_download_attachment(attachment, attachment_dir, "review", index)
+            await _review_dump_download_attachment(cog, attachment, attachment_dir, "review", index)
         )
     addendums: list[dict[str, typing.Any]] = []
     for addendum in sorted(
         replies_by_reference.get(review_message.id, []), key=lambda item: item.created_at
     ):
-        addendum_record = cog._review_dump_message_record(addendum, review_message.id)
+        addendum_record = _review_dump_message_record(addendum, review_message.id)
         addendum_attachments: list[dict[str, typing.Any]] = []
         for index, attachment in enumerate(addendum.attachments, 1):
             addendum_attachments.append(
-                await cog._review_dump_download_attachment(
+                await _review_dump_download_attachment(
+                    cog,
                     attachment,
                     attachment_dir,
                     f"addendum-{addendum.id}",
@@ -184,18 +185,18 @@ async def _review_dump_collect_case(
         "review_message_id": str(review_message.id),
         "review_jump_url": review_message.jump_url,
         "review_created_at": review_message.created_at.isoformat(),
-        "target_user_id": cog._review_dump_extract_user_id(embed, fields),
+        "target_user_id": _review_dump_extract_user_id(embed, fields),
         "case_type": "manual_review" if fields.get("action taken") else "honeypot_hit",
         "completed_action": fields.get("action taken") or fields.get("action"),
         "reviewed_by": fields.get("reviewed by"),
         "channels": fields.get("channels") or fields.get("channel"),
-        "channel_ids": cog._review_dump_clean_mentions(
+        "channel_ids": _review_dump_clean_mentions(
             fields.get("channels") or fields.get("channel")
         ),
         "trigger_reasons": fields.get("trigger reasons") or fields.get("reason"),
         "message_content": embed.description,
         "embed_fields": fields,
-        "review_message": cog._review_dump_message_record(review_message),
+        "review_message": _review_dump_message_record(review_message),
         "attachments": attachments,
         "addendums": addendums,
     }
@@ -350,7 +351,7 @@ async def review_dump(cog, ctx: commands.Context) -> None:
                 reference = getattr(message, "reference", None)
                 if reference is not None and reference.message_id is not None:
                     replies_by_reference[reference.message_id].append(message)
-                if cog._review_dump_is_banned_review(message):
+                if _review_dump_is_banned_review(message):
                     banned_reviews.append(message)
                 now = datetime.now(timezone.utc)
                 if (
@@ -358,7 +359,8 @@ async def review_dump(cog, ctx: commands.Context) -> None:
                     or scanned % 250 == 0
                     or (now - last_progress).total_seconds() >= 30
                 ):
-                    await cog._review_dump_update_progress(
+                    await _review_dump_update_progress(
+                        cog,
                         progress_message,
                         scanned=scanned,
                         dumped=dumped,
@@ -370,14 +372,16 @@ async def review_dump(cog, ctx: commands.Context) -> None:
 
             for review_message in sorted(banned_reviews, key=lambda item: item.created_at):
                 cases.append(
-                    await cog._review_dump_collect_case(
+                    await _review_dump_collect_case(
+                        cog,
                         review_message, replies_by_reference, data_root
                     )
                 )
                 dumped += 1
                 now = datetime.now(timezone.utc)
                 if dumped == 1 or dumped % 10 == 0 or (now - last_progress).total_seconds() >= 30:
-                    await cog._review_dump_update_progress(
+                    await _review_dump_update_progress(
+                        cog,
                         progress_message,
                         scanned=scanned,
                         dumped=dumped,
@@ -404,8 +408,9 @@ async def review_dump(cog, ctx: commands.Context) -> None:
                 for case in cases:
                     handle.write(json.dumps(case, ensure_ascii=False) + "\n")
 
-            archives = cog._review_dump_zip_chunks(data_root, zip_root, REVIEW_DUMP_MAX_ZIP_BYTES)
-            await cog._review_dump_update_progress(
+            archives = _review_dump_zip_chunks(data_root, zip_root, REVIEW_DUMP_MAX_ZIP_BYTES)
+            await _review_dump_update_progress(
+                cog,
                 progress_message,
                 scanned=scanned,
                 dumped=dumped,
@@ -630,7 +635,7 @@ async def _doctor_runtime_checks(cog, guild_id: int) -> tuple[DoctorResult, ...]
     else:
         results.append(DoctorResult("Detection case database", "healthy"))
     try:
-        await asyncio.to_thread(cog._verify_detection_case_evidence_directory)
+        await asyncio.to_thread(_verify_detection_case_evidence_directory, cog)
     except OSError as error:
         results.append(
             DoctorResult(
@@ -982,7 +987,7 @@ async def honeypot_doctor(cog, ctx: commands.Context) -> None:
     raw_config = await cog.config.guild(ctx.guild).all()
     guild_settings = GuildSettings.from_mapping(raw_config)
     results = list(
-        await cog._run_doctor_checks([partial(cog._doctor_runtime_checks, ctx.guild.id)])
+        await _run_doctor_checks([partial(_doctor_runtime_checks, cog, ctx.guild.id)])
     )
     me = ctx.guild.me
     if me is None:
@@ -1012,7 +1017,8 @@ async def honeypot_doctor(cog, ctx: commands.Context) -> None:
     review_channel = cog._get_text_channel_or_thread(ctx.guild, guild_settings.review_channel)
     checks: list[DoctorCheck] = [
         partial(
-            cog._doctor_configuration_checks,
+            _doctor_configuration_checks,
+            cog,
             ctx.guild,
             me,
             guild_settings,
@@ -1029,8 +1035,8 @@ async def honeypot_doctor(cog, ctx: commands.Context) -> None:
             logs_channel,
             review_channel,
         ),
-        partial(cog._doctor_guild_permission_checks, me, guild_settings),
+        partial(_doctor_guild_permission_checks, cog, me, guild_settings),
     ]
-    results.extend(await cog._run_doctor_checks(checks))
-    for page in cog._render_doctor_results(results):
+    results.extend(await _run_doctor_checks(checks))
+    for page in _render_doctor_results(results):
         await ctx.send(page)

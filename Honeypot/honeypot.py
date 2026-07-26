@@ -5879,77 +5879,6 @@ class Honeypot(Cog):
                     )
 
     @staticmethod
-    def _review_dump_field_map(embed: discord.Embed) -> dict[str, str]:
-        return diagnostics._review_dump_field_map(embed)
-
-    @staticmethod
-    def _review_dump_clean_mentions(value: str | None) -> list[str]:
-        return diagnostics._review_dump_clean_mentions(value)
-
-    @staticmethod
-    def _review_dump_extract_user_id(
-        embed: discord.Embed, fields: dict[str, str]
-    ) -> int | None:
-        return diagnostics._review_dump_extract_user_id(embed, fields)
-
-    @staticmethod
-    def _review_dump_is_banned_review(message: discord.Message) -> bool:
-        return diagnostics._review_dump_is_banned_review(message)
-
-    @staticmethod
-    def _review_dump_message_record(
-        message: discord.Message, parent_review_id: int | None = None
-    ) -> dict[str, typing.Any]:
-        return diagnostics._review_dump_message_record(message, parent_review_id)
-
-    async def _review_dump_download_attachment(
-        self,
-        attachment: discord.Attachment,
-        case_dir: Path,
-        prefix: str,
-        index: int,
-    ) -> dict[str, typing.Any]:
-        return await diagnostics._review_dump_download_attachment(
-            self, attachment, case_dir, prefix, index
-        )
-
-    async def _review_dump_collect_case(
-        self,
-        review_message: discord.Message,
-        replies_by_reference: dict[int, list[discord.Message]],
-        root_dir: Path,
-    ) -> dict[str, typing.Any]:
-        return await diagnostics._review_dump_collect_case(
-            self, review_message, replies_by_reference, root_dir
-        )
-
-    @staticmethod
-    def _review_dump_zip_chunks(
-        root_dir: Path, zip_dir: Path, max_bytes: int
-    ) -> list[Path]:
-        return diagnostics._review_dump_zip_chunks(root_dir, zip_dir, max_bytes)
-
-    async def _review_dump_update_progress(
-        self,
-        progress_message: discord.Message,
-        *,
-        scanned: int,
-        dumped: int,
-        current_date: datetime | None,
-        started_at: datetime,
-        finished: bool = False,
-    ) -> None:
-        return await diagnostics._review_dump_update_progress(
-            self,
-            progress_message,
-            scanned=scanned,
-            dumped=dumped,
-            current_date=current_date,
-            started_at=started_at,
-            finished=finished,
-        )
-
-    @staticmethod
     def _imagescan_is_image_attachment(attachment: discord.Attachment) -> bool:
         content_type = (attachment.content_type or "").lower()
         if content_type.startswith("image/"):
@@ -6003,7 +5932,9 @@ class Honeypot(Cog):
                 target = files_root / str(guild_id) / source.relative_to(source_files_root)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)
-        archives = self._review_dump_zip_chunks(data_root, zip_root, REVIEW_DUMP_MAX_ZIP_BYTES)
+        archives = diagnostics._review_dump_zip_chunks(
+            data_root, zip_root, REVIEW_DUMP_MAX_ZIP_BYTES
+        )
         return temp_root, archives
 
     # ─── Commands ─────────────────────────────────────────────────────────
@@ -7872,33 +7803,6 @@ class Honeypot(Cog):
         """Reset stored honeypot statistics."""
         return await diagnostics.honeypot_reset_stats(self, ctx)
 
-    def _verify_detection_case_evidence_directory(self) -> None:
-        return diagnostics._verify_detection_case_evidence_directory(self)
-
-    async def _doctor_runtime_checks(self, guild_id: int) -> tuple[DoctorResult, ...]:
-        return await diagnostics._doctor_runtime_checks(self, guild_id)
-
-    async def _doctor_configuration_checks(
-        self,
-        guild,
-        me,
-        guild_settings: GuildSettings,
-        honeypot_channels: typing.Sequence,
-        logs_channel,
-        logs_channel_invalid: bool,
-        review_channel,
-    ) -> tuple[DoctorResult, ...]:
-        return await diagnostics._doctor_configuration_checks(
-            self,
-            guild,
-            me,
-            guild_settings,
-            honeypot_channels,
-            logs_channel,
-            logs_channel_invalid,
-            review_channel,
-        )
-
     async def _doctor_channel_permission_checks(
         self,
         guild,
@@ -7907,6 +7811,8 @@ class Honeypot(Cog):
         logs_channel,
         review_channel,
     ) -> tuple[DoctorResult, ...]:
+        # Binds the two purge predicates, which stay in this module: importing
+        # them into diagnostics would close an import cycle.
         return await diagnostics._doctor_channel_permission_checks(
             self,
             guild,
@@ -7917,25 +7823,6 @@ class Honeypot(Cog):
             missing_purge_permissions=missing_purge_permissions,
             is_purgeable_message_channel=is_purgeable_message_channel,
         )
-
-    async def _doctor_guild_permission_checks(
-        self,
-        me,
-        guild_settings: GuildSettings,
-    ) -> tuple[DoctorResult, ...]:
-        return await diagnostics._doctor_guild_permission_checks(self, me, guild_settings)
-
-    @staticmethod
-    async def _run_doctor_checks(
-        checks: typing.Sequence[DoctorCheck],
-    ) -> tuple[DoctorResult, ...]:
-        return await diagnostics._run_doctor_checks(checks)
-
-    @staticmethod
-    def _render_doctor_results(
-        results: typing.Sequence[DoctorResult],
-    ) -> tuple[str, ...]:
-        return diagnostics._render_doctor_results(results)
 
     @honeypot.command(name="doctor")
     async def honeypot_doctor(self, ctx: commands.Context) -> None:
