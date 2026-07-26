@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
-from tests.test_detection_pipeline import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules
 
 
 class _StatsContext:
