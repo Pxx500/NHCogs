@@ -2002,7 +2002,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
 
                 with (
                     mock.patch.object(
-                        honeypot,
+                        honeypot.imagescan,
                         "image_hashes_from_bytes",
                         side_effect=lambda data: {
                             "sha256": data.decode(),
@@ -2012,7 +2012,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                         },
                     ),
                     mock.patch.object(
-                        honeypot,
+                        honeypot.imagescan,
                         "match_image",
                         side_effect=match,
                     ),
@@ -2088,12 +2088,12 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                 cog._imagescan_increment_profile = mock.AsyncMock()
                 with (
                     mock.patch.object(
-                        honeypot,
+                        honeypot.imagescan,
                         "image_hashes_from_bytes",
                         side_effect=lambda data: {"sha256": data.decode()},
                     ),
                     mock.patch.object(
-                        honeypot,
+                        honeypot.imagescan,
                         "match_image",
                         return_value={"matched": False, "score": None},
                     ),
@@ -4763,11 +4763,11 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     return_value={"effective_threshold": 20}
                 )
                 with mock.patch.object(
-                    honeypot,
+                    honeypot.imagescan,
                     "image_hashes_from_bytes",
                     return_value={"sha256": "recovered-image", "phash": "recovered-phash"},
                 ), mock.patch.object(
-                    honeypot,
+                    honeypot.imagescan,
                     "match_image",
                     return_value={"matched": False, "score": None},
                 ):
@@ -5464,12 +5464,12 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
                 with (
                     mock.patch.object(
-                        honeypot,
+                        honeypot.imagescan,
                         "image_hashes_from_bytes",
                         side_effect=lambda data: hashes_by_payload[data],
                     ),
                     mock.patch.object(
-                        honeypot,
+                        honeypot.imagescan,
                         "match_image",
                         side_effect=lambda hashes, samples, threshold: {
                             "sha256": hashes["sha256"]
@@ -6946,7 +6946,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 cog._publish_detection_case = mock.AsyncMock()
                 with (
                     mock.patch.object(
-                        honeypot,
+                        honeypot.imagescan,
                         "image_hashes_from_bytes",
                         side_effect=lambda data: {
                             "sha256": data.decode(),
@@ -6956,7 +6956,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                         },
                     ) as hashes,
                     mock.patch.object(
-                        honeypot,
+                        honeypot.imagescan,
                         "match_image",
                         return_value={"matched": False, "score": None},
                     ),
@@ -8591,7 +8591,9 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 cog._case_store.update_attachment_scan = mock.Mock()
 
                 with mock.patch.object(
-                    honeypot, "image_hashes_from_bytes", side_effect=ValueError("invalid image")
+                    honeypot.imagescan,
+                    "image_hashes_from_bytes",
+                    side_effect=ValueError("invalid image"),
                 ):
                     await cog._scan_case_message_images(
                         message.guild.id,
@@ -8689,14 +8691,14 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
                 with (
                     mock.patch.object(
-                        honeypot,
+                        honeypot.imagescan,
                         "image_hashes_from_bytes",
                         side_effect=lambda data: {
                             "sha256": data.decode(), "phash": f"p-{data.decode()}"
                         },
                     ),
                     mock.patch.object(
-                        honeypot,
+                        honeypot.imagescan,
                         "match_image",
                         side_effect=lambda hashes, samples, threshold: {
                             "matched": hashes["sha256"] == "image-1",
@@ -8776,12 +8778,12 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
                 with (
                     mock.patch.object(
-                        honeypot,
+                        honeypot.imagescan,
                         "image_hashes_from_bytes",
                         return_value={"sha256": "new", "phash": "near-known"},
                     ),
                     mock.patch.object(
-                        honeypot,
+                        honeypot.imagescan,
                         "match_image",
                         return_value={
                             "matched": True,
@@ -8842,7 +8844,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
                 with (
                     mock.patch.object(
-                        honeypot,
+                        honeypot.imagescan,
                         "image_hashes_from_bytes",
                         side_effect=lambda data: {
                             "sha256": data.decode(),
@@ -8850,7 +8852,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                         },
                     ),
                     mock.patch.object(
-                        honeypot,
+                        honeypot.imagescan,
                         "match_image",
                         side_effect=lambda hashes, samples, threshold: {
                             "matched": hashes["sha256"] == "image-2",
@@ -13186,7 +13188,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                         "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
                     )
                 )
-                real_connect = honeypot.sqlite3.connect
+                real_connect = honeypot.imagescan.sqlite3.connect
                 canonical_was_published = []
 
                 class CommitFailingConnection:
@@ -13226,7 +13228,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
 
                 try:
                     with mock.patch.object(
-                        honeypot.sqlite3,
+                        honeypot.imagescan.sqlite3,
                         "connect",
                         side_effect=commit_failing_connect,
                     ):
@@ -13355,14 +13357,14 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 ctx = self._doctor_context()
                 event_loop_thread = get_ident()
                 probe_threads = []
-                named_temporary_file = honeypot.tempfile.NamedTemporaryFile
+                named_temporary_file = honeypot.diagnostics.tempfile.NamedTemporaryFile
 
                 def record_probe_thread(*args, **kwargs):
                     probe_threads.append(get_ident())
                     return named_temporary_file(*args, **kwargs)
 
                 with mock.patch.object(
-                    honeypot.tempfile,
+                    honeypot.diagnostics.tempfile,
                     "NamedTemporaryFile",
                     side_effect=record_probe_thread,
                 ):
