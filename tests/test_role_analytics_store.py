@@ -224,6 +224,74 @@ class RoleAnalyticsStoreTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await self.store.count_matching(123, "1", ()), 0)
 
+    async def _activate_single_member_guild(self):
+        generation = await self.store.next_generation(123)
+        await self.store.write_generation(
+            123,
+            generation,
+            [role_analytics_store.MemberSnapshot(1, False, (10,))],
+        )
+        await self.store.activate_generation(123, generation, 1)
+
+    async def test_active_generation_stays_queryable_while_a_replacement_stages(self):
+        await self._activate_single_member_guild()
+
+        staged = await self.store.next_generation(123)
+        await self.store.write_generation(
+            123,
+            staged,
+            [role_analytics_store.MemberSnapshot(2, False, (20,))],
+        )
+
+        state = await self.store.get_state(123)
+        self.assertEqual(state.status, role_analytics_store.SyncStatus.SYNCING)
+        self.assertEqual(await self.store.count_matching(123, "1", ()), 1)
+        role_20_sql, role_20_parameters = role_expression.compile_role_expression(
+            role_expression.parse_role_expression("20")
+        )
+        self.assertEqual(
+            await self.store.count_matching(123, role_20_sql, role_20_parameters), 0
+        )
+
+    async def test_failed_status_does_not_hide_the_still_valid_active_generation(self):
+        await self._activate_single_member_guild()
+
+        await self.store.set_status(
+            123, role_analytics_store.SyncStatus.FAILED, "sync_failed"
+        )
+
+        self.assertEqual(await self.store.count_matching(123, "1", ()), 1)
+
+    async def test_disabled_guild_is_never_queryable_even_with_a_stale_generation(self):
+        await self._activate_single_member_guild()
+
+        await self.store.clear_guild(123)
+
+        with self.assertRaises(role_analytics_store.AnalyticsUnavailableError):
+            await self.store.count_matching(123, "1", ())
+
+    async def test_repeated_state_reads_hit_the_database_once_until_invalidated(self):
+        reads = 0
+        original = self.store._get_state_sync
+
+        def counting_get_state(guild_id):
+            nonlocal reads
+            reads += 1
+            return original(guild_id)
+
+        self.store._get_state_sync = counting_get_state
+
+        await self.store.get_state(123)
+        await self.store.get_state(123)
+        await self.store.get_state(123)
+        self.assertEqual(reads, 1)
+
+        await self.store.set_status(123, role_analytics_store.SyncStatus.RETRYING)
+
+        state = await self.store.get_state(123)
+        self.assertEqual(reads, 2)
+        self.assertEqual(state.status, role_analytics_store.SyncStatus.RETRYING)
+
 
 if __name__ == "__main__":
     unittest.main()

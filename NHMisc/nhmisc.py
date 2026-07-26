@@ -150,13 +150,21 @@ class NHMisc(commands.Cog):
 
     async def _role_analytics_startup_reconcile(self) -> None:
         await self.bot.wait_until_ready()
-        await self._role_analytics.reconcile_enabled_guilds(tuple(self.bot.guilds))
+        try:
+            await self._role_analytics.reconcile_enabled_guilds(tuple(self.bot.guilds))
+        except Exception:
+            log.exception("Failed to reconcile role analytics on startup")
 
     async def _role_analytics_daily_loop(self) -> None:
         await self.bot.wait_until_ready()
         while True:
             await asyncio.sleep(24 * 60 * 60)
-            await self._role_analytics.run_daily_reconciliation(tuple(self.bot.guilds))
+            try:
+                await self._role_analytics.run_daily_reconciliation(
+                    tuple(self.bot.guilds)
+                )
+            except Exception:
+                log.exception("Failed to run daily role analytics reconciliation")
 
     async def red_delete_data_for_user(self, *, requester, user_id: int) -> None:
         await self._role_analytics_store.delete_user_everywhere(user_id)

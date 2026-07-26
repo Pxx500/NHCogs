@@ -335,7 +335,7 @@ class RoleAnalyticsService:
                 self._event_queues[guild_id].append((event_type, payload))
                 return
             state = await self._store.get_state(guild_id)
-            if not state.enabled or state.status != SyncStatus.READY:
+            if not state.enabled or state.active_generation is None:
                 return
             await self._apply_event(
                 guild_id,

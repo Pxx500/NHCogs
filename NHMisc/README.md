@@ -311,6 +311,11 @@ initial synchronization, member and role events keep the database current. The b
 reconciles enabled guilds after startup, after a resumed gateway session, and once every
 24 hours. A manual `rolesync` forces an immediate reconciliation.
 
+A reconciliation builds the replacement snapshot in a separate generation and swaps it in
+atomically, so `rolestats` and `roleusers` keep answering from the previous snapshot for
+the whole duration. If a reconciliation fails, the previous snapshot stays queryable and
+a retry is scheduled with exponential backoff.
+
 ```ini
 [p]rolestats 1348078496710135888 AND 1097204292198338692
 [p]rolestats <@&1348078496710135888> OR NOT <@&1097204292198338692>
@@ -338,7 +343,8 @@ Parentheses can override the precedence, for example:
 UTF-8 CSV with `user_id`, `username`, and `display_name` columns. It sends a ZIP instead
 when the CSV exceeds Discord's attachment limit. Usernames and display names are read
 from the current Discord cache for the export and are not stored in the analytics
-database.
+database. Names beginning with `=`, `+`, `-`, or `@` are prefixed with an apostrophe so
+that spreadsheet applications treat them as text instead of evaluating them as formulas.
 
 For privacy, `roleusers` only works when the invocation channel is not visible to the
 guild's `@everyone` role and the bot can View Channel, Send Messages, and Attach Files

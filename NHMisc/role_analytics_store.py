@@ -20,7 +20,7 @@ class SyncStatus(str, Enum):
 
 
 class AnalyticsUnavailableError(RuntimeError):
-    """Raised when a guild has no ready active analytics generation."""
+    """Raised when a guild has no enabled active analytics generation."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,14 +45,22 @@ class RoleAnalyticsStore:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._lock = asyncio.Lock()
+        self._state_cache: dict[int, RoleAnalyticsState] = {}
 
     async def initialize(self) -> None:
         async with self._lock:
+            self._state_cache.clear()
             await asyncio.to_thread(self._initialize_sync)
 
     async def get_state(self, guild_id: int) -> RoleAnalyticsState:
+        guild_id = int(guild_id)
         async with self._lock:
-            return await asyncio.to_thread(self._get_state_sync, guild_id)
+            cached = self._state_cache.get(guild_id)
+            if cached is not None:
+                return cached
+            state = await asyncio.to_thread(self._get_state_sync, guild_id)
+            self._state_cache[guild_id] = state
+            return state
 
     async def set_status(
         self,
@@ -61,6 +69,7 @@ class RoleAnalyticsStore:
         error_code: str | None = None,
     ) -> None:
         async with self._lock:
+            self._state_cache.pop(int(guild_id), None)
             await asyncio.to_thread(
                 self._set_status_sync,
                 guild_id,
@@ -70,6 +79,7 @@ class RoleAnalyticsStore:
 
     async def mark_needs_reconciliation_if_enabled(self, guild_id: int) -> bool:
         async with self._lock:
+            self._state_cache.pop(int(guild_id), None)
             return await asyncio.to_thread(
                 self._mark_needs_reconciliation_if_enabled_sync,
                 guild_id,
@@ -77,6 +87,7 @@ class RoleAnalyticsStore:
 
     async def next_generation(self, guild_id: int) -> int:
         async with self._lock:
+            self._state_cache.pop(int(guild_id), None)
             return await asyncio.to_thread(self._next_generation_sync, guild_id)
 
     async def write_generation(
@@ -100,6 +111,7 @@ class RoleAnalyticsStore:
         source_member_count: int,
     ) -> None:
         async with self._lock:
+            self._state_cache.pop(int(guild_id), None)
             await asyncio.to_thread(
                 self._activate_generation_sync,
                 guild_id,
@@ -179,6 +191,7 @@ class RoleAnalyticsStore:
 
     async def clear_guild(self, guild_id: int) -> None:
         async with self._lock:
+            self._state_cache.pop(int(guild_id), None)
             await asyncio.to_thread(self._clear_guild_sync, guild_id)
 
     async def discard_generation(self, guild_id: int, generation: int) -> None:
@@ -437,24 +450,26 @@ class RoleAnalyticsStore:
             )
 
     @staticmethod
-    def _ready_generation(
+    def _servable_generation(
         connection: sqlite3.Connection,
         guild_id: int,
     ) -> int:
+        """Return the generation that queries read from.
+
+        An activated generation stays servable while a replacement is being
+        staged or a retry is pending. Staging writes to a different generation
+        and only the atomic activation swaps ``active_generation``, so the
+        status flag describes sync health and never gates reads.
+        """
         row = connection.execute(
             """
-            SELECT enabled, status, active_generation
+            SELECT enabled, active_generation
             FROM role_analytics_state
             WHERE guild_id = ?
             """,
             (guild_id,),
         ).fetchone()
-        if (
-            row is None
-            or not row["enabled"]
-            or row["status"] != SyncStatus.READY.value
-            or row["active_generation"] is None
-        ):
+        if row is None or not row["enabled"] or row["active_generation"] is None:
             raise AnalyticsUnavailableError("Role analytics are not ready")
         return int(row["active_generation"])
 
@@ -465,7 +480,7 @@ class RoleAnalyticsStore:
         parameters: tuple[int, ...],
     ) -> int:
         with self._connection() as connection:
-            generation = self._ready_generation(connection, guild_id)
+            generation = self._servable_generation(connection, guild_id)
             row = connection.execute(
                 f"""
                 SELECT COUNT(*) AS matching_count
@@ -486,7 +501,7 @@ class RoleAnalyticsStore:
         parameters: tuple[int, ...],
     ) -> tuple[int, ...]:
         with self._connection() as connection:
-            generation = self._ready_generation(connection, guild_id)
+            generation = self._servable_generation(connection, guild_id)
             rows = connection.execute(
                 f"""
                 SELECT member.user_id
@@ -509,7 +524,7 @@ class RoleAnalyticsStore:
     ) -> None:
         with self._connection() as connection:
             target_generation = (
-                self._ready_generation(connection, guild_id)
+                self._servable_generation(connection, guild_id)
                 if generation is None
                 else generation
             )
@@ -555,7 +570,7 @@ class RoleAnalyticsStore:
     ) -> None:
         with self._connection() as connection:
             target_generation = (
-                self._ready_generation(connection, guild_id)
+                self._servable_generation(connection, guild_id)
                 if generation is None
                 else generation
             )
@@ -575,7 +590,7 @@ class RoleAnalyticsStore:
     ) -> None:
         with self._connection() as connection:
             target_generation = (
-                self._ready_generation(connection, guild_id)
+                self._servable_generation(connection, guild_id)
                 if generation is None
                 else generation
             )

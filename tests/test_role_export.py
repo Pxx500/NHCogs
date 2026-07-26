@@ -14,10 +14,10 @@ SPEC.loader.exec_module(role_export)
 
 
 class RoleExportTests(unittest.TestCase):
-    def test_csv_is_sent_directly_when_it_fits_and_values_remain_verbatim(self):
+    def test_csv_is_sent_directly_and_safe_values_remain_verbatim(self):
         members = [
             role_export.ExportMember(1, "plain", "Plain Name"),
-            role_export.ExportMember(2, "=formula", "Comma, Name"),
+            role_export.ExportMember(2, "with.dot", "Comma, Name"),
         ]
 
         payload = role_export.build_role_export(members, upload_limit=10_000)
@@ -27,7 +27,22 @@ class RoleExportTests(unittest.TestCase):
             payload.data.decode("utf-8"),
             "user_id,username,display_name\n"
             "1,plain,Plain Name\n"
-            '2,=formula,"Comma, Name"\n',
+            '2,with.dot,"Comma, Name"\n',
+        )
+
+    def test_spreadsheet_formula_names_are_neutralized_without_losing_text(self):
+        members = [
+            role_export.ExportMember(1, "=cmd|'/c calc'!A0", "+1234"),
+            role_export.ExportMember(2, "-minus", "@at"),
+        ]
+
+        payload = role_export.build_role_export(members, upload_limit=10_000)
+
+        self.assertEqual(
+            payload.data.decode("utf-8"),
+            "user_id,username,display_name\n"
+            "1,'=cmd|'/c calc'!A0,'+1234\n"
+            "2,'-minus,'@at\n",
         )
 
     def test_csv_is_zipped_when_raw_bytes_exceed_upload_limit(self):
