@@ -243,6 +243,9 @@ class _Cog:
     def __init__(self, *, bot):
         self.bot = bot
 
+    def format_help_for_context(self, ctx):
+        return self.__class__.__doc__
+
     async def cog_load(self):
         self.base_loaded = True
 
@@ -494,6 +497,46 @@ class _Bot:
 
     def get_guild(self, guild_id):
         return None
+
+
+class HoneypotMetadataTests(unittest.TestCase):
+    def test_runtime_help_identifies_current_cog_and_repository(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = object.__new__(honeypot.Honeypot)
+                cog.__version__ = "3.5.0"
+
+                help_text = cog.format_help_for_context(SimpleNamespace())
+
+        self.assertIn(
+            "Detect and review suspicious activity with honeypot channels, "
+            "image scanning, and join monitoring.",
+            help_text,
+        )
+        self.assertIn("Author: Pxx500", help_text)
+        self.assertIn("Cog version: 3.5.0", help_text)
+        self.assertIn("Repo name: NHCogs", help_text)
+        self.assertIn("Repository: https://github.com/Pxx500/NHCogs", help_text)
+        self.assertNotIn("AAA3A", help_text)
+        self.assertNotIn("readthedocs", help_text.lower())
+        self.assertNotIn("crowdin", help_text.lower())
+        self.assertNotIn("commit", help_text.lower())
+
+    def test_info_metadata_describes_current_maintainer_and_scope(self):
+        metadata = json.loads((PACKAGE_DIR / "info.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(metadata["author"], ["Pxx500"])
+        self.assertEqual(
+            metadata["short"],
+            "Detect and review suspicious activity with honeypot channels, signal "
+            "aggregation, image scanning, and join monitoring.",
+        )
+        self.assertEqual(
+            metadata["description"],
+            "Protect a server with honeypot channels and join monitoring, aggregate "
+            "suspicious messages into moderator cases, preserve review evidence, scan "
+            "images, and execute automatic or moderator-approved actions.",
+        )
 
 
 class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):

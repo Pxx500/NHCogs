@@ -110,6 +110,9 @@ from .views import (
 
 _ = Translator("Honeypot", __file__)
 log = logging.getLogger("red.Honeypot")
+COG_AUTHOR = "Pxx500"
+COG_REPO_NAME = "NHCogs"
+COG_REPO_URL = "https://github.com/Pxx500/NHCogs"
 _TIMELINE_VIEW_UNSET = object()
 DETECTION_FAST_RETRY_SECONDS = 10
 DETECTION_FAST_RETRY_LIMIT = 5
@@ -444,7 +447,17 @@ def message_spam_fingerprint(message: discord.Message) -> str:
 
 @cog_i18n(_)
 class Honeypot(Cog):
-    """Create a trap channel and handle users who post in it."""
+    """Detect and review suspicious activity with honeypot channels, image scanning, and join monitoring."""
+
+    def format_help_for_context(self, ctx: commands.Context) -> str:
+        help_text = commands.Cog.format_help_for_context(self, ctx)
+        return (
+            f"{help_text}\n\n"
+            f"Author: {COG_AUTHOR}\n"
+            f"Cog version: {self.__version__}\n"
+            f"Repo name: {COG_REPO_NAME}\n"
+            f"Repository: {COG_REPO_URL}"
+        )
 
     def __init__(self, bot: Red) -> None:
         super().__init__(bot=bot)

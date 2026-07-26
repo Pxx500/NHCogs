@@ -4,6 +4,8 @@ Honeypot is a Red-DiscordBot cog that protects your server by creating trap chan
 spam accounts, and suspicious users. Messages posted in honeypot channels are deleted, logged, optionally purged,
 and either punished automatically or sent to moderators for review. It also alerts moderators when new accounts join the server.
 
+This implementation is maintained by Pxx500 and was originally based on AAA3A's Honeypot.
+
 ## Installation
 
 ```ini
