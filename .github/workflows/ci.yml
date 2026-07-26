@@ -15,8 +15,11 @@ jobs:
       - name: Install quality tools
         run: python -m pip install ruff mypy Pillow
       - name: Ruff
-        continue-on-error: true
         run: ruff check .
+      # Typing is a separate phase. mypy still reports errors across both cogs,
+      # including NHMisc, which the Honeypot refactor plan never scoped, so this
+      # step stays advisory. Ruff above is the hard gate; see round D in
+      # local-data/Honeypot/docs/phase6-plan.md.
       - name: Mypy
         continue-on-error: true
         run: mypy
