@@ -136,6 +136,13 @@ ignore = [
 # PLR0917: the fixture builder mirrors the store signature it wraps.
 "tests/detection_case_fixtures.py" = ["PLR0917"]
 
+# PLR0915: `_isolated_honeypot_modules` is one long flat stub table - the same
+# shape and the same reason as `_install_redbot_stubs` in
+# tests/test_imagescan_cleanup.py. It builds the discord and Red module tree in
+# declaration order, and every statement is one attribute of that tree; slicing
+# it into helpers would scatter the stub surface without removing a statement.
+"tests/harness.py" = ["PLR0915"]
+
 # B023: every flagged closure is a stub defined and consumed inside the same
 # subTest iteration - the loop variable is read before the next iteration
 # rebinds it, so the capture hazard cannot fire. Checked site by site; none of
