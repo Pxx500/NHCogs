@@ -4,10 +4,9 @@ import logging
 import re
 import threading
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable
-
 
 MAX_RECORDS = 20_000
 MAX_BUFFER_BYTES = 32 * 1024 * 1024

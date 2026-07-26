@@ -9,9 +9,9 @@ from typing import TYPE_CHECKING
 import discord
 
 from ..detection_cases import (
-    ActionIntent,
     OPERATION_RESULT_KICK_MISSING,
     PLANNED_PREFIX,
+    ActionIntent,
     effective_action,
 )
 from ..settings import GuildSettings

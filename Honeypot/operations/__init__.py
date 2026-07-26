@@ -24,7 +24,6 @@ from .role_apply import role_apply_handler
 from .role_release import role_release_handler
 from .source_delete import source_delete_handler
 
-
 HANDLERS: Mapping[OperationType, OperationHandler] = MappingProxyType(
     {
         OperationType.MESSAGE_PROCESS: message_process_handler,

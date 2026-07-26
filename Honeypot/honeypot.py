@@ -6,14 +6,30 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import discord
-from discord.ext import tasks
-
 from AAA3A_utils import Cog
+from discord.ext import tasks
 from redbot.core import Config, commands, modlog
 from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
 from redbot.core.i18n import Translator, cog_i18n
 
+from . import (
+    detection,
+    detection_runtime,
+    diagnostics,
+    imagescan,
+    joinwatch,
+    review_publication,
+    settings,
+)
+from .case_review import (
+    CaseFeedbackItem,  # noqa: F401 - public module re-export
+    CaseReviewService,
+    case_feedback_items,  # noqa: F401 - public module re-export
+    render_case,
+    render_timeline,  # noqa: F401 - public module re-export
+)
+from .console_dump import ReadOnlyLogBuffer
 from .detection_cases import (
     ActionIntent,
     AttachmentKey,
@@ -26,15 +42,8 @@ from .detection_cases import (
     OperationStatus,  # noqa: F401 - public module re-export
     OperationType,
 )
-from .case_review import (
-    CaseFeedbackItem,  # noqa: F401 - public module re-export
-    CaseReviewService,
-    case_feedback_items,  # noqa: F401 - public module re-export
-    render_case,
-    render_timeline,  # noqa: F401 - public module re-export
-)
-from .console_dump import ReadOnlyLogBuffer
 from .firstpost_store import FirstPostStore
+from .image_detector import ImageSample
 from .imagescan_store import ImageScanStore
 from .operations import OperationHandlerRegistry
 from .operations.context import (
@@ -44,14 +53,6 @@ from .operations.context import (
     OperationLease,  # noqa: F401 - public module re-export
     OperationOutcome,  # noqa: F401 - public module re-export
 )
-from . import diagnostics
-from . import detection
-from . import detection_runtime
-from . import imagescan
-from . import joinwatch
-from . import review_publication
-from .image_detector import ImageSample
-from . import settings
 from .settings import (
     BAIT_ACTION_OPTIONS,  # noqa: F401 - public module re-export
     CORE_ACTION_OPTIONS,  # noqa: F401 - public module re-export
@@ -84,10 +85,6 @@ COG_REPO_URL = "https://github.com/Pxx500/NHCogs"
 JOINWATCH_MAX_ACCOUNT_AGE_HOURS = joinwatch.JOINWATCH_MAX_ACCOUNT_AGE_HOURS
 CONSOLE_DUMP_USAGE = diagnostics.CONSOLE_DUMP_USAGE
 
-try:
-    from PIL import Image
-except ImportError:  # pragma: no cover - optional metadata enrichment.
-    Image = None
 
 JOINWATCH_RETRY_DELAY_MINUTES = joinwatch.JOINWATCH_RETRY_DELAY_MINUTES
 JOINWATCH_MAX_RETRIES = joinwatch.JOINWATCH_MAX_RETRIES
@@ -95,14 +92,9 @@ REVIEW_DUMP_START = diagnostics.REVIEW_DUMP_START
 REVIEW_DUMP_MAX_ZIP_BYTES = diagnostics.REVIEW_DUMP_MAX_ZIP_BYTES
 REVIEW_DUMP_ATTACHMENT_DELAY_SECONDS = diagnostics.REVIEW_DUMP_ATTACHMENT_DELAY_SECONDS
 IMAGE_SCAN_EXTENSIONS = imagescan.IMAGE_SCAN_EXTENSIONS
-IMAGE_SCAN_COUNTS = imagescan.IMAGE_SCAN_COUNTS
 IMAGE_SCAN_MAX_ATTACHMENTS = imagescan.IMAGE_SCAN_MAX_ATTACHMENTS
-IMAGE_SCAN_FEEDBACK_TIMEOUT_SECONDS = imagescan.IMAGE_SCAN_FEEDBACK_TIMEOUT_SECONDS
-DETECTION_CAPTURE_DEADLINE_SECONDS = review_publication.DETECTION_CAPTURE_DEADLINE_SECONDS
 DETECTION_ATTACHMENT_TIMEOUT_SECONDS = detection_runtime.DETECTION_ATTACHMENT_TIMEOUT_SECONDS
-DETECTION_IMAGE_READ_MAX_BYTES = detection_runtime.DETECTION_IMAGE_READ_MAX_BYTES
 DETECTION_HEARTBEAT_INTERVAL_SECONDS = 60.0
-IMAGE_SCAN_FEEDBACK_BULK_LABELS = imagescan.IMAGE_SCAN_FEEDBACK_BULK_LABELS
 
 
 DoctorResult = diagnostics.DoctorResult
@@ -119,14 +111,11 @@ IMAGE_SCAN_DECISIONS = imagescan.IMAGE_SCAN_DECISIONS
 KICK_FAIL_WARNING_REASON = "Suspicious activity: target left before the kick could be applied."
 
 
-missing_purge_permissions = detection.missing_purge_permissions
-is_purgeable_message_channel = detection.is_purgeable_message_channel
 
 
 joinwatch_channel_id = joinwatch.joinwatch_channel_id
 
 
-is_image_attachment = imagescan.is_image_attachment
 plan_imagescan_event_cache_cleanup = imagescan.plan_imagescan_event_cache_cleanup
 match_imagescan_sample_identifier = imagescan.match_imagescan_sample_identifier
 is_imagescan_sample_path_safe = imagescan.is_imagescan_sample_path_safe
@@ -142,9 +131,6 @@ MessageRef = detection.MessageRef
 IMAGE_ATTACHMENT_EXTENSIONS = imagescan.IMAGE_ATTACHMENT_EXTENSIONS
 
 
-keyword_matches_content = detection.keyword_matches_content
-matched_scam_keywords = detection.matched_scam_keywords
-message_spam_fingerprint = detection.message_spam_fingerprint
 
 
 @cog_i18n(_)

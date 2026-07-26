@@ -1,7 +1,6 @@
 from typing import TYPE_CHECKING
 
 import discord
-
 from redbot.core.i18n import Translator
 
 from .case_review import (

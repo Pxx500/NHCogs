@@ -904,63 +904,62 @@ async def on_member_join(cog, member: discord.Member) -> None:
                         value=role_permission_error,
                         inline=False,
                     )
+                elif guild_settings.joinwatch_auto_role_random_delay_enabled:
+                    min_delay = max(
+                        1,
+                        guild_settings.joinwatch_auto_role_random_delay_min_minutes,
+                    )
+                    max_delay = max(
+                        min_delay,
+                        guild_settings.joinwatch_auto_role_random_delay_max_minutes,
+                    )
+                    delay_minutes = random.randint(min_delay, max_delay)
+                    apply_at = now + timedelta(minutes=delay_minutes)
+                    await _store_joinwatch_pending_assignment(cog, member, role.id, apply_at)
+                    await cog._increment_stat(member.guild, "joinwatch_auto_roles_scheduled")
+                    embed.add_field(
+                        name=_("Auto-role:"),
+                        value=_("{role} scheduled for {time}.").format(
+                            role=role.mention,
+                            time=discord.utils.format_dt(apply_at, style="R"),
+                        ),
+                        inline=False,
+                    )
                 else:
-                    if guild_settings.joinwatch_auto_role_random_delay_enabled:
-                        min_delay = max(
-                            1,
-                            guild_settings.joinwatch_auto_role_random_delay_min_minutes,
+                    try:
+                        await member.add_roles(role, reason="Automated account status update.")
+                        await cog._increment_stat(member.guild, "joinwatch_auto_roles")
+                        expires_at = now + timedelta(
+                            minutes=guild_settings.joinwatch_auto_role_timer_minutes
                         )
-                        max_delay = max(
-                            min_delay,
-                            guild_settings.joinwatch_auto_role_random_delay_max_minutes,
+                        await _store_joinwatch_pending_role(
+                            cog,
+                            member,
+                            role.id,
+                            expires_at,
+                            applied_at=now,
                         )
-                        delay_minutes = random.randint(min_delay, max_delay)
-                        apply_at = now + timedelta(minutes=delay_minutes)
-                        await _store_joinwatch_pending_assignment(cog, member, role.id, apply_at)
-                        await cog._increment_stat(member.guild, "joinwatch_auto_roles_scheduled")
                         embed.add_field(
                             name=_("Auto-role:"),
-                            value=_("{role} scheduled for {time}.").format(
+                            value=_("{role} applied until {time}.").format(
                                 role=role.mention,
-                                time=discord.utils.format_dt(apply_at, style="R"),
+                                time=discord.utils.format_dt(expires_at, style="R"),
                             ),
                             inline=False,
                         )
-                    else:
-                        try:
-                            await member.add_roles(role, reason="Automated account status update.")
-                            await cog._increment_stat(member.guild, "joinwatch_auto_roles")
-                            expires_at = now + timedelta(
-                                minutes=guild_settings.joinwatch_auto_role_timer_minutes
-                            )
-                            await _store_joinwatch_pending_role(
-                                cog,
-                                member,
-                                role.id,
-                                expires_at,
-                                applied_at=now,
-                            )
-                            embed.add_field(
-                                name=_("Auto-role:"),
-                                value=_("{role} applied until {time}.").format(
-                                    role=role.mention,
-                                    time=discord.utils.format_dt(expires_at, style="R"),
-                                ),
-                                inline=False,
-                            )
-                        except discord.HTTPException as exc:
-                            await cog._increment_stat(member.guild, "joinwatch_auto_role_failures")
-                            await cog._record_operational_failure(
-                                member.guild.id,
-                                "joinwatch_role_assignment",
-                                f"Could not apply auto-role to user {member.id}: {exc}",
-                                terminal=True,
-                            )
-                            embed.add_field(
-                                name=_("Auto-role:"),
-                                value=_("I couldn't apply the configured joinwatch auto-role."),
-                                inline=False,
-                            )
+                    except discord.HTTPException as exc:
+                        await cog._increment_stat(member.guild, "joinwatch_auto_role_failures")
+                        await cog._record_operational_failure(
+                            member.guild.id,
+                            "joinwatch_role_assignment",
+                            f"Could not apply auto-role to user {member.id}: {exc}",
+                            terminal=True,
+                        )
+                        embed.add_field(
+                            name=_("Auto-role:"),
+                            value=_("I couldn't apply the configured joinwatch auto-role."),
+                            inline=False,
+                        )
         if guild_settings.joinwatch_alert_enabled and channel is not None:
             try:
                 alert_message = await channel.send(embed=embed)

@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING
 
 from .. import detection_runtime
 from ..detection_cases import (
-    DeleteStatus,
     OPERATION_RESULT_CHANNEL_UNAVAILABLE,
     OPERATION_RESULT_UNSUPPORTED_CHANNEL,
+    DeleteStatus,
 )
 from .context import OperationContext, OperationOutcome
 

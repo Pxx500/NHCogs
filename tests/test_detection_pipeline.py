@@ -6356,7 +6356,9 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
                 self.assertEqual(honeypot.DETECTION_ATTACHMENT_TIMEOUT_SECONDS, 15.0)
-                self.assertEqual(honeypot.DETECTION_CAPTURE_DEADLINE_SECONDS, 20.0)
+                self.assertEqual(
+                    honeypot.review_publication.DETECTION_CAPTURE_DEADLINE_SECONDS, 20.0
+                )
                 cog = honeypot.Honeypot(_Bot())
                 await asyncio.to_thread(cog._case_store.initialize)
                 gate = asyncio.Event()

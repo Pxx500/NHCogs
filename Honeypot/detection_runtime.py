@@ -1,18 +1,16 @@
 """Runtime containment operations for detection cases."""
 
 import asyncio
-from collections.abc import Awaitable, Callable, Iterable
+import unicodedata
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-import shutil
-import unicodedata
 from uuid import uuid4
 
 import discord
 
 from .detection_cases import DeleteStatus
-
 
 _MAX_ERROR_LENGTH = 512
 _INVALID_FILENAME_CHARACTERS = frozenset('<>:"/\\|?*')
