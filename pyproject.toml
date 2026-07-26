@@ -211,6 +211,22 @@ ignore = [
 # tests/test_detection_pipeline.py, where the exclusion had hidden it.
 "tests/test_detection_signals.py" = ["PLR0915"]
 
+# PLW0108: twelve `lambda **kwargs: SimpleNamespace(**kwargs)` factories
+# patched onto `discord.ui.Button`, `discord.ui.Select` and
+# `discord.SelectOption` in the isolated stub module. Inlining them would bind
+# all three attributes to the one `SimpleNamespace` type object instead of
+# giving each patched attribute its own factory; one test patches all three at
+# once.
+# E731: `signal = lambda: honeypot.DetectionSignal(...)` builds a fresh signal
+# per source message inside one test. A `def` here would read as a fixture
+# rather than the one-expression value it is.
+# PLR0915: `test_individual_image_action_opens_dropdown_and_routes_selected_image`
+# is a flat sequence - the view and widget stub table, the dropdown interaction,
+# then the routing assertions.
+# Moved verbatim from tests/test_detection_pipeline.py, where the exclusion had
+# hidden all three.
+"tests/test_case_review_controls.py" = ["E731", "PLR0915", "PLW0108"]
+
 # PLW0108: one `lambda **kwargs: SimpleNamespace(**kwargs)` patched onto
 # `discord.ui.Button` in the isolated stub module. Inlining it would bind the
 # attribute to the `SimpleNamespace` type itself - one object shared with every
