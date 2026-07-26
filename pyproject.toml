@@ -169,6 +169,13 @@ ignore = [
 # tests/test_detection_pipeline.py, where the exclusion had hidden it.
 "tests/test_cog_assembly.py" = ["PLR0912"]
 
+# ASYNC240: two `evidence_path.exists()` assertions inside async tests. The
+# blocking call is the assertion on the captured evidence file, not production
+# work - the same reason as tests/test_detection_runtime.py below. Moved
+# verbatim from tests/test_detection_pipeline.py, where the exclusion had
+# hidden them.
+"tests/test_detection_capture.py" = ["ASYNC240"]
+
 # ASYNC240: `Path.mkdir`/`Path.write_bytes`/`Path.glob` inside an async test
 # build and inspect the imagescan sample tree; that is the fixture and the
 # assertion, not production blocking - the same reason as
