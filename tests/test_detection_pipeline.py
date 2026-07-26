@@ -750,6 +750,73 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(command.callback.__module__, "Honeypot.honeypot")
                         self.assertTrue(callable(getattr(diagnostics, name, None)))
 
+    def test_domain_shells_delegate_to_a_matching_twin(self):
+        """Structural guard for the Phase 5 fallback across every domain module.
+
+        A shell that delegates to the wrong twin - `imagescan_remove` calling
+        `imagescan.imagescan_add` - renders no test failure for the commands the
+        suite does not drive. Counts are exact so a lost delegation fails too;
+        a new split row updates them deliberately.
+        """
+        expected_counts = {"diagnostics": 10, "imagescan": 23, "joinwatch": 16}
+        tree = ast.parse((PACKAGE_DIR / "honeypot.py").read_text(encoding="utf-8"))
+        cog_class = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "Honeypot"
+        )
+        delegations = {}
+        for node in cog_class.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            body = [
+                statement
+                for statement in node.body
+                if not (
+                    isinstance(statement, ast.Expr)
+                    and isinstance(statement.value, ast.Constant)
+                )
+            ]
+            if len(body) != 1 or not isinstance(body[0], ast.Return):
+                continue
+            call = body[0].value
+            if isinstance(call, ast.Await):
+                call = call.value
+            if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
+                continue
+            owner = call.func.value
+            if not isinstance(owner, ast.Name) or owner.id not in expected_counts:
+                continue
+            delegations.setdefault(owner.id, []).append(
+                (node.name, call.func.attr, call.args[0] if call.args else None)
+            )
+
+        self.assertEqual(
+            {name: len(items) for name, items in sorted(delegations.items())},
+            expected_counts,
+        )
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                for module_name, items in sorted(delegations.items()):
+                    module = getattr(honeypot, module_name, None)
+                    self.assertIsNotNone(module, f"{module_name} is not importable")
+                    for method_name, target_name, first_argument in items:
+                        with self.subTest(shell=f"{module_name}.{method_name}"):
+                            self.assertEqual(
+                                target_name,
+                                method_name,
+                                "shell delegates to a differently named twin",
+                            )
+                            self.assertTrue(
+                                isinstance(first_argument, ast.Name)
+                                and first_argument.id == "self",
+                                "delegation must pass the cog as its first argument",
+                            )
+                            self.assertTrue(
+                                callable(getattr(module, target_name, None)),
+                                f"{module_name}.{target_name} is missing",
+                            )
+
     async def test_cog_after_invoke_keeps_group_cleanup_override(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
