@@ -33,7 +33,7 @@ By default, only the server owner can use `!honeypot` and all subcommands. Red P
 
 | Command | Description |
 |---------|-------------|
-| `!honeypot honeypot toggle <bool>` | Enable or disable the main honeypot layer |
+| `!honeypot honeypot toggle <bool>` | Master switch for all message detection: honeypot channels, spam, firstpost and the image detector. Joinwatch and the bait role are unaffected |
 | `!honeypot honeypot action <kick\|ban\|review\|none>` | Main action for suspicious posts |
 | `!honeypot honeypot fallback_action <review\|kick\|ban\|none>` | Action for non-suspicious posts |
 | `!honeypot honeypot dry_run <bool>` | Log what would happen without punishing |
@@ -212,6 +212,8 @@ A message is considered suspicious if:
 - Has 4+ image attachments, regardless of filename
 - Has 2+ generic attachment names (e.g. `image.jpeg`, `image(1).jpeg`, `1.jpeg`)
 - Has 2+ attachments matching configured filename-base regexes
+- An image matches the image-detector dataset, when the detector is enabled and
+  samples exist (see `!honeypot imagescan`)
 
 If firstpost is enabled, a user's first observed message is also considered
 suspicious when it has exactly 4 attachments, or exactly 2 attachments with
@@ -236,7 +238,9 @@ Default attachment patterns: `^image$` (matches `image.jpeg`), `^image ?\(\d+\)$
 
 1. Attachment capture starts before the source message is deleted. A failed or
    timed-out download is shown as missing evidence and does not block containment.
-2. The source and recent cached messages from that user are deleted when configured.
+2. The source message is deleted, along with recent cached messages from that user.
+   Backward purge cannot be turned off; its window is 60-3600 seconds. Forward
+   purge is disabled by setting `purge forward` to `0`.
 3. The review mute role is applied while review is pending when configured.
 4. One compact summary is posted in the review channel and a public case thread is
    created from it.
