@@ -24,6 +24,25 @@ from .activity_storage import (
     UserChannelDistribution,
     UserStats,
 )
+from .role_analytics_service import (
+    FullMemberRequestCooldownError,
+    MemberIntentRequiredError,
+    RoleAnalyticsService,
+    SyncAlreadyRunningError,
+)
+from .role_analytics_store import (
+    AnalyticsUnavailableError,
+    RoleAnalyticsStore,
+    SyncStatus,
+)
+from .role_export import ExportMember, ExportTooLarge, build_role_export
+from .role_expression import (
+    RoleExpressionSyntaxError,
+    compile_role_expression,
+    parse_role_expression,
+    render_role_expression,
+    role_ids,
+)
 from .sticky_roles import StickyRoleStore
 from .voice_activity import VoiceChannelVisitTracker
 
@@ -96,24 +115,183 @@ class NHMisc(commands.Cog):
         self._audit_log_tasks: set[asyncio.Task] = set()
         self._activity_store = ActivityStore(cog_data_path(self) / "activity.sqlite")
         self._sticky_roles = StickyRoleStore(cog_data_path(self) / "sticky_roles.sqlite")
+        self._role_analytics_store = RoleAnalyticsStore(
+            cog_data_path(self) / "role_analytics.sqlite"
+        )
+        self._role_analytics = RoleAnalyticsService(
+            self.bot, self._role_analytics_store, logger=log
+        )
         self._activity_task: asyncio.Task | None = None
+        self._role_analytics_startup_task: asyncio.Task | None = None
+        self._role_analytics_daily_task: asyncio.Task | None = None
 
     async def cog_load(self) -> None:
         await self._activity_store.initialize()
         await self._sticky_roles.initialize()
+        await self._role_analytics_store.initialize()
         self._activity_task = asyncio.create_task(self._activity_midnight_loop())
+        self._role_analytics_startup_task = asyncio.create_task(
+            self._role_analytics_startup_reconcile()
+        )
+        self._role_analytics_daily_task = asyncio.create_task(
+            self._role_analytics_daily_loop()
+        )
 
     def cog_unload(self) -> None:
         for task in self._audit_log_tasks:
             task.cancel()
         if self._activity_task is not None:
             self._activity_task.cancel()
+        if self._role_analytics_startup_task is not None:
+            self._role_analytics_startup_task.cancel()
+        if self._role_analytics_daily_task is not None:
+            self._role_analytics_daily_task.cancel()
+        self._role_analytics.cancel()
+
+    async def _role_analytics_startup_reconcile(self) -> None:
+        await self.bot.wait_until_ready()
+        try:
+            await self._role_analytics.reconcile_enabled_guilds(tuple(self.bot.guilds))
+        except Exception:
+            log.exception("Failed to reconcile role analytics on startup")
+
+    async def _role_analytics_daily_loop(self) -> None:
+        await self.bot.wait_until_ready()
+        while True:
+            await asyncio.sleep(24 * 60 * 60)
+            try:
+                await self._role_analytics.run_daily_reconciliation(
+                    tuple(self.bot.guilds)
+                )
+            except Exception:
+                log.exception("Failed to run daily role analytics reconciliation")
+
+    async def red_delete_data_for_user(self, *, requester, user_id: int) -> None:
+        await self._role_analytics_store.delete_user_everywhere(user_id)
+
+    @commands.command(name="rolesync")
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def rolesync(self, ctx: commands.Context) -> None:
+        """Initialize or reconcile the role analytics database."""
+        if self._role_analytics.is_syncing(ctx.guild.id):
+            raise commands.UserFeedbackCheckFailure(
+                "Role synchronization is already running"
+            )
+        await ctx.send("Role synchronization started")
+        try:
+            result = await self._role_analytics.sync_guild(ctx.guild, manual=True)
+        except SyncAlreadyRunningError as error:
+            raise commands.UserFeedbackCheckFailure(
+                "Role synchronization is already running"
+            ) from error
+        except (MemberIntentRequiredError, FullMemberRequestCooldownError) as error:
+            log.warning("Role synchronization unavailable for guild %s: %s", ctx.guild.id, error)
+            raise commands.UserFeedbackCheckFailure(
+                "Role synchronization is unavailable right now"
+            ) from error
+        except Exception as error:
+            log.exception("Role synchronization failed for guild %s", ctx.guild.id)
+            raise commands.UserFeedbackCheckFailure(
+                "Role synchronization failed"
+            ) from error
+
+        await ctx.send(
+            f"Role synchronization complete: {result.member_count} members, "
+            f"{result.membership_count} role memberships in {result.elapsed_seconds:.1f}s"
+        )
+
+    @commands.command(name="rolestats")
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    @commands.cooldown(1, 5, commands.BucketType.user)
+    async def rolestats(self, ctx: commands.Context, *, expression: str) -> None:
+        """Count members matching a boolean role expression."""
+        parsed, predicate_sql, parameters = self._prepare_role_expression(
+            ctx.guild, expression
+        )
+        try:
+            count = await self._role_analytics_store.count_matching(
+                ctx.guild.id, predicate_sql, parameters
+            )
+        except AnalyticsUnavailableError as error:
+            raise commands.UserFeedbackCheckFailure(
+                "Role analytics are unavailable right now"
+            ) from error
+
+        await ctx.send(
+            f"{count} users match: {render_role_expression(parsed)}",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @commands.command(name="roleusers")
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    @commands.cooldown(1, 10, commands.BucketType.guild)
+    async def roleusers(self, ctx: commands.Context, *, expression: str) -> None:
+        """Export members matching a boolean role expression."""
+        self._require_private_role_export_channel(ctx)
+        parsed, predicate_sql, parameters = self._prepare_role_expression(
+            ctx.guild, expression
+        )
+        if not bool(ctx.guild.chunked):
+            await self._repair_role_analytics_cache(ctx.guild)
+            raise commands.UserFeedbackCheckFailure(
+                "Role analytics are unavailable right now"
+            )
+
+        try:
+            user_ids = await self._role_analytics_store.matching_user_ids(
+                ctx.guild.id, predicate_sql, parameters
+            )
+        except AnalyticsUnavailableError as error:
+            raise commands.UserFeedbackCheckFailure(
+                "Role analytics are unavailable right now"
+            ) from error
+        if not user_ids:
+            await ctx.send("No users match this expression")
+            return
+
+        members = [ctx.guild.get_member(user_id) for user_id in user_ids]
+        if any(member is None for member in members):
+            await self._repair_role_analytics_cache(ctx.guild)
+            raise commands.UserFeedbackCheckFailure(
+                "Role analytics are unavailable right now"
+            )
+
+        export_members = tuple(
+            ExportMember(member.id, member.name, member.display_name)
+            for member in members
+        )
+        try:
+            payload = build_role_export(export_members, ctx.guild.filesize_limit)
+        except ExportTooLarge:
+            await ctx.send("Export is too large to upload")
+            return
+
+        await ctx.send(
+            f"{len(user_ids)} users match: {render_role_expression(parsed)}",
+            file=discord.File(io.BytesIO(payload.data), filename=payload.filename),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @commands.group(name="nhmisc", invoke_without_command=True)
     @commands.guild_only()
     async def nhmisc(self, ctx: commands.Context) -> None:
         """Configure NHMisc."""
         await ctx.send_help()
+
+    @nhmisc.group(name="roleanalytics", invoke_without_command=True)
+    @commands.admin_or_permissions(administrator=True)
+    async def nhmisc_roleanalytics(self, ctx: commands.Context) -> None:
+        """Configure role analytics."""
+        await ctx.send_help()
+
+    @nhmisc_roleanalytics.command(name="disable")
+    async def nhmisc_roleanalytics_disable(self, ctx: commands.Context) -> None:
+        """Disable role analytics and delete this guild's analytics database."""
+        await self._role_analytics.disable_guild(ctx.guild.id)
+        await ctx.send("Role analytics disabled")
 
     @nhmisc.command(name="channel")
     @commands.admin_or_permissions(manage_guild=True)
@@ -771,6 +949,40 @@ class NHMisc(commands.Cog):
             requester=None,
         )
 
+    @commands.Cog.listener("on_member_join")
+    async def on_role_analytics_member_join(self, member: discord.Member) -> None:
+        await self._role_analytics.member_joined(
+            member.guild.id,
+            member,
+            member.guild.default_role.id,
+        )
+
+    @commands.Cog.listener("on_member_update")
+    async def on_role_analytics_member_update(
+        self, before: discord.Member, after: discord.Member
+    ) -> None:
+        before_role_ids = {role.id for role in before.roles}
+        after_role_ids = {role.id for role in after.roles}
+        if before_role_ids == after_role_ids:
+            return
+        await self._role_analytics.member_roles_changed(
+            after.guild.id,
+            after,
+            after.guild.default_role.id,
+        )
+
+    @commands.Cog.listener("on_member_remove")
+    async def on_role_analytics_member_remove(self, member: discord.Member) -> None:
+        await self._role_analytics.member_removed(member.guild.id, member.id)
+
+    @commands.Cog.listener("on_guild_role_delete")
+    async def on_role_analytics_role_delete(self, role: discord.Role) -> None:
+        await self._role_analytics.role_deleted(role.guild.id, role.id)
+
+    @commands.Cog.listener("on_resumed")
+    async def on_role_analytics_resumed(self) -> None:
+        await self._role_analytics.schedule_resumed_check(tuple(self.bot.guilds))
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         """Passively collect message activity counters."""
@@ -1095,6 +1307,70 @@ class NHMisc(commands.Cog):
         raise commands.UserFeedbackCheckFailure(
             "You need Manage Messages or Manage Server permission."
         )
+
+    def _prepare_role_expression(
+        self, guild: discord.Guild, expression: str
+    ) -> tuple[object, str, tuple[int, ...]]:
+        try:
+            parsed = parse_role_expression(expression)
+        except RoleExpressionSyntaxError as error:
+            raise commands.UserFeedbackCheckFailure(
+                "Invalid role expression"
+            ) from error
+
+        for role_id in role_ids(parsed):
+            role = guild.get_role(role_id)
+            if role is None:
+                raise commands.UserFeedbackCheckFailure(
+                    "Role expression contains an unknown role"
+                )
+            if role_id == guild.default_role.id or role.is_default():
+                raise commands.UserFeedbackCheckFailure(
+                    "The @everyone role cannot be used in role expressions"
+                )
+
+        predicate_sql, parameters = compile_role_expression(parsed)
+        return parsed, predicate_sql, parameters
+
+    def _require_private_role_export_channel(self, ctx: commands.Context) -> None:
+        everyone_permissions = ctx.channel.permissions_for(ctx.guild.default_role)
+        if everyone_permissions.view_channel:
+            log.info(
+                "Role export refused in public channel %s for guild %s",
+                getattr(ctx.channel, "id", "unknown"),
+                ctx.guild.id,
+            )
+            raise commands.UserFeedbackCheckFailure(
+                "Role export is unavailable in this channel"
+            )
+
+        if ctx.guild.me is None:
+            missing_permissions = ("bot_member",)
+        else:
+            bot_permissions = ctx.channel.permissions_for(ctx.guild.me)
+            missing_permissions = tuple(
+                name
+                for name in ("view_channel", "send_messages", "attach_files")
+                if not bool(getattr(bot_permissions, name, False))
+            )
+        if missing_permissions:
+            log.warning(
+                "Role export refused in channel %s for guild %s; missing bot permissions: %s",
+                getattr(ctx.channel, "id", "unknown"),
+                ctx.guild.id,
+                ", ".join(missing_permissions),
+            )
+            raise commands.UserFeedbackCheckFailure(
+                "Role export is unavailable in this channel"
+            )
+
+    async def _repair_role_analytics_cache(self, guild: discord.Guild) -> None:
+        await self._role_analytics_store.set_status(
+            guild.id,
+            SyncStatus.NEEDS_RECONCILIATION,
+            "member_cache_mismatch",
+        )
+        self._role_analytics.schedule_guild_retry(guild, 0)
 
     def _parse_role_id(self, value: str) -> int:
         stripped = value.strip()
