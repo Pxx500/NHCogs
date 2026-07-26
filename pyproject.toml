@@ -182,6 +182,14 @@ ignore = [
 # PLR0915: `_install_redbot_stubs` is one long flat stub table.
 "tests/test_imagescan_cleanup.py" = ["E402", "PLC0415", "PLR0915"]
 
+# PLW0108: three `lambda id: <dict>.get(id)` stubs stand in for
+# `Guild.get_channel`, `Guild.get_member` and `Guild.fetch_member`. Inlining
+# them to `dict.get` would give the stub `dict.get`'s two-argument signature
+# instead of the one-argument Discord one, so the lambda is what pins the
+# stubbed arity. Moved verbatim from tests/test_detection_pipeline.py, where
+# the exclusion had hidden it.
+"tests/test_joinwatch_retry.py" = ["PLW0108"]
+
 [tool.mypy]
 files = ["Honeypot", "NHMisc"]
 python_version = "3.10"
