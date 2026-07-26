@@ -10,98 +10,10 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.detection_case_fixtures import capture_attachment, publish_evidence, publish_primary
-from tests.harness import _Bot, _async_noop, _isolated_honeypot_modules
+from tests.harness import CaseExpiryTestCase, DetectionPipelineTestCase, _Bot, _async_noop, _isolated_honeypot_modules, active_case
 
 
-def active_case(store, guild_id: int, user_id: int):
-    return next(
-        (
-            snapshot
-            for snapshot in store.list_open_cases()
-            if snapshot.case.guild_id == guild_id
-            and snapshot.case.user_id == user_id
-        ),
-        None,
-    )
-
-
-class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
-    @staticmethod
-    def _message(
-        honeypot,
-        *,
-        attachment_count=3,
-        delete_error=None,
-        message_id=300,
-        channel_id=400,
-    ):
-        attachments = [
-            SimpleNamespace(
-                filename=f"proof-{position}.png",
-                size=len(f"image-{position}".encode()),
-                content_type="image/png",
-                width=10,
-                height=20,
-                description=None,
-                is_spoiler=lambda: False,
-                url=f"https://cdn.test/proof-{position}.png",
-                read=mock.AsyncMock(return_value=f"image-{position}".encode()),
-            )
-            for position in range(1, attachment_count + 1)
-        ]
-        for attachment in attachments:
-            async def read_bounded(max_bytes, *, _attachment=attachment):
-                data = await _attachment.read(use_cached=True)
-                return data[: max_bytes + 1]
-
-            attachment.read_bounded = read_bounded
-        guild = SimpleNamespace(
-            id=100,
-            name="Guild",
-            icon=None,
-            get_channel=lambda channel_id: None,
-            get_thread=lambda channel_id: None,
-        )
-        author = SimpleNamespace(
-            id=200,
-            bot=False,
-            roles=[],
-            display_name="User",
-            display_avatar=None,
-            created_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
-            joined_at=datetime(2026, 7, 2, tzinfo=timezone.utc),
-        )
-        message = SimpleNamespace(
-            id=message_id,
-            guild=guild,
-            author=author,
-            channel=SimpleNamespace(id=channel_id),
-            content="forward evidence",
-            attachments=attachments,
-            created_at=datetime(2026, 7, 13, 12, tzinfo=timezone.utc),
-            jump_url="https://discord.test/channels/100/400/300",
-            webhook_id=None,
-        )
-        message.delete = mock.AsyncMock(side_effect=delete_error)
-        return message
-
-    @staticmethod
-    def _configure_public_boundary(cog, config):
-        cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
-        cog.config = SimpleNamespace(
-            guild=lambda guild: SimpleNamespace(all=mock.AsyncMock(return_value=config)),
-            guild_from_id=lambda guild_id: SimpleNamespace(
-                all=mock.AsyncMock(return_value=config)
-            ),
-        )
-        cog._is_protected_member = mock.AsyncMock(return_value=False)
-        cog._is_forward_purge_active = mock.Mock(return_value=True)
-        cog._handle_spam_message = mock.AsyncMock()
-        cog._handle_firstpost_message = mock.AsyncMock()
-        cog._handle_imagescan_detector_message = mock.AsyncMock()
-        cog._increment_stat = mock.AsyncMock()
-        cog._purge_detection_case_cached_messages = mock.AsyncMock(return_value=0)
-
+class ForwardPurgeCoordinatorTests(DetectionPipelineTestCase):
     async def test_malformed_enabled_setting_does_not_enter_detection_pipeline(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -339,6 +251,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 )
                 cog._publish_detection_case.assert_not_awaited()
                 cog._increment_stat.assert_any_await(message.guild, "whitelisted")
+
     async def test_disabled_review_keeps_containment_but_suppresses_interactive_case(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -378,6 +291,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     "review_publish",
                     {operation.operation_type for operation in snapshot.operations},
                 )
+
     async def test_admission_preserves_discord_attachment_description_and_spoiler(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -2640,9 +2554,6 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
 
-
-
-
     async def test_concurrent_publishers_create_one_summary_and_one_thread_timeline(self):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
@@ -2803,9 +2714,6 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(snapshot.case.review_channel_id, 50)
                 self.assertEqual(snapshot.case.review_message_id, 60)
 
-
-
-
     async def test_rerender_uses_persisted_log_channel_without_configured_destination(self):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
@@ -2869,7 +2777,6 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 existing.edit.assert_awaited_once()
                 log_channel.send.assert_not_awaited()
                 self.assertEqual(thread.send.await_count, 2)
-
 
     async def test_forward_route_hashes_and_persists_every_image_attachment(self):
         with TemporaryDirectory() as directory:
@@ -2960,7 +2867,6 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     [signal.signal.detector for signal in snapshot.signals],
                     ["forward_purge", "firstpost"],
                 )
-
 
     async def test_spam_review_deletes_before_review_publication(self):
         with TemporaryDirectory() as directory:
@@ -4858,47 +4764,7 @@ class ForwardPurgeCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(batch_key, cog._initial_image_scan_batches)
 
 
-class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
-    @staticmethod
-    def _config(values):
-        async def all_values():
-            return values
-
-        return SimpleNamespace(guild_from_id=lambda guild_id: SimpleNamespace(all=all_values))
-
-    @staticmethod
-    def _append_case(honeypot, cog, created_at, *, message_id=40):
-        cog._case_store.initialize()
-        return cog._case_store.append_message(
-            honeypot.NewMessage(
-                guild_id=10,
-                user_id=20,
-                channel_id=30,
-                message_id=message_id,
-                content="evidence",
-                created_at=created_at,
-                jump_url=f"https://discord.test/messages/{message_id}",
-                attachments=(),
-            ),
-            (),
-        )
-
-    @staticmethod
-    def _complete_case_operation(cog, case_id, result, now):
-        operation = cog._case_store.ensure_operation(
-            case_id,
-            "moderation_action",
-            f"moderation-action:{case_id}:1",
-            1,
-        )
-        claimed = cog._case_store.claim_operation(operation.operation_id, now)
-        cog._case_store.complete_operation(
-            claimed.operation_id,
-            claimed.claim_token,
-            now,
-            result,
-        )
-
+class DetectionExpiryTests(CaseExpiryTestCase):
     async def test_completed_moderation_waits_for_pending_attachment_capture(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -5798,7 +5664,6 @@ class DetectionExpiryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     cog._case_store.owned_role_ids(second.case.case_id), (role.id,)
                 )
-
 
     async def test_case_projection_warns_about_failed_required_operations(self):
         with TemporaryDirectory() as directory:

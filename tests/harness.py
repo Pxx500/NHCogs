@@ -8,10 +8,13 @@ rename belongs in its own commit.
 import ast
 import asyncio
 import sys
+import unittest
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from importlib import util
 from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
+from unittest import mock
 
 PACKAGE_DIR = Path(__file__).resolve().parents[1] / "Honeypot"
 _MISSING = object()
@@ -541,3 +544,139 @@ class _Bot:
 
 async def _async_noop(*args, **kwargs):
     return None
+
+
+def active_case(store, guild_id: int, user_id: int):
+    return next(
+        (
+            snapshot
+            for snapshot in store.list_open_cases()
+            if snapshot.case.guild_id == guild_id
+            and snapshot.case.user_id == user_id
+        ),
+        None,
+    )
+
+
+class DetectionPipelineTestCase(unittest.IsolatedAsyncioTestCase):
+    """Message and public-boundary fixtures shared by the detection tests."""
+
+    @staticmethod
+    def _message(
+        honeypot,
+        *,
+        attachment_count=3,
+        delete_error=None,
+        message_id=300,
+        channel_id=400,
+    ):
+        attachments = [
+            SimpleNamespace(
+                filename=f"proof-{position}.png",
+                size=len(f"image-{position}".encode()),
+                content_type="image/png",
+                width=10,
+                height=20,
+                description=None,
+                is_spoiler=lambda: False,
+                url=f"https://cdn.test/proof-{position}.png",
+                read=mock.AsyncMock(return_value=f"image-{position}".encode()),
+            )
+            for position in range(1, attachment_count + 1)
+        ]
+        for attachment in attachments:
+            async def read_bounded(max_bytes, *, _attachment=attachment):
+                data = await _attachment.read(use_cached=True)
+                return data[: max_bytes + 1]
+
+            attachment.read_bounded = read_bounded
+        guild = SimpleNamespace(
+            id=100,
+            name="Guild",
+            icon=None,
+            get_channel=lambda channel_id: None,
+            get_thread=lambda channel_id: None,
+        )
+        author = SimpleNamespace(
+            id=200,
+            bot=False,
+            roles=[],
+            display_name="User",
+            display_avatar=None,
+            created_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            joined_at=datetime(2026, 7, 2, tzinfo=timezone.utc),
+        )
+        message = SimpleNamespace(
+            id=message_id,
+            guild=guild,
+            author=author,
+            channel=SimpleNamespace(id=channel_id),
+            content="forward evidence",
+            attachments=attachments,
+            created_at=datetime(2026, 7, 13, 12, tzinfo=timezone.utc),
+            jump_url="https://discord.test/channels/100/400/300",
+            webhook_id=None,
+        )
+        message.delete = mock.AsyncMock(side_effect=delete_error)
+        return message
+
+    @staticmethod
+    def _configure_public_boundary(cog, config):
+        cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
+        cog.config = SimpleNamespace(
+            guild=lambda guild: SimpleNamespace(all=mock.AsyncMock(return_value=config)),
+            guild_from_id=lambda guild_id: SimpleNamespace(
+                all=mock.AsyncMock(return_value=config)
+            ),
+        )
+        cog._is_protected_member = mock.AsyncMock(return_value=False)
+        cog._is_forward_purge_active = mock.Mock(return_value=True)
+        cog._handle_spam_message = mock.AsyncMock()
+        cog._handle_firstpost_message = mock.AsyncMock()
+        cog._handle_imagescan_detector_message = mock.AsyncMock()
+        cog._increment_stat = mock.AsyncMock()
+        cog._purge_detection_case_cached_messages = mock.AsyncMock(return_value=0)
+
+
+class CaseExpiryTestCase(unittest.IsolatedAsyncioTestCase):
+    """Config, case-append and operation fixtures shared by the case tests."""
+
+    @staticmethod
+    def _config(values):
+        async def all_values():
+            return values
+
+        return SimpleNamespace(guild_from_id=lambda guild_id: SimpleNamespace(all=all_values))
+
+    @staticmethod
+    def _append_case(honeypot, cog, created_at, *, message_id=40):
+        cog._case_store.initialize()
+        return cog._case_store.append_message(
+            honeypot.NewMessage(
+                guild_id=10,
+                user_id=20,
+                channel_id=30,
+                message_id=message_id,
+                content="evidence",
+                created_at=created_at,
+                jump_url=f"https://discord.test/messages/{message_id}",
+                attachments=(),
+            ),
+            (),
+        )
+
+    @staticmethod
+    def _complete_case_operation(cog, case_id, result, now):
+        operation = cog._case_store.ensure_operation(
+            case_id,
+            "moderation_action",
+            f"moderation-action:{case_id}:1",
+            1,
+        )
+        claimed = cog._case_store.claim_operation(operation.operation_id, now)
+        cog._case_store.complete_operation(
+            claimed.operation_id,
+            claimed.claim_token,
+            now,
+            result,
+        )
