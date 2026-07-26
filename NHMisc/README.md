@@ -277,10 +277,11 @@ used, top locations in the range, and the dominant location for each retained da
 [p]nhmisc chatchart 7
 ```
 
-Creates a pie chart of message activity for the channel where the command is used. If the
-command is used in a thread, it charts that specific thread. The requested day count is
-capped to the configured detail retention. The chart labels include the message count for
-each shown user.
+Creates a chart of message activity for the channel where the command is used. A horizontal
+ranking compares the ten most active users, while a donut shows the Top 10 share against all
+other users. If the command is used in a thread, it charts that specific thread. The requested
+day count is capped to the configured detail retention. The chart includes message counts and
+overall percentages for each shown user.
 
 ### User Command
 

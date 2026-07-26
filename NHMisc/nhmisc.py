@@ -606,7 +606,7 @@ class NHMisc(commands.Cog):
 
     @nhmisc.command(name="chatchart")
     async def nhmisc_chatchart(self, ctx: commands.Context, days: int) -> None:
-        """Render a pie chart of user activity in the current channel."""
+        """Render a chart of user activity in the current channel."""
         await self._require_activity_staff(ctx)
         await self._close_stale_activity_days_for_guild(ctx.guild, send_reports=True)
         if days < 1:
@@ -1823,27 +1823,70 @@ class NHMisc(commands.Cog):
             ) from exc
 
         top_counts = counts[:10]
+        top_count = sum(count.message_count for count in top_counts)
         other_count = sum(count.message_count for count in counts[10:])
+        total_count = top_count + other_count
         labels: list[str] = []
         values: list[int] = []
         for count in top_counts:
             member = guild.get_member(count.user_id)
             name = member.display_name if member is not None else str(count.user_id)
-            labels.append(f"{name} ({count.message_count})")
+            if len(name) > 32:
+                name = f"{name[:29]}..."
+            labels.append(name)
             values.append(count.message_count)
-        if other_count:
-            labels.append(f"Other ({other_count})")
-            values.append(other_count)
 
-        figure, axis = plt.subplots(figsize=(8, 6))
-        axis.pie(
-            values,
-            labels=labels,
-            autopct=lambda percent: f"{percent:.1f}%" if percent >= 3 else "",
+        figure_height = max(5.5, 1.5 + len(top_counts) * 0.5)
+        figure = plt.figure(figsize=(13, figure_height))
+        grid = figure.add_gridspec(1, 2, width_ratios=(3, 1), wspace=0.12)
+        ranking_axis = figure.add_subplot(grid[0, 0])
+        donut_axis = figure.add_subplot(grid[0, 1])
+
+        positions = list(range(len(values)))
+        bar_color = "#287eb6"
+        ranking_axis.barh(positions, values, color=bar_color, height=0.68)
+        ranking_axis.set_yticks(positions, labels=labels)
+        ranking_axis.invert_yaxis()
+        ranking_axis.xaxis.set_visible(False)
+        ranking_axis.tick_params(axis="y", length=0)
+        for spine in ranking_axis.spines.values():
+            spine.set_visible(False)
+
+        largest_value = max(values)
+        ranking_axis.set_xlim(0, largest_value * 1.38)
+        for position, value in zip(positions, values):
+            percentage = value / total_count * 100
+            ranking_axis.text(
+                value + largest_value * 0.025,
+                position,
+                f"{value:,} · {percentage:.1f}%",
+                va="center",
+                fontsize=9,
+            )
+
+        donut_values = [top_count, other_count]
+        donut_axis.pie(
+            donut_values,
+            colors=[bar_color, "#6c757d"],
+            autopct=lambda percent: f"{percent:.1f}%" if percent > 0 else "",
+            pctdistance=0.81,
             startangle=90,
+            counterclock=False,
+            wedgeprops={"width": 0.38, "edgecolor": "white"},
+            textprops={"color": "white", "fontsize": 11, "fontweight": "bold"},
         )
-        axis.axis("equal")
-        axis.set_title(f"Messages by user - last {days} days")
+        donut_axis.text(
+            0,
+            0,
+            f"{total_count:,}\nmessages",
+            ha="center",
+            va="center",
+            fontsize=11,
+        )
+        donut_axis.set_title("Top 10 vs other", pad=12)
+        donut_axis.axis("equal")
+
+        figure.suptitle(f"Messages by user - last {days} days", fontsize=16)
         buffer = io.BytesIO()
         figure.savefig(buffer, format="png", bbox_inches="tight", dpi=160)
         plt.close(figure)
