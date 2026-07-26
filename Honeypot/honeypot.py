@@ -65,6 +65,9 @@ from .firstpost_store import FirstPostStore
 from .imagescan_store import ImageScanStore
 from .operations import OperationHandlerRegistry, executor_operation_policy
 from .operations.context import (
+    DETECTION_FAST_RETRY_LIMIT,
+    DETECTION_FAST_RETRY_SECONDS,
+    DETECTION_SLOW_RETRY_MINUTES,
     CompletionMode,
     FollowUpKind,
     OperationContext,
@@ -115,9 +118,6 @@ COG_REPO_NAME = "NHCogs"
 COG_REPO_URL = "https://github.com/Pxx500/NHCogs"
 JOINWATCH_MAX_ACCOUNT_AGE_HOURS = 1_000_000
 _TIMELINE_VIEW_UNSET = object()
-DETECTION_FAST_RETRY_SECONDS = 10
-DETECTION_FAST_RETRY_LIMIT = 5
-DETECTION_SLOW_RETRY_MINUTES = 5
 CONSOLE_DUMP_USAGE = diagnostics.CONSOLE_DUMP_USAGE
 
 try:

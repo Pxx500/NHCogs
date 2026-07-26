@@ -24,14 +24,17 @@ from ..detection_cases import (
     effective_action,
 )
 from ..settings import GuildSettings
-from .context import OperationContext, OperationOutcome
+from .context import (
+    DETECTION_FAST_RETRY_SECONDS,
+    OperationContext,
+    OperationOutcome,
+)
 
 if TYPE_CHECKING:
     from ..honeypot import Honeypot
 
 
 log = logging.getLogger("red.Honeypot")
-DETECTION_FAST_RETRY_SECONDS = 10
 DETECTION_CAPTURE_START_TIMEOUT_SECONDS = 1.0
 
 
