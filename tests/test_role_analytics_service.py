@@ -328,6 +328,34 @@ class RoleAnalyticsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.status, role_analytics_store.SyncStatus.DISABLED)
         self.assertFalse(state.enabled)
 
+    async def test_role_events_still_apply_while_a_retry_is_pending(self):
+        guild = FakeGuild([FakeMember(1, (123, 10))])
+        service = role_analytics_service.RoleAnalyticsService(FakeBot(), self.store)
+        await service.sync_guild(guild, manual=True)
+        await self.store.set_status(
+            guild.id,
+            role_analytics_store.SyncStatus.RETRYING,
+            "sync_retry_scheduled",
+        )
+
+        await service.member_roles_changed(guild.id, FakeMember(1, (123, 20)), 123)
+
+        role_20_sql, role_20_parameters = role_expression.compile_role_expression(
+            role_expression.parse_role_expression("20")
+        )
+        self.assertEqual(
+            await self.store.count_matching(guild.id, role_20_sql, role_20_parameters),
+            1,
+        )
+
+    async def test_role_events_are_dropped_for_a_guild_that_never_activated(self):
+        service = role_analytics_service.RoleAnalyticsService(FakeBot(), self.store)
+
+        await service.member_roles_changed(123, FakeMember(1, (123, 20)), 123)
+
+        with self.assertRaises(role_analytics_store.AnalyticsUnavailableError):
+            await self.store.count_matching(123, "1", ())
+
 
 if __name__ == "__main__":
     unittest.main()
