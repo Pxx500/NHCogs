@@ -297,6 +297,17 @@ def _command_decorator(kind, *, parent=None, **options):
     return apply
 
 
+class _AAA3ACog(_Cog):
+    def format_help_for_context(self, ctx):
+        help_text = super().format_help_for_context(ctx)
+        return (
+            f"{help_text}\n\n"
+            "Repo name: AAA3A-cogs\n"
+            "Documentation: https://aaa3a-cogs.readthedocs.io\n"
+            "Translations: https://crowdin.com/project/aaa3a-cogs"
+        )
+
+
 @contextmanager
 def _isolated_honeypot_modules(data_path: Path):
     dependency_order = (
@@ -431,7 +442,7 @@ def _isolated_honeypot_modules(data_path: Path):
     formatting.pagify = pagify
     redbot.core.utils.chat_formatting = formatting
     aaa3a_utils = ModuleType("AAA3A_utils")
-    aaa3a_utils.Cog = _Cog
+    aaa3a_utils.Cog = _AAA3ACog
     package = ModuleType("Honeypot")
     package.__path__ = [str(PACKAGE_DIR)]
 
@@ -3601,6 +3612,25 @@ class JoinwatchCommandTests(unittest.IsolatedAsyncioTestCase):
                 ctx.send.reset_mock()
 
                 await honeypot.Honeypot.max_age.callback(cog, ctx, 1_000_001)
+
+                setting.set.assert_not_awaited()
+                ctx.send.assert_awaited_once_with(
+                    "Hours must be between 1 and 1000000."
+                )
+
+    async def test_max_age_rejects_zero_at_lower_boundary(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                setting = SimpleNamespace(set=mock.AsyncMock())
+                cog = object.__new__(honeypot.Honeypot)
+                cog.config = SimpleNamespace(
+                    guild=mock.Mock(
+                        return_value=SimpleNamespace(joinwatch_min_age_hours=setting)
+                    )
+                )
+                ctx = SimpleNamespace(guild=object(), send=mock.AsyncMock())
+
+                await honeypot.Honeypot.max_age.callback(cog, ctx, 0)
 
                 setting.set.assert_not_awaited()
                 ctx.send.assert_awaited_once_with(
