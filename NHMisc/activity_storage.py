@@ -252,6 +252,22 @@ class ActivityStore:
                 days,
             )
 
+    async def get_guild_user_counts(
+        self,
+        guild_id: int,
+        end_date_utc: date,
+        days: int,
+        limit: int,
+    ) -> list[ChannelUserCount]:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._get_guild_user_counts_sync,
+                guild_id,
+                end_date_utc,
+                days,
+                limit,
+            )
+
     async def get_channel_timeline(
         self,
         guild_id: int,
@@ -1103,6 +1119,29 @@ class ActivityStore:
                 ORDER BY total DESC, user_id ASC
                 """,
                 params,
+            ).fetchall()
+        return [ChannelUserCount(int(user_id), int(count)) for user_id, count in rows]
+
+    def _get_guild_user_counts_sync(
+        self,
+        guild_id: int,
+        end_date_utc: date,
+        days: int,
+        limit: int,
+    ) -> list[ChannelUserCount]:
+        start = date.fromordinal(end_date_utc.toordinal() - days + 1).isoformat()
+        end = end_date_utc.isoformat()
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT user_id, SUM(message_count) AS total
+                FROM activity_user_day
+                WHERE guild_id = ? AND date_utc BETWEEN ? AND ?
+                GROUP BY user_id
+                ORDER BY total DESC, user_id ASC
+                LIMIT ?
+                """,
+                (guild_id, start, end, limit),
             ).fetchall()
         return [ChannelUserCount(int(user_id), int(count)) for user_id, count in rows]
 
