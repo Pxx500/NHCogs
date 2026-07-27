@@ -10,7 +10,13 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.harness import DetectionPipelineTestCase, _Bot, _isolated_honeypot_modules, active_case
+from tests.harness import (
+    DetectionPipelineTestCase,
+    _Bot,
+    _isolated_honeypot_modules,
+    active_case,
+    drain_background_work,
+)
 
 
 class DetectionCaptureTests(DetectionPipelineTestCase):
@@ -59,6 +65,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                     self.assertTrue(read_stopped.is_set())
                 finally:
                     release_read.set()
+                    await drain_background_work(cog)
 
     async def test_capture_failures_count_failed_timeout_and_too_large_results(self):
         with TemporaryDirectory() as directory:
@@ -1265,3 +1272,4 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                     await cog.on_message(message)
 
                 self.assertNotIn(batch_key, cog._initial_image_scan_batches)
+                await drain_background_work(cog)

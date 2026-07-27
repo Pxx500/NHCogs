@@ -10,7 +10,12 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.detection_case_fixtures import capture_attachment, publish_primary
-from tests.harness import CaseExpiryTestCase, _Bot, _isolated_honeypot_modules
+from tests.harness import (
+    CaseExpiryTestCase,
+    _Bot,
+    _isolated_honeypot_modules,
+    drain_background_work,
+)
 
 
 class CaseModeratorDecisionTests(CaseExpiryTestCase):
@@ -237,6 +242,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 self.assertEqual(
                     snapshot.attachments[0].learning_decision, "true_positive"
                 )
+                await drain_background_work(cog, restarted)
 
     async def test_case_ignore_releases_owned_role_before_image_review_finishes(self):
         with TemporaryDirectory() as directory:
