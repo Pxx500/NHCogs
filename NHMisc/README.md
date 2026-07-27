@@ -304,17 +304,16 @@ shown as separate locations. The output includes total messages, active days, lo
 used, top locations in the range, and the dominant location for each retained day.
 
 ```ini
-[p]nhmisc chatchart 7
+[p]nhmisc chatchart 7 [amount]
 ```
 
-Creates a chart of message activity for the channel where the command is used. A horizontal
-ranking compares the eight most active users, while a donut shows each of their shares of the
-total plus one `Other` slice for everyone else. Each ranked user keeps the same colour in both
-halves of the chart. The ranking stops at eight because more than eight hues stop being
-reliably distinguishable for colourblind readers. If the command is used in a thread, it charts
-that specific thread. The requested
-day count is capped to the configured detail retention. The chart includes message counts and
-overall percentages for each shown user.
+Creates a chart of message activity for the channel where the command is used. `amount`
+controls how many of the most active users are shown, defaults to `10`, and accepts values from
+`1` through `20`. Each displayed user keeps the same distinct colour in the horizontal ranking
+and donut, while `Other` contains everyone outside the selected ranking. Choosing `1` adds
+`One is a bit low, no? 🤨` to the chart message. If the command is used in a thread, it charts
+that specific thread. The requested day count is capped to the configured detail retention.
+The chart includes message counts and overall percentages for each shown user.
 
 ```ini
 [p]nhmisc topyapper 30 10
