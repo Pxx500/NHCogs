@@ -1,23 +1,19 @@
 import importlib.util
-import asyncio
 import sys
-import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from tests.test_detection_cases import detection_cases_under_test as cases
 from tests.detection_case_fixtures import capture_attachment, publish_evidence
+from tests.test_detection_cases import detection_cases_under_test as cases
 
 
 def _load_case_review():
-    name = "Honeypot.case_review"
+    package_name = cases.__package__
+    name = f"{package_name}.case_review"
     path = Path(__file__).parents[1] / "Honeypot" / "case_review.py"
-    package = types.ModuleType("Honeypot")
-    package.__path__ = [str(path.parent)]
-    sys.modules.setdefault("Honeypot", package)
-    sys.modules["Honeypot.detection_cases"] = cases
+    sys.modules[f"{package_name}.detection_cases"] = cases
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
@@ -924,8 +920,8 @@ class CaseReviewServiceTests(unittest.IsolatedAsyncioTestCase):
                 position,
                 f"sha-{position}",
                 f"phash-{position}",
-                {"matched": True},
-                None,
+                match_metadata={"matched": True},
+                error=None,
             )
         return appended.case.case_id
 
@@ -938,8 +934,8 @@ class CaseReviewServiceTests(unittest.IsolatedAsyncioTestCase):
             1,
             "sha-1",
             "phash-1",
-            {"matched": False},
-            None,
+            match_metadata={"matched": False},
+            error=None,
         )
         snapshot = self.store.get_case(case_id)
         items = case_review.case_feedback_items(snapshot)
@@ -1049,8 +1045,8 @@ class CaseReviewServiceTests(unittest.IsolatedAsyncioTestCase):
             0,
             "sha-second",
             "phash-second",
-            {"matched": True},
-            None,
+            match_metadata={"matched": True},
+            error=None,
         )
 
         snapshot = await case_review.CaseReviewService(self.store).apply_message(
@@ -1086,8 +1082,8 @@ class CaseReviewServiceTests(unittest.IsolatedAsyncioTestCase):
                 position,
                 f"sha-{position}",
                 f"phash-{position}",
-                {"matched": True},
-                None,
+                match_metadata={"matched": True},
+                error=None,
             )
         expected_keys = tuple(
             item.key for item in case_review.case_feedback_items(self.store.get_case(case_id))

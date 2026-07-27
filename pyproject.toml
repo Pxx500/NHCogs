@@ -1,0 +1,262 @@
+[project]
+name = "nhcogs"
+version = "0.0.0"
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [
+    ".worktrees",
+    "local-data",
+    # NHMisc has its own Ruff cleanup PR. Keep this Honeypot refactor from
+    # imposing its new hard gate on that cog or the tests added with it.
+    "NHMisc",
+    "tests/test_activity_storage.py",
+    "tests/test_chatchart.py",
+    "tests/test_forum_autopin.py",
+    "tests/test_role_*.py",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RET", "ASYNC", "PL", "TRY"]
+# Rules rejected repo-wide, not grandfathered debt. Every entry is triaged in
+# local-data/Honeypot/docs/phase6-plan.md, round D.
+ignore = [
+    "E501",
+    "PLR0913",
+    "TRY003",
+    # SIM105: `try: ... except X: pass` is kept literal. Every site guards
+    # exactly one best-effort call, and `contextlib.suppress` hides which
+    # statement that is. Most are cleanup or teardown; two are not - the
+    # AAA3A_utils reload loop at cog load and a progress-message edit inside the
+    # imagescan import loop - and they are covered by the same argument.
+    "SIM105",
+    # TRY300: a stance on the rule, not a property of the sites. Seven of the
+    # nine return a literal (`return True`, or a bare `return`) rather than a
+    # value produced by the guarded call, so an `else:` block would add a level
+    # of indentation and separate the result from the condition that earned it.
+    "TRY300",
+    # TRY301: raising inside `try` is the deliberate error-funnelling shape of
+    # the operation handlers and the publication path, where a local `raise` is
+    # caught by the same function and converted into an operation outcome. Three
+    # sites are outside that shape: a diagnostics `OSError` that is stored and
+    # re-raised, one image-scan path, and a test that manufactures `exc_info`.
+    "TRY301",
+]
+
+# Per-file ignores. Each entry is a location-specific grandfathered violation
+# with a reason recorded in local-data/Honeypot/docs/phase6-plan.md, round D.
+[tool.ruff.lint.per-file-ignores]
+"tests/*.py" = ["PLR2004", "SIM117"]
+
+# E402: the redbot/Red imports must run after the AAA3A_utils availability
+# check and reload loop above them; hoisting them breaks cog loading.
+"Honeypot/__init__.py" = ["E402"]
+
+# PLR2004: Discord's select-menu option limit and the summary message preview
+# count. Naming the menu limit needs a home shared with review_publication.py.
+# PLR0911: `_cached_purge_status` is a flat guard-clause chain over purge
+# states; collapsing it would hide the state table.
+"Honeypot/case_review.py" = ["PLR0911", "PLR2004"]
+
+# PLR2004: the 24-hour window in a console retention comparison.
+"Honeypot/console_dump.py" = ["PLR2004"]
+
+# PLR2004: keyword/attachment scoring thresholds that are local tuning values,
+# each used once. PLR0911/PLR0912/PLR0915: `on_message`, `_process_detected_message`
+# and `_public_moderation_reason` are the live detection path, explicitly
+# deferred by the plan until rail-4 verification on a real bot exists.
+"Honeypot/detection.py" = ["PLR0911", "PLR0912", "PLR0915", "PLR2004"]
+
+# PLR0912: `append_message` is the single durable write path for a case; it is
+# not in the plan's approved decomposition set.
+"Honeypot/detection_cases.py" = ["PLR0912"]
+
+# PLR2004: a retry-attempt comparison local to one reader.
+# TRY004: raising `RuntimeError` instead of `TypeError` for a non-callable
+# download interface is the established validation contract; swapping the type
+# is a behaviour change on a validation path.
+"Honeypot/detection_runtime.py" = ["PLR2004", "TRY004"]
+
+# PLR2004: doctor thresholds (24h, 30 days) used once each.
+# PLR0912/PLR0917: `_doctor_configuration_checks` was skipped in round B with a
+# reason; it is a flat checklist, and its parameters are the checklist inputs.
+"Honeypot/diagnostics.py" = ["PLR0912", "PLR0917", "PLR2004"]
+
+# PLR2004: the 1024 in a byte-size formatter, which is the unit base, not a
+# limit. PLR0911: `_is_protected_member` and `_missing_channel_permissions` are
+# guard-clause chains. PLR0917: `_scan_case_message_images` was skipped in
+# round B with a reason. TRY004: same validation contract as detection_runtime.
+"Honeypot/honeypot.py" = ["PLR0911", "PLR0917", "PLR2004", "TRY004"]
+
+# PLR0912/PLR0915/PLR0917: `imagescan_add`, `imagescan_import_tp_zip`,
+# `_imagescan_add_attachment_sample`, `_imagescan_add_bytes_sample` and
+# `_scan_image_attachments` are in the plan's `< 40%` coverage band or its
+# deferred set. PLR2004: local batch sizes.
+"Honeypot/imagescan.py" = ["PLR0912", "PLR0915", "PLR0917", "PLR2004"]
+
+# PLR0911/PLR0912/PLR0915: `on_member_join` (11%), `on_member_update` (0%),
+# `_apply_joinwatch_role_actions` (33%) and `_apply_joinwatch_assignment_actions`
+# (39%) are the plan's whole `< 40%` band - measured, and not to be touched.
+# PLR2004: the 10080-minute (7 day) joinwatch window, used once per branch.
+"Honeypot/joinwatch.py" = ["PLR0911", "PLR0912", "PLR0915", "PLR2004"]
+
+# PLC0415: `from ..honeypot import case_evidence_root` is deferred to call time
+# to break the cog <-> handler import cycle.
+"Honeypot/operations/evidence_cleanup.py" = ["PLC0415"]
+
+# PLR0912: `_delete_source_message` is in the plan's deferred set.
+"Honeypot/operations/message_process.py" = ["PLR0912"]
+
+# PLR0912/PLR0915: `_capture_case_attachments_unlocked`, `_publish_case_timeline`,
+# `_publish_detection_case_serial` and `_case_review_moderation_interaction` are
+# the plan's deferred set; `_case_timeline_attachment_line` and
+# `_delete_detection_case_publications` are on the same live evidence path and
+# were not in round C's approved targets.
+# PLR2004: Discord's 2000-character message limit and the 25-option select-menu
+# limit. Both are real platform constants, but they are also spelled in
+# diagnostics.py and case_review.py, so naming them needs a shared home module -
+# recorded as follow-up rather than done here.
+"Honeypot/review_publication.py" = ["PLR0912", "PLR0915", "PLR2004"]
+
+# PLR0917: NHMisc is outside this plan's scope and has no coverage in this
+# suite; the positional parameters are a stable storage signature.
+"NHMisc/activity_storage.py" = ["PLR0917"]
+
+# PLC0415: matplotlib and other optional dependencies are imported lazily so a
+# missing extra degrades one command instead of failing cog load.
+# TRY203: the `except asyncio.CancelledError: raise` in the daily loop is an
+# explicit statement that cancellation must not be swallowed there.
+# PLR0917/PLR2004: NHMisc is outside this plan's scope and untested here.
+"NHMisc/nhmisc.py" = ["PLC0415", "PLR0917", "PLR2004", "TRY203"]
+
+# PLR0917: the fixture builder mirrors the store signature it wraps.
+"tests/detection_case_fixtures.py" = ["PLR0917"]
+
+# PLR0915: `_isolated_honeypot_modules` is one long flat stub table - the same
+# shape and the same reason as `_install_redbot_stubs` in
+# tests/test_imagescan_cleanup.py. It builds the discord and Red module tree in
+# declaration order, and every statement is one attribute of that tree; slicing
+# it into helpers would scatter the stub surface without removing a statement.
+"tests/harness.py" = ["PLR0915"]
+
+# B023: every flagged closure is a stub defined and consumed inside the same
+# subTest iteration - the loop variable is read before the next iteration
+# rebinds it, so the capture hazard cannot fire. Checked site by site; none of
+# the 23 is in Honeypot/.
+"tests/operations/test_cached_purge.py" = ["B023"]
+
+# ASYNC221: the test shells out to `mklink /J` to build a Windows junction for
+# the evidence-containment case; that is the fixture, not incidental blocking.
+"tests/operations/test_evidence_cleanup.py" = ["ASYNC221"]
+
+# PLR0917: the helper mirrors the operation signature it claims.
+"tests/operations/test_moderator_decision.py" = ["PLR0917"]
+
+# B023: same within-iteration stub closures as test_cached_purge.py.
+# PLW2901: the loop rebinds `idempotency_key` to fill in a case-derived default
+# for the rows that leave it `None`; that is the table's intent.
+"tests/operations/test_source_delete.py" = ["B023", "PLW2901"]
+
+# PLR0912: `test_domain_shells_delegate_to_a_matching_twin` is a single AST
+# classification walk over the cog body (13 branches, one over the limit). Its
+# branches are the guard clauses that reject a node as a delegation shell, and
+# each `continue` states one reason; hoisting them into helpers would scatter
+# the classifier the guard exists to make readable. Moved verbatim from
+# tests/test_detection_pipeline.py, where the exclusion had hidden it.
+"tests/test_cog_assembly.py" = ["PLR0912"]
+
+# B023: the four flagged closures all live in
+# `test_automatic_dry_run_preserves_planned_action_kind`, defined and consumed
+# inside the same `subTest` iteration - the same shape and the same reason as
+# tests/operations/test_cached_purge.py above.
+# PLR0915: `test_automatic_ban_case_projection_catches_up_after_early_publication`
+# and `test_blocked_review_role_starts_after_containment_before_capture_finishes`
+# are flat stub-and-assert sequences over one ordering; their statements are the
+# fixture and the ordering assertions. Moved verbatim from
+# tests/test_detection_pipeline.py, where the exclusion had hidden both.
+"tests/test_detection_actions.py" = ["B023", "PLR0915"]
+
+# ASYNC240: two `evidence_path.exists()` assertions inside async tests. The
+# blocking call is the assertion on the captured evidence file, not production
+# work - the same reason as tests/test_detection_runtime.py below. Moved
+# verbatim from tests/test_detection_pipeline.py, where the exclusion had
+# hidden them.
+"tests/test_detection_capture.py" = ["ASYNC240"]
+
+# ASYNC240: `Path.mkdir`/`Path.write_bytes`/`Path.glob` inside an async test
+# build and inspect the imagescan sample tree; that is the fixture and the
+# assertion, not production blocking - the same reason as
+# tests/test_detection_runtime.py below.
+# RET503: the sqlite connection stub's `__exit__` returns the wrapped
+# `__exit__` on the error path and falls through on the success path, which is
+# the protocol's "do not suppress". The fall-through statement is a `commit()`
+# that always raises the injected failure, so an explicit trailing `return` is
+# unreachable. Moved verbatim from tests/test_detection_pipeline.py, where the
+# exclusion had hidden both.
+"tests/test_detection_diagnostics.py" = ["ASYNC240", "RET503"]
+
+# ASYNC240: the tests touch `Path` directly to set up and assert on capture
+# directories; that is the assertion, not production blocking.
+"tests/test_detection_runtime.py" = ["ASYNC240"]
+
+# PLR0915: `test_image_signal_stops_after_first_match_and_returns_serializable_match`
+# is one flat sequence - the attachment and detector stub table, a controlled
+# scan, then a field-by-field assertion on the serialized match. Its statements
+# are the fixture and the assertions; extracting helpers would separate each
+# assertion from the state it describes. Moved verbatim from
+# tests/test_detection_pipeline.py, where the exclusion had hidden it.
+"tests/test_detection_signals.py" = ["PLR0915"]
+
+# PLW0108: twelve `lambda **kwargs: SimpleNamespace(**kwargs)` factories
+# patched onto `discord.ui.Button`, `discord.ui.Select` and
+# `discord.SelectOption` in the isolated stub module. Inlining them would bind
+# all three attributes to the one `SimpleNamespace` type object instead of
+# giving each patched attribute its own factory; one test patches all three at
+# once.
+# E731: `signal = lambda: honeypot.DetectionSignal(...)` builds a fresh signal
+# per source message inside one test. A `def` here would read as a fixture
+# rather than the one-expression value it is.
+# PLR0915: `test_individual_image_action_opens_dropdown_and_routes_selected_image`
+# is a flat sequence - the view and widget stub table, the dropdown interaction,
+# then the routing assertions.
+# Moved verbatim from tests/test_detection_pipeline.py, where the exclusion had
+# hidden all three.
+"tests/test_case_review_controls.py" = ["E731", "PLR0915", "PLW0108"]
+
+# PLW0108: one `lambda **kwargs: SimpleNamespace(**kwargs)` patched onto
+# `discord.ui.Button` in the isolated stub module. Inlining it would bind the
+# attribute to the `SimpleNamespace` type itself - one object shared with every
+# other widget stub - instead of a factory belonging to this one attribute.
+# Moved verbatim from tests/test_detection_pipeline.py, where the exclusion had
+# hidden it.
+"tests/test_case_moderator_decisions.py" = ["PLW0108"]
+
+# PLC0415: `PIL` is imported inside the helper so the module still imports when
+# Pillow is absent and the test skips instead of erroring at collection.
+"tests/test_image_detector_model.py" = ["PLC0415"]
+
+# E402/PLC0415: the Honeypot imports must run after the redbot/discord stubs
+# are installed into `sys.modules`; hoisting them breaks the module.
+# PLR0915: `_install_redbot_stubs` is one long flat stub table.
+"tests/test_imagescan_cleanup.py" = ["E402", "PLC0415", "PLR0915"]
+
+# PLW0108: three `lambda id: <dict>.get(id)` stubs stand in for
+# `Guild.get_channel`, `Guild.get_member` and `Guild.fetch_member`. Inlining
+# them to `dict.get` would give the stub `dict.get`'s two-argument signature
+# instead of the one-argument Discord one, so the lambda is what pins the
+# stubbed arity. Moved verbatim from tests/test_detection_pipeline.py, where
+# the exclusion had hidden it.
+"tests/test_joinwatch_retry.py" = ["PLW0108"]
+
+[tool.mypy]
+files = ["Honeypot", "NHMisc"]
+python_version = "3.10"
+exclude = "(^|/)(\\.worktrees|local-data)/"
+ignore_missing_imports = true
+warn_unused_configs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = false

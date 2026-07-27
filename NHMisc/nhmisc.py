@@ -4,21 +4,22 @@ import asyncio
 import io
 import logging
 import time
-from datetime import date, datetime, time as datetime_time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as datetime_time
 
 import discord
 from redbot.core import Config, commands
 from redbot.core.data_manager import cog_data_path
 
 from .activity_storage import (
-    ActivityLocation,
     ActivityConsistencyReport,
     ActivityDatabaseStats,
+    ActivityLocation,
     ActivityStore,
     ChannelTimelineDay,
     ChannelUserCount,
-    DailySummary,
     DailyDominantLocation,
+    DailySummary,
     TimelineDay,
     TopChannel,
     UserChannelDistribution,
@@ -46,7 +47,6 @@ from .role_expression import (
 )
 from .sticky_roles import StickyRoleStore
 from .voice_activity import VoiceChannelVisitTracker
-
 
 log = logging.getLogger("red.NHMisc")
 
@@ -1818,7 +1818,7 @@ class NHMisc(commands.Cog):
         parent = getattr(channel, "parent", None)
         if isinstance(channel, discord.Thread) and parent is not None:
             return parent.id
-        return getattr(channel, "id")
+        return channel.id
 
     def _activity_thread_id(self, channel: object) -> int | None:
         if isinstance(channel, discord.Thread):

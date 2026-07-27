@@ -1,0 +1,1040 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import io
+import json
+import logging
+import math
+import re
+import shutil
+import sqlite3
+import tempfile
+import typing
+import zipfile
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from functools import partial
+from pathlib import Path
+
+import discord
+from redbot.core import commands
+from redbot.core.i18n import Translator
+from redbot.core.utils.chat_formatting import box, pagify
+
+from .console_dump import build_log_dump
+from .detection_cases import OperationType
+from .settings import CORE_ACTION_OPTIONS, DEFAULT_STATS, GuildSettings
+
+_ = Translator("Honeypot", __file__)
+log = logging.getLogger("red.Honeypot")
+
+CONSOLE_DUMP_USAGE = (
+    "Usage: `consoledump <bot|honeypot> <hours 1-24> "
+    "[debug|info|warning|error|critical]`\n"
+    "Scope: `bot` includes all captured Python logs. `honeypot` includes Honeypot "
+    "logs and related tracebacks.\n"
+    "Hours: a whole number from 1 to 24.\n"
+    "Level (optional): the minimum log level to include. Omit it to include all "
+    "levels.\n"
+    "Examples: `consoledump bot 2`, `consoledump honeypot 1`, "
+    "`consoledump bot 6 error`"
+)
+REVIEW_DUMP_START = datetime(2026, 5, 1, tzinfo=timezone.utc)
+REVIEW_DUMP_MAX_ZIP_BYTES = 95 * 1024 * 1024
+REVIEW_DUMP_ATTACHMENT_DELAY_SECONDS = 1
+
+
+@dataclass(frozen=True, slots=True)
+class DoctorResult:
+    name: str
+    status: typing.Literal["healthy", "warning", "failed"]
+    detail: str = ""
+
+
+DoctorCheck = typing.Callable[[], typing.Awaitable[typing.Sequence[DoctorResult]]]
+
+
+def _review_dump_field_map(embed: discord.Embed) -> dict[str, str]:
+    return {str(field.name).strip().rstrip(":").lower(): str(field.value) for field in embed.fields}
+
+
+def _review_dump_clean_mentions(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return re.findall(r"<#(\d+)>", value)
+
+
+def _review_dump_extract_user_id(embed: discord.Embed, fields: dict[str, str]) -> int | None:
+    candidates = [
+        fields.get("user"),
+        fields.get("user id"),
+        embed.description,
+        embed.title,
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        match = re.search(r"\b(\d{15,25})\b", str(candidate))
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _review_dump_is_banned_review(message: discord.Message) -> bool:
+    if not message.embeds:
+        return False
+    fields = _review_dump_field_map(message.embeds[0])
+    action = (fields.get("action taken") or fields.get("action") or "").lower()
+    return "ban" in action and "dry-run" not in action and "failed" not in action
+
+
+def _review_dump_message_record(
+    message: discord.Message, parent_review_id: int | None = None
+) -> dict[str, typing.Any]:
+    embed = message.embeds[0] if message.embeds else None
+    fields = _review_dump_field_map(embed) if embed else {}
+    record: dict[str, typing.Any] = {
+        "message_id": str(message.id),
+        "parent_review_message_id": str(parent_review_id) if parent_review_id is not None else None,
+        "jump_url": message.jump_url,
+        "created_at": message.created_at.isoformat(),
+        "content": message.content or None,
+        "embed": None,
+        "attachment_count": len(message.attachments),
+    }
+    if embed:
+        record["embed"] = {
+            "title": embed.title,
+            "description": embed.description,
+            "timestamp": embed.timestamp.isoformat() if embed.timestamp else None,
+            "fields": fields,
+        }
+    return record
+
+
+async def _review_dump_download_attachment(
+    cog,
+    attachment: discord.Attachment,
+    case_dir: Path,
+    prefix: str,
+    index: int,
+) -> dict[str, typing.Any]:
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", attachment.filename or f"attachment-{index}")
+    archive_name = f"{prefix}-{index:03d}-{safe_name}"
+    target = case_dir / archive_name
+    result: dict[str, typing.Any] = {
+        "filename": attachment.filename,
+        "archive_path": target.as_posix(),
+        "size": attachment.size,
+        "content_type": attachment.content_type,
+        "url": attachment.url,
+        "sha256": None,
+        "error": None,
+    }
+    try:
+        data = await attachment.read(use_cached=True)
+        target.write_bytes(data)
+        result["size"] = len(data)
+        result["sha256"] = hashlib.sha256(data).hexdigest()
+        await asyncio.sleep(REVIEW_DUMP_ATTACHMENT_DELAY_SECONDS)
+    except (discord.HTTPException, OSError) as exc:
+        result["archive_path"] = None
+        result["error"] = str(exc)
+    return result
+
+
+async def _review_dump_collect_case(
+    cog,
+    review_message: discord.Message,
+    replies_by_reference: dict[int, list[discord.Message]],
+    root_dir: Path,
+) -> dict[str, typing.Any]:
+    embed = review_message.embeds[0]
+    fields = _review_dump_field_map(embed)
+    attachment_dir = root_dir / "cases" / str(review_message.id) / "attachments"
+    attachment_dir.mkdir(parents=True, exist_ok=True)
+    attachments: list[dict[str, typing.Any]] = []
+    for index, attachment in enumerate(review_message.attachments, 1):
+        attachments.append(
+            await _review_dump_download_attachment(cog, attachment, attachment_dir, "review", index)
+        )
+    addendums: list[dict[str, typing.Any]] = []
+    for addendum in sorted(
+        replies_by_reference.get(review_message.id, []), key=lambda item: item.created_at
+    ):
+        addendum_record = _review_dump_message_record(addendum, review_message.id)
+        addendum_attachments: list[dict[str, typing.Any]] = []
+        for index, attachment in enumerate(addendum.attachments, 1):
+            addendum_attachments.append(
+                await _review_dump_download_attachment(
+                    cog,
+                    attachment,
+                    attachment_dir,
+                    f"addendum-{addendum.id}",
+                    index,
+                )
+            )
+        addendum_record["attachments"] = addendum_attachments
+        addendums.append(addendum_record)
+        attachments.extend(addendum_attachments)
+    return {
+        "review_message_id": str(review_message.id),
+        "review_jump_url": review_message.jump_url,
+        "review_created_at": review_message.created_at.isoformat(),
+        "target_user_id": _review_dump_extract_user_id(embed, fields),
+        "case_type": "manual_review" if fields.get("action taken") else "honeypot_hit",
+        "completed_action": fields.get("action taken") or fields.get("action"),
+        "reviewed_by": fields.get("reviewed by"),
+        "channels": fields.get("channels") or fields.get("channel"),
+        "channel_ids": _review_dump_clean_mentions(
+            fields.get("channels") or fields.get("channel")
+        ),
+        "trigger_reasons": fields.get("trigger reasons") or fields.get("reason"),
+        "message_content": embed.description,
+        "embed_fields": fields,
+        "review_message": _review_dump_message_record(review_message),
+        "attachments": attachments,
+        "addendums": addendums,
+    }
+
+
+def _review_dump_zip_chunks(root_dir: Path, zip_dir: Path, max_bytes: int) -> list[Path]:
+    files = [path for path in root_dir.rglob("*") if path.is_file()]
+    chunks: list[list[Path]] = [[]]
+    chunk_sizes = [0]
+    for path in sorted(files):
+        size = path.stat().st_size
+        if chunks[-1] and chunk_sizes[-1] + size > max_bytes:
+            chunks.append([])
+            chunk_sizes.append(0)
+        chunks[-1].append(path)
+        chunk_sizes[-1] += size
+    width = max(3, int(math.log10(max(len(chunks), 1))) + 1)
+    archives: list[Path] = []
+    for index, chunk in enumerate(chunks, 1):
+        archive = zip_dir / f"honeypot-review-dump-{index:0{width}d}.zip"
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+            for path in chunk:
+                zip_file.write(path, path.relative_to(root_dir))
+        archives.append(archive)
+    return archives
+
+
+async def _review_dump_update_progress(
+    cog,
+    progress_message: discord.Message,
+    *,
+    scanned: int,
+    dumped: int,
+    current_date: datetime | None,
+    started_at: datetime,
+    finished: bool = False,
+) -> None:
+    elapsed = datetime.now(timezone.utc) - started_at
+    current = current_date.strftime("%Y-%m-%d %H:%M UTC") if current_date else "unknown"
+    status = "Finished" if finished else "Running"
+    content = (
+        f"**Honeypot review dump:** {status}\n"
+        f"Current date: `{current}`\n"
+        f"Messages scanned: `{scanned}`\n"
+        f"Banned reviews dumped: `{dumped}`\n"
+        f"Elapsed: `{str(elapsed).split('.')[0]}`"
+    )
+    try:
+        await progress_message.edit(content=content)
+    except discord.HTTPException:
+        log.debug("Failed to update review dump progress message %s", progress_message.id)
+
+
+async def console_dump(
+    cog,
+    ctx: commands.Context,
+    scope: str | None = None,
+    hours: str | None = None,
+    level: str | None = None,
+) -> None:
+    """Export recent sanitized Python logs to a private text channel."""
+    channel = ctx.channel
+    if not isinstance(channel, discord.TextChannel):
+        await ctx.send(_("Console dumps require a private text channel."))
+        return
+    if not channel.permissions_for(ctx.author).manage_messages:
+        await ctx.send(_("You need Manage Messages to use this command."))
+        return
+    if channel.permissions_for(ctx.guild.default_role).view_channel:
+        await ctx.send(_("Console dumps cannot be sent to a channel visible to @everyone."))
+        return
+    missing_permissions = cog._missing_channel_permissions(
+        ctx.guild,
+        channel,
+        attach_files=True,
+    )
+    if missing_permissions is not None:
+        await ctx.send(missing_permissions)
+        return
+
+    normalized_scope = scope.casefold() if scope is not None else None
+    normalized_level = level.casefold() if level is not None else None
+    try:
+        parsed_hours = int(hours) if hours is not None else None
+    except ValueError:
+        parsed_hours = None
+    levels = {
+        "debug": logging.DEBUG,
+        "info": logging.INFO,
+        "warning": logging.WARNING,
+        "error": logging.ERROR,
+        "critical": logging.CRITICAL,
+    }
+    if (
+        normalized_scope not in {"bot", "honeypot"}
+        or parsed_hours is None
+        or not 1 <= parsed_hours <= 24
+        or (normalized_level is not None and normalized_level not in levels)
+    ):
+        await ctx.send(CONSOLE_DUMP_USAGE)
+        return
+
+    dump = build_log_dump(
+        cog._console_log_buffer.snapshot(),
+        scope=normalized_scope,
+        hours=parsed_hours,
+        minimum_level=levels.get(normalized_level),
+        upload_limit=int(ctx.guild.filesize_limit),
+        now=datetime.now(timezone.utc),
+    )
+    await ctx.send(
+        file=discord.File(io.BytesIO(dump.content), filename=dump.filename),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+async def review_dump(cog, ctx: commands.Context) -> None:
+    """Export banned review cases from the current channel."""
+    if cog._review_dump_lock.locked():
+        await ctx.send(_("A review dump is already running."))
+        return
+
+    async with cog._review_dump_lock:
+        started_at = datetime.now(timezone.utc)
+        after = REVIEW_DUMP_START
+        progress_message = await ctx.send(
+            _(
+                "**Honeypot review dump:** Running\n"
+                "Current date: `starting`\n"
+                "Messages scanned: `0`\n"
+                "Banned reviews dumped: `0`\n"
+                "Elapsed: `0:00:00`"
+            )
+        )
+        temp_root = Path(tempfile.mkdtemp(prefix="honeypot-review-dump-"))
+        data_root = temp_root / "data"
+        zip_root = temp_root / "zips"
+        data_root.mkdir(parents=True, exist_ok=True)
+        zip_root.mkdir(parents=True, exist_ok=True)
+        scanned = 0
+        dumped = 0
+        current_date: datetime | None = None
+        last_progress = datetime.now(timezone.utc)
+        replies_by_reference: dict[int, list[discord.Message]] = defaultdict(list)
+        banned_reviews: list[discord.Message] = []
+        cases: list[dict[str, typing.Any]] = []
+
+        try:
+            async for message in ctx.channel.history(limit=None, after=after, oldest_first=False):
+                scanned += 1
+                current_date = message.created_at
+                reference = getattr(message, "reference", None)
+                if reference is not None and reference.message_id is not None:
+                    replies_by_reference[reference.message_id].append(message)
+                if _review_dump_is_banned_review(message):
+                    banned_reviews.append(message)
+                now = datetime.now(timezone.utc)
+                if (
+                    scanned == 1
+                    or scanned % 250 == 0
+                    or (now - last_progress).total_seconds() >= 30
+                ):
+                    await _review_dump_update_progress(
+                        cog,
+                        progress_message,
+                        scanned=scanned,
+                        dumped=dumped,
+                        current_date=current_date,
+                        started_at=started_at,
+                    )
+                    last_progress = now
+                    await asyncio.sleep(0.25)
+
+            for review_message in sorted(banned_reviews, key=lambda item: item.created_at):
+                cases.append(
+                    await _review_dump_collect_case(
+                        cog,
+                        review_message, replies_by_reference, data_root
+                    )
+                )
+                dumped += 1
+                now = datetime.now(timezone.utc)
+                if dumped == 1 or dumped % 10 == 0 or (now - last_progress).total_seconds() >= 30:
+                    await _review_dump_update_progress(
+                        cog,
+                        progress_message,
+                        scanned=scanned,
+                        dumped=dumped,
+                        current_date=review_message.created_at,
+                        started_at=started_at,
+                    )
+                    last_progress = now
+
+            manifest = {
+                "guild_id": str(ctx.guild.id),
+                "channel_id": str(ctx.channel.id),
+                "channel_name": getattr(ctx.channel, "name", None),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "scan_after": after.isoformat(),
+                "messages_scanned": scanned,
+                "banned_reviews_dumped": dumped,
+                "cases": cases,
+            }
+            (data_root / "manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            with (data_root / "reviews.jsonl").open("w", encoding="utf-8") as handle:
+                for case in cases:
+                    handle.write(json.dumps(case, ensure_ascii=False) + "\n")
+
+            archives = _review_dump_zip_chunks(data_root, zip_root, REVIEW_DUMP_MAX_ZIP_BYTES)
+            await _review_dump_update_progress(
+                cog,
+                progress_message,
+                scanned=scanned,
+                dumped=dumped,
+                current_date=current_date,
+                started_at=started_at,
+                finished=True,
+            )
+
+            if not archives:
+                await ctx.send(_("No dump files were created."))
+                return
+            for archive in archives:
+                await ctx.send(file=discord.File(archive))
+        finally:
+            shutil.rmtree(temp_root, ignore_errors=True)
+
+
+async def config_dump(cog, ctx: commands.Context) -> None:
+    """Show current honeypot configuration by section."""
+
+
+async def honeypot_errors(cog, ctx: commands.Context) -> None:
+    """Show unacknowledged Honeypot operational failures."""
+    failures = await asyncio.to_thread(
+        cog._case_store.list_operational_failures,
+        ctx.guild.id,
+        include_resolved=True,
+    )
+    if not failures:
+        await ctx.send(_("No unacknowledged Honeypot errors."))
+        return
+    lines = []
+    for failure in failures:
+        state = "recovered" if failure.resolved_at is not None else "active"
+        source = (
+            failure.source.value if isinstance(failure.source, OperationType) else failure.source
+        )
+        lines.append(
+            f"- <t:{int(failure.last_seen_at.timestamp())}:R> "
+            f"`{source}` ({state}, x{failure.occurrences}): "
+            f"{failure.summary[:500]}"
+        )
+    body = "\n".join(lines)
+    header = _("**Honeypot operational errors:**\n")
+    for page in pagify(body, page_length=2000 - len(header)):
+        await ctx.send(header + page)
+
+
+async def honeypot_errors_clear(cog, ctx: commands.Context) -> None:
+    """Acknowledge all currently visible Honeypot operational failures."""
+    count = await asyncio.to_thread(
+        cog._case_store.clear_operational_failures,
+        ctx.guild.id,
+        datetime.now(timezone.utc),
+    )
+    await ctx.send(_("Acknowledged {count} Honeypot errors.").format(count=count))
+
+
+async def honeypot_mod_stats(cog, ctx: commands.Context) -> None:
+    """Show detailed moderation statistics."""
+    stats = DEFAULT_STATS.copy()
+    stats.update(await cog.config.guild(ctx.guild).stats())
+    pending_joinwatch_assignments = await cog.config.guild(
+        ctx.guild
+    ).joinwatch_pending_role_assignments()
+    pending_joinwatch_roles = await cog.config.guild(ctx.guild).joinwatch_pending_roles()
+    now = datetime.now(timezone.utc)
+    case_counts = await asyncio.to_thread(
+        cog._case_store.operational_counts,
+        ctx.guild.id,
+        now,
+        now - timedelta(minutes=5),
+    )
+    total_joins = stats["joinwatch_total_joins"]
+    young_joins = stats["joinwatch_young_joins"]
+    young_join_rate = (young_joins / total_joins * 100) if total_joins else 0
+    sections = {
+        "Detection": {
+            "Total detections": stats["detections"],
+            "Suspicious detections": stats["suspicious"],
+            "Whitelisted users": stats["whitelisted"],
+            "Purged messages": stats["purged_messages"],
+            "Cached purge deletes": stats["cached_purge_deletes"],
+            "Forward purge deletes": stats["forward_purge_deletes"],
+            "Forward purge delete failures": stats["forward_purge_delete_failures"],
+            "Evidence capture failures": stats["evidence_capture_failures"],
+            "Active detection cases": case_counts["active_cases"],
+            "Due detection cases": case_counts["due_cases"],
+            "Stale resolving cases": case_counts["stale_resolving_cases"],
+            "Failed containment cases": case_counts["failed_containment"],
+            "Forbidden message deletes": case_counts["forbidden_deletes"],
+            "Outstanding durable operations": case_counts["outstanding_operations"],
+            "Queued privacy deletions": case_counts["privacy_deletion_jobs"],
+        },
+        "Firstpost": {
+            "Firstpost seen": stats["firstpost_seen"],
+            "Firstpost hits": stats["firstpost_hits"],
+            "Firstpost reviews": stats["firstpost_reviews"],
+            "Firstpost kicks": stats["firstpost_kicks"],
+            "Firstpost bans": stats["firstpost_bans"],
+            "Early catches": stats["early_catches"],
+        },
+        "Honeypot": {
+            "Honeypot hits": stats["honeypot_hits"],
+            "Honeypot reviews": stats["honeypot_reviews"],
+            "Honeypot kicks": stats["honeypot_kicks"],
+            "Honeypot bans": stats["honeypot_bans"],
+            "Honeypot catches": stats["honeypot_catches"],
+        },
+        "Spam": {
+            "Spam hits": stats["spam_hits"],
+            "Spam reviews": stats["spam_reviews"],
+            "Spam kicks": stats["spam_kicks"],
+            "Spam bans": stats["spam_bans"],
+            "Spam catches": stats["spam_catches"],
+        },
+        "Image detection": {
+            "Image hits": stats["image_hits"],
+            "Image reviews": stats["image_reviews"],
+            "Image kicks": stats["image_kicks"],
+            "Image bans": stats["image_bans"],
+            "Image catches": stats["image_catches"],
+        },
+        "Review": {
+            "Reviews sent": stats["reviewed"],
+            "Expired reviews": stats["review_expired"],
+            "Ignored reviews": stats["ignored"],
+            "Applied temporary mutes": stats["pending_mutes"],
+            "Failed temporary mutes": stats["pending_mute_failures"],
+        },
+        "Joinwatch": {
+            "Total joins": total_joins,
+            "Young joins": young_joins,
+            "Young join rate": f"{young_join_rate:.1f}%",
+            "Auto-role applications scheduled": stats["joinwatch_auto_roles_scheduled"],
+            "Pending role applications": len(pending_joinwatch_assignments),
+            "Auto-roles applied": stats["joinwatch_auto_roles"],
+            "Auto-role failures": stats["joinwatch_auto_role_failures"],
+            "Auto-roles cleared": stats["joinwatch_auto_roles_cleared"],
+            "Active auto-role timers": len(pending_joinwatch_roles),
+            "Auto-role punishments": stats["joinwatch_auto_role_punishments"],
+        },
+        "Actions": {
+            "Kicked users": stats["kicked"],
+            "Banned users": stats["banned"],
+            "Failed actions": stats["failed_actions"],
+            "Dry-run actions": stats["dry_run_actions"],
+        },
+    }
+    lines = []
+    for section, values in sections.items():
+        if lines:
+            lines.append("")
+        lines.append(f"{section}:")
+        lines.extend(f"  {label}: {value}" for label, value in values.items())
+    await ctx.send(_("**Honeypot stats:**\n") + box("\n".join(lines)))
+
+
+async def honeypot_stats(cog, ctx: commands.Context) -> None:
+    """Show public server safety statistics."""
+    stats = DEFAULT_STATS.copy()
+    stats.update(await cog.config.guild(ctx.guild).stats())
+    detected_activity = stats["detections"]
+    moderation_actions = stats["kicked"] + stats["banned"]
+    automated_protections = stats["joinwatch_auto_roles"] + stats["joinwatch_auto_role_punishments"]
+    lines = [
+        f"  {_('Detected activity')}: {detected_activity}",
+        f"  {_('Moderation actions')}: {moderation_actions}",
+        f"  {_('Sent for review')}: {stats['reviewed']}",
+        f"  {_('Automated protections')}: {automated_protections}",
+    ]
+    await ctx.send(_("**Server safety stats:**\n") + box("\n".join(lines)))
+
+
+async def honeypot_reset_stats(cog, ctx: commands.Context) -> None:
+    """Reset stored honeypot statistics."""
+    await cog.config.guild(ctx.guild).stats.set(DEFAULT_STATS.copy())
+    await ctx.send(_("✅ Stats reset."))
+
+
+def _verify_detection_case_evidence_directory(cog) -> None:
+    probe_path: Path | None = None
+    probe_error: OSError | None = None
+    try:
+        cog._detection_case_files_path.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            dir=cog._detection_case_files_path,
+            prefix=".doctor-",
+            delete=False,
+        ) as probe:
+            probe_path = Path(probe.name)
+            probe.write(b"ok")
+        if probe_path.read_bytes() != b"ok":
+            raise OSError("evidence directory read/write check failed")
+    except OSError as error:
+        probe_error = error
+    finally:
+        if probe_path is not None:
+            try:
+                probe_path.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                if probe_error is None:
+                    probe_error = cleanup_error
+    if probe_error is not None:
+        raise probe_error
+
+
+async def _doctor_runtime_checks(cog, guild_id: int) -> tuple[DoctorResult, ...]:
+    results: list[DoctorResult] = []
+    case_database_ok = True
+    try:
+        await asyncio.to_thread(cog._case_store.verify_read_write)
+    except (OSError, sqlite3.Error) as error:
+        case_database_ok = False
+        results.append(
+            DoctorResult(
+                "Detection case database",
+                "failed",
+                f"Read/write check failed: {error}",
+            )
+        )
+    else:
+        results.append(DoctorResult("Detection case database", "healthy"))
+    try:
+        await asyncio.to_thread(_verify_detection_case_evidence_directory, cog)
+    except OSError as error:
+        results.append(
+            DoctorResult(
+                "Detection case evidence directory",
+                "failed",
+                f"Read/write check failed: {error}",
+            )
+        )
+    else:
+        results.append(DoctorResult("Detection case evidence directory", "healthy"))
+    if not case_database_ok:
+        return tuple(results)
+
+    now = datetime.now(timezone.utc)
+    operational_failures = await asyncio.to_thread(
+        cog._case_store.list_operational_failures,
+        guild_id,
+    )
+    if operational_failures:
+        oldest = min(item.first_seen_at for item in operational_failures)
+        results.append(
+            DoctorResult(
+                f"Active operational failures: {len(operational_failures)}",
+                "failed",
+                f"Oldest: <t:{int(oldest.timestamp())}:R>. Run `honeypot errors`.",
+            )
+        )
+    else:
+        results.append(DoctorResult("Active operational failures: 0", "healthy"))
+    case_counts = await asyncio.to_thread(
+        cog._case_store.operational_counts,
+        guild_id,
+        now,
+        now - timedelta(minutes=5),
+    )
+    for name, count, detail in (
+        (
+            "Due detection cases",
+            case_counts["due_cases"],
+            "Run detection case reconciliation.",
+        ),
+        (
+            "Stale resolving cases",
+            case_counts["stale_resolving_cases"],
+            "Run detection case reconciliation.",
+        ),
+        (
+            "Failed containment cases",
+            case_counts["failed_containment"],
+            "Inspect moderation case delete failures.",
+        ),
+    ):
+        results.append(
+            DoctorResult(
+                f"{name}: {count}",
+                "healthy" if count == 0 else "failed",
+                detail,
+            )
+        )
+    return tuple(results)
+
+
+async def _doctor_configuration_checks(
+    cog,
+    guild,
+    me,
+    guild_settings: GuildSettings,
+    honeypot_channels: typing.Sequence,
+    logs_channel,
+    logs_channel_invalid: bool,
+    review_channel,
+) -> tuple[DoctorResult, ...]:
+    results: list[DoctorResult] = []
+    if not guild_settings.enabled:
+        results.append(DoctorResult("Honeypot is disabled.", "warning"))
+    if guild_settings.action is None:
+        results.append(
+            DoctorResult(
+                "Honeypot action is invalid",
+                "failed",
+                "Run `honeypot honeypot action`.",
+            )
+        )
+    if guild_settings.firstpost_action.value not in CORE_ACTION_OPTIONS:
+        results.append(
+            DoctorResult(
+                "Firstpost action is invalid",
+                "failed",
+                "Run `honeypot firstpost action`.",
+            )
+        )
+    if guild_settings.spam_action.value not in CORE_ACTION_OPTIONS:
+        results.append(
+            DoctorResult(
+                "Spam action is invalid",
+                "failed",
+                "Run `honeypot spam action`.",
+            )
+        )
+    if guild_settings.enabled and not honeypot_channels:
+        results.append(
+            DoctorResult(
+                "No honeypot channel exists",
+                "failed",
+                "Run `honeypot channel add`.",
+            )
+        )
+    if logs_channel_invalid:
+        results.append(
+            DoctorResult(
+                "Logs channel must be a normal text channel",
+                "failed",
+                "Run `honeypot channel logs` with a normal text channel.",
+            )
+        )
+    if guild_settings.enabled and logs_channel is None and not logs_channel_invalid:
+        results.append(
+            DoctorResult(
+                "Logs channel is missing",
+                "failed",
+                "Run `honeypot channel logs`.",
+            )
+        )
+    review_required = (
+        guild_settings.fallback_action.value == "review"
+        or guild_settings.review_enabled
+        or guild_settings.whitelist_mode.value == "review"
+        or (guild_settings.firstpost_enabled and guild_settings.firstpost_action.value == "review")
+        or (guild_settings.spam_enabled and guild_settings.spam_action.value == "review")
+    )
+    if review_required and review_channel is None:
+        results.append(
+            DoctorResult(
+                "Review channel is missing",
+                "failed",
+                "Run `honeypot review channel`.",
+            )
+        )
+    if guild_settings.mute_role:
+        mute_role = guild.get_role(guild_settings.mute_role)
+        if mute_role is None:
+            results.append(
+                DoctorResult(
+                    "Mute role is missing",
+                    "failed",
+                    "Run `honeypot punishment mute_role`.",
+                )
+            )
+        elif not me.top_role > mute_role:
+            results.append(
+                DoctorResult(
+                    "Bot is not above mute role",
+                    "failed",
+                    "Move bot role above mute role.",
+                )
+            )
+    if guild_settings.joinwatch_auto_role_enabled:
+        auto_role_id = guild_settings.joinwatch_auto_role_id
+        auto_role = guild.get_role(auto_role_id) if auto_role_id else None
+        if auto_role is None:
+            results.append(
+                DoctorResult(
+                    "Joinwatch auto-role is missing",
+                    "failed",
+                    "Run `honeypot joinwatch autorole role`.",
+                )
+            )
+        elif not me.top_role > auto_role:
+            results.append(
+                DoctorResult(
+                    "Bot is not above joinwatch auto-role",
+                    "failed",
+                    "Move bot role above the joinwatch auto-role.",
+                )
+            )
+    if guild_settings.joinwatch_enabled and guild_settings.joinwatch_alert_enabled:
+        joinwatch_channel = cog._get_text_channel_or_thread(guild, guild_settings.joinwatch_channel)
+        if joinwatch_channel is None:
+            results.append(
+                DoctorResult(
+                    "Joinwatch alert channel is missing",
+                    "failed",
+                    "Run `honeypot joinwatch channel`.",
+                )
+            )
+        else:
+            perms = joinwatch_channel.permissions_for(me)
+            send_permission = (
+                "send_messages_in_threads"
+                if isinstance(joinwatch_channel, discord.Thread)
+                else "send_messages"
+            )
+            if not getattr(perms, send_permission, False):
+                permission_label = (
+                    "Send Messages in Threads"
+                    if send_permission == "send_messages_in_threads"
+                    else "Send Messages"
+                )
+                results.append(
+                    DoctorResult(
+                        "Cannot send joinwatch alerts",
+                        "failed",
+                        f"Grant {permission_label}.",
+                    )
+                )
+    return tuple(results)
+
+
+async def _doctor_channel_permission_checks(
+    cog,
+    guild,
+    me,
+    honeypot_channels: typing.Sequence,
+    logs_channel,
+    *,
+    review_channel,
+    missing_purge_permissions,
+    is_purgeable_message_channel,
+) -> tuple[DoctorResult, ...]:
+    results: list[DoctorResult] = []
+    for honeypot_channel in honeypot_channels:
+        perms = honeypot_channel.permissions_for(me)
+        missing_permissions = missing_purge_permissions(perms)
+        if missing_permissions:
+            results.append(
+                DoctorResult(
+                    f"{honeypot_channel} permissions",
+                    "failed",
+                    "Missing: " + ", ".join(missing_permissions),
+                )
+            )
+    skipped_channels = []
+    purgeable_channels = [
+        channel
+        for channel in list(guild.channels) + list(guild.threads)
+        if is_purgeable_message_channel(channel)
+    ]
+    for channel in purgeable_channels:
+        perms = channel.permissions_for(me)
+        if not perms.view_channel:
+            continue
+        if not perms.manage_messages:
+            skipped_channels.append(channel.mention)
+    if skipped_channels:
+        results.append(
+            DoctorResult(
+                "Cached purge can delete visible message channels",
+                "failed",
+                "\nManage - " + ", ".join(skipped_channels),
+            )
+        )
+    if logs_channel is not None:
+        perms = logs_channel.permissions_for(me)
+        if not perms.send_messages:
+            results.append(DoctorResult("Cannot send logs", "failed", "Grant Send Messages."))
+    case_destination = review_channel or logs_channel
+    if case_destination is not None:
+        perms = case_destination.permissions_for(me)
+        destination_label = "Review channel" if review_channel is not None else "Logs channel"
+        required = (
+            ("view_channel", "View Channel"),
+            ("send_messages", "Send Messages"),
+            ("create_public_threads", "Create Public Threads"),
+            ("send_messages_in_threads", "Send Messages in Threads"),
+            ("read_message_history", "Read Message History"),
+            ("embed_links", "Embed Links"),
+            ("attach_files", "Attach Files"),
+            ("manage_threads", "Manage Threads"),
+        )
+        missing = [label for attribute, label in required if not getattr(perms, attribute, False)]
+        if not isinstance(case_destination, discord.TextChannel) or missing:
+            detail = (
+                "Use a normal text channel."
+                if not isinstance(case_destination, discord.TextChannel)
+                else "Grant: " + ", ".join(missing)
+            )
+            results.append(
+                DoctorResult(
+                    f"{destination_label} cannot host case threads",
+                    "failed",
+                    detail,
+                )
+            )
+    return tuple(results)
+
+
+async def _doctor_guild_permission_checks(
+    cog,
+    me,
+    guild_settings: GuildSettings,
+) -> tuple[DoctorResult, ...]:
+    results: list[DoctorResult] = []
+    guild_perms = me.guild_permissions
+    configured_actions = {
+        guild_settings.action.value if guild_settings.action is not None else None,
+        guild_settings.fallback_action.value,
+        guild_settings.firstpost_action.value,
+        guild_settings.spam_action.value,
+        guild_settings.imagescan_detector_action.value,
+    }
+    if "kick" in configured_actions and not guild_perms.kick_members:
+        results.append(DoctorResult("Cannot kick members", "failed", "Grant Kick Members."))
+    if "ban" in configured_actions and not guild_perms.ban_members:
+        results.append(DoctorResult("Cannot ban members", "failed", "Grant Ban Members."))
+    roles_configured = guild_settings.mute_role or guild_settings.joinwatch_auto_role_enabled
+    if roles_configured and not guild_perms.manage_roles:
+        results.append(
+            DoctorResult(
+                "Cannot manage configured roles",
+                "failed",
+                "Grant Manage Roles.",
+            )
+        )
+    return tuple(results)
+
+
+async def _run_doctor_checks(
+    checks: typing.Sequence[DoctorCheck],
+) -> tuple[DoctorResult, ...]:
+    results: list[DoctorResult] = []
+    for check in checks:
+        results.extend(await check())
+    return tuple(results)
+
+
+def _render_doctor_results(
+    results: typing.Sequence[DoctorResult],
+) -> tuple[str, ...]:
+    failed = [
+        f"❌ {result.name}{result.detail}"
+        if result.detail.startswith("\n")
+        else f"❌ {result.name} - {result.detail}"
+        for result in results
+        if result.status == "failed"
+    ]
+    warnings = [
+        f"⚠️ {result.name}" if not result.detail else f"⚠️ {result.name} - {result.detail}"
+        for result in results
+        if result.status == "warning"
+    ]
+    header = _("**Honeypot doctor:**\n")
+    findings = failed + warnings
+    body = "\n".join(findings) if findings else "✅ No configuration or runtime problems found."
+    return tuple(header + page for page in pagify(body, page_length=2000 - len(header)))
+
+
+async def honeypot_doctor(cog, ctx: commands.Context) -> None:
+    """Check honeypot configuration and required permissions."""
+    raw_config = await cog.config.guild(ctx.guild).all()
+    guild_settings = GuildSettings.from_mapping(raw_config)
+    results = list(
+        await _run_doctor_checks([partial(_doctor_runtime_checks, cog, ctx.guild.id)])
+    )
+    me = ctx.guild.me
+    if me is None:
+        await ctx.send(_("**Honeypot doctor:**\n❌ I couldn't find my server member."))
+        return
+
+    honeypot_channels = tuple(
+        channel
+        for channel_id in cog._honeypot_channel_ids(
+            guild_settings.honeypot_channels,
+            guild_settings.honeypot_channel,
+        )
+        if (channel := cog._get_text_channel_or_thread(ctx.guild, channel_id)) is not None
+    )
+    logs_channel_id = guild_settings.logs_channel
+    configured_logs_channel = (
+        cog._get_cached_message_channel(ctx.guild, logs_channel_id)
+        if isinstance(logs_channel_id, int)
+        else None
+    )
+    logs_channel = (
+        configured_logs_channel
+        if isinstance(configured_logs_channel, discord.TextChannel)
+        else None
+    )
+    logs_channel_invalid = configured_logs_channel is not None and logs_channel is None
+    review_channel = cog._get_text_channel_or_thread(ctx.guild, guild_settings.review_channel)
+    checks: list[DoctorCheck] = [
+        partial(
+            _doctor_configuration_checks,
+            cog,
+            ctx.guild,
+            me,
+            guild_settings,
+            honeypot_channels,
+            logs_channel,
+            logs_channel_invalid,
+            review_channel,
+        ),
+        partial(
+            cog._doctor_channel_permission_checks,
+            ctx.guild,
+            me,
+            honeypot_channels,
+            logs_channel,
+            review_channel,
+        ),
+        partial(_doctor_guild_permission_checks, cog, me, guild_settings),
+    ]
+    results.extend(await _run_doctor_checks(checks))
+    for page in _render_doctor_results(results):
+        await ctx.send(page)
