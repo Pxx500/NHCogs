@@ -1736,9 +1736,7 @@ async def _execute_action(
                     return ModerationEffectResult(
                         label,
                         failed_message,
-                        EffectStatus.FAILED
-                        if failed_message is not None
-                        else EffectStatus.SUCCEEDED,
+                        EffectStatus.FAILED,
                     )
                 raise
             await cog._increment_stat(guild, "kicked")

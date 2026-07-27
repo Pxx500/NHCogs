@@ -63,3 +63,54 @@ class PunitiveEffectPolicyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_current_dry_run_blocks_kick_with_stale_settings(self):
         await self._assert_current_dry_run_plans("kick")
+
+    async def test_successful_kick_fail_warning_keeps_failed_effect_status(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                from Honeypot.effects import EffectStatus
+
+                cog = honeypot.Honeypot(_Bot())
+                current_config = SimpleNamespace(
+                    all=mock.AsyncMock(return_value={"dry_run": False})
+                )
+                cog.config = SimpleNamespace(
+                    guild=mock.Mock(return_value=current_config)
+                )
+                cog._increment_stat = mock.AsyncMock()
+                cog._missing_action_permission = mock.Mock(return_value=None)
+                cog._deactivate_forward_purge = mock.Mock()
+                cog._get_user_or_object = mock.AsyncMock()
+                honeypot.detection._activate_forward_purge = mock.Mock()
+
+                guild = SimpleNamespace(id=10, me=SimpleNamespace(id=11))
+                member = SimpleNamespace(
+                    id=20,
+                    kick=mock.AsyncMock(
+                        side_effect=honeypot.discord.NotFound(
+                            "kick target missing"
+                        )
+                    ),
+                )
+                cog._get_user_or_object.return_value = member
+                modlog_create_case = mock.AsyncMock()
+                honeypot.modlog.create_case = modlog_create_case
+                settings = honeypot.GuildSettings.from_mapping(
+                    {
+                        "automated_kick_fail_warning": True,
+                        "dry_run": False,
+                    }
+                )
+
+                result = await cog._execute_action(
+                    guild,
+                    member,
+                    datetime.now(timezone.utc),
+                    settings,
+                    reason="Punishment safety test",
+                    action="kick",
+                )
+
+                member.kick.assert_awaited_once()
+                modlog_create_case.assert_awaited_once()
+                self.assertIsNone(result.failed_message)
+                self.assertEqual(result.status, EffectStatus.FAILED)
