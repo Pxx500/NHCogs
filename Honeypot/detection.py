@@ -40,7 +40,11 @@ from .detection_cases import (
     OperationType,
     effective_action,
 )
-from .effects import EffectStatus, ModerationEffectResult
+from .effects import (
+    EffectRetryDisposition,
+    EffectStatus,
+    ModerationEffectResult,
+)
 from .operations import executor_operation_policy
 from .operations.context import (
     DETECTION_CACHED_PURGE_ATTEMPT_LIMIT,
@@ -1746,6 +1750,7 @@ async def _execute_action(
                         label,
                         failed_message,
                         EffectStatus.FAILED,
+                        retry_disposition=EffectRetryDisposition.TERMINAL,
                     )
                 raise
             await cog._increment_stat(guild, "kicked")

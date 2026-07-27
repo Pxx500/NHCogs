@@ -15,7 +15,11 @@ from ..detection_cases import (
     PLANNED_PREFIX,
     ActionIntent,
 )
-from ..effects import EffectStatus, ModerationEffectResult
+from ..effects import (
+    EffectRetryDisposition,
+    EffectStatus,
+    ModerationEffectResult,
+)
 from ..settings import GuildSettings
 from .context import OperationContext, OperationOutcome
 
@@ -156,7 +160,9 @@ async def _apply_moderator_decision(
     if result.status is EffectStatus.FAILED:
         return OperationOutcome(
             error=RuntimeError(result.failed_message or result.label),
-            terminal_failure=True,
+            terminal_failure=(
+                result.retry_disposition is EffectRetryDisposition.TERMINAL
+            ),
         )
     return OperationOutcome(result=action.value)
 

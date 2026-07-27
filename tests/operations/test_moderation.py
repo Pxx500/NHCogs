@@ -618,6 +618,84 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertIn("temporary kick failure", persisted.last_error)
 
+    async def test_transient_ban_failure_is_reclaimable_and_resolves(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                now = datetime.now(timezone.utc)
+                member = SimpleNamespace(
+                    id=20,
+                    ban=mock.AsyncMock(
+                        side_effect=[
+                            honeypot.discord.HTTPException(
+                                "temporary ban failure"
+                            ),
+                            None,
+                        ]
+                    ),
+                )
+                guild = SimpleNamespace(
+                    id=10,
+                    me=SimpleNamespace(
+                        guild_permissions=SimpleNamespace(
+                            kick_members=True,
+                            ban_members=True,
+                        )
+                    ),
+                    get_member=lambda user_id: member,
+                    fetch_ban=mock.AsyncMock(
+                        side_effect=honeypot.discord.NotFound("not banned")
+                    ),
+                )
+                bot = _Bot()
+                bot.get_guild = lambda guild_id: guild
+                cog = honeypot.Honeypot(bot)
+                cog.config = _Config({"dry_run": False})
+                cog._schedule_post_ban_sweep = mock.Mock()
+                appended = self._append_case(
+                    honeypot,
+                    cog,
+                    now,
+                    honeypot.ActionIntent.BAN,
+                    pending_attachment=True,
+                )
+                operation, claimed = self._claim_moderation(
+                    honeypot, cog, appended, now
+                )
+
+                with mock.patch.object(
+                    honeypot.modlog,
+                    "create_case",
+                    new=mock.AsyncMock(),
+                    create=True,
+                ):
+                    await cog._execute_detection_case_operation(claimed, now)
+
+                    failed = self._persisted_operation(
+                        cog,
+                        appended.case.case_id,
+                        operation.operation_id,
+                    )
+                    self.assertEqual(failed.status, honeypot.OperationStatus.FAILED)
+                    self.assertIsNotNone(failed.retry_at)
+
+                    retried = cog._case_store.claim_operation(
+                        failed.operation_id, failed.retry_at
+                    )
+                    await cog._execute_detection_case_operation(
+                        retried, failed.retry_at
+                    )
+
+                resolved = self._persisted_operation(
+                    cog,
+                    appended.case.case_id,
+                    operation.operation_id,
+                )
+                self.assertEqual(
+                    (resolved.status, resolved.result, resolved.attempts),
+                    (honeypot.OperationStatus.SUCCEEDED, "ban", 2),
+                )
+                self.assertEqual(member.ban.await_count, 2)
+
     async def test_action_cancellation_propagates_without_settlement(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:

@@ -17,11 +17,17 @@ class EffectStatus(str, Enum):
     SUCCEEDED = "succeeded"
 
 
+class EffectRetryDisposition(str, Enum):
+    RETRYABLE = "retryable"
+    TERMINAL = "terminal"
+
+
 @dataclass(frozen=True)
 class ModerationEffectResult:
     label: str | None
     failed_message: str | None
     status: EffectStatus
+    retry_disposition: EffectRetryDisposition = EffectRetryDisposition.RETRYABLE
     modlog_failed: bool = False
 
 
