@@ -26,12 +26,13 @@ class _GuildConfig:
 
 
 class _Config:
-    def __init__(self, values):
+    def __init__(self, values, *, current_values=None):
         self._values = values
+        self._current_values = current_values or values
         self._stats = {}
 
     def guild(self, guild):
-        return self.guild_from_id(guild.id)
+        return _GuildConfig(self._current_values, self._stats)
 
     def guild_from_id(self, guild_id):
         return _GuildConfig(self._values, self._stats)
@@ -355,6 +356,111 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
                         cog,
                         self._handler_context(honeypot, cog, claimed, now),
                     )
+
+    async def test_effect_boundary_dry_run_persists_automatic_kick_as_planned(
+        self,
+    ):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                now = datetime.now(timezone.utc)
+                member = SimpleNamespace(
+                    id=20,
+                    kick=mock.AsyncMock(
+                        side_effect=AssertionError("planned kick must not execute")
+                    ),
+                )
+                guild = SimpleNamespace(
+                    id=10,
+                    me=SimpleNamespace(
+                        guild_permissions=SimpleNamespace(
+                            kick_members=True,
+                            ban_members=True,
+                        )
+                    ),
+                    get_member=lambda user_id: member,
+                )
+                bot = _Bot()
+                bot.get_guild = lambda guild_id: guild
+                cog = honeypot.Honeypot(bot)
+                cog.config = _Config(
+                    {"dry_run": False},
+                    current_values={"dry_run": True},
+                )
+                appended = self._append_case(
+                    honeypot, cog, now, honeypot.ActionIntent.KICK
+                )
+                operation, claimed = self._claim_moderation(
+                    honeypot, cog, appended, now
+                )
+
+                await cog._execute_detection_case_operation(claimed, now)
+
+                persisted = self._persisted_operation(
+                    cog,
+                    appended.case.case_id,
+                    operation.operation_id,
+                )
+                self.assertEqual(
+                    (persisted.status, persisted.result),
+                    (honeypot.OperationStatus.SUCCEEDED, "planned_kick"),
+                )
+
+    async def test_kick_not_found_with_warning_persists_automatic_effect_as_failed(
+        self,
+    ):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                now = datetime.now(timezone.utc)
+                member = SimpleNamespace(
+                    id=20,
+                    kick=mock.AsyncMock(
+                        side_effect=honeypot.discord.NotFound("kick target missing")
+                    ),
+                )
+                guild = SimpleNamespace(
+                    id=10,
+                    me=SimpleNamespace(
+                        guild_permissions=SimpleNamespace(
+                            kick_members=True,
+                            ban_members=True,
+                        )
+                    ),
+                    get_member=lambda user_id: member,
+                )
+                bot = _Bot()
+                bot.get_guild = lambda guild_id: guild
+                cog = honeypot.Honeypot(bot)
+                cog.config = _Config(
+                    {
+                        "automated_kick_fail_warning": True,
+                        "dry_run": False,
+                    }
+                )
+                cog._get_user_or_object = mock.AsyncMock(return_value=member)
+                appended = self._append_case(
+                    honeypot, cog, now, honeypot.ActionIntent.KICK
+                )
+                operation, claimed = self._claim_moderation(
+                    honeypot, cog, appended, now
+                )
+
+                with mock.patch.object(
+                    honeypot.modlog,
+                    "create_case",
+                    new=mock.AsyncMock(),
+                    create=True,
+                ):
+                    await cog._execute_detection_case_operation(claimed, now)
+
+                persisted = self._persisted_operation(
+                    cog,
+                    appended.case.case_id,
+                    operation.operation_id,
+                )
+                self.assertEqual(
+                    (persisted.status, persisted.result),
+                    (honeypot.OperationStatus.FAILED, None),
+                )
 
     async def test_live_kick_uses_public_reason_and_persists_exact_result(self):
         with TemporaryDirectory() as directory:

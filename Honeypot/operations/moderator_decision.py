@@ -15,6 +15,7 @@ from ..detection_cases import (
     PLANNED_PREFIX,
     ActionIntent,
 )
+from ..effects import EffectStatus, ModerationEffectResult
 from ..settings import GuildSettings
 from .context import OperationContext, OperationOutcome
 
@@ -94,7 +95,7 @@ async def _execute_moderator_action(
     *,
     action: ActionIntent,
     guild_settings: GuildSettings,
-) -> None:
+) -> ModerationEffectResult:
     """Take the moderator's lease and carry the decision out on Discord."""
     operation = context.operation
     moderator = guild.get_member(operation.actor_id)
@@ -109,7 +110,7 @@ async def _execute_moderator_action(
     )
     if not started:
         raise RuntimeError("moderator action operation lease was lost")
-    result = await cog._execute_action(
+    return await cog._execute_action(
         guild,
         member,
         effect_started_at,
@@ -118,8 +119,6 @@ async def _execute_moderator_action(
         action=action.value,
         moderator=moderator,
     )
-    if result.failed_message is not None:
-        raise RuntimeError(result.failed_message)
 
 
 async def _apply_moderator_decision(
@@ -144,7 +143,7 @@ async def _apply_moderator_decision(
     member = await _decision_target(cog, guild, snapshot.case.user_id, action)
     if member is None:
         return OPERATION_RESULT_KICK_MISSING
-    await _execute_moderator_action(
+    result = await _execute_moderator_action(
         cog,
         context,
         guild,
@@ -152,6 +151,10 @@ async def _apply_moderator_decision(
         action=action,
         guild_settings=guild_settings,
     )
+    if result.status is EffectStatus.PLANNED:
+        return f"{PLANNED_PREFIX}{action.value}"
+    if result.status is EffectStatus.FAILED:
+        raise RuntimeError(result.failed_message or result.label)
     return action.value
 
 

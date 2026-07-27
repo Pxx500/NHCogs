@@ -16,6 +16,7 @@ from ..detection_cases import (
     ActionIntent,
     effective_action,
 )
+from ..effects import EffectStatus
 from ..settings import GuildSettings
 from .context import OperationContext, OperationOutcome
 
@@ -132,6 +133,11 @@ async def moderation_action_handler(
         reason=public_reason,
         action=action.value,
     )
-    if result.failed_message is not None:
-        raise RuntimeError(result.failed_message)
-    return OperationOutcome(result=action.value)
+    if result.status is EffectStatus.FAILED:
+        raise RuntimeError(result.failed_message or result.label)
+    operation_result = (
+        f"{PLANNED_PREFIX}{action.value}"
+        if result.status is EffectStatus.PLANNED
+        else action.value
+    )
+    return OperationOutcome(result=operation_result)
