@@ -10,7 +10,12 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.detection_case_fixtures import capture_attachment
-from tests.harness import CaseExpiryTestCase, _Bot, _isolated_honeypot_modules
+from tests.harness import (
+    CaseExpiryTestCase,
+    _Bot,
+    _isolated_honeypot_modules,
+    drain_background_work,
+)
 
 
 class CaseReviewControlTests(CaseExpiryTestCase):
@@ -91,6 +96,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                 self.assertTrue(completed)
                 self.assertEqual(decisions["proof.png"], "true_positive")
                 self.assertIsNone(decisions["invoice.pdf"])
+                await drain_background_work(cog)
 
     async def test_moderator_ban_requires_confirmation_for_unreviewed_attachment(self):
         with TemporaryDirectory() as directory:
@@ -373,9 +379,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                 finally:
                     release_final_operation.set()
                     await interaction_task
-                    pending = tuple(getattr(cog, "_case_review_tasks", ()))
-                    if pending:
-                        await asyncio.gather(*pending)
+                    await drain_background_work(cog)
 
     async def test_dismissed_confirmation_reports_failure_in_new_ephemeral_message(self):
         with TemporaryDirectory() as directory:

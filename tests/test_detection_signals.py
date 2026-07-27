@@ -11,7 +11,7 @@ from threading import get_ident
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules, drain_background_work
 
 
 class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
@@ -484,6 +484,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertGreaterEqual(profile["compare_ms_count"], 1)
                 cog._increment_stat.assert_not_awaited()
                 cog._send_review.assert_not_awaited()
+                await drain_background_work(cog)
 
     async def test_four_negative_initial_images_do_not_scan_later_attachments(self):
         with TemporaryDirectory() as directory:

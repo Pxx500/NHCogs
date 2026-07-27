@@ -558,6 +558,46 @@ def active_case(store, guild_id: int, user_id: int):
     )
 
 
+_DRAIN_PASSES = 5
+
+
+async def drain_background_work(*cogs) -> None:
+    """Wait for background work to finish before a temporary directory is torn down.
+
+    A case review follow-up hands sqlite and filesystem work to an
+    ``asyncio.to_thread`` worker. On Windows that worker still holds an open WAL
+    connection to ``detection_cases.sqlite`` while ``TemporaryDirectory.__exit__``
+    tries to remove the tree, and the removal then fails with
+    ``PermissionError: [WinError 32]``. Call this as the last statement inside the
+    temporary-directory block of any test that leaves such work running.
+
+    ``cog_unload`` is deliberately not used: it cancels the tasks and returns while
+    the worker still owns the file. The follow-up tasks are awaited without
+    ``return_exceptions`` so a follow-up that fails still fails the test. Unrelated
+    loop work the test abandoned on purpose is only quiesced, not asserted on.
+
+    Awaiting the tasks is not sufficient on its own. When a test cancels the work
+    mid-flight the thread that ``to_thread`` started keeps running with no task left
+    to await it, so the executor is shut down as well; that call returns only once
+    every worker has finished and released the store.
+    """
+    for cog in cogs:
+        pending = tuple(getattr(cog, "_case_review_tasks", ()))
+        if pending:
+            await asyncio.gather(*pending)
+    current = asyncio.current_task()
+    for _ in range(_DRAIN_PASSES):
+        outstanding = tuple(
+            task
+            for task in asyncio.all_tasks()
+            if task is not current and not task.done()
+        )
+        if not outstanding:
+            break
+        await asyncio.gather(*outstanding, return_exceptions=True)
+    await asyncio.get_running_loop().shutdown_default_executor()
+
+
 class DetectionPipelineTestCase(unittest.IsolatedAsyncioTestCase):
     """Message and public-boundary fixtures shared by the detection tests."""
 
