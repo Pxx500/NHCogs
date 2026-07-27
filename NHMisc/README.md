@@ -307,10 +307,28 @@ used, top locations in the range, and the dominant location for each retained da
 [p]nhmisc chatchart 7
 ```
 
-Creates a pie chart of message activity for the channel where the command is used. If the
-command is used in a thread, it charts that specific thread. The requested day count is
-capped to the configured detail retention. The chart labels include the message count for
-each shown user.
+Creates a chart of message activity for the channel where the command is used. A horizontal
+ranking compares the eight most active users, while a donut shows each of their shares of the
+total plus one `Other` slice for everyone else. Each ranked user keeps the same colour in both
+halves of the chart. The ranking stops at eight because more than eight hues stop being
+reliably distinguishable for colourblind readers. If the command is used in a thread, it charts
+that specific thread. The requested
+day count is capped to the configured detail retention. The chart includes message counts and
+overall percentages for each shown user.
+
+```ini
+[p]nhmisc topyapper 30 10
+```
+
+Shows the users who sent the most messages across the server in the retained date range.
+The result count must be between 1 and 20.
+
+```ini
+[p]nhmisc channelyapper 30 10
+```
+
+Shows the users who sent the most messages in the current channel. When used in a thread,
+the ranking covers that thread only. The result count must be between 1 and 20.
 
 ### User Command
 

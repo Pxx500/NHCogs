@@ -55,6 +55,22 @@ DEFAULT_VCJUMPING_WINDOW_SECONDS = 30
 DEFAULT_ACTIVITY_DETAIL_RETENTION_DAYS = 31
 DEFAULT_ACTIVITY_HISTORY_RETENTION_DAYS = -1
 RETENTION_CONFIRMATION = "I understand"
+
+# Categorical chart hues in fixed order. The ordering is the colourblind-safety
+# mechanism, not decoration: it is validated pairwise for adjacent slots, so
+# slots must be assigned front to back and never cycled or generated past the
+# end. Ranks beyond the last slot share the neutral "other" tone.
+CHATCHART_SERIES_COLORS = (
+    "#2a78d6",
+    "#eb6834",
+    "#1baf7a",
+    "#eda100",
+    "#e87ba4",
+    "#008300",
+    "#4a3aa7",
+    "#e34948",
+)
+CHATCHART_OTHER_COLOR = "#898781"
 GATECOUNT_TIERS = (
     # For Each Tier: emoji ID, SP role ID, MP role ID
     (
@@ -846,7 +862,7 @@ class NHMisc(commands.Cog):
 
     @nhmisc.command(name="chatchart")
     async def nhmisc_chatchart(self, ctx: commands.Context, days: int) -> None:
-        """Render a pie chart of user activity in the current channel."""
+        """Render a chart of user activity in the current channel."""
         await self._require_activity_staff(ctx)
         await self._close_stale_activity_days_for_guild(ctx.guild, send_reports=True)
         if days < 1:
@@ -865,11 +881,30 @@ class NHMisc(commands.Cog):
             await ctx.send(f"No retained activity data for this channel in the last {days} days.")
             return
 
-        file = self._build_chatchart_file(ctx.guild, counts, days)
+        file = self._build_chatchart_file(
+            ctx.guild,
+            counts,
+            days,
+            self._chatchart_location_label(ctx.channel),
+        )
         await ctx.send(
             file=file,
             allowed_mentions=discord.AllowedMentions.none(),
         )
+
+    @nhmisc.command(name="topyapper")
+    async def nhmisc_topyapper(
+        self, ctx: commands.Context, days: int, amount: int
+    ) -> None:
+        """Show the most active users across this server."""
+        await self._send_yapper_ranking(ctx, days, amount, guild_wide=True)
+
+    @nhmisc.command(name="channelyapper")
+    async def nhmisc_channelyapper(
+        self, ctx: commands.Context, days: int, amount: int
+    ) -> None:
+        """Show the most active users in the current channel or thread."""
+        await self._send_yapper_ranking(ctx, days, amount, guild_wide=False)
 
     @commands.command(name="selfchart")
     @commands.guild_only()
@@ -1657,6 +1692,62 @@ class NHMisc(commands.Cog):
         if page:
             await ctx.send(page, allowed_mentions=discord.AllowedMentions.none())
 
+    async def _send_yapper_ranking(
+        self,
+        ctx: commands.Context,
+        days: int,
+        amount: int,
+        *,
+        guild_wide: bool,
+    ) -> None:
+        await self._require_activity_staff(ctx)
+        if days < 1:
+            raise commands.UserFeedbackCheckFailure("Days must be at least 1.")
+        if not 1 <= amount <= 20:
+            raise commands.UserFeedbackCheckFailure(
+                "Amount must be between 1 and 20."
+            )
+
+        await self._close_stale_activity_days_for_guild(ctx.guild, send_reports=True)
+        days = await self._cap_detail_days(ctx.guild, days)
+        end_date_utc = self._utc_today()
+        if guild_wide:
+            counts = await self._activity_store.get_guild_user_counts(
+                ctx.guild.id,
+                end_date_utc,
+                days,
+                amount,
+            )
+            scope = "server"
+        else:
+            counts = await self._activity_store.get_channel_user_counts(
+                ctx.guild.id,
+                self._activity_parent_channel_id(ctx.channel),
+                self._activity_thread_id(ctx.channel),
+                end_date_utc,
+                days,
+            )
+            counts = counts[:amount]
+            scope = "channel"
+
+        if not counts:
+            await ctx.send(
+                f"No retained activity data for this {scope} in the last {days} days.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        lines = [f"Top {len(counts)} yappers in this {scope} - last {days} days:"]
+        for rank, count in enumerate(counts, start=1):
+            member = ctx.guild.get_member(count.user_id)
+            user = (
+                f"{member.display_name} ({count.user_id})"
+                if member is not None
+                else str(count.user_id)
+            )
+            lines.append(f"{rank}. {user} — {count.message_count:,} messages")
+        await self._send_paginated_text(ctx, "\n".join(lines))
+
     async def _confirm_retention_delete(self, ctx: commands.Context, warning: str) -> bool:
         await ctx.send(warning)
 
@@ -2168,8 +2259,20 @@ class NHMisc(commands.Cog):
             current_length += extra_length
         return "\n".join(output) if output else "n/d"
 
+    def _chatchart_location_label(self, channel: object) -> str:
+        """Name the charted channel or thread for display inside the image."""
+        name = getattr(channel, "name", None) or "unknown-channel"
+        if self._activity_thread_id(channel) is None:
+            return f"#{name}"
+        parent_name = getattr(getattr(channel, "parent", None), "name", None)
+        return f"#{parent_name} / {name}" if parent_name else name
+
     def _build_chatchart_file(
-        self, guild: discord.Guild, counts: list[ChannelUserCount], days: int
+        self,
+        guild: discord.Guild,
+        counts: list[ChannelUserCount],
+        days: int,
+        location_label: str,
     ) -> discord.File:
         try:
             import matplotlib
@@ -2181,28 +2284,111 @@ class NHMisc(commands.Cog):
                 "Matplotlib is required for chatchart but is not installed."
             ) from exc
 
-        top_counts = counts[:10]
-        other_count = sum(count.message_count for count in counts[10:])
+        top_counts = counts[: len(CHATCHART_SERIES_COLORS)]
+        top_count = sum(count.message_count for count in top_counts)
+        other_count = sum(count.message_count for count in counts[len(top_counts):])
+        total_count = top_count + other_count
         labels: list[str] = []
         values: list[int] = []
         for count in top_counts:
             member = guild.get_member(count.user_id)
             name = member.display_name if member is not None else str(count.user_id)
-            labels.append(f"{name} ({count.message_count})")
+            if len(name) > 32:
+                name = f"{name[:29]}..."
+            labels.append(name)
             values.append(count.message_count)
-        if other_count:
-            labels.append(f"Other ({other_count})")
-            values.append(other_count)
 
-        figure, axis = plt.subplots(figsize=(8, 6))
-        axis.pie(
-            values,
-            labels=labels,
-            autopct=lambda percent: f"{percent:.1f}%" if percent >= 3 else "",
+        bar_colors = [
+            CHATCHART_SERIES_COLORS[index]
+            if index < len(CHATCHART_SERIES_COLORS)
+            else CHATCHART_OTHER_COLOR
+            for index in range(len(values))
+        ]
+
+        figure_height = max(5.5, 1.5 + len(top_counts) * 0.5)
+        figure = plt.figure(figsize=(13, figure_height))
+        grid = figure.add_gridspec(1, 2, width_ratios=(3, 1.35), wspace=0.02)
+        ranking_axis = figure.add_subplot(grid[0, 0])
+        donut_axis = figure.add_subplot(grid[0, 1])
+
+        positions = list(range(len(values)))
+        ranking_axis.barh(positions, values, color=bar_colors, height=0.68)
+        ranking_axis.set_yticks(positions, labels=labels)
+        ranking_axis.invert_yaxis()
+        ranking_axis.xaxis.set_visible(False)
+        ranking_axis.tick_params(axis="y", length=0)
+        for spine in ranking_axis.spines.values():
+            spine.set_visible(False)
+
+        largest_value = max(values)
+        ranking_axis.set_xlim(0, largest_value * 1.24)
+        for position, value in zip(positions, values):
+            percentage = value / total_count * 100
+            ranking_axis.text(
+                value + largest_value * 0.025,
+                position,
+                f"{value:,} · {percentage:.1f}%",
+                va="center",
+                fontsize=9,
+            )
+
+        # Ranks past the last hue share one neutral wedge with everybody outside
+        # the top ten, so the grey bars map onto exactly one grey slice instead
+        # of splitting into wedges no reader can tell apart.
+        named_count = min(len(values), len(CHATCHART_SERIES_COLORS))
+        donut_values = list(values[:named_count])
+        donut_colors = list(bar_colors[:named_count])
+        neutral_count = sum(values[named_count:]) + other_count
+        if neutral_count:
+            donut_values.append(neutral_count)
+            donut_colors.append(CHATCHART_OTHER_COLOR)
+        # The named wedges are identified by the ranking beside them; the neutral
+        # one has no bar to point at, so it carries its own label outside the ring.
+        donut_labels = [""] * len(donut_values)
+        if neutral_count:
+            donut_labels[-1] = "Other"
+        _wedges, outside_labels, _percentages = donut_axis.pie(
+            donut_values,
+            labels=donut_labels,
+            colors=donut_colors,
+            autopct=lambda percent: f"{percent:.0f}%" if percent >= 6 else "",
+            pctdistance=0.79,
+            labeldistance=1.08,
             startangle=90,
+            counterclock=False,
+            wedgeprops={"width": 0.38, "edgecolor": "white", "linewidth": 2},
+            textprops={"color": "white", "fontsize": 10, "fontweight": "bold"},
         )
-        axis.axis("equal")
-        axis.set_title(f"Messages by user - last {days} days")
+        for outside_label in outside_labels:
+            outside_label.set_color("#52514e")
+            outside_label.set_fontweight("normal")
+        donut_axis.text(
+            0,
+            0,
+            f"{total_count:,}\nmessages",
+            ha="center",
+            va="center",
+            fontsize=11,
+        )
+        donut_axis.set_title("Share by user", pad=12)
+        donut_axis.axis("equal")
+
+        title_y = 0.97
+        figure.suptitle(
+            f"Messages by user - last {days} days",
+            fontsize=16,
+            y=title_y,
+            va="center",
+        )
+        figure.text(
+            0.008,
+            title_y,
+            location_label,
+            ha="left",
+            va="center",
+            fontsize=12,
+            color="#52514e",
+        )
         buffer = io.BytesIO()
         figure.savefig(buffer, format="png", bbox_inches="tight", dpi=160)
         plt.close(figure)
