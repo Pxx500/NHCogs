@@ -24,6 +24,7 @@ from .activity_storage import (
     UserChannelDistribution,
     UserStats,
 )
+from .forum_autopin import ForumAutopinService
 from .role_analytics_service import (
     FullMemberRequestCooldownError,
     MemberIntentRequiredError,
@@ -126,9 +127,13 @@ class NHMisc(commands.Cog):
             activity_history_retention_days=DEFAULT_ACTIVITY_HISTORY_RETENTION_DAYS,
             sticky_debug_logging_enabled=False,
             sticky_debug_logging_channel=None,
+            forum_autopin_channel_ids=[],
         )
         self._voice_visits = VoiceChannelVisitTracker()
         self._audit_log_tasks: set[asyncio.Task] = set()
+        self._forum_autopin = ForumAutopinService(
+            self.config, alert_sender=self._send_guild_alert, logger=log
+        )
         self._activity_store = ActivityStore(cog_data_path(self) / "activity.sqlite")
         self._sticky_roles = StickyRoleStore(cog_data_path(self) / "sticky_roles.sqlite")
         self._role_analytics_store = RoleAnalyticsStore(
@@ -381,6 +386,63 @@ class NHMisc(commands.Cog):
                 seconds=config["vcjumping_window_seconds"],
             )
         )
+
+    @nhmisc.group(name="forumautopin", invoke_without_command=True)
+    @commands.admin_or_permissions(manage_guild=True)
+    async def nhmisc_forumautopin(self, ctx: commands.Context) -> None:
+        """Configure automatic pinning for new forum post starter messages."""
+        await ctx.send_help()
+
+    @nhmisc_forumautopin.command(name="add")
+    async def nhmisc_forumautopin_add(
+        self,
+        ctx: commands.Context,
+        channel: discord.ForumChannel,
+    ) -> None:
+        """Enable starter-message autopinning in a forum."""
+        missing_permission = self._forum_autopin.missing_permissions(ctx.guild, channel)
+        if missing_permission is not None:
+            raise commands.UserFeedbackCheckFailure(missing_permission)
+
+        enabled = await self._forum_autopin.enable(ctx.guild, channel.id)
+        state = "is now enabled" if enabled else "is already enabled"
+        await ctx.send(
+            f"Forum autopin {state} for {channel.mention}.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @nhmisc_forumautopin.command(name="remove")
+    async def nhmisc_forumautopin_remove(
+        self,
+        ctx: commands.Context,
+        channel: discord.ForumChannel,
+    ) -> None:
+        """Disable starter-message autopinning in a forum."""
+        disabled = await self._forum_autopin.disable(ctx.guild, channel.id)
+        state = "is disabled" if disabled else "is not enabled"
+        await ctx.send(
+            f"Forum autopin {state} for {channel.mention}.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @nhmisc_forumautopin.command(name="list")
+    async def nhmisc_forumautopin_list(self, ctx: commands.Context) -> None:
+        """List forums configured for starter-message autopinning."""
+        configured = await self._forum_autopin.get_forum_ids(ctx.guild)
+        if not configured:
+            await ctx.send(
+                "No forums are configured for automatic starter-message pinning."
+            )
+            return
+
+        lines = ["Forums with starter-message autopinning:"]
+        for channel_id in configured:
+            channel = ctx.guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
+            if isinstance(channel, discord.ForumChannel):
+                lines.append(f"- {channel.mention} (`{channel_id}`)")
+            else:
+                lines.append(f"- Missing forum (`{channel_id}`)")
+        await self._send_paginated_text(ctx, "\n".join(lines))
 
     @commands.command(name="gatecount")
     @commands.guild_only()
@@ -856,6 +918,16 @@ class NHMisc(commands.Cog):
         await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
     @commands.Cog.listener()
+    async def on_thread_create(self, thread: discord.Thread) -> None:
+        """Pin the starter message for a new post in a configured forum."""
+        await self._forum_autopin.handle_thread_create(thread)
+
+    @commands.Cog.listener()
+    async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
+        """Drop autopin configuration for a deleted forum."""
+        await self._forum_autopin.handle_channel_delete(channel)
+
+    @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member) -> None:
         """Snapshot configured sticky roles when a member leaves."""
         configured_roles = await self._sticky_roles.get_sticky_roles(member.guild.id)
@@ -1140,6 +1212,17 @@ class NHMisc(commands.Cog):
         if not permissions.send_messages:
             return f"I need permission to send messages in {channel.mention}."
         return None
+
+    async def _send_guild_alert(self, guild: discord.Guild, content: str) -> bool:
+        """Send to the configured alert channel. False when there is none."""
+        alert_channel = self._get_log_channel(
+            guild, await self.config.guild(guild).alert_channel()
+        )
+        if alert_channel is None:
+            return False
+
+        await self._send_voice_log(alert_channel, content)
+        return True
 
     def _schedule_audit_log_edit(
         self,
