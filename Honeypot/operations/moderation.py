@@ -68,21 +68,17 @@ async def moderation_action_handler(
         raise RuntimeError(
             "detection case moderation action is no longer applicable"
         )
-    raw_config = await cog.config.guild_from_id(
-        context.snapshot.case.guild_id
-    ).all()
-    guild_settings = GuildSettings.from_mapping(raw_config)
-    if guild_settings.dry_run:
-        return OperationOutcome(result=f"{PLANNED_PREFIX}{action.value}")
-    guild = cog.bot.get_guild(context.snapshot.case.guild_id)
-    if guild is None:
-        raise RuntimeError("detection case guild is unavailable")
     effect_started = await asyncio.to_thread(
         cog._case_store.operation_effect_started,
         context.operation.operation_id,
     )
     if effect_started and action is ActionIntent.KICK:
-        member = guild.get_member(context.snapshot.case.user_id)
+        guild = cog.bot.get_guild(context.snapshot.case.guild_id)
+        member = (
+            guild.get_member(context.snapshot.case.user_id)
+            if guild is not None
+            else None
+        )
         await asyncio.to_thread(
             cog._case_store.mark_case_needs_attention,
             context.snapshot.case.case_id,
@@ -95,6 +91,15 @@ async def moderation_action_handler(
             getattr(member, "joined_at", None),
         )
         return OperationOutcome(result=OPERATION_RESULT_KICK_OUTCOME_UNKNOWN)
+    raw_config = await cog.config.guild_from_id(
+        context.snapshot.case.guild_id
+    ).all()
+    guild_settings = GuildSettings.from_mapping(raw_config)
+    if guild_settings.dry_run:
+        return OperationOutcome(result=f"{PLANNED_PREFIX}{action.value}")
+    guild = cog.bot.get_guild(context.snapshot.case.guild_id)
+    if guild is None:
+        raise RuntimeError("detection case guild is unavailable")
     if effect_started and action is ActionIntent.BAN:
         target = guild.get_member(context.snapshot.case.user_id)
         if target is None:

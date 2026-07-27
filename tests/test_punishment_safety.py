@@ -166,7 +166,14 @@ class PunitiveEffectPolicyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class UnknownKickRecoveryTests(unittest.IsolatedAsyncioTestCase):
-    async def _run_reclaimed_kick(self, honeypot, operation_type):
+    async def _run_reclaimed_kick(
+        self,
+        honeypot,
+        operation_type,
+        *,
+        dry_run=False,
+        guild_available=True,
+    ):
         now = datetime.now(timezone.utc)
         member = SimpleNamespace(
             id=20,
@@ -182,10 +189,12 @@ class UnknownKickRecoveryTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         bot = _Bot()
-        bot.get_guild = lambda guild_id: guild if guild_id == guild.id else None
+        bot.get_guild = lambda guild_id: (
+            guild if guild_available and guild_id == guild.id else None
+        )
         cog = honeypot.Honeypot(bot)
         guild_config = SimpleNamespace(
-            all=mock.AsyncMock(return_value={"dry_run": False})
+            all=mock.AsyncMock(return_value={"dry_run": dry_run})
         )
         cog.config = SimpleNamespace(
             guild_from_id=lambda guild_id: guild_config,
@@ -245,12 +254,24 @@ class UnknownKickRecoveryTests(unittest.IsolatedAsyncioTestCase):
             outcome = await handler(cog, context)
         return outcome, member, case_store
 
-    async def _assert_reclaimed_kick_is_terminal(self, operation_type):
+    async def _assert_reclaimed_kick_is_terminal(
+        self,
+        operation_type,
+        *,
+        dry_run=False,
+        guild_available=True,
+    ):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                outcome, member, case_store = await self._run_reclaimed_kick(
-                    honeypot, honeypot.OperationType(operation_type)
-                )
+                try:
+                    outcome, member, case_store = await self._run_reclaimed_kick(
+                        honeypot,
+                        honeypot.OperationType(operation_type),
+                        dry_run=dry_run,
+                        guild_available=guild_available,
+                    )
+                except RuntimeError as error:
+                    self.fail(f"reclaimed kick was not terminal: {error}")
 
                 self.assertEqual(outcome.result, "kick_outcome_unknown")
                 member.kick.assert_not_awaited()
@@ -261,6 +282,24 @@ class UnknownKickRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_moderator_reclaimed_kick_stops_with_unknown_outcome(self):
         await self._assert_reclaimed_kick_is_terminal("moderator_kick")
+
+    async def test_automatic_reclaimed_kick_ignores_new_dry_run_setting(self):
+        await self._assert_reclaimed_kick_is_terminal(
+            "moderation_action", dry_run=True
+        )
+
+    async def test_automatic_reclaimed_kick_is_terminal_without_guild(self):
+        await self._assert_reclaimed_kick_is_terminal(
+            "moderation_action", guild_available=False
+        )
+
+    async def test_moderator_reclaimed_kick_ignores_new_dry_run_setting(self):
+        await self._assert_reclaimed_kick_is_terminal("moderator_kick", dry_run=True)
+
+    async def test_moderator_reclaimed_kick_is_terminal_without_guild(self):
+        await self._assert_reclaimed_kick_is_terminal(
+            "moderator_kick", guild_available=False
+        )
 
 
 class JoinwatchDryRunTests(unittest.IsolatedAsyncioTestCase):

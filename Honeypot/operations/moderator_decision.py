@@ -127,6 +127,7 @@ async def _apply_moderator_decision(
     context: OperationContext,
     *,
     action: ActionIntent,
+    effect_started: bool,
     guild_settings: GuildSettings,
 ) -> str:
     """Apply a live (non dry-run) moderator decision and report its result."""
@@ -134,23 +135,6 @@ async def _apply_moderator_decision(
     guild = cog.bot.get_guild(snapshot.case.guild_id)
     if guild is None:
         raise RuntimeError("detection case guild is unavailable")
-    effect_started = await asyncio.to_thread(
-        cog._case_store.operation_effect_started, context.operation.operation_id
-    )
-    if effect_started and action is ActionIntent.KICK:
-        member = guild.get_member(snapshot.case.user_id)
-        await asyncio.to_thread(
-            cog._case_store.mark_case_needs_attention,
-            snapshot.case.case_id,
-        )
-        log.warning(
-            "Detection case moderator kick outcome is unknown; operation will not "
-            "be retried (case_id=%s, operation_id=%s, member_joined_at=%s)",
-            snapshot.case.case_id,
-            context.operation.operation_id,
-            getattr(member, "joined_at", None),
-        )
-        return OPERATION_RESULT_KICK_OUTCOME_UNKNOWN
     if (
         effect_started
         and action is ActionIntent.BAN
@@ -179,12 +163,34 @@ async def moderator_decision_handler(
     action = ActionIntent(
         operation.operation_type.value.removeprefix("moderator_")
     )
+    effect_started = await asyncio.to_thread(
+        cog._case_store.operation_effect_started, operation.operation_id
+    )
+    if effect_started and action is ActionIntent.KICK:
+        guild = cog.bot.get_guild(snapshot.case.guild_id)
+        member = guild.get_member(snapshot.case.user_id) if guild is not None else None
+        await asyncio.to_thread(
+            cog._case_store.mark_case_needs_attention,
+            snapshot.case.case_id,
+        )
+        log.warning(
+            "Detection case moderator kick outcome is unknown; operation will not "
+            "be retried (case_id=%s, operation_id=%s, member_joined_at=%s)",
+            snapshot.case.case_id,
+            operation.operation_id,
+            getattr(member, "joined_at", None),
+        )
+        return OperationOutcome(result=OPERATION_RESULT_KICK_OUTCOME_UNKNOWN)
     raw_config = await cog.config.guild_from_id(snapshot.case.guild_id).all()
     guild_settings = GuildSettings.from_mapping(raw_config)
     if guild_settings.dry_run:
         operation_result = f"{PLANNED_PREFIX}{action.value}"
     else:
         operation_result = await _apply_moderator_decision(
-            cog, context, action=action, guild_settings=guild_settings
+            cog,
+            context,
+            action=action,
+            effect_started=effect_started,
+            guild_settings=guild_settings,
         )
     return OperationOutcome(result=operation_result)
