@@ -156,7 +156,57 @@ class FakeContext:
 
 
 class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
-    async def test_command_renders_wide_hybrid_activity_chart(self):
+    def _command_fixture(self):
+        guild = types.SimpleNamespace(id=123)
+        ctx = FakeContext(guild)
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._require_activity_staff = mock.AsyncMock()
+        cog._close_stale_activity_days_for_guild = mock.AsyncMock()
+        cog._cap_detail_days = mock.AsyncMock(return_value=31)
+        cog._activity_parent_channel_id = lambda channel: channel.id
+        cog._activity_thread_id = lambda channel: None
+        cog._utc_today = lambda: None
+        cog._activity_store = types.SimpleNamespace(
+            get_channel_user_counts=mock.AsyncMock(
+                return_value=[types.SimpleNamespace(user_id=1, message_count=100)]
+            )
+        )
+        cog._build_chatchart_file = mock.Mock(return_value=object())
+        return cog, ctx
+
+    async def test_command_defaults_to_ten_users(self):
+        cog, ctx = self._command_fixture()
+
+        await nhmisc.NHMisc.nhmisc_chatchart.callback(cog, ctx, 31)
+
+        self.assertEqual(cog._build_chatchart_file.call_args.args[-1], 10)
+
+    async def test_command_passes_explicit_user_count(self):
+        cog, ctx = self._command_fixture()
+
+        await nhmisc.NHMisc.nhmisc_chatchart.callback(cog, ctx, 31, 17)
+
+        self.assertEqual(cog._build_chatchart_file.call_args.args[-1], 17)
+
+    async def test_one_user_adds_comment_to_chart_message(self):
+        cog, ctx = self._command_fixture()
+
+        await nhmisc.NHMisc.nhmisc_chatchart.callback(cog, ctx, 31, 1)
+
+        self.assertEqual(ctx.sent[0]["content"], "One is a bit low, no? 🤨")
+
+    async def test_user_count_outside_range_is_rejected_before_query(self):
+        for amount in (0, 21):
+            with self.subTest(amount=amount):
+                cog, ctx = self._command_fixture()
+                with self.assertRaisesRegex(
+                    UserFeedbackCheckFailure,
+                    "Amount must be between 1 and 20",
+                ):
+                    await nhmisc.NHMisc.nhmisc_chatchart.callback(cog, ctx, 31, amount)
+                cog._activity_store.get_channel_user_counts.assert_not_awaited()
+
+    async def test_command_renders_configured_hybrid_activity_chart(self):
         guild = types.SimpleNamespace(
             id=123,
             get_member=lambda user_id: types.SimpleNamespace(
@@ -166,7 +216,7 @@ class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
         ctx = FakeContext(guild)
         counts = [
             types.SimpleNamespace(user_id=index, message_count=10_000 - index * 400)
-            for index in range(1, 13)
+            for index in range(1, 25)
         ]
         cog = object.__new__(nhmisc.NHMisc)
         cog._require_activity_staff = mock.AsyncMock()
@@ -186,7 +236,7 @@ class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
             return original_savefig(figure, *args, **kwargs)
 
         with mock.patch.object(Figure, "savefig", savefig_and_capture):
-            await nhmisc.NHMisc.nhmisc_chatchart.callback(cog, ctx, 31)
+            await nhmisc.NHMisc.nhmisc_chatchart.callback(cog, ctx, 31, 20)
 
         attachment = ctx.sent[0]["file"]
         with Image.open(io.BytesIO(attachment.data)) as image:
@@ -194,7 +244,7 @@ class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(attachment.filename, "chatchart.png")
         self.assertGreaterEqual(width, 1_700)
-        self.assertGreater(width / height, 1.6)
+        self.assertGreater(height, 1_600)
 
         figure_text = {text.get_text() for text in captured_figures[0].texts}
         self.assertIn("#test-channel", figure_text)
@@ -208,7 +258,7 @@ class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(channel_label.get_position()[0], 0.1)
         self.assertGreater(channel_label.get_position()[1], 0.9)
 
-        named = len(nhmisc.CHATCHART_SERIES_COLORS)
+        named = 20
         ranking_axis, donut_axis = captured_figures[0].axes
         self.assertEqual(
             [bar.get_width() for bar in ranking_axis.patches],
@@ -216,8 +266,8 @@ class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         # Percentages stay relative to every user, not just the ranked ones.
         ranking_annotations = {text.get_text() for text in ranking_axis.texts}
-        self.assertIn("9,600 · 10.8%", ranking_annotations)
-        self.assertIn("6,800 · 7.7%", ranking_annotations)
+        self.assertIn("9,600 · 8.0%", ranking_annotations)
+        self.assertIn("2,000 · 1.7%", ranking_annotations)
 
         # One distinct hue per ranked user, so no bar shares the neutral tone.
         ranking_colors = [bar.get_facecolor() for bar in ranking_axis.patches]
@@ -230,7 +280,7 @@ class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(donut_colors[named], ranking_colors)
 
         donut_text = {text.get_text() for text in donut_axis.texts if text.get_text()}
-        self.assertIn("88,800\nmessages", donut_text)
+        self.assertIn("120,000\nmessages", donut_text)
         self.assertIn("Other", donut_text)
         percentage_labels = [
             text for text in donut_axis.texts if text.get_text().endswith("%")
@@ -239,6 +289,17 @@ class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
         for label in percentage_labels:
             self.assertAlmostEqual(math.hypot(*label.get_position()), 0.79, places=2)
         self.assertIsNone(donut_axis.get_legend())
+
+    def test_palette_has_one_non_neutral_color_for_every_allowed_rank(self):
+        self.assertEqual(
+            len(nhmisc.CHATCHART_SERIES_COLORS),
+            nhmisc.MAX_CHATCHART_USER_COUNT,
+        )
+        self.assertEqual(
+            len(set(nhmisc.CHATCHART_SERIES_COLORS)),
+            nhmisc.MAX_CHATCHART_USER_COUNT,
+        )
+        self.assertNotIn(nhmisc.CHATCHART_OTHER_COLOR, nhmisc.CHATCHART_SERIES_COLORS)
 
     def test_location_label_names_channels_threads_and_missing_parents(self):
         cog = object.__new__(nhmisc.NHMisc)
