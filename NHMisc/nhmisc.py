@@ -56,10 +56,8 @@ DEFAULT_ACTIVITY_DETAIL_RETENTION_DAYS = 31
 DEFAULT_ACTIVITY_HISTORY_RETENTION_DAYS = -1
 RETENTION_CONFIRMATION = "I understand"
 
-# Categorical chart hues in fixed order. The ordering is the colourblind-safety
-# mechanism, not decoration: it is validated pairwise for adjacent slots, so
-# slots must be assigned front to back and never cycled or generated past the
-# end. Ranks beyond the last slot share the neutral "other" tone.
+# Categorical chart hues in fixed rank order, arranged so neighboring bars use
+# clearly different colors. The neutral tone is reserved for undisplayed users.
 CHATCHART_SERIES_COLORS = (
     "#2a78d6",
     "#eb6834",
@@ -69,8 +67,22 @@ CHATCHART_SERIES_COLORS = (
     "#008300",
     "#4a3aa7",
     "#e34948",
+    "#00a6d6",
+    "#7a5c00",
+    "#a1c935",
+    "#9f55d4",
+    "#c44e9b",
+    "#006d77",
+    "#f48c06",
+    "#264653",
+    "#9b5de5",
+    "#ef476f",
+    "#118ab2",
+    "#6a994e",
 )
 CHATCHART_OTHER_COLOR = "#898781"
+DEFAULT_CHATCHART_USER_COUNT = 10
+MAX_CHATCHART_USER_COUNT = 20
 GATECOUNT_TIERS = (
     # For Each Tier: emoji ID, SP role ID, MP role ID
     (
@@ -864,12 +876,21 @@ class NHMisc(commands.Cog):
         )
 
     @nhmisc.command(name="chatchart")
-    async def nhmisc_chatchart(self, ctx: commands.Context, days: int) -> None:
+    async def nhmisc_chatchart(
+        self,
+        ctx: commands.Context,
+        days: int,
+        amount: int = DEFAULT_CHATCHART_USER_COUNT,
+    ) -> None:
         """Render a chart of user activity in the current channel."""
         await self._require_activity_staff(ctx)
         await self._close_stale_activity_days_for_guild(ctx.guild, send_reports=True)
         if days < 1:
             raise commands.UserFeedbackCheckFailure("Days must be at least 1.")
+        if not 1 <= amount <= MAX_CHATCHART_USER_COUNT:
+            raise commands.UserFeedbackCheckFailure(
+                f"Amount must be between 1 and {MAX_CHATCHART_USER_COUNT}."
+            )
 
         days = await self._cap_detail_days(ctx.guild, days)
         channel_id = self._activity_parent_channel_id(ctx.channel)
@@ -889,8 +910,11 @@ class NHMisc(commands.Cog):
             counts,
             days,
             self._chatchart_location_label(ctx.channel),
+            amount,
         )
+        content = "One is a bit low, no? 🤨" if amount == 1 else None
         await ctx.send(
+            content,
             file=file,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -2278,20 +2302,13 @@ class NHMisc(commands.Cog):
         other_count: int,
         total_count: int,
     ) -> None:
-        # Ranks past the last hue share one neutral wedge with everybody outside
-        # the top ten, so the grey bars map onto exactly one grey slice instead
-        # of splitting into wedges no reader can tell apart.
-        named_count = min(len(values), len(CHATCHART_SERIES_COLORS))
-        donut_values = list(values[:named_count])
-        donut_colors = list(bar_colors[:named_count])
-        neutral_count = sum(values[named_count:]) + other_count
-        if neutral_count:
-            donut_values.append(neutral_count)
+        donut_values = list(values)
+        donut_colors = list(bar_colors)
+        if other_count:
+            donut_values.append(other_count)
             donut_colors.append(CHATCHART_OTHER_COLOR)
-        # The named wedges are identified by the ranking beside them; the neutral
-        # one has no bar to point at, so it carries its own label outside the ring.
         donut_labels = [""] * len(donut_values)
-        if neutral_count:
+        if other_count:
             donut_labels[-1] = "Other"
         _wedges, outside_labels, _percentages = donut_axis.pie(
             donut_values,
@@ -2325,6 +2342,7 @@ class NHMisc(commands.Cog):
         counts: list[ChannelUserCount],
         days: int,
         location_label: str,
+        amount: int,
     ) -> discord.File:
         try:
             import matplotlib
@@ -2336,7 +2354,7 @@ class NHMisc(commands.Cog):
                 "Matplotlib is required for chatchart but is not installed."
             ) from exc
 
-        top_counts = counts[: len(CHATCHART_SERIES_COLORS)]
+        top_counts = counts[:amount]
         top_count = sum(count.message_count for count in top_counts)
         other_count = sum(count.message_count for count in counts[len(top_counts):])
         total_count = top_count + other_count
@@ -2350,12 +2368,7 @@ class NHMisc(commands.Cog):
             labels.append(name)
             values.append(count.message_count)
 
-        bar_colors = [
-            CHATCHART_SERIES_COLORS[index]
-            if index < len(CHATCHART_SERIES_COLORS)
-            else CHATCHART_OTHER_COLOR
-            for index in range(len(values))
-        ]
+        bar_colors = list(CHATCHART_SERIES_COLORS[: len(values)])
 
         figure_height = max(5.5, 1.5 + len(top_counts) * 0.5)
         figure = plt.figure(figsize=(13, figure_height))
