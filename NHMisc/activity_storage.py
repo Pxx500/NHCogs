@@ -1135,7 +1135,7 @@ class ActivityStore:
             rows = conn.execute(
                 """
                 SELECT user_id, SUM(message_count) AS total
-                FROM activity_user_day
+                FROM activity_user_channel_day
                 WHERE guild_id = ? AND date_utc BETWEEN ? AND ?
                 GROUP BY user_id
                 ORDER BY total DESC, user_id ASC
