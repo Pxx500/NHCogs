@@ -92,6 +92,49 @@ class ActivityStoreLeaderboardTests(unittest.IsolatedAsyncioTestCase):
             [(20, 4), (10, 3)],
         )
 
+    async def test_guild_user_counts_include_closed_days(self):
+        with TemporaryDirectory() as directory:
+            store = activity_storage.ActivityStore(Path(directory) / "activity.sqlite3")
+            await store.initialize()
+
+            for _ in range(100):
+                await store.record_message(
+                    guild_id=1,
+                    date_utc=date(2026, 7, 26),
+                    hour_utc=12,
+                    user_id=10,
+                    channel_id=100,
+                    thread_id=None,
+                    now_utc=datetime(2026, 7, 26, 12, tzinfo=timezone.utc),
+                )
+            await store.close_stale_days(
+                guild_id=1,
+                current_date_utc=date(2026, 7, 27),
+                member_count=1_000,
+            )
+            for _ in range(5):
+                await store.record_message(
+                    guild_id=1,
+                    date_utc=date(2026, 7, 27),
+                    hour_utc=12,
+                    user_id=20,
+                    channel_id=100,
+                    thread_id=None,
+                    now_utc=datetime(2026, 7, 27, 12, tzinfo=timezone.utc),
+                )
+
+            rows = await store.get_guild_user_counts(
+                guild_id=1,
+                end_date_utc=date(2026, 7, 27),
+                days=2,
+                limit=20,
+            )
+
+        self.assertEqual(
+            [(row.user_id, row.message_count) for row in rows],
+            [(10, 100), (20, 5)],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
