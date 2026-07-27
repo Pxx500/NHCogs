@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from typing import TypeAlias
 
 
@@ -36,6 +36,11 @@ class Or:
 
 
 Expression: TypeAlias = Role | Not | And | Or
+
+MAX_EXPRESSION_LENGTH = 1_000
+MAX_EXPRESSION_TOKENS = 64
+MAX_EXPRESSION_ROLES = 20
+MAX_EXPRESSION_NESTING_DEPTH = 16
 
 
 _TOKEN_RE = re.compile(
@@ -117,9 +122,9 @@ class _Parser:
             return Role(int(token[1]))
         if self._accept("LPAREN"):
             self._nesting_depth += 1
-            if self._nesting_depth > 16:
+            if self._nesting_depth > MAX_EXPRESSION_NESTING_DEPTH:
                 raise RoleExpressionLimitError(
-                    "Expression nesting is deeper than 16 levels"
+                    f"Expression nesting is deeper than {MAX_EXPRESSION_NESTING_DEPTH} levels"
                 )
             expression = self._parse_or()
             if not self._accept("RPAREN"):
@@ -142,14 +147,20 @@ class _Parser:
 
 
 def parse_role_expression(text: str) -> Expression:
-    if len(text) > 1_000:
-        raise RoleExpressionLimitError("Expression is longer than 1,000 characters")
+    if len(text) > MAX_EXPRESSION_LENGTH:
+        raise RoleExpressionLimitError(
+            f"Expression is longer than {MAX_EXPRESSION_LENGTH:,} characters"
+        )
     tokens = _tokenize(text)
-    if len(tokens) > 64:
-        raise RoleExpressionLimitError("Expression contains more than 64 tokens")
+    if len(tokens) > MAX_EXPRESSION_TOKENS:
+        raise RoleExpressionLimitError(
+            f"Expression contains more than {MAX_EXPRESSION_TOKENS} tokens"
+        )
     expression = _Parser(tokens).parse()
-    if len(role_ids(expression)) > 20:
-        raise RoleExpressionLimitError("Expression references more than 20 roles")
+    if len(role_ids(expression)) > MAX_EXPRESSION_ROLES:
+        raise RoleExpressionLimitError(
+            f"Expression references more than {MAX_EXPRESSION_ROLES} roles"
+        )
     return expression
 
 

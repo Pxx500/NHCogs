@@ -1,10 +1,9 @@
 import importlib.util
-from io import BytesIO
 import sys
 import unittest
+from io import BytesIO
 from pathlib import Path
 from zipfile import ZipFile
-
 
 MODULE_PATH = Path(__file__).parents[1] / "NHMisc" / "role_export.py"
 SPEC = importlib.util.spec_from_file_location("nhmisc_role_export_test", MODULE_PATH)
