@@ -246,7 +246,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 second_task = asyncio.create_task(cog.on_message(second))
                 try:
                     await asyncio.wait_for(second_processed.wait(), timeout=0.1)
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     pass
                 release_first_detection.set()
                 await asyncio.gather(first_task, second_task)
@@ -303,17 +303,21 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 first_task = asyncio.create_task(cog.on_message(first))
                 await asyncio.wait_for(first_scan_started.wait(), timeout=1)
                 second_task = asyncio.create_task(cog.on_message(second))
+                async def wait_for_second_admission():
+                    while True:
+                        snapshot = await asyncio.to_thread(
+                            active_case, cog._case_store,
+                            first.guild.id,
+                            first.author.id,
+                        )
+                        if snapshot is not None and len(snapshot.messages) == 2:
+                            return snapshot
+                        await asyncio.sleep(0)
+
                 try:
-                    async with asyncio.timeout(0.5):
-                        while True:
-                            snapshot = await asyncio.to_thread(
-                                active_case, cog._case_store,
-                                first.guild.id,
-                                first.author.id,
-                            )
-                            if snapshot is not None and len(snapshot.messages) == 2:
-                                break
-                            await asyncio.sleep(0)
+                    snapshot = await asyncio.wait_for(
+                        wait_for_second_admission(), timeout=0.5
+                    )
                     self.assertEqual(
                         [message.message_id for message in snapshot.messages],
                         [first.id, second.id],
