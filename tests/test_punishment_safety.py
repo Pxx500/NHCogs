@@ -1,20 +1,68 @@
 """Safety policy at the Discord punishment boundary."""
 
-from datetime import datetime, timezone
+import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-import unittest
 from unittest import mock
 
 from tests.harness import _Bot, _isolated_honeypot_modules
+
+
+class _Store:
+    def __init__(self, value):
+        self.value = value
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+
+class _Ranked:
+    def __init__(self, position):
+        self.position = position
+
+    def __le__(self, other):
+        return self.position <= other.position
+
+    def __ge__(self, other):
+        return self.position >= other.position
+
+
+class _FakeEmbed:
+    def __init__(self, *, description=None, **_kwargs):
+        self.description = description
+        self.fields = []
+
+    def set_author(self, **_kwargs):
+        pass
+
+    def set_thumbnail(self, **_kwargs):
+        pass
+
+    def add_field(self, *, name, value, inline):
+        self.fields.append(SimpleNamespace(name=name, value=value, inline=inline))
+
+
+class _CompletedTask:
+    def add_done_callback(self, callback):
+        callback(self)
+
+
+class _DiscardingLoop:
+    def create_task(self, coroutine, *, name):
+        coroutine.close()
+        return _CompletedTask()
 
 
 class PunitiveEffectPolicyTests(unittest.IsolatedAsyncioTestCase):
     async def _assert_current_dry_run_plans(self, action: str) -> None:
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                from Honeypot.effects import EffectStatus
+                from Honeypot.effects import EffectStatus  # noqa: PLC0415
 
                 cog = honeypot.Honeypot(_Bot())
                 current_config = SimpleNamespace(
@@ -67,7 +115,7 @@ class PunitiveEffectPolicyTests(unittest.IsolatedAsyncioTestCase):
     async def test_successful_kick_fail_warning_keeps_failed_effect_status(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                from Honeypot.effects import EffectStatus
+                from Honeypot.effects import EffectStatus  # noqa: PLC0415
 
                 cog = honeypot.Honeypot(_Bot())
                 current_config = SimpleNamespace(
@@ -114,3 +162,299 @@ class PunitiveEffectPolicyTests(unittest.IsolatedAsyncioTestCase):
                 modlog_create_case.assert_awaited_once()
                 self.assertIsNone(result.failed_message)
                 self.assertEqual(result.status, EffectStatus.FAILED)
+
+
+class JoinwatchDryRunTests(unittest.IsolatedAsyncioTestCase):
+    async def test_current_dry_run_plans_immediate_role_without_tracking_removal(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                role = _Ranked(5)
+                role.id = 501
+                role.mention = "<@&501>"
+                alert_channel = SimpleNamespace(id=601, send=mock.AsyncMock())
+                alert_channel.send.return_value = SimpleNamespace(
+                    id=701,
+                    channel=alert_channel,
+                )
+                guild = SimpleNamespace(
+                    id=100,
+                    me=SimpleNamespace(
+                        guild_permissions=SimpleNamespace(manage_roles=True),
+                        top_role=_Ranked(10),
+                    ),
+                    get_role=lambda role_id: role if role_id == role.id else None,
+                    get_channel=lambda channel_id: (
+                        alert_channel if channel_id == alert_channel.id else None
+                    ),
+                    get_thread=lambda _channel_id: None,
+                )
+                member = SimpleNamespace(
+                    id=200,
+                    guild=guild,
+                    bot=False,
+                    created_at=datetime.now(timezone.utc) - timedelta(hours=1),
+                    joined_at=datetime.now(timezone.utc),
+                    display_name="New Member",
+                    display_avatar=None,
+                    mention="<@200>",
+                    roles=[],
+                    guild_permissions=SimpleNamespace(manage_guild=False),
+                    top_role=_Ranked(1),
+                    add_roles=mock.AsyncMock(),
+                )
+                pending_roles = {}
+                stats = {}
+                raw_config = {
+                    "dry_run": True,
+                    "joinwatch_enabled": True,
+                    "joinwatch_alert_enabled": True,
+                    "joinwatch_channel": alert_channel.id,
+                    "joinwatch_min_age_hours": 24,
+                    "joinwatch_auto_role_enabled": True,
+                    "joinwatch_auto_role_id": role.id,
+                    "joinwatch_auto_role_timer_minutes": 30,
+                    "joinwatch_auto_role_random_delay_enabled": False,
+                    "joinwatch_pending_roles": pending_roles,
+                }
+                guild_config = SimpleNamespace(
+                    all=mock.AsyncMock(return_value=raw_config),
+                    joinwatch_pending_roles=lambda: _Store(pending_roles),
+                    stats=lambda: _Store(stats),
+                )
+                bot = _Bot()
+                bot.owner_ids = ()
+                bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
+                bot.is_mod = mock.AsyncMock(return_value=False)
+                bot.is_admin = mock.AsyncMock(return_value=False)
+                cog = honeypot.Honeypot(bot)
+                cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
+
+                with mock.patch.object(honeypot.discord, "Embed", _FakeEmbed), mock.patch.object(
+                    honeypot.discord,
+                    "Color",
+                    SimpleNamespace(orange=mock.Mock(return_value=None)),
+                ), mock.patch.object(
+                    honeypot.discord,
+                    "utils",
+                    SimpleNamespace(format_dt=lambda value, style: value.isoformat()),
+                    create=True,
+                ):
+                    await cog.on_member_join(member)
+
+                member.add_roles.assert_not_awaited()
+                self.assertNotIn(str(member.id), pending_roles)
+                moderator_embed = alert_channel.send.await_args.kwargs["embed"]
+                self.assertTrue(
+                    any("dry run" in field.value.lower() for field in moderator_embed.fields)
+                )
+
+    async def test_current_dry_run_discards_due_assignment_without_tracking_removal(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                role = _Ranked(5)
+                role.id = 501
+                role.mention = "<@&501>"
+                guild = SimpleNamespace(
+                    id=100,
+                    me=SimpleNamespace(
+                        guild_permissions=SimpleNamespace(manage_roles=True),
+                        top_role=_Ranked(10),
+                    ),
+                    get_channel=lambda _channel_id: None,
+                    get_thread=lambda _channel_id: None,
+                    get_role=lambda role_id: role if role_id == role.id else None,
+                )
+                member = SimpleNamespace(
+                    id=200,
+                    guild=guild,
+                    roles=[],
+                    guild_permissions=SimpleNamespace(manage_guild=False),
+                    top_role=_Ranked(1),
+                    add_roles=mock.AsyncMock(),
+                )
+                guild.get_member = lambda member_id: (
+                    member if member_id == member.id else None
+                )
+                guild.fetch_member = mock.AsyncMock(return_value=member)
+                assignments = {
+                    str(member.id): {
+                        "role_id": role.id,
+                        "apply_at": (
+                            datetime.now(timezone.utc) - timedelta(minutes=1)
+                        ).isoformat(),
+                    }
+                }
+                pending_roles = {}
+                stats = {}
+                raw_config = {
+                    "dry_run": True,
+                    "joinwatch_auto_role_enabled": True,
+                    "joinwatch_auto_role_id": role.id,
+                    "joinwatch_auto_role_timer_minutes": 30,
+                    "joinwatch_pending_role_assignments": assignments,
+                    "joinwatch_pending_roles": pending_roles,
+                }
+                guild_config = SimpleNamespace(
+                    all=mock.AsyncMock(return_value=raw_config),
+                    joinwatch_pending_role_assignments=lambda: _Store(assignments),
+                    joinwatch_pending_roles=lambda: _Store(pending_roles),
+                    stats=lambda: _Store(stats),
+                )
+                bot = _Bot()
+                bot.guilds = [guild]
+                bot.owner_ids = ()
+                bot.is_mod = mock.AsyncMock(return_value=False)
+                bot.is_admin = mock.AsyncMock(return_value=False)
+                cog = honeypot.Honeypot(bot)
+                cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
+
+                with mock.patch.object(
+                    honeypot.discord,
+                    "utils",
+                    SimpleNamespace(format_dt=lambda value, style: value.isoformat()),
+                    create=True,
+                ):
+                    await cog.joinwatch_auto_role_loop.function(cog)
+
+                member.add_roles.assert_not_awaited()
+                self.assertNotIn(str(member.id), assignments)
+                self.assertNotIn(str(member.id), pending_roles)
+
+
+class BaitRoleSafetyTests(unittest.IsolatedAsyncioTestCase):
+    async def _run_bait_ban(
+        self,
+        *,
+        dry_run: bool,
+        discord_failure: bool = False,
+        modlog_failure: bool = False,
+    ):
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        modules = _isolated_honeypot_modules(Path(directory.name))
+        honeypot = modules.__enter__()
+        self.addCleanup(modules.__exit__, None, None, None)
+
+        bait_role = SimpleNamespace(id=501)
+        logs_channel = SimpleNamespace(id=601, send=mock.AsyncMock())
+        guild = SimpleNamespace(
+            id=100,
+            me=SimpleNamespace(
+                id=101,
+                guild_permissions=SimpleNamespace(
+                    ban_members=True,
+                    kick_members=True,
+                ),
+                top_role=_Ranked(10),
+            ),
+            get_role=lambda role_id: bait_role if role_id == bait_role.id else None,
+            get_channel=lambda channel_id: (
+                logs_channel if channel_id == logs_channel.id else None
+            ),
+            get_thread=lambda _channel_id: None,
+        )
+        common_member = {
+            "id": 200,
+            "guild": guild,
+            "bot": False,
+            "mention": "<@200>",
+            "display_avatar": None,
+            "guild_permissions": SimpleNamespace(manage_guild=False),
+            "top_role": _Ranked(1),
+        }
+        before = SimpleNamespace(**common_member, roles=[])
+        after = SimpleNamespace(
+            **common_member,
+            roles=[bait_role],
+            ban=mock.AsyncMock(
+                side_effect=(
+                    honeypot.discord.HTTPException("ban failed")
+                    if discord_failure
+                    else None
+                )
+            ),
+            kick=mock.AsyncMock(),
+        )
+        pending_roles = {}
+        stats = {}
+        raw_config = {
+            "dry_run": dry_run,
+            "logs_channel": logs_channel.id,
+            "baitrole_enabled": True,
+            "baitrole_id": bait_role.id,
+            "baitrole_action": "ban",
+            "joinwatch_pending_roles": pending_roles,
+        }
+        guild_config = SimpleNamespace(
+            all=mock.AsyncMock(return_value=raw_config),
+            joinwatch_pending_roles=lambda: _Store(pending_roles),
+            stats=lambda: _Store(stats),
+        )
+        bot = _Bot()
+        bot.owner_ids = ()
+        bot.loop = _DiscardingLoop()
+        bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
+        bot.is_mod = mock.AsyncMock(return_value=False)
+        bot.is_admin = mock.AsyncMock(return_value=False)
+        cog = honeypot.Honeypot(bot)
+        cog.config = SimpleNamespace(
+            guild=lambda _guild: guild_config,
+            guild_from_id=lambda _guild_id: guild_config,
+        )
+        cog._case_store.initialize()
+        modlog_create_case = mock.AsyncMock(
+            side_effect=(RuntimeError("modlog failed") if modlog_failure else None)
+        )
+
+        with mock.patch.object(honeypot.discord, "Embed", _FakeEmbed), mock.patch.object(
+            honeypot.discord,
+            "Color",
+            SimpleNamespace(dark_red=mock.Mock(return_value=None)),
+        ), mock.patch.object(
+            honeypot.modlog,
+            "create_case",
+            modlog_create_case,
+            create=True,
+        ):
+            await cog.on_member_update(before, after)
+
+        moderator_embed = logs_channel.send.await_args.kwargs["embed"]
+        return after, modlog_create_case, moderator_embed
+
+    async def test_current_dry_run_plans_bait_ban(self):
+        member, modlog_create_case, moderator_embed = await self._run_bait_ban(
+            dry_run=True
+        )
+
+        member.ban.assert_not_awaited()
+        modlog_create_case.assert_not_awaited()
+        self.assertIn("dry run", moderator_embed.description.lower())
+
+    async def test_failed_bait_ban_reports_failure_without_modlog(self):
+        member, modlog_create_case, moderator_embed = await self._run_bait_ban(
+            dry_run=False,
+            discord_failure=True,
+        )
+
+        member.ban.assert_awaited_once()
+        modlog_create_case.assert_not_awaited()
+        self.assertIn("failed", moderator_embed.description.lower())
+
+    async def test_successful_bait_ban_reports_punishment(self):
+        member, modlog_create_case, moderator_embed = await self._run_bait_ban(
+            dry_run=False
+        )
+
+        member.ban.assert_awaited_once()
+        modlog_create_case.assert_awaited_once()
+        self.assertIn("was banned", moderator_embed.description.lower())
+
+    async def test_successful_bait_ban_reports_modlog_failure(self):
+        member, modlog_create_case, moderator_embed = await self._run_bait_ban(
+            dry_run=False,
+            modlog_failure=True,
+        )
+
+        member.ban.assert_awaited_once()
+        modlog_create_case.assert_awaited_once()
+        self.assertIn("modlog", moderator_embed.description.lower())
