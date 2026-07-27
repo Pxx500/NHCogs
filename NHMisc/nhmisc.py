@@ -169,6 +169,9 @@ class NHMisc(commands.Cog):
             self._role_analytics_daily_task.cancel()
         self._role_analytics.cancel()
 
+    async def configured_sticky_role_ids(self, guild_id: int) -> frozenset[int]:
+        return frozenset(await self._sticky_roles.get_sticky_roles(guild_id))
+
     async def _role_analytics_startup_reconcile(self) -> None:
         await self.bot.wait_until_ready()
         try:
