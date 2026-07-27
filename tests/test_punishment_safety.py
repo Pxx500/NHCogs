@@ -2,6 +2,7 @@
 
 import unittest
 from datetime import datetime, timedelta, timezone
+from importlib import import_module
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -162,6 +163,104 @@ class PunitiveEffectPolicyTests(unittest.IsolatedAsyncioTestCase):
                 modlog_create_case.assert_awaited_once()
                 self.assertIsNone(result.failed_message)
                 self.assertEqual(result.status, EffectStatus.FAILED)
+
+
+class UnknownKickRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def _run_reclaimed_kick(self, honeypot, operation_type):
+        now = datetime.now(timezone.utc)
+        member = SimpleNamespace(
+            id=20,
+            joined_at=now - timedelta(minutes=5),
+            kick=mock.AsyncMock(),
+        )
+        moderator = SimpleNamespace(id=777)
+        guild = SimpleNamespace(
+            id=10,
+            me=SimpleNamespace(id=11),
+            get_member=lambda user_id: (
+                member if user_id == member.id else moderator
+            ),
+        )
+        bot = _Bot()
+        bot.get_guild = lambda guild_id: guild if guild_id == guild.id else None
+        cog = honeypot.Honeypot(bot)
+        guild_config = SimpleNamespace(
+            all=mock.AsyncMock(return_value={"dry_run": False})
+        )
+        cog.config = SimpleNamespace(
+            guild_from_id=lambda guild_id: guild_config,
+            guild=lambda configured_guild: guild_config,
+        )
+        cog._increment_stat = mock.AsyncMock()
+        cog._missing_action_permission = mock.Mock(return_value=None)
+        honeypot.detection._activate_forward_purge = mock.Mock()
+        case_store = SimpleNamespace(
+            operation_effect_started=mock.Mock(return_value=True),
+            mark_case_needs_attention=mock.Mock(),
+            start_operation_effect=mock.Mock(return_value=True),
+        )
+        cog._case_store = case_store
+        operation = SimpleNamespace(
+            operation_id=f"operation-{operation_type.value}",
+            operation_type=operation_type,
+            message_sequence=1,
+            actor_id=moderator.id,
+            claim_token="claim-token",
+        )
+        snapshot = SimpleNamespace(
+            case=SimpleNamespace(case_id="case-1", guild_id=10, user_id=20),
+            messages=(SimpleNamespace(sequence=1, created_at=now),),
+            signals=(
+                SimpleNamespace(
+                    message_sequence=1,
+                    signal=honeypot.DetectionSignal(
+                        "spam",
+                        "duplicate",
+                        honeypot.ActionIntent.KICK,
+                        True,
+                        {},
+                    ),
+                ),
+            ),
+        )
+        context = honeypot.OperationContext(
+            operation=operation,
+            snapshot=snapshot,
+            lease=honeypot.OperationLease(
+                operation_id=operation.operation_id,
+                claim_token=operation.claim_token,
+            ),
+            now=now,
+        )
+        handler = import_module(
+            "Honeypot.operations"
+        ).OperationHandlerRegistry().resolve(operation_type)
+
+        with mock.patch.object(
+            honeypot.modlog,
+            "create_case",
+            new=mock.AsyncMock(),
+            create=True,
+        ):
+            outcome = await handler(cog, context)
+        return outcome, member, case_store
+
+    async def _assert_reclaimed_kick_is_terminal(self, operation_type):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                outcome, member, case_store = await self._run_reclaimed_kick(
+                    honeypot, honeypot.OperationType(operation_type)
+                )
+
+                self.assertEqual(outcome.result, "kick_outcome_unknown")
+                member.kick.assert_not_awaited()
+                case_store.mark_case_needs_attention.assert_called_once_with("case-1")
+
+    async def test_automatic_reclaimed_kick_stops_with_unknown_outcome(self):
+        await self._assert_reclaimed_kick_is_terminal("moderation_action")
+
+    async def test_moderator_reclaimed_kick_stops_with_unknown_outcome(self):
+        await self._assert_reclaimed_kick_is_terminal("moderator_kick")
 
 
 class JoinwatchDryRunTests(unittest.IsolatedAsyncioTestCase):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -10,6 +11,7 @@ import discord
 
 from ..detection_cases import (
     OPERATION_RESULT_KICK_MISSING,
+    OPERATION_RESULT_KICK_OUTCOME_UNKNOWN,
     PLANNED_PREFIX,
     ActionIntent,
     effective_action,
@@ -19,6 +21,8 @@ from .context import OperationContext, OperationOutcome
 
 if TYPE_CHECKING:
     from ..honeypot import Honeypot
+
+log = logging.getLogger("red.Honeypot")
 
 
 async def _moderation_target(
@@ -77,6 +81,20 @@ async def moderation_action_handler(
         cog._case_store.operation_effect_started,
         context.operation.operation_id,
     )
+    if effect_started and action is ActionIntent.KICK:
+        member = guild.get_member(context.snapshot.case.user_id)
+        await asyncio.to_thread(
+            cog._case_store.mark_case_needs_attention,
+            context.snapshot.case.case_id,
+        )
+        log.warning(
+            "Detection case kick outcome is unknown; operation will not be retried "
+            "(case_id=%s, operation_id=%s, member_joined_at=%s)",
+            context.snapshot.case.case_id,
+            context.operation.operation_id,
+            getattr(member, "joined_at", None),
+        )
+        return OperationOutcome(result=OPERATION_RESULT_KICK_OUTCOME_UNKNOWN)
     if effect_started and action is ActionIntent.BAN:
         target = guild.get_member(context.snapshot.case.user_id)
         if target is None:
