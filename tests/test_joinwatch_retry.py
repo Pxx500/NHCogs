@@ -165,6 +165,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                 }
                 stats = {}
                 raw_config = {
+                    "dry_run": False,
                     "joinwatch_auto_role_enabled": True,
                     "joinwatch_auto_role_id": 501,
                     "joinwatch_auto_role_timer_minutes": 30,

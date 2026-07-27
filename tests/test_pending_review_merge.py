@@ -180,6 +180,44 @@ class CaseReviewProjectionTests(unittest.TestCase):
         )
         self.assertNotIn("delete", warning.value.lower())
 
+    def test_unknown_kick_outcome_warns_that_operation_was_not_retried(self):
+        snapshot = self.snapshot(delete_status=cases.DeleteStatus.DELETED)
+        operation = cases.OperationRecord(
+            "op-unknown-kick",
+            snapshot.case.case_id,
+            1,
+            "moderation_action",
+            cases.OperationStatus.SUCCEEDED,
+            2,
+            snapshot.case.created_at,
+            snapshot.case.created_at,
+            None,
+            None,
+            "kick_outcome_unknown",
+            None,
+            f"moderation:{snapshot.case.case_id}:1",
+            None,
+            snapshot.case.created_at,
+        )
+        snapshot = cases.CaseSnapshot(
+            cases.CaseRecord(
+                **{**snapshot.case.__dict__, "needs_attention": True}
+            ),
+            snapshot.messages,
+            snapshot.attachments,
+            snapshot.signals,
+            (operation,),
+        )
+
+        projection = case_review.render_case(snapshot)
+        warning = next(
+            field for field in projection.pages[0] if field.name == "Warnings:"
+        )
+
+        self.assertTrue(projection.needs_attention)
+        self.assertIn("could not be confirmed", warning.value.lower())
+        self.assertIn("not retried", warning.value.lower())
+
     def test_review_projects_complete_persisted_case_status(self):
         snapshot = self.snapshot()
         incomplete = cases.AttachmentRecord(

@@ -42,6 +42,7 @@ from .detection_cases import (
     OperationStatus,  # noqa: F401 - public module re-export
     OperationType,
 )
+from .effects import ModerationEffectResult, punitive_effect_allowed
 from .firstpost_store import FirstPostStore
 from .image_detector import ImageSample
 from .imagescan_store import ImageScanStore
@@ -438,6 +439,9 @@ class Honeypot(Cog):
     ) -> list[str]:
         return detection._spam_suspicion_reasons(self, message, guild_settings)
 
+    async def _punitive_effect_allowed(self, guild: discord.Guild) -> bool:
+        return await punitive_effect_allowed(self, guild)
+
     async def _execute_action(
         self,
         guild: discord.Guild,
@@ -448,7 +452,7 @@ class Honeypot(Cog):
         reason: str,
         action: str | None = None,
         moderator: discord.Member | discord.User | discord.Object | None = None,
-    ) -> tuple[str | None, str | None]:
+    ) -> ModerationEffectResult:
         return await detection._execute_action(
             self,
             guild,

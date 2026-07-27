@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from .detection_cases import (
     OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP,
     OPERATION_RESULT_CHANNEL_UNAVAILABLE,
+    OPERATION_RESULT_KICK_OUTCOME_UNKNOWN,
     OPERATION_RESULT_UNSUPPORTED_CHANNEL,
     AttachmentKey,
     AttachmentRecord,
@@ -440,7 +441,10 @@ def render_timeline(snapshot: CaseSnapshot) -> CaseTimelineProjection:
     operation_notes = tuple(
         _operation_warning(operation)
         for operation in snapshot.operations
-        if operation.result == OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP
+        if operation.result in {
+            OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP,
+            OPERATION_RESULT_KICK_OUTCOME_UNKNOWN,
+        }
         or (
             operation.operation_type
             in {
@@ -477,6 +481,11 @@ def _resolution_label(resolution: str) -> str:
 
 
 def _operation_warning(operation: OperationRecord) -> str:
+    if operation.result == OPERATION_RESULT_KICK_OUTCOME_UNKNOWN:
+        return (
+            "The previous kick outcome could not be confirmed, so the operation "
+            "was not retried. Review it manually."
+        )
     if operation.result == OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP:
         return (
             "Bot could not confirm that this case applied the temporary mute role. "
@@ -738,7 +747,10 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
     operation_warning_lines = tuple(
         _operation_warning(operation)
         for operation in snapshot.operations
-        if operation.result == OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP
+        if operation.result in {
+            OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP,
+            OPERATION_RESULT_KICK_OUTCOME_UNKNOWN,
+        }
         or (
             operation.operation_type
             in {

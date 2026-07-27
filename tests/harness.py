@@ -9,7 +9,7 @@ import ast
 import asyncio
 import sys
 import unittest
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from importlib import util
 from pathlib import Path
@@ -194,9 +194,32 @@ class _LoopStub:
         return function
 
 
+class _GuildConfig:
+    def __init__(self, values, stats):
+        self._values = values
+        self._stats = stats
+
+    async def all(self):
+        return dict(self._values)
+
+    @asynccontextmanager
+    async def stats(self):
+        yield self._stats
+
+
 class _Config:
+    def __init__(self):
+        self.defaults = {}
+        self._stats = {}
+
     def register_guild(self, **defaults):
         self.defaults = defaults
+
+    def guild(self, guild):
+        return self.guild_from_id(guild.id)
+
+    def guild_from_id(self, guild_id):
+        return _GuildConfig(self.defaults, self._stats)
 
 
 class _Cog:
@@ -683,10 +706,9 @@ class CaseExpiryTestCase(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def _config(values):
-        async def all_values():
-            return values
-
-        return SimpleNamespace(guild_from_id=lambda guild_id: SimpleNamespace(all=all_values))
+        config = _Config()
+        config.register_guild(**values)
+        return config
 
     @staticmethod
     def _append_case(honeypot, cog, created_at, *, message_id=40):

@@ -16,6 +16,7 @@ from unittest import mock
 
 from tests.detection_case_fixtures import capture_attachment
 from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.test_chatchart import load_nhmisc_module
 
 
 class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
@@ -71,13 +72,16 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         )
 
     @staticmethod
-    def _doctor_context():
+    def _doctor_context(*, role_ids=()):
         permissions = SimpleNamespace(
             kick_members=True,
             ban_members=True,
             manage_roles=True,
         )
-        member = SimpleNamespace(guild_permissions=permissions)
+        top_role = mock.MagicMock()
+        top_role.__gt__.return_value = True
+        member = SimpleNamespace(guild_permissions=permissions, top_role=top_role)
+        roles = {role_id: SimpleNamespace(id=role_id) for role_id in role_ids}
         guild = SimpleNamespace(
             id=10,
             me=member,
@@ -85,9 +89,154 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             threads=[],
             get_channel=lambda channel_id: None,
             get_thread=lambda channel_id: None,
-            get_role=lambda role_id: None,
+            get_role=roles.get,
         )
         return SimpleNamespace(guild=guild, send=mock.AsyncMock())
+
+    @staticmethod
+    def _doctor_config(**overrides):
+        config = {
+            "enabled": False,
+            "action": "none",
+            "fallback_action": "none",
+            "whitelist_mode": "bypass",
+        }
+        config.update(overrides)
+        return config
+
+    async def test_nhmisc_exposes_configured_sticky_roles_as_a_read_only_snapshot(self):
+        with TemporaryDirectory() as directory:
+            nhmisc = load_nhmisc_module()
+            sticky_roles = nhmisc.StickyRoleStore(Path(directory) / "sticky_roles.sqlite")
+            await sticky_roles.initialize()
+            await sticky_roles.add_sticky_role(10, 41)
+            await sticky_roles.add_sticky_role(10, 42)
+            cog = object.__new__(nhmisc.NHMisc)
+            cog._sticky_roles = sticky_roles
+
+            role_ids = await cog.configured_sticky_role_ids(10)
+
+            self.assertEqual(role_ids, frozenset({41, 42}))
+
+    async def test_doctor_warns_when_bait_role_is_the_mute_role(self):
+        role_id = 41
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog.config = SimpleNamespace(
+                    guild=lambda guild: SimpleNamespace(
+                        all=mock.AsyncMock(
+                            return_value=self._doctor_config(
+                                baitrole_id=role_id,
+                                mute_role=role_id,
+                            )
+                        )
+                    )
+                )
+                ctx = self._doctor_context(role_ids=(role_id,))
+
+                await cog.honeypot_doctor(ctx)
+
+                report = "\n".join(call.args[0] for call in ctx.send.await_args_list)
+                collision_line = next(
+                    line
+                    for line in report.splitlines()
+                    if "bait role" in line.lower() and "mute role" in line.lower()
+                )
+                self.assertIn("bait role", report.lower())
+                self.assertIn("mute role", report.lower())
+                self.assertNotIn("❌", collision_line)
+
+    async def test_doctor_warns_when_bait_role_is_the_joinwatch_auto_role(self):
+        role_id = 42
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog.config = SimpleNamespace(
+                    guild=lambda guild: SimpleNamespace(
+                        all=mock.AsyncMock(
+                            return_value=self._doctor_config(
+                                baitrole_id=role_id,
+                                joinwatch_auto_role_enabled=True,
+                                joinwatch_auto_role_id=role_id,
+                            )
+                        )
+                    )
+                )
+                ctx = self._doctor_context(role_ids=(role_id,))
+
+                await cog.honeypot_doctor(ctx)
+
+                report = "\n".join(call.args[0] for call in ctx.send.await_args_list)
+                collision_line = next(
+                    line
+                    for line in report.splitlines()
+                    if "bait role" in line.lower()
+                    and "joinwatch auto-role" in line.lower()
+                )
+                self.assertIn("bait role", report.lower())
+                self.assertIn("joinwatch auto-role", report.lower())
+                self.assertNotIn("❌", collision_line)
+
+    async def test_doctor_warns_when_bait_role_is_an_nhmisc_sticky_role(self):
+        role_id = 43
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                bot = _Bot()
+                bot.get_cog = mock.Mock(
+                    return_value=SimpleNamespace(
+                        configured_sticky_role_ids=mock.AsyncMock(
+                            return_value=frozenset({role_id})
+                        )
+                    )
+                )
+                cog = honeypot.Honeypot(bot)
+                cog.config = SimpleNamespace(
+                    guild=lambda guild: SimpleNamespace(
+                        all=mock.AsyncMock(
+                            return_value=self._doctor_config(baitrole_id=role_id)
+                        )
+                    )
+                )
+                ctx = self._doctor_context(role_ids=(role_id,))
+
+                await cog.honeypot_doctor(ctx)
+
+                report = "\n".join(call.args[0] for call in ctx.send.await_args_list)
+                collision_line = next(
+                    line
+                    for line in report.splitlines()
+                    if "bait role" in line.lower() and "sticky role" in line.lower()
+                )
+                self.assertIn("bait role", report.lower())
+                self.assertIn("sticky role", report.lower())
+                self.assertNotIn("❌", collision_line)
+
+    async def test_doctor_treats_unloaded_nhmisc_as_an_unavailable_optional_check(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                bot = _Bot()
+                bot.get_cog = mock.Mock(return_value=None)
+                cog = honeypot.Honeypot(bot)
+                cog.config = SimpleNamespace(
+                    guild=lambda guild: SimpleNamespace(
+                        all=mock.AsyncMock(
+                            return_value=self._doctor_config(baitrole_id=43)
+                        )
+                    )
+                )
+                ctx = self._doctor_context(role_ids=(43,))
+
+                await cog.honeypot_doctor(ctx)
+
+                report = "\n".join(call.args[0] for call in ctx.send.await_args_list)
+                sticky_role_lines = [
+                    line for line in report.splitlines() if "sticky role" in line.lower()
+                ]
+                self.assertTrue(
+                    all("❌" not in line for line in sticky_role_lines),
+                    report,
+                )
 
     async def test_doctor_command_output_matches_golden(self):
         with TemporaryDirectory() as directory:

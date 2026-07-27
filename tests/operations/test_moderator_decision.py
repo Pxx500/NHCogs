@@ -1,26 +1,39 @@
 import unittest
-from datetime import datetime, timezone
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from importlib import import_module
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest import mock
 
 from tests.harness import _Bot, _isolated_honeypot_modules
 
 
 class _GuildConfig:
-    def __init__(self, values):
+    def __init__(self, values, stats):
         self._values = values
+        self._stats = stats
 
     async def all(self):
         return dict(self._values)
 
+    @asynccontextmanager
+    async def stats(self):
+        yield self._stats
+
 
 class _Config:
-    def __init__(self, values):
+    def __init__(self, values, *, current_values=None):
         self._values = values
+        self._current_values = current_values or values
+        self._stats = {}
+
+    def guild(self, guild):
+        return _GuildConfig(self._current_values, self._stats)
 
     def guild_from_id(self, guild_id):
-        return _GuildConfig(self._values)
+        return _GuildConfig(self._values, self._stats)
 
 
 class ModeratorDecisionHandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -107,6 +120,109 @@ class ModeratorDecisionHandlerTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(outcome.result, "planned_ban")
 
+    async def test_effect_boundary_dry_run_persists_moderator_kick_as_planned(
+        self,
+    ):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                now = datetime.now(timezone.utc)
+                member = SimpleNamespace(
+                    id=20,
+                    kick=mock.AsyncMock(
+                        side_effect=AssertionError("planned kick must not execute")
+                    ),
+                )
+                guild = SimpleNamespace(
+                    id=10,
+                    get_member=lambda user_id: member,
+                )
+                bot = _Bot()
+                bot.get_guild = lambda guild_id: guild
+                cog = honeypot.Honeypot(bot)
+                cog.config = _Config(
+                    {"dry_run": False},
+                    current_values={"dry_run": True},
+                )
+                appended = self._append_case(honeypot, cog, now)
+                claimed = self._claim_moderator_action(
+                    honeypot, cog, appended, "kick", 777, now
+                )
+
+                await cog._execute_detection_case_operation(claimed, now)
+
+                snapshot = cog._case_store.get_case(appended.case.case_id)
+                persisted = next(
+                    item
+                    for item in snapshot.operations
+                    if item.operation_id == claimed.operation_id
+                )
+                self.assertEqual(
+                    (persisted.status, persisted.result),
+                    (honeypot.OperationStatus.SUCCEEDED, "planned_kick"),
+                )
+
+    async def test_kick_not_found_with_warning_keeps_moderator_effect_terminal_failed(
+        self,
+    ):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                now = datetime.now(timezone.utc)
+                member = SimpleNamespace(
+                    id=20,
+                    kick=mock.AsyncMock(
+                        side_effect=honeypot.discord.NotFound("kick target missing")
+                    ),
+                )
+                guild = SimpleNamespace(
+                    id=10,
+                    me=SimpleNamespace(
+                        guild_permissions=SimpleNamespace(
+                            kick_members=True,
+                            ban_members=True,
+                        )
+                    ),
+                    get_member=lambda user_id: member,
+                )
+                bot = _Bot()
+                bot.get_guild = lambda guild_id: guild
+                cog = honeypot.Honeypot(bot)
+                cog.config = _Config(
+                    {
+                        "automated_kick_fail_warning": True,
+                        "dry_run": False,
+                    }
+                )
+                cog._get_user_or_object = mock.AsyncMock(return_value=member)
+                appended = self._append_case(honeypot, cog, now)
+                claimed = self._claim_moderator_action(
+                    honeypot, cog, appended, "kick", 777, now
+                )
+
+                with mock.patch.object(
+                    honeypot.modlog,
+                    "create_case",
+                    new=mock.AsyncMock(),
+                    create=True,
+                ):
+                    await cog._execute_detection_case_operation(claimed, now)
+
+                due = cog._case_store.claim_due_operations(
+                    now + timedelta(days=1)
+                )
+                snapshot = cog._case_store.get_case(appended.case.case_id)
+                persisted = next(
+                    item
+                    for item in snapshot.operations
+                    if item.operation_id == claimed.operation_id
+                )
+                self.assertNotIn(
+                    claimed.operation_id,
+                    {item.operation_id for item in due},
+                )
+                self.assertEqual(
+                    (persisted.status, persisted.result, persisted.retry_at),
+                    (honeypot.OperationStatus.FAILED, None, None),
+                )
 
 class ModeratorIgnoreTests(unittest.IsolatedAsyncioTestCase):
     async def test_ignore_is_succeeded_without_a_dispatch_claim(self):

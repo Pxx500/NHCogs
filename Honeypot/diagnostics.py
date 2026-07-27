@@ -696,6 +696,48 @@ async def _doctor_runtime_checks(cog, guild_id: int) -> tuple[DoctorResult, ...]
     return tuple(results)
 
 
+async def _doctor_bait_role_collision_checks(
+    cog,
+    guild_id: int,
+    guild_settings: GuildSettings,
+) -> tuple[DoctorResult, ...]:
+    bait_role_id = guild_settings.baitrole_id
+    if bait_role_id is None:
+        return ()
+
+    results: list[DoctorResult] = []
+    if bait_role_id == guild_settings.mute_role:
+        results.append(
+            DoctorResult(
+                "Bait role reuses the mute role",
+                "warning",
+                "Configure a dedicated bait role.",
+            )
+        )
+    if bait_role_id == guild_settings.joinwatch_auto_role_id:
+        results.append(
+            DoctorResult(
+                "Bait role reuses the Joinwatch auto-role",
+                "warning",
+                "Configure a dedicated bait role.",
+            )
+        )
+    get_cog = getattr(cog.bot, "get_cog", None)
+    nhmisc = get_cog("NHMisc") if callable(get_cog) else None
+    configured_sticky_role_ids = getattr(nhmisc, "configured_sticky_role_ids", None)
+    if callable(configured_sticky_role_ids):
+        sticky_role_ids = await configured_sticky_role_ids(guild_id)
+        if bait_role_id in sticky_role_ids:
+            results.append(
+                DoctorResult(
+                    "Bait role reuses an NHMisc sticky role",
+                    "warning",
+                    "Configure a dedicated bait role.",
+                )
+            )
+    return tuple(results)
+
+
 async def _doctor_configuration_checks(
     cog,
     guild,
@@ -772,6 +814,7 @@ async def _doctor_configuration_checks(
                 "Run `honeypot review channel`.",
             )
         )
+    results.extend(await _doctor_bait_role_collision_checks(cog, guild.id, guild_settings))
     if guild_settings.mute_role:
         mute_role = guild.get_role(guild_settings.mute_role)
         if mute_role is None:

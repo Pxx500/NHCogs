@@ -92,6 +92,7 @@ OPERATION_RESULT_TRANSFERRED_ROLE_OWNERSHIP = "transferred_role_ownership"
 OPERATION_RESULT_ROLE_ALREADY_OWNED = "role_already_owned"
 OPERATION_RESULT_PREEXISTING_ROLE = "preexisting_role"
 OPERATION_RESULT_KICK_MISSING = "kick_missing"
+OPERATION_RESULT_KICK_OUTCOME_UNKNOWN = "kick_outcome_unknown"
 OPERATION_RESULT_CHANNEL_UNAVAILABLE = "channel_unavailable"
 OPERATION_RESULT_UNSUPPORTED_CHANNEL = "unsupported_channel"
 OPERATION_RESULT_OWNERSHIP_TRANSFERRED = "ownership_transferred"
@@ -2826,8 +2827,11 @@ class DetectionCaseStore:
                 for row in connection.execute(
                     """SELECT operation_id FROM detection_operations AS candidate
                        WHERE (
-                         (status IN ('pending', 'failed')
+                         (status = 'pending'
                           AND (retry_at IS NULL OR retry_at <= ?))
+                         OR (status = 'failed'
+                             AND retry_at IS NOT NULL
+                             AND retry_at <= ?)
                          OR (status = 'running' AND claimed_at <= ?)
                        )
                          AND NOT EXISTS (
@@ -2879,6 +2883,7 @@ class DetectionCaseStore:
                                 operation_id
                        LIMIT ?""",
                     (
+                        now_value,
                         now_value,
                         _to_timestamp(stale_before) if stale_before is not None else -1,
                         limit,
@@ -3170,8 +3175,13 @@ class DetectionCaseStore:
     def fail_operation(
         self, operation_id: str, token: str, error: str, now: datetime,
         retry_at: datetime | None, *, result: str | None = None,
+        terminal_failure: bool = False,
     ) -> bool:
-        status = OperationStatus.FAILED if retry_at is not None else OperationStatus.ABANDONED
+        status = (
+            OperationStatus.FAILED
+            if retry_at is not None or terminal_failure
+            else OperationStatus.ABANDONED
+        )
         with closing(self._connect()) as connection, connection:
             result = connection.execute(
                 """UPDATE detection_operations
