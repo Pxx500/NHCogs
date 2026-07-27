@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
-from dataclasses import dataclass
 import logging
 import time
-from typing import Any, Callable
+from collections import defaultdict
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 from .role_analytics_store import (
     MemberSnapshot,

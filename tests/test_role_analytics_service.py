@@ -2,10 +2,9 @@ import importlib.util
 import sys
 import types
 import unittest
-from unittest import mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
-
+from unittest import mock
 
 PACKAGE_NAME = "nhmisc_role_analytics_service_test_package"
 PACKAGE_PATH = Path(__file__).parents[1] / "NHMisc"

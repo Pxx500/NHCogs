@@ -2267,6 +2267,55 @@ class NHMisc(commands.Cog):
         parent_name = getattr(getattr(channel, "parent", None), "name", None)
         return f"#{parent_name} / {name}" if parent_name else name
 
+    def _draw_chatchart_donut(
+        self,
+        donut_axis,
+        values: list[int],
+        bar_colors: list[str],
+        other_count: int,
+        total_count: int,
+    ) -> None:
+        # Ranks past the last hue share one neutral wedge with everybody outside
+        # the top ten, so the grey bars map onto exactly one grey slice instead
+        # of splitting into wedges no reader can tell apart.
+        named_count = min(len(values), len(CHATCHART_SERIES_COLORS))
+        donut_values = list(values[:named_count])
+        donut_colors = list(bar_colors[:named_count])
+        neutral_count = sum(values[named_count:]) + other_count
+        if neutral_count:
+            donut_values.append(neutral_count)
+            donut_colors.append(CHATCHART_OTHER_COLOR)
+        # The named wedges are identified by the ranking beside them; the neutral
+        # one has no bar to point at, so it carries its own label outside the ring.
+        donut_labels = [""] * len(donut_values)
+        if neutral_count:
+            donut_labels[-1] = "Other"
+        _wedges, outside_labels, _percentages = donut_axis.pie(
+            donut_values,
+            labels=donut_labels,
+            colors=donut_colors,
+            autopct=lambda percent: f"{percent:.0f}%" if percent >= 6 else "",
+            pctdistance=0.79,
+            labeldistance=1.08,
+            startangle=90,
+            counterclock=False,
+            wedgeprops={"width": 0.38, "edgecolor": "white", "linewidth": 2},
+            textprops={"color": "white", "fontsize": 10, "fontweight": "bold"},
+        )
+        for outside_label in outside_labels:
+            outside_label.set_color("#52514e")
+            outside_label.set_fontweight("normal")
+        donut_axis.text(
+            0,
+            0,
+            f"{total_count:,}\nmessages",
+            ha="center",
+            va="center",
+            fontsize=11,
+        )
+        donut_axis.set_title("Share by user", pad=12)
+        donut_axis.axis("equal")
+
     def _build_chatchart_file(
         self,
         guild: discord.Guild,
@@ -2322,7 +2371,7 @@ class NHMisc(commands.Cog):
 
         largest_value = max(values)
         ranking_axis.set_xlim(0, largest_value * 1.24)
-        for position, value in zip(positions, values):
+        for position, value in zip(positions, values, strict=True):
             percentage = value / total_count * 100
             ranking_axis.text(
                 value + largest_value * 0.025,
@@ -2332,46 +2381,9 @@ class NHMisc(commands.Cog):
                 fontsize=9,
             )
 
-        # Ranks past the last hue share one neutral wedge with everybody outside
-        # the top ten, so the grey bars map onto exactly one grey slice instead
-        # of splitting into wedges no reader can tell apart.
-        named_count = min(len(values), len(CHATCHART_SERIES_COLORS))
-        donut_values = list(values[:named_count])
-        donut_colors = list(bar_colors[:named_count])
-        neutral_count = sum(values[named_count:]) + other_count
-        if neutral_count:
-            donut_values.append(neutral_count)
-            donut_colors.append(CHATCHART_OTHER_COLOR)
-        # The named wedges are identified by the ranking beside them; the neutral
-        # one has no bar to point at, so it carries its own label outside the ring.
-        donut_labels = [""] * len(donut_values)
-        if neutral_count:
-            donut_labels[-1] = "Other"
-        _wedges, outside_labels, _percentages = donut_axis.pie(
-            donut_values,
-            labels=donut_labels,
-            colors=donut_colors,
-            autopct=lambda percent: f"{percent:.0f}%" if percent >= 6 else "",
-            pctdistance=0.79,
-            labeldistance=1.08,
-            startangle=90,
-            counterclock=False,
-            wedgeprops={"width": 0.38, "edgecolor": "white", "linewidth": 2},
-            textprops={"color": "white", "fontsize": 10, "fontweight": "bold"},
+        self._draw_chatchart_donut(
+            donut_axis, values, bar_colors, other_count, total_count
         )
-        for outside_label in outside_labels:
-            outside_label.set_color("#52514e")
-            outside_label.set_fontweight("normal")
-        donut_axis.text(
-            0,
-            0,
-            f"{total_count:,}\nmessages",
-            ha="center",
-            va="center",
-            fontsize=11,
-        )
-        donut_axis.set_title("Share by user", pad=12)
-        donut_axis.axis("equal")
 
         title_y = 0.97
         figure.suptitle(

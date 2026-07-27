@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import csv
+from collections.abc import Sequence
 from dataclasses import dataclass
 from io import BytesIO, StringIO
-from typing import Sequence
 from zipfile import ZIP_DEFLATED, ZipFile
 
 

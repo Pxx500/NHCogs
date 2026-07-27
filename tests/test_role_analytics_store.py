@@ -4,7 +4,6 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-
 MODULE_PATH = Path(__file__).parents[1] / "NHMisc" / "role_analytics_store.py"
 SPEC = importlib.util.spec_from_file_location(
     "nhmisc_role_analytics_store_test", MODULE_PATH

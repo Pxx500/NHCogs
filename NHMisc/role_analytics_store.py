@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-import sqlite3
-from typing import Iterator, Sequence
 
 
 class SyncStatus(str, Enum):

@@ -1,16 +1,15 @@
-import io
 import importlib.util
+import io
 import math
-from datetime import date
-from pathlib import Path
 import sys
 import types
 import unittest
+from datetime import date
+from pathlib import Path
 from unittest import mock
 
 from matplotlib.figure import Figure
 from PIL import Image
-
 
 PACKAGE_NAME = "nhmisc_chatchart_test_package"
 PACKAGE_PATH = Path(__file__).parents[1] / "NHMisc"
@@ -274,7 +273,7 @@ class YapperCommandTests(unittest.IsolatedAsyncioTestCase):
         }
         guild = types.SimpleNamespace(
             id=123,
-            get_member=lambda user_id: members.get(user_id),
+            get_member=members.get,
         )
         ctx = FakeContext(guild)
         store = types.SimpleNamespace(
