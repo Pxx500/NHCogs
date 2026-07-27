@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from importlib import import_module
@@ -12,19 +13,28 @@ from tests.harness import _Bot, _isolated_honeypot_modules
 
 
 class _GuildConfig:
-    def __init__(self, values):
+    def __init__(self, values, stats):
         self._values = values
+        self._stats = stats
 
     async def all(self):
         return dict(self._values)
+
+    @asynccontextmanager
+    async def stats(self):
+        yield self._stats
 
 
 class _Config:
     def __init__(self, values):
         self._values = values
+        self._stats = {}
+
+    def guild(self, guild):
+        return self.guild_from_id(guild.id)
 
     def guild_from_id(self, guild_id):
-        return _GuildConfig(self._values)
+        return _GuildConfig(self._values, self._stats)
 
 
 class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):

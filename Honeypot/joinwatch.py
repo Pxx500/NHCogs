@@ -414,8 +414,7 @@ async def _execute_joinwatch_action(
     action = settings.joinwatch_auto_role_action.value
     if action not in ("kick", "ban"):
         return (_("No joinwatch punishment configured."), None)
-    if settings.dry_run:
-        await cog._increment_stat(guild, "dry_run_actions")
+    if not await cog._punitive_effect_allowed(guild):
         return (cog._dry_run_label(action), None)
     missing_permission = cog._missing_action_permission(guild, action)
     if missing_permission is not None:

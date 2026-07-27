@@ -458,6 +458,101 @@ class JoinwatchDryRunTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(str(member.id), assignments)
                 self.assertNotIn(str(member.id), pending_roles)
 
+    async def test_current_dry_run_plans_due_punishment_from_stale_settings(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                role = _Ranked(5)
+                role.id = 501
+                role.mention = "<@&501>"
+                guild = SimpleNamespace(
+                    id=100,
+                    me=SimpleNamespace(
+                        guild_permissions=SimpleNamespace(
+                            manage_roles=True,
+                            kick_members=True,
+                            ban_members=True,
+                        ),
+                        top_role=_Ranked(10),
+                    ),
+                    get_role=lambda role_id: role if role_id == role.id else None,
+                    ban=mock.AsyncMock(),
+                )
+                member = SimpleNamespace(
+                    id=200,
+                    guild=guild,
+                    roles=[role],
+                    mention="<@200>",
+                    guild_permissions=SimpleNamespace(manage_guild=False),
+                    top_role=_Ranked(1),
+                    kick=mock.AsyncMock(),
+                )
+                guild.get_member = lambda member_id: (
+                    member if member_id == member.id else None
+                )
+                guild.fetch_member = mock.AsyncMock(return_value=member)
+                assignments = {}
+                pending_roles = {
+                    str(member.id): {
+                        "role_id": role.id,
+                        "applied_at": (
+                            datetime.now(timezone.utc) - timedelta(hours=1)
+                        ).isoformat(),
+                        "expires_at": (
+                            datetime.now(timezone.utc) - timedelta(minutes=1)
+                        ).isoformat(),
+                    }
+                }
+                stats = {}
+                stale_config = {
+                    "dry_run": False,
+                    "joinwatch_auto_role_enabled": True,
+                    "joinwatch_auto_role_id": role.id,
+                    "joinwatch_auto_role_action": "kick",
+                    "joinwatch_pending_role_assignments": assignments,
+                    "joinwatch_pending_roles": pending_roles,
+                }
+                current_config = dict(stale_config, dry_run=True)
+                config_reads = iter((stale_config, current_config))
+                guild_config = SimpleNamespace(
+                    all=mock.AsyncMock(side_effect=lambda: next(config_reads)),
+                    joinwatch_pending_role_assignments=lambda: _Store(assignments),
+                    joinwatch_pending_roles=lambda: _Store(pending_roles),
+                    stats=lambda: _Store(stats),
+                )
+                moderator_channel = SimpleNamespace(send=mock.AsyncMock())
+                bot = _Bot()
+                bot.guilds = [guild]
+                bot.owner_ids = ()
+                bot.is_mod = mock.AsyncMock(return_value=False)
+                bot.is_admin = mock.AsyncMock(return_value=False)
+                cog = honeypot.Honeypot(bot)
+                cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
+                cog._get_text_channel_or_thread = mock.Mock(
+                    return_value=moderator_channel
+                )
+
+                with mock.patch.object(
+                    honeypot.discord,
+                    "Color",
+                    SimpleNamespace(dark_red=lambda: 0, orange=lambda: 0),
+                ), mock.patch.object(
+                    honeypot.discord, "Embed", _FakeEmbed
+                ), mock.patch.object(
+                    honeypot.modlog,
+                    "create_case",
+                    new=mock.AsyncMock(),
+                    create=True,
+                ):
+                    await cog.joinwatch_auto_role_loop.function(cog)
+
+                member.kick.assert_not_awaited()
+                guild.ban.assert_not_awaited()
+                self.assertNotIn(str(member.id), pending_roles)
+                self.assertEqual(stats["dry_run_actions"], 1)
+                moderator_channel.send.assert_awaited_once()
+                planned_embed = moderator_channel.send.await_args.kwargs["embed"]
+                self.assertIn("dry run", planned_embed.fields[0].value.lower())
+
     async def test_dry_run_permission_error_cannot_leave_retry_that_later_applies(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
