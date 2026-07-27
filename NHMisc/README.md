@@ -326,6 +326,71 @@ Shows the caller's own simplified activity for the last 7 retained days:
 
 This command has no arguments and only shows the caller's own data.
 
+## Role Analytics
+
+Role analytics maintains a current SQLite mirror of guild members and their role IDs.
+Run the initial synchronization once to opt the guild in:
+
+```ini
+[p]rolesync
+```
+
+The command reuses Red's complete member cache when it is available. If the cache is
+incomplete, it requests the guild member list through the Discord gateway. After the
+initial synchronization, member and role events keep the database current. The bot also
+reconciles enabled guilds after startup, after a resumed gateway session, and once every
+24 hours. A manual `rolesync` forces an immediate reconciliation.
+
+A reconciliation builds the replacement snapshot in a separate generation and swaps it in
+atomically, so `rolestats` and `roleusers` keep answering from the previous snapshot for
+the whole duration. If a reconciliation fails, the previous snapshot stays queryable and
+a retry is scheduled with exponential backoff.
+
+```ini
+[p]rolestats 1348078496710135888 AND 1097204292198338692
+[p]rolestats <@&1348078496710135888> OR NOT <@&1097204292198338692>
+```
+
+`rolestats` returns only the number of matching non-bot members. It may be used in
+public channels. Role operands can be raw Discord role IDs or role mentions. Operators
+are case-insensitive and use this precedence:
+
+1. `NOT`
+2. `AND`
+3. `OR`
+
+Parentheses can override the precedence, for example:
+
+```ini
+[p]rolestats (10 OR 20) AND NOT 30
+```
+
+```ini
+[p]roleusers 1348078496710135888 AND 1097204292198338692
+```
+
+`roleusers` uses the same expression language and exports matching non-bot members as
+UTF-8 CSV with `user_id`, `username`, and `display_name` columns. It sends a ZIP instead
+when the CSV exceeds Discord's attachment limit. Usernames and display names are read
+from the current Discord cache for the export and are not stored in the analytics
+database. Names beginning with `=`, `+`, `-`, or `@` are prefixed with an apostrophe so
+that spreadsheet applications treat them as text instead of evaluating them as formulas.
+
+For privacy, `roleusers` only works when the invocation channel is not visible to the
+guild's `@everyone` role and the bot can View Channel, Send Messages, and Attach Files
+there. The export is sent to that channel. `rolesync` and `rolestats` do not require a
+private channel.
+
+All three top-level role analytics commands require the effective Manage Messages
+permission in the invocation channel. Role references in responses never notify role
+members.
+
+Administrators can disable role analytics and delete the guild's analytics data:
+
+```ini
+[p]nhmisc roleanalytics disable
+```
+
 ## Permissions
 
 Configuration commands require Manage Server or bot admin permissions.
@@ -334,6 +399,10 @@ Sticky-role commands require Manage Server or bot admin permissions.
 
 Server-wide activity commands and moderator tools require Manage Messages, Manage
 Server, or bot admin permissions.
+
+`rolesync`, `rolestats`, and `roleusers` require Manage Messages in the invocation
+channel. Only `roleusers` additionally requires a non-public channel and the bot channel
+permissions described above.
 
 `[p]selfchart` is available to regular guild users because it only returns the caller's
 own activity.
@@ -350,3 +419,8 @@ multiple channels or threads. NHMisc does not store message content, message IDs
 URLs, attachment URLs, embeds, or deleted/edited message state.
 
 Sticky roles are stored in a local SQLite database as guild IDs, user IDs, and role IDs.
+
+Role analytics stores guild IDs, current member user IDs, bot flags, and current role
+IDs in a local SQLite database. It stores no usernames, display names, role-change
+history, or message data. Members who leave and roles that are deleted are removed from
+the current-state index. Disabling role analytics deletes the guild's analytics data.
