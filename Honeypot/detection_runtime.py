@@ -184,7 +184,7 @@ async def capture_attachment(
     max_bytes: int = 25 * 1024 * 1024,
     reader: BoundedReader = read_attachment_bounded,
 ) -> CaptureResult:
-    target_dir.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(target_dir.mkdir, parents=True, exist_ok=True)
     return await _capture_with_timeout(
         attachment,
         target_dir,

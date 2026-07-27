@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -35,12 +36,12 @@ def _contained_case_evidence_root(cog: Honeypot, context: OperationContext) -> P
     return case_root
 
 
-async def _promote_reviewed_evidence_samples(
-    cog: Honeypot, context: OperationContext
-) -> None:
-    """Copy moderator-classified image evidence into the learning sample set."""
-    snapshot = context.snapshot
-    for attachment in snapshot.attachments:
+def _promotable_evidence_samples(
+    context: OperationContext,
+) -> list[tuple[Path, str]]:
+    """Select the classified image evidence that is still present on disk."""
+    selected: list[tuple[Path, str]] = []
+    for attachment in context.snapshot.attachments:
         if (
             attachment.evidence_path is None
             or not is_persisted_image_attachment(attachment)
@@ -51,10 +52,21 @@ async def _promote_reviewed_evidence_samples(
         evidence_path = Path(attachment.evidence_path)
         if not evidence_path.exists():
             continue
+        selected.append((evidence_path, attachment.learning_decision))
+    return selected
+
+
+async def _promote_reviewed_evidence_samples(
+    cog: Honeypot, context: OperationContext
+) -> None:
+    """Copy moderator-classified image evidence into the learning sample set."""
+    snapshot = context.snapshot
+    promotable = await asyncio.to_thread(_promotable_evidence_samples, context)
+    for evidence_path, learning_decision in promotable:
         result, _sample = await cog._imagescan_add_file_sample(
             snapshot.case.guild_id,
             evidence_path,
-            attachment.learning_decision,
+            learning_decision,
             snapshot.case.moderator_id,
         )
         if result not in {"inserted", "duplicate"}:
@@ -96,7 +108,7 @@ async def evidence_cleanup_handler(
         and review_update.status.value != "succeeded"
     ):
         raise RuntimeError("terminal review projection is not complete")
-    case_root = _contained_case_evidence_root(cog, context)
+    case_root = await asyncio.to_thread(_contained_case_evidence_root, cog, context)
     await _promote_reviewed_evidence_samples(cog, context)
-    _remove_case_evidence_tree(case_root)
+    await asyncio.to_thread(_remove_case_evidence_tree, case_root)
     return OperationOutcome()
