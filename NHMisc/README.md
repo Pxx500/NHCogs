@@ -37,6 +37,12 @@ Only posts created after the forum is enabled and while the bot is online are pr
 NHMisc does not scan old posts or backfill posts created while offline. Removing a forum
 does not unpin starter messages that were pinned earlier.
 
+If one of these permissions is revoked later, autopinning stops silently on Discord's
+side. NHMisc reports it once per forum in the alert channel configured with
+`[p]nhmisc alert channel`, and reports it again only after a later pin succeeds and the
+problem reappears. Deleting a configured forum removes it from the configuration and is
+also reported in the alert channel.
+
 ## Voice Logging
 
 Voice logging sends messages when users join, leave, or move between voice channels.
