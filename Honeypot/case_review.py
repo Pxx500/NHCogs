@@ -1,23 +1,31 @@
 """Discord-independent review projections for persisted detection cases."""
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .detection_cases import (
+    OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP,
+    OPERATION_RESULT_CHANNEL_UNAVAILABLE,
+    OPERATION_RESULT_UNSUPPORTED_CHANNEL,
     AttachmentKey,
     AttachmentRecord,
     CaseSnapshot,
     CaseStatus,
+    CaseSubjectRecord,
     DeleteStatus,
     DetectionCaseStore,
     MessageRecord,
     OperationRecord,
     OperationStatus,
+    OperationType,
 )
 
-
+# Discord embed limits. An embed carries at most 25 fields and each field value
+# is capped at 1024 characters; both are platform constants, not tuning knobs.
+_EMBED_FIELD_LIMIT = 25
+_EMBED_FIELD_VALUE_LIMIT = 1024
 _DECISIONS = {
     "tp": "true_positive",
     "fp": "false_positive",
@@ -48,9 +56,9 @@ def _cached_purge_status(operation: OperationRecord) -> str:
     )
     if delete_status is not None:
         return _DELETE_STATUS_LABELS[delete_status]
-    if operation.result == "channel_unavailable":
+    if operation.result == OPERATION_RESULT_CHANNEL_UNAVAILABLE:
         return "Could not delete: channel unavailable"
-    if operation.result == "unsupported_channel":
+    if operation.result == OPERATION_RESULT_UNSUPPORTED_CHANNEL:
         return "Could not delete: unsupported channel"
     if operation.status is OperationStatus.PENDING:
         return "Waiting for deletion"
@@ -423,7 +431,7 @@ def render_timeline(snapshot: CaseSnapshot) -> CaseTimelineProjection:
             (
                 operation
                 for operation in snapshot.operations
-                if operation.operation_type == "cached_purge"
+                if operation.operation_type == OperationType.CACHED_PURGE
                 and operation.status.value in {"failed", "abandoned"}
             ),
             start=1,
@@ -432,16 +440,16 @@ def render_timeline(snapshot: CaseSnapshot) -> CaseTimelineProjection:
     operation_notes = tuple(
         _operation_warning(operation)
         for operation in snapshot.operations
-        if operation.result == "ambiguous_role_ownership"
+        if operation.result == OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP
         or (
             operation.operation_type
             in {
-                "review_publish",
-                "role_apply",
-                "role_release",
-                "moderation_action",
-                "moderator_ban",
-                "moderator_kick",
+                OperationType.REVIEW_PUBLISH,
+                OperationType.ROLE_APPLY,
+                OperationType.ROLE_RELEASE,
+                OperationType.MODERATION_ACTION,
+                OperationType.MODERATOR_BAN,
+                OperationType.MODERATOR_KICK,
             }
             and operation.status.value in {"failed", "abandoned"}
         )
@@ -469,18 +477,22 @@ def _resolution_label(resolution: str) -> str:
 
 
 def _operation_warning(operation: OperationRecord) -> str:
-    if operation.result == "ambiguous_role_ownership":
+    if operation.result == OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP:
         return (
             "Bot could not confirm that this case applied the temporary mute role. "
             "Review it manually."
         )
-    if operation.operation_type == "role_release":
+    if operation.operation_type == OperationType.ROLE_RELEASE:
         return "Temporary mute could not be removed. See bot logs."
-    if operation.operation_type == "role_apply":
+    if operation.operation_type == OperationType.ROLE_APPLY:
         if operation.status is OperationStatus.FAILED:
             return "Temporary mute could not be applied; retry scheduled. See bot logs."
         return "Temporary mute could not be applied. Review it manually."
-    if operation.operation_type in {"moderation_action", "moderator_ban", "moderator_kick"}:
+    if operation.operation_type in {
+        OperationType.MODERATION_ACTION,
+        OperationType.MODERATOR_BAN,
+        OperationType.MODERATOR_KICK,
+    }:
         return "Moderation action failed. See bot logs."
     return "Case publication failed. See bot logs."
 
@@ -492,36 +504,23 @@ def _publication_warning(attachment: AttachmentRecord) -> str:
     return f"{attachment.filename}: Could not publish evidence. See bot logs."
 
 
-def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
-    """Build the complete Discord-agnostic representation of one case snapshot."""
-
-    channel_ids = tuple(dict.fromkeys(message.channel_id for message in snapshot.messages))
-    needs_attention = snapshot.case.needs_attention or any(
-        message.delete_status is DeleteStatus.FORBIDDEN for message in snapshot.messages
-    )
-    message_lines = tuple(_message_review_line(message) for message in snapshot.messages)
-    reasons_by_message = _signal_reasons_by_message(snapshot)
-    sorted_messages = tuple(sorted(snapshot.messages, key=lambda item: item.sequence))
-    signal_lines = tuple(
-        f"<#{message.channel_id}>: {reason}"
-        for message in sorted_messages
-        for reason in reasons_by_message.get(message.sequence, ())
-    )
-    moderation_operations = tuple(
-        operation
-        for operation in snapshot.operations
-        if operation.operation_type == "moderation_action"
-        or operation.operation_type
-        in {"moderator_ban", "moderator_kick", "moderator_ignore"}
-    )
+def _moderation_state(
+    snapshot: CaseSnapshot, moderation_operations: tuple[OperationRecord, ...]
+) -> tuple[str, tuple[str, ...], bool]:
+    """Derive the moderation status label, the offered actions and completion."""
     moderation_actions = ("ban", "kick", "ignore")
     moderation_completed = False
     if moderation_operations:
         moderation = moderation_operations[-1]
+        moderation_type = (
+            moderation.operation_type.value
+            if isinstance(moderation.operation_type, OperationType)
+            else moderation.operation_type
+        )
         moderation_completed = moderation.status is OperationStatus.SUCCEEDED
         action = moderation.result
-        if action is None and moderation.operation_type.startswith("moderator_"):
-            action = moderation.operation_type.removeprefix("moderator_")
+        if action is None and moderation_type.startswith("moderator_"):
+            action = moderation_type.removeprefix("moderator_")
         if moderation.result is not None and moderation.result.startswith("planned_"):
             moderation_status = (
                 moderation.result.removeprefix("planned_").capitalize()
@@ -534,10 +533,11 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
             moderation_status = "Action failed. See bot logs"
             if (
                 moderation.status is OperationStatus.FAILED
-                and moderation.operation_type in {"moderator_ban", "moderator_kick"}
+                and moderation.operation_type
+                in {OperationType.MODERATOR_BAN, OperationType.MODERATOR_KICK}
             ):
                 moderation_actions = (
-                    moderation.operation_type.removeprefix("moderator_"),
+                    moderation_type.removeprefix("moderator_"),
                 )
             elif not (
                 moderation.status is OperationStatus.ABANDONED
@@ -549,88 +549,18 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
             moderation_actions = ()
     else:
         moderation_status = "none"
-    incomplete_evidence = any(
-        attachment.capture_status != "captured"
-        for attachment in snapshot.attachments
-    )
-    feedback_items = case_feedback_items(snapshot)
-    awaiting_classification = (
-        snapshot.case.status in {CaseStatus.PENDING, CaseStatus.RESOLVING}
-        and moderation_completed
-        and any(item.decision is None for item in feedback_items)
-    )
-    feedback_lines = tuple(
-        f"{item.message_sequence}.{item.position + 1} {item.filename}: "
-        f"{item.decision or 'pending'}"
-        for item in feedback_items
-    )
-    cached_purge_operations = tuple(
-        operation
-        for operation in snapshot.operations
-        if operation.operation_type == "cached_purge"
-    )
-    cached_purge_lines = tuple(
-        f"{index}. <#{operation.idempotency_key.rsplit(':', 2)[-2]}>: "
-        f"{_cached_purge_status(operation)}"
-        for index, operation in enumerate(cached_purge_operations, start=1)
-    )
-    publication_warning_lines = tuple(
-        f"{attachment.message_sequence}.{attachment.position + 1} "
-        f"{_publication_warning(attachment)}"
-        for attachment in snapshot.attachments
-        if attachment.publication_error is not None
-    )
-    operation_warning_lines = tuple(
-        _operation_warning(operation)
-        for operation in snapshot.operations
-        if operation.result == "ambiguous_role_ownership"
-        or (
-            operation.operation_type
-            in {
-                "review_publish",
-                "role_apply",
-                "role_release",
-                "moderation_action",
-                "moderator_ban",
-                "moderator_kick",
-            }
-            and operation.status.value in {"failed", "abandoned"}
-        )
-    ) + tuple(
-        f"Evidence unavailable for message {attachment.message_sequence}, "
-        f"attachment {attachment.position + 1} ({attachment.filename})."
-        for attachment in snapshot.attachments
-        if attachment.capture_status in {"capture_failed", "capture_timeout"}
-    )
-    title = "Detection case"
-    subject = snapshot.subject
-    identity_lines = []
-    identity_lines.append(f"<@{snapshot.case.user_id}> ({snapshot.case.user_id})")
-    if subject is not None and subject.account_created_at is not None:
-        identity_lines.append(
-            f"Account created <t:{int(subject.account_created_at.timestamp())}:R>"
-        )
-    if subject is not None and subject.guild_joined_at is not None:
-        identity_lines.append(
-            f"Joined server <t:{int(subject.guild_joined_at.timestamp())}:R>"
-        )
-    status_labels = {
-        "pending": "Open",
-        "resolving": "Resolving",
-        "resolved": "Closed",
-        "expired": "Expired",
-    }
-    display_status = (
-        "Awaiting classification"
-        if awaiting_classification
-        else status_labels.get(snapshot.case.status.value, snapshot.case.status.value)
-    )
-    identity_lines.append(f"Status: {display_status}")
+    return moderation_status, moderation_actions, moderation_completed
+
+
+def _case_resolution_lines(
+    snapshot: CaseSnapshot, moderation_operations: tuple[OperationRecord, ...]
+) -> tuple[str, ...]:
+    """Render how and by whom the case was closed."""
     resolution_lines: tuple[str, ...] = ()
     automatic_resolution = False
     if snapshot.case.resolution is not None:
         automatic_resolution = any(
-            operation.operation_type == "moderation_action"
+            operation.operation_type == OperationType.MODERATION_ACTION
             and operation.status is OperationStatus.SUCCEEDED
             and operation.result == snapshot.case.resolution
             for operation in moderation_operations
@@ -644,6 +574,14 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
         if snapshot.case.resolved_at is not None:
             reviewer += f" • <t:{int(snapshot.case.resolved_at.timestamp())}:F>"
         resolution_lines += (reviewer,)
+    return resolution_lines
+
+
+def _summary_signal_lines(
+    sorted_messages: tuple[MessageRecord, ...],
+    reasons_by_message: Mapping[int, Sequence[str]],
+) -> tuple[str, ...]:
+    """Render the truncated per-message signal digest shown on the summary embed."""
     summary_signal_lines_list: list[str] = []
     for message in sorted_messages[:3]:
         reasons = reasons_by_message.get(message.sequence, ())
@@ -666,14 +604,18 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
         summary_signal_lines_list.append(
             f"+{len(sorted_messages) - 3} additional messages in thread"
         )
-    summary_signal_lines = tuple(summary_signal_lines_list)
-    summary_publication_warnings = tuple(
-        line[:300] for line in publication_warning_lines[:3]
-    )
-    summary_operation_warnings = tuple(
-        line[:300] for line in operation_warning_lines[:3]
-    )
-    summary_resolution_lines = tuple(line[:300] for line in resolution_lines[:2])
+    return tuple(summary_signal_lines_list)
+
+
+def _optional_summary_fields(
+    feedback_items: tuple[CaseFeedbackItem, ...],
+    *,
+    moderation_status: str,
+    incomplete_evidence: bool,
+    needs_attention: bool,
+    warning_lines: tuple[str, ...],
+) -> tuple[CaseReviewField, ...]:
+    """Build the summary embed fields that only appear when they have something to say."""
     optional_fields: list[CaseReviewField] = []
     if moderation_status != "none":
         optional_fields.append(CaseReviewField("Moderation:", moderation_status))
@@ -684,11 +626,43 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
         ))
     if incomplete_evidence:
         optional_fields.append(CaseReviewField("Evidence:", "Capture incomplete"))
-    warning_lines = summary_publication_warnings + summary_operation_warnings
     if needs_attention:
         warning_lines += ("Staff attention required",)
     if warning_lines:
         optional_fields.extend(_field_chunks("Warnings:", warning_lines))
+    return tuple(optional_fields)
+
+
+def _case_description(
+    snapshot: CaseSnapshot,
+    subject: CaseSubjectRecord | None,
+    *,
+    awaiting_classification: bool,
+    summary_signal_lines: tuple[str, ...],
+) -> str:
+    """Assemble the identity and summary block shown as the embed description."""
+    identity_lines = []
+    identity_lines.append(f"<@{snapshot.case.user_id}> ({snapshot.case.user_id})")
+    if subject is not None and subject.account_created_at is not None:
+        identity_lines.append(
+            f"Account created <t:{int(subject.account_created_at.timestamp())}:R>"
+        )
+    if subject is not None and subject.guild_joined_at is not None:
+        identity_lines.append(
+            f"Joined server <t:{int(subject.guild_joined_at.timestamp())}:R>"
+        )
+    status_labels = {
+        "pending": "Open",
+        "resolving": "Resolving",
+        "resolved": "Closed",
+        "expired": "Expired",
+    }
+    display_status = (
+        "Awaiting classification"
+        if awaiting_classification
+        else status_labels.get(snapshot.case.status.value, snapshot.case.status.value)
+    )
+    identity_lines.append(f"Status: {display_status}")
     standard_lines = [f"Messages: {len(snapshot.messages)}"]
     if snapshot.case.status.value in {"pending", "resolving"}:
         standard_lines.append(
@@ -698,18 +672,126 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
     if summary_signal_lines:
         standard_lines.append("Signals:")
         standard_lines.extend(summary_signal_lines)
-    description = "\n".join(identity_lines + standard_lines)[:4096]
+    return "\n".join(identity_lines + standard_lines)[:4096]
+
+
+def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
+    """Build the complete Discord-agnostic representation of one case snapshot."""
+
+    channel_ids = tuple(dict.fromkeys(message.channel_id for message in snapshot.messages))
+    needs_attention = snapshot.case.needs_attention or any(
+        message.delete_status is DeleteStatus.FORBIDDEN for message in snapshot.messages
+    )
+    message_lines = tuple(_message_review_line(message) for message in snapshot.messages)
+    reasons_by_message = _signal_reasons_by_message(snapshot)
+    sorted_messages = tuple(sorted(snapshot.messages, key=lambda item: item.sequence))
+    signal_lines = tuple(
+        f"<#{message.channel_id}>: {reason}"
+        for message in sorted_messages
+        for reason in reasons_by_message.get(message.sequence, ())
+    )
+    moderation_operations = tuple(
+        operation
+        for operation in snapshot.operations
+        if operation.operation_type == OperationType.MODERATION_ACTION
+        or operation.operation_type
+        in {
+            OperationType.MODERATOR_BAN,
+            OperationType.MODERATOR_KICK,
+            OperationType.MODERATOR_IGNORE,
+        }
+    )
+    moderation_status, moderation_actions, moderation_completed = _moderation_state(
+        snapshot, moderation_operations
+    )
+    incomplete_evidence = any(
+        attachment.capture_status != "captured"
+        for attachment in snapshot.attachments
+    )
+    feedback_items = case_feedback_items(snapshot)
+    awaiting_classification = (
+        snapshot.case.status in {CaseStatus.PENDING, CaseStatus.RESOLVING}
+        and moderation_completed
+        and any(item.decision is None for item in feedback_items)
+    )
+    feedback_lines = tuple(
+        f"{item.message_sequence}.{item.position + 1} {item.filename}: "
+        f"{item.decision or 'pending'}"
+        for item in feedback_items
+    )
+    cached_purge_operations = tuple(
+        operation
+        for operation in snapshot.operations
+        if operation.operation_type == OperationType.CACHED_PURGE
+    )
+    cached_purge_lines = tuple(
+        f"{index}. <#{operation.idempotency_key.rsplit(':', 2)[-2]}>: "
+        f"{_cached_purge_status(operation)}"
+        for index, operation in enumerate(cached_purge_operations, start=1)
+    )
+    publication_warning_lines = tuple(
+        f"{attachment.message_sequence}.{attachment.position + 1} "
+        f"{_publication_warning(attachment)}"
+        for attachment in snapshot.attachments
+        if attachment.publication_error is not None
+    )
+    operation_warning_lines = tuple(
+        _operation_warning(operation)
+        for operation in snapshot.operations
+        if operation.result == OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP
+        or (
+            operation.operation_type
+            in {
+                OperationType.REVIEW_PUBLISH,
+                OperationType.ROLE_APPLY,
+                OperationType.ROLE_RELEASE,
+                OperationType.MODERATION_ACTION,
+                OperationType.MODERATOR_BAN,
+                OperationType.MODERATOR_KICK,
+            }
+            and operation.status.value in {"failed", "abandoned"}
+        )
+    ) + tuple(
+        f"Evidence unavailable for message {attachment.message_sequence}, "
+        f"attachment {attachment.position + 1} ({attachment.filename})."
+        for attachment in snapshot.attachments
+        if attachment.capture_status in {"capture_failed", "capture_timeout"}
+    )
+    title = "Detection case"
+    subject = snapshot.subject
+    resolution_lines = _case_resolution_lines(snapshot, moderation_operations)
+    summary_signal_lines = _summary_signal_lines(sorted_messages, reasons_by_message)
+    summary_publication_warnings = tuple(
+        line[:300] for line in publication_warning_lines[:3]
+    )
+    summary_operation_warnings = tuple(
+        line[:300] for line in operation_warning_lines[:3]
+    )
+    summary_resolution_lines = tuple(line[:300] for line in resolution_lines[:2])
+    optional_fields = _optional_summary_fields(
+        feedback_items,
+        moderation_status=moderation_status,
+        incomplete_evidence=incomplete_evidence,
+        needs_attention=needs_attention,
+        warning_lines=summary_publication_warnings + summary_operation_warnings,
+    )
+    description = _case_description(
+        snapshot,
+        subject,
+        awaiting_classification=awaiting_classification,
+        summary_signal_lines=summary_signal_lines,
+    )
     pages = _bounded_field_pages(
-        (),
-        (),
-        (),
-        (),
-        (),
-        (),
-        summary_resolution_lines,
-        needs_attention,
-        "",
-        tuple(optional_fields),
+        signal_lines=(),
+        message_lines=(),
+        feedback_lines=(),
+        cached_purge_lines=(),
+        publication_warning_lines=(),
+        operation_warning_lines=(),
+        resolution_lines=summary_resolution_lines,
+        needs_attention=needs_attention,
+        case_summary="",
+        optional_fields=tuple(optional_fields),
     )
     return CaseReviewProjection(
         case_id=snapshot.case.case_id,
@@ -744,10 +826,13 @@ def _field_chunks(name: str, lines: tuple[str, ...]) -> tuple[CaseReviewField, .
     current: list[str] = []
     current_size = 0
     for line in lines:
-        pieces = tuple(line[index : index + 1024] for index in range(0, len(line), 1024)) or ("",)
+        pieces = tuple(
+            line[index : index + _EMBED_FIELD_VALUE_LIMIT]
+            for index in range(0, len(line), _EMBED_FIELD_VALUE_LIMIT)
+        ) or ("",)
         for piece in pieces:
             added = len(piece) + (1 if current else 0)
-            if current and current_size + added > 1024:
+            if current and current_size + added > _EMBED_FIELD_VALUE_LIMIT:
                 chunks.append(CaseReviewField(name if not chunks else f"{name} (continued)", "\n".join(current)))
                 current = []
                 current_size = 0
@@ -760,6 +845,7 @@ def _field_chunks(name: str, lines: tuple[str, ...]) -> tuple[CaseReviewField, .
 
 
 def _bounded_field_pages(
+    *,
     signal_lines: tuple[str, ...],
     message_lines: tuple[str, ...],
     feedback_lines: tuple[str, ...],
@@ -791,7 +877,7 @@ def _bounded_field_pages(
     budget = 6000 - len("Detection case") - 4096
     for field in fields:
         size = len(field.name) + len(field.value)
-        if current and (len(current) == 25 or size > budget):
+        if current and (len(current) == _EMBED_FIELD_LIMIT or size > budget):
             pages.append(tuple(current))
             current = []
             budget = 6000 - len("Detection case") - 4096

@@ -1,15 +1,31 @@
 """Discord-independent domain vocabulary for detection cases."""
 
+import json
+import logging
+import sqlite3
+from collections.abc import Callable, Mapping
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from collections.abc import Callable, Mapping
-from contextlib import closing
-import json
 from pathlib import Path
-import sqlite3
 from types import MappingProxyType
 from uuid import uuid4
+
+from .storage import apply_migrations, connect
+
+log = logging.getLogger(__name__)
+
+
+def _execute_script(connection: sqlite3.Connection, script: str) -> None:
+    statement = ""
+    for line in script.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            connection.execute(statement)
+            statement = ""
+    if statement.strip():
+        raise ValueError("incomplete detection case schema statement")
 
 
 def _freeze(value: object) -> object:
@@ -51,6 +67,56 @@ class OperationStatus(str, Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     ABANDONED = "abandoned"
+
+
+class OperationType(str, Enum):
+    MESSAGE_PROCESS = "message_process"
+    ROLE_APPLY = "role_apply"
+    ROLE_RELEASE = "role_release"
+    REVIEW_UPDATE = "review_update"
+    REVIEW_PUBLISH = "review_publish"
+    SOURCE_DELETE = "source_delete"
+    EVIDENCE_CLEANUP = "evidence_cleanup"
+    CACHED_PURGE = "cached_purge"
+    MODERATION_ACTION = "moderation_action"
+    MODERATOR_BAN = "moderator_ban"
+    MODERATOR_KICK = "moderator_kick"
+    MODERATOR_IGNORE = "moderator_ignore"
+
+
+OPERATION_RESULT_CASE_TERMINAL = "case_terminal"
+OPERATION_RESULT_SUPERSEDED_BY_MODERATION = "superseded_by_moderation"
+OPERATION_RESULT_MEMBER_UNAVAILABLE = "member_unavailable"
+OPERATION_RESULT_AMBIGUOUS_ROLE_OWNERSHIP = "ambiguous_role_ownership"
+OPERATION_RESULT_TRANSFERRED_ROLE_OWNERSHIP = "transferred_role_ownership"
+OPERATION_RESULT_ROLE_ALREADY_OWNED = "role_already_owned"
+OPERATION_RESULT_PREEXISTING_ROLE = "preexisting_role"
+OPERATION_RESULT_KICK_MISSING = "kick_missing"
+OPERATION_RESULT_CHANNEL_UNAVAILABLE = "channel_unavailable"
+OPERATION_RESULT_UNSUPPORTED_CHANNEL = "unsupported_channel"
+OPERATION_RESULT_OWNERSHIP_TRANSFERRED = "ownership_transferred"
+PLANNED_PREFIX = "planned_"
+
+MODERATOR_DECISION_TYPES = frozenset(
+    {
+        OperationType.MODERATOR_BAN,
+        OperationType.MODERATOR_KICK,
+        OperationType.MODERATOR_IGNORE,
+    }
+)
+MODERATION_SUPERSEDING_TYPES = MODERATOR_DECISION_TYPES | {
+    OperationType.MODERATION_ACTION
+}
+MODERATION_SUPERSEDING_RESULTS = frozenset(
+    {
+        "ban",
+        "kick",
+        OPERATION_RESULT_KICK_MISSING,
+        "ignore",
+        "planned_ban",
+        "planned_kick",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -164,7 +230,7 @@ class OperationRecord:
     operation_id: str
     case_id: str
     message_sequence: int | None
-    operation_type: str
+    operation_type: OperationType | str
     status: OperationStatus
     attempts: int
     created_at: datetime
@@ -182,7 +248,7 @@ class OperationRecord:
 class OperationalFailureRecord:
     failure_id: str
     guild_id: int
-    source: str
+    source: OperationType | str
     summary: str
     first_seen_at: datetime
     last_seen_at: datetime
@@ -372,16 +438,15 @@ class DetectionCaseStore:
         self.connection_factory = connection_factory
 
     def _connect(self) -> sqlite3.Connection:
-        connection = self.connection_factory(self.database_path, timeout=5)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 5000")
-        connection.execute("PRAGMA journal_mode = WAL")
-        return connection
+        return connect(
+            self.database_path,
+            connection_factory=self.connection_factory,
+        )
 
     def initialize(self) -> None:
-        with closing(self._connect()) as connection, connection:
-            connection.executescript(
+        def migrate_schema_0(connection: sqlite3.Connection) -> None:
+            _execute_script(
+                connection,
                 """
                 CREATE TABLE IF NOT EXISTS detection_cases (
                     case_id TEXT PRIMARY KEY,
@@ -646,7 +711,7 @@ class DetectionCaseStore:
                 );
                 CREATE INDEX IF NOT EXISTS detection_orphan_publications_due
                     ON detection_orphan_publications(created_at, case_id);
-                """
+                """,
             )
             attachment_columns = {
                 row["name"]
@@ -661,6 +726,13 @@ class DetectionCaseStore:
                     """ALTER TABLE detection_attachments
                        ADD COLUMN spoiler INTEGER NOT NULL DEFAULT 0"""
                 )
+
+        with closing(self._connect()) as connection:
+            apply_migrations(
+                connection,
+                (migrate_schema_0,),
+                label="detection case storage",
+            )
 
     @staticmethod
     def _timeline_logical_key(
@@ -907,8 +979,11 @@ class DetectionCaseStore:
         self,
         new_message: NewMessage,
         signals: tuple[DetectionSignal, ...],
-        initial_operations: tuple[tuple[str, str], ...]
-        | Callable[[tuple[DetectionSignal, ...]], tuple[tuple[str, str], ...]] = (),
+        initial_operations: tuple[tuple[OperationType | str, str], ...]
+        | Callable[
+            [tuple[DetectionSignal, ...]],
+            tuple[tuple[OperationType | str, str], ...],
+        ] = (),
         *,
         claim_firstpost: bool = False,
     ) -> AppendResult | None:
@@ -1147,7 +1222,11 @@ class DetectionCaseStore:
                         str(uuid4()),
                         case_id,
                         sequence,
-                        operation_type,
+                        (
+                            operation_type.value
+                            if isinstance(operation_type, OperationType)
+                            else operation_type
+                        ),
                         operation_time,
                         operation_time,
                         resolved_key,
@@ -1364,9 +1443,9 @@ class DetectionCaseStore:
         position: int,
         claim_token: str,
         actual_bytes: int,
+        *,
         evidence_path: str,
         now: datetime,
-        *,
         max_attachment_bytes: int,
         max_case_bytes: int,
     ) -> str | None:
@@ -1491,6 +1570,7 @@ class DetectionCaseStore:
         position: int,
         claim_token: str,
         capture_status: str,
+        *,
         error: str | None,
     ) -> bool:
         with closing(self._connect()) as connection, connection:
@@ -1570,6 +1650,7 @@ class DetectionCaseStore:
         position: int,
         sha256: str | None,
         perceptual_hash: str | None,
+        *,
         match_metadata: Mapping[str, object],
         error: str | None,
     ) -> bool:
@@ -1616,7 +1697,7 @@ class DetectionCaseStore:
             if case_row is None:
                 raise KeyError(case_id)
             current_decisions: dict[AttachmentKey, str | None] = {}
-            for key, decision in decisions.items():
+            for key in decisions:
                 if key.case_id != case_id:
                     raise ValueError("attachment key belongs to another case")
                 row = connection.execute(
@@ -2340,6 +2421,7 @@ class DetectionCaseStore:
         resolution: str,
         moderator_id: int | None,
         now: datetime,
+        *,
         decisions: Mapping[AttachmentKey, str] | None = None,
         final_operations: tuple[tuple[str, str], ...] = (),
     ) -> bool:
@@ -2658,11 +2740,14 @@ class DetectionCaseStore:
         ).fetchone() is not None:
             return False
         final_operations = [
-            ("review_update", f"review-update:{case_id}"),
-            ("evidence_cleanup", f"evidence-cleanup:{case_id}"),
+            (OperationType.REVIEW_UPDATE, f"review-update:{case_id}"),
+            (OperationType.EVIDENCE_CLEANUP, f"evidence-cleanup:{case_id}"),
         ]
         final_operations.extend(
-            ("role_release", f"role-release:{case_id}:{int(row[0])}")
+            (
+                OperationType.ROLE_RELEASE,
+                f"role-release:{case_id}:{int(row[0])}",
+            )
             for row in connection.execute(
                 """SELECT role_id FROM detection_role_ownership
                    WHERE case_id = ? ORDER BY role_id""",
@@ -2677,7 +2762,7 @@ class DetectionCaseStore:
                     idempotency_key, claim_token, claimed_at)
                    VALUES (?, ?, NULL, ?, 'pending', 0, ?, ?, NULL, NULL, ?, NULL, NULL)""",
                 (
-                    str(uuid4()), case_id, operation_type,
+                    str(uuid4()), case_id, operation_type.value,
                     now_value, now_value, idempotency_key,
                 ),
             )
@@ -2701,7 +2786,7 @@ class DetectionCaseStore:
     def ensure_operation(
         self,
         case_id: str,
-        kind: str,
+        kind: OperationType | str,
         idempotency_key: str,
         message_sequence: int | None = None,
         actor_id: int | None = None,
@@ -2717,7 +2802,8 @@ class DetectionCaseStore:
                     claim_token, claimed_at)
                    VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, NULL, NULL, NULL, ?, ?, NULL, NULL)""",
                 (
-                    str(uuid4()), case_id, message_sequence, kind,
+                    str(uuid4()), case_id, message_sequence,
+                    kind.value if isinstance(kind, OperationType) else kind,
                     created_at, created_at, actor_id, idempotency_key,
                 ),
             )
@@ -2825,6 +2911,7 @@ class DetectionCaseStore:
         case_id: str,
         guild_id: int,
         user_id: int,
+        *,
         role_id: int,
         now: datetime,
     ) -> str | None:
@@ -2875,6 +2962,7 @@ class DetectionCaseStore:
         case_id: str,
         guild_id: int,
         user_id: int,
+        *,
         role_id: int,
         now: datetime,
     ) -> bool:
@@ -3081,7 +3169,7 @@ class DetectionCaseStore:
 
     def fail_operation(
         self, operation_id: str, token: str, error: str, now: datetime,
-        retry_at: datetime | None, result: str | None = None,
+        retry_at: datetime | None, *, result: str | None = None,
     ) -> bool:
         status = OperationStatus.FAILED if retry_at is not None else OperationStatus.ABANDONED
         with closing(self._connect()) as connection, connection:
@@ -3106,12 +3194,13 @@ class DetectionCaseStore:
         self,
         *,
         guild_id: int,
-        source: str,
+        source: OperationType | str,
         summary: str,
         occurred_at: datetime,
         case_id: str | None = None,
         operation_id: str | None = None,
     ) -> OperationalFailureRecord:
+        source_value = source.value if isinstance(source, OperationType) else source
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -3120,7 +3209,7 @@ class DetectionCaseStore:
                      AND COALESCE(operation_id, '') = COALESCE(?, '')
                      AND COALESCE(case_id, '') = COALESCE(?, '')
                      AND resolved_at IS NULL""",
-                (guild_id, source, operation_id, case_id),
+                (guild_id, source_value, operation_id, case_id),
             ).fetchone()
             timestamp = _to_timestamp(occurred_at)
             if row is None:
@@ -3133,7 +3222,7 @@ class DetectionCaseStore:
                     (
                         failure_id,
                         guild_id,
-                        source,
+                        source_value,
                         summary[:1000],
                         timestamp,
                         timestamp,
@@ -3357,9 +3446,14 @@ class DetectionCaseStore:
 
     @staticmethod
     def _operation_from_row(row: sqlite3.Row) -> OperationRecord:
+        operation_type = row["operation_type"]
+        try:
+            operation_type = OperationType(operation_type)
+        except ValueError:
+            log.warning("Unknown persisted detection operation type: %s", operation_type)
         return OperationRecord(
             row["operation_id"], row["case_id"], row["message_sequence"],
-            row["operation_type"], OperationStatus(row["status"]), row["attempts"],
+            operation_type, OperationStatus(row["status"]), row["attempts"],
             _from_timestamp(row["created_at"]), _from_timestamp(row["updated_at"]),
             _from_timestamp(row["retry_at"]), row["last_error"], row["result"],
             row["actor_id"], row["idempotency_key"],
@@ -3368,8 +3462,16 @@ class DetectionCaseStore:
 
     @staticmethod
     def _operational_failure_from_row(row: sqlite3.Row) -> OperationalFailureRecord:
+        source = next(
+            (
+                operation_type
+                for operation_type in OperationType
+                if operation_type.value == row["source"]
+            ),
+            row["source"],
+        )
         return OperationalFailureRecord(
-            row["failure_id"], row["guild_id"], row["source"], row["summary"],
+            row["failure_id"], row["guild_id"], source, row["summary"],
             _from_timestamp(row["first_seen_at"]), _from_timestamp(row["last_seen_at"]),
             row["occurrences"], row["case_id"], row["operation_id"],
             _from_timestamp(row["resolved_at"]), _from_timestamp(row["acknowledged_at"]),

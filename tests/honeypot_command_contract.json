@@ -1,0 +1,40 @@
+{
+  "command_count": 106,
+  "command_structure_sha256": "9dc40524a53fb537423409be1d35a83f1015da600e9c7a0fec337a6f12e8f975",
+  "intentionally_undocumented_debug_commands": [
+    "honeypot debug imagescan cleanup_events",
+    "honeypot debug imagescan dump",
+    "honeypot debug imagescan importtpzip",
+    "honeypot debug imagescan legacy_channel",
+    "honeypot debug imagescan legacy_toggle",
+    "honeypot debug resetstats",
+    "honeypot debug reviewdump"
+  ],
+  "listeners": [
+    "on_guild_remove",
+    "on_member_join",
+    "on_member_update",
+    "on_message"
+  ],
+  "loops": [
+    "detection_case_loop",
+    "detection_reconciliation_loop",
+    "firstpost_seen_flush_loop",
+    "joinwatch_auto_role_loop",
+    "purge_cache_cleanup_loop"
+  ],
+  "readme": {
+    "leaf_count": 84,
+    "row_count": 77,
+    "rows_without_command": [],
+    "undocumented_commands": [
+      "honeypot debug imagescan cleanup_events",
+      "honeypot debug imagescan dump",
+      "honeypot debug imagescan importtpzip",
+      "honeypot debug imagescan legacy_channel",
+      "honeypot debug imagescan legacy_toggle",
+      "honeypot debug resetstats",
+      "honeypot debug reviewdump"
+    ]
+  }
+}

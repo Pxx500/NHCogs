@@ -1,22 +1,22 @@
 """Runtime containment operations for detection cases."""
 
 import asyncio
-from collections.abc import Awaitable, Callable, Iterable
+import unicodedata
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-import shutil
-import unicodedata
 from uuid import uuid4
 
 import discord
 
 from .detection_cases import DeleteStatus
 
-
 _MAX_ERROR_LENGTH = 512
 _INVALID_FILENAME_CHARACTERS = frozenset('<>:"/\\|?*')
 BoundedReader = Callable[[object, int], Awaitable[bytes]]
+DETECTION_ATTACHMENT_TIMEOUT_SECONDS = 15.0
+DETECTION_IMAGE_READ_MAX_BYTES = 25 * 1024 * 1024
 
 
 class AttachmentTooLargeError(ValueError):
@@ -162,6 +162,7 @@ async def _capture_with_timeout(
     target_dir: Path,
     position: int,
     timeout_seconds: float,
+    *,
     max_bytes: int = 25 * 1024 * 1024,
     reader: BoundedReader = read_attachment_bounded,
 ) -> CaptureResult:
@@ -170,7 +171,7 @@ async def _capture_with_timeout(
             _capture_one(attachment, target_dir, position, max_bytes, reader),
             timeout=timeout_seconds,
         )
-    except TimeoutError as error:
+    except asyncio.TimeoutError as error:
         return CaptureResult(position, CaptureStatus.TIMEOUT, None, _bounded_error(error))
 
 
@@ -183,9 +184,14 @@ async def capture_attachment(
     max_bytes: int = 25 * 1024 * 1024,
     reader: BoundedReader = read_attachment_bounded,
 ) -> CaptureResult:
-    target_dir.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(target_dir.mkdir, parents=True, exist_ok=True)
     return await _capture_with_timeout(
-        attachment, target_dir, position, timeout_seconds, max_bytes, reader
+        attachment,
+        target_dir,
+        position,
+        timeout_seconds,
+        max_bytes=max_bytes,
+        reader=reader,
     )
 
 

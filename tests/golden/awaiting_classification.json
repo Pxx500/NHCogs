@@ -1,0 +1,99 @@
+{
+  "case": {
+    "cached_purge_lines": [],
+    "case_id": "{{CASE_ID}}",
+    "channel_ids": [
+      300
+    ],
+    "description": "<@200> (200)\nAccount created <t:1783425600:R>\nJoined server <t:1783944000:R>\nStatus: Awaiting classification\nMessages: 1\nExpires: <t:1784116800:R>\n\nSignals:\nMessage 1 · <#300>:\nKnown suspicious image match",
+    "expires_at": "2026-07-15T12:00:00+00:00",
+    "feedback_items": [
+      {
+        "decision": null,
+        "detector_matched": true,
+        "filename": "matched.png",
+        "key": {
+          "case_id": "{{CASE_ID}}",
+          "message_sequence": 1,
+          "position": 0
+        }
+      }
+    ],
+    "feedback_lines": [
+      "1.1 matched.png: pending"
+    ],
+    "fields": [
+      {
+        "name": "Moderation:",
+        "value": "Banned"
+      }
+    ],
+    "incomplete_evidence": false,
+    "message_count": 1,
+    "message_lines": [
+      "Message 1 in <#300>: Deletion not attempted yet"
+    ],
+    "moderation_actions": [],
+    "moderation_status": "Banned",
+    "moderator_id": null,
+    "needs_attention": false,
+    "operation_warning_lines": [],
+    "pages": [
+      [
+        {
+          "name": "Moderation:",
+          "value": "Banned"
+        }
+      ]
+    ],
+    "resolution": null,
+    "resolved_at": null,
+    "signal_lines": [
+      "<#300>: Known suspicious image match"
+    ],
+    "status": "pending",
+    "thumbnail_url": "https://cdn.example.test/avatar.png",
+    "title": "Detection case",
+    "user_id": 200
+  },
+  "timeline": {
+    "case_id": "{{CASE_ID}}",
+    "case_notes": [],
+    "messages": [
+      {
+        "attachments": [
+          {
+            "capture_status": "captured",
+            "content_type": "image/png",
+            "description": null,
+            "evidence_path": "evidence/matched.png",
+            "filename": "matched.png",
+            "key": {
+              "case_id": "{{CASE_ID}}",
+              "message_sequence": 1,
+              "position": 0
+            },
+            "learning_decision": null,
+            "match_metadata": {
+              "distance": 2,
+              "matched": true
+            },
+            "publication_error": null,
+            "size": 128,
+            "spoiler": false
+          }
+        ],
+        "channel_id": 300,
+        "content": "classification pending",
+        "created_at": "2026-07-14T12:00:00+00:00",
+        "delete_status": "Deletion not attempted yet",
+        "jump_url": null,
+        "sequence": 1,
+        "signal_reasons": [
+          "Known suspicious image match"
+        ],
+        "source_message_id": 1001
+      }
+    ]
+  }
+}

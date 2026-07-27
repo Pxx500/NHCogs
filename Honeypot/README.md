@@ -4,6 +4,8 @@ Honeypot is a Red-DiscordBot cog that protects your server by creating trap chan
 spam accounts, and suspicious users. Messages posted in honeypot channels are deleted, logged, optionally purged,
 and either punished automatically or sent to moderators for review. It also alerts moderators when new accounts join the server.
 
+This implementation is maintained by Pxx500 and was originally based on AAA3A's Honeypot.
+
 ## Installation
 
 ```ini
@@ -19,24 +21,24 @@ Requires `AAA3A_utils`. Red will show the pip install command if missing.
 ```ini
 [p]honeypot channel create
 [p]honeypot channel logs #mod-logs
-[p]honeypot core action ban
-[p]honeypot core toggle true
+[p]honeypot honeypot action ban
+[p]honeypot honeypot toggle true
 ```
 
 ## Commands
 
 By default, only the server owner can use `!honeypot` and all subcommands. Red Permissions rules can allow other users or roles.
 
-### core
+### honeypot
 
 | Command | Description |
 |---------|-------------|
-| `!honeypot core toggle <bool>` | Enable or disable the cog |
-| `!honeypot core action <kick\|ban\|review\|none>` | Main action for suspicious posts |
-| `!honeypot core fallback_action <review\|kick\|ban\|none>` | Action for non-suspicious posts |
-| `!honeypot core dry_run <bool>` | Log what would happen without punishing |
-| `!honeypot core whitelist_mode <bypass\|review\|fallback\|none>` | How whitelisted roles behave |
-| `!honeypot core automated_kick_fail_warn <bool>` | Warn when the target has already left before the kick is applied |
+| `!honeypot honeypot toggle <bool>` | Master switch for all message detection: honeypot channels, spam, firstpost and the image detector. Joinwatch and the bait role are unaffected |
+| `!honeypot honeypot action <kick\|ban\|review\|none>` | Main action for suspicious posts |
+| `!honeypot honeypot fallback_action <review\|kick\|ban\|none>` | Action for non-suspicious posts |
+| `!honeypot honeypot dry_run <bool>` | Log what would happen without punishing |
+| `!honeypot honeypot whitelist_mode <bypass\|review\|fallback\|none>` | How whitelisted roles behave |
+| `!honeypot honeypot automated_kick_fail_warn <bool>` | Warn when the target has already left before the kick is applied |
 
 ### channel
 
@@ -47,30 +49,27 @@ By default, only the server owner can use `!honeypot` and all subcommands. Red P
 | `!honeypot channel remove <channel>` | Remove a honeypot channel |
 | `!honeypot channel list` | List honeypot channels |
 | `!honeypot channel logs <channel>` | Set the logs channel |
-| `!honeypot channel ping_role <role>` | Role to ping on detection |
 
 ### punishment
 
 | Command | Description |
 |---------|-------------|
 | `!honeypot punishment mute_role <role>` | Temp mute role for users awaiting review |
-| `!honeypot punishment delete_days <0-7>` | Days of messages to delete on ban |
 
 ### purge
 
 | Command | Description |
 |---------|-------------|
-| `!honeypot purge toggle <bool>` | Delete recent cached messages from caught users |
-| `!honeypot purge minutes` | Show fixed cache retention |
+| `!honeypot purge backward <60-3600>` | Seconds of cached messages the purge step may delete |
+| `!honeypot purge forward <0-300>` | Seconds of new messages purged after a trigger (`0` disables it) |
 
 ### firstpost
 
 | Command | Description |
 |---------|-------------|
 | `!honeypot firstpost toggle <bool>` | Enable or disable suspicious first-post detection |
-| `!honeypot firstpost collect <bool>` | Collect first observed senders without taking action |
+| `!honeypot firstpost warmup <bool>` | Record first observed senders without taking action |
 | `!honeypot firstpost action <review\|kick\|ban\|none>` | Action for suspicious first observed messages |
-| `!honeypot firstpost status` | Show firstpost status and seen-author count |
 
 ### spam
 
@@ -80,7 +79,6 @@ By default, only the server owner can use `!honeypot` and all subcommands. Red P
 | `!honeypot spam action <review\|kick\|ban\|none>` | Action for repeated messages across channels |
 | `!honeypot spam window <3-60>` | Seconds in the repeated message window |
 | `!honeypot spam channels <2-10>` | Different channels required to trigger |
-| `!honeypot spam status` | Show spam detection status |
 
 ### review
 
@@ -96,22 +94,35 @@ Detection cases expire 24 hours after the first detection. This lifetime is fixe
 
 | Command | Description |
 |---------|-------------|
-| `!honeypot roles add <role>` | Add a whitelisted role |
-| `!honeypot roles remove <role>` | Remove a whitelisted role |
-| `!honeypot roles list` | List whitelisted roles |
+| `!honeypot honeypot roles add <role>` | Add a whitelisted role |
+| `!honeypot honeypot roles remove <role>` | Remove a whitelisted role |
+| `!honeypot honeypot roles list` | List whitelisted roles |
 
 ### keywords
 
 | Command | Description |
 |---------|-------------|
-| `!honeypot keywords add <keyword>` | Add a scam keyword |
-| `!honeypot keywords remove <keyword>` | Remove a scam keyword |
-| `!honeypot keywords list` | List scam keywords |
-| `!honeypot keywords reset` | Reset to defaults |
-| `!honeypot keywords attachments add <regex>` | Add filename-base regex (triggers at 2+ matches) |
-| `!honeypot keywords attachments remove <regex>` | Remove a filename regex |
-| `!honeypot keywords attachments list` | List filename regexes |
-| `!honeypot keywords attachments reset` | Reset to default patterns |
+| `!honeypot honeypot keywords add <keyword>` | Add a scam keyword |
+| `!honeypot honeypot keywords remove <keyword>` | Remove a scam keyword |
+| `!honeypot honeypot keywords list` | List scam keywords |
+| `!honeypot honeypot keywords reset` | Reset to defaults |
+| `!honeypot honeypot keywords attachments add <regex>` | Add filename-base regex (triggers at 2+ matches) |
+| `!honeypot honeypot keywords attachments remove <regex>` | Remove a filename regex |
+| `!honeypot honeypot keywords attachments list` | List filename regexes |
+| `!honeypot honeypot keywords attachments reset` | Reset to default patterns |
+
+### imagescan
+
+| Command | Description |
+|---------|-------------|
+| `!honeypot imagescan add` | Add scam images from the message this command replies to |
+| `!honeypot imagescan remove <identifier>` | Remove an image sample and its stored file from the active dataset |
+| `!honeypot imagescan dropfile <identifier>` | Remove a stored image file while keeping its hashes active |
+| `!honeypot imagescan rebuild` | Recompute image detector threshold state |
+| `!honeypot imagescan status` | Show image detector settings, samples, and timing |
+| `!honeypot imagescan detector toggle <bool>` | Enable or disable production image detection |
+| `!honeypot imagescan detector action <none\|review\|kick\|ban>` | Action for image detector matches |
+| `!honeypot imagescan detector threshold <0-100>` | Maximum image hash distance |
 
 ### joinwatch
 
@@ -120,7 +131,7 @@ Detection cases expire 24 hours after the first detection. This lifetime is fixe
 | `!honeypot joinwatch toggle <bool>` | Enable or disable the joinwatch module |
 | `!honeypot joinwatch alert toggle <bool>` | Enable or disable joinwatch alert messages |
 | `!honeypot joinwatch channel <channel>` | Channel for join alerts |
-| `!honeypot joinwatch max_age <1-168>` | Max account age in hours to trigger alert |
+| `!honeypot joinwatch max_age <1-1000000>` | Max account age in hours to trigger alert |
 | `!honeypot joinwatch autorole toggle <bool>` | Enable or disable automatic role assignment for young accounts |
 | `!honeypot joinwatch autorole role <role>` | Role to apply to young accounts |
 | `!honeypot joinwatch autorole timer <1-10080>` | Minutes before punishment if the role remains |
@@ -130,35 +141,44 @@ Detection cases expire 24 hours after the first detection. This lifetime is fixe
 | `!honeypot joinwatch autorole randomize min_time <1-10080>` | Minimum minutes before applying the auto-role |
 | `!honeypot joinwatch autorole randomize max_time <1-10080>` | Maximum minutes before applying the auto-role |
 
-### bait
+### bait_role
 
 | Command | Description |
 |---------|-------------|
-| `!honeypot bait toggle <bool>` | Enable or disable the bait role trap |
-| `!honeypot bait role <role>` | Set the bait role |
-| `!honeypot bait action <kick\|ban>` | Action to take when users take the bait role |
+| `!honeypot bait_role toggle <bool>` | Enable or disable the bait role trap |
+| `!honeypot bait_role role <role>` | Set the bait role |
+| `!honeypot bait_role action <kick\|ban>` | Action to take when users take the bait role |
+
+### errors
+
+`!honeypot errors` on its own lists unacknowledged operational failures.
+
+| Command | Description |
+|---------|-------------|
+| `!honeypot errors clear` | Acknowledge all currently visible operational failures |
 
 ### other
 
 | Command | Description |
 |---------|-------------|
 | `!honeypot config all` | Show a compact summary of all configuration sections |
-| `!honeypot config core` | Show core settings |
-| `!honeypot config channel` | Show channel and ping role settings |
+| `!honeypot config honeypot` | Show main honeypot detection settings |
+| `!honeypot config channel` | Show honeypot and log channel settings |
 | `!honeypot config punishment` | Show punishment settings |
 | `!honeypot config purge` | Show purge settings |
 | `!honeypot config firstpost` | Show firstpost settings |
+| `!honeypot config imagescan` | Show image detector settings |
 | `!honeypot config spam` | Show spam detection settings |
 | `!honeypot config review` | Show review settings |
 | `!honeypot config roles` | Show whitelist role settings |
 | `!honeypot config keywords` | Show keyword and attachment-pattern counts |
 | `!honeypot config joinwatch` | Show joinwatch and joinwatch auto-role settings |
-| `!honeypot config bait` | Show bait role settings |
+| `!honeypot config bait_role` | Show bait role settings |
 | `!honeypot config stats` | Show stored stats, detection-case operations, and pending timer counts |
 | `!honeypot stats` | Show public-facing stats |
 | `!honeypot modstats` | Show detailed moderator statistics |
-| `!honeypot resetstats` | Reset statistics |
 | `!honeypot doctor` | Check config, channels, and permissions |
+| `!consoledump <bot\|honeypot> <1-24> [level]` | Export recent sanitized Python logs to a private text channel (requires Manage Messages) |
 
 ## Action & Fallback Logic
 
@@ -187,18 +207,20 @@ fallback_action = none     → log only
 A message is considered suspicious if:
 
 - Account is under 7 days old
-- Content contains scam keywords (customizable, see `!honeypot keywords`)
+- Content contains scam keywords (customizable, see `!honeypot honeypot keywords`)
 - Has attachments and account is under 14 days old
 - Has 4+ image attachments, regardless of filename
 - Has 2+ generic attachment names (e.g. `image.jpeg`, `image(1).jpeg`, `1.jpeg`)
 - Has 2+ attachments matching configured filename-base regexes
+- An image matches the image-detector dataset, when the detector is enabled and
+  samples exist (see `!honeypot imagescan`)
 
 If firstpost is enabled, a user's first observed message is also considered
 suspicious when it has exactly 4 attachments, or exactly 2 attachments with
 configured scam keywords.
 The keyword `bro` is treated as attachment-only: it does not trigger by itself,
 but can satisfy the 2-attachment firstpost rule.
-`firstpost collect` and active firstpost detection are mutually exclusive:
+`firstpost warmup` and active firstpost detection are mutually exclusive:
 enabling one disables the other.
 
 If spam detection is enabled, a user's matching message fingerprint in multiple
@@ -216,7 +238,9 @@ Default attachment patterns: `^image$` (matches `image.jpeg`), `^image ?\(\d+\)$
 
 1. Attachment capture starts before the source message is deleted. A failed or
    timed-out download is shown as missing evidence and does not block containment.
-2. The source and recent cached messages from that user are deleted when configured.
+2. The source message is deleted, along with recent cached messages from that user.
+   Backward purge cannot be turned off; its window is 60-3600 seconds. Forward
+   purge is disabled by setting `purge forward` to `0`.
 3. The review mute role is applied while review is pending when configured.
 4. One compact summary is posted in the review channel and a public case thread is
    created from it.
@@ -259,8 +283,9 @@ does not include the original honeypot message, which is deleted separately as
 part of every detection.
 
 Cached purge stores recent message IDs observed through Discord Gateway events
-for 2 minutes, then deletes those known messages directly. After a purge trigger,
-the bot also forward-purges new messages from that user for 1 minute.
+for the configured `purge backward` window, then deletes those known messages
+directly. After a purge trigger, the bot also forward-purges new messages from
+that user for the configured `purge forward` window.
 
 `Early catches` counts suspicious first observed messages handled by firstpost.
 `Spam catches` counts repeated messages across channels handled by spam detection.
@@ -329,9 +354,9 @@ kick or ban action regardless of which system assigned it.
 Setup:
 
 ```ini
-[p]honeypot bait role @SuspiciousRole
-[p]honeypot bait action ban
-[p]honeypot bait toggle true
+[p]honeypot bait_role role @SuspiciousRole
+[p]honeypot bait_role action ban
+[p]honeypot bait_role toggle true
 ```
 
 When the trap is enabled and a non-exempt user receives the bait role, the cog
@@ -391,7 +416,7 @@ the cog data directory so large servers do not inflate Red Config.
 ## Operational Notes
 
 - Bot owners, mods, admins, users with `Manage Server`, and users at or above the bot's top role are ignored
-- Purge uses a 2-minute Gateway message cache; it does not scan channel history
+- Purge uses a Gateway message cache; it does not scan channel history
 - When using review mode, a mute role is used as temporary containment until moderators decide
 - `!honeypot doctor` checks all permissions and configuration at once
-- Stats are per-server and reset with `resetstats`
+- Stats are per-server

@@ -1,22 +1,26 @@
-from importlib import util
-from contextlib import closing
-from pathlib import Path
-from dataclasses import FrozenInstanceError
-from datetime import datetime, timedelta, timezone
-from concurrent.futures import ThreadPoolExecutor
-from zoneinfo import ZoneInfo
-from tempfile import TemporaryDirectory
-from threading import Barrier, Event
 import sqlite3
 import sys
+import types
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+from dataclasses import FrozenInstanceError
+from datetime import datetime, timedelta, timezone
+from importlib import util
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from threading import Barrier, Event
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 from tests.detection_case_fixtures import capture_attachment, publish_primary
 
-
 MODULE_PATH = Path(__file__).resolve().parents[1] / "Honeypot" / "detection_cases.py"
-spec = util.spec_from_file_location("detection_cases_under_test", MODULE_PATH)
+PACKAGE_NAME = "_honeypot_detection_cases_tests"
+package = types.ModuleType(PACKAGE_NAME)
+package.__path__ = [str(MODULE_PATH.parent)]
+sys.modules[PACKAGE_NAME] = package
+spec = util.spec_from_file_location(f"{PACKAGE_NAME}.detection_cases", MODULE_PATH)
 detection_cases_under_test = util.module_from_spec(spec)
 sys.modules[spec.name] = detection_cases_under_test
 assert spec.loader is not None
@@ -28,6 +32,7 @@ CaseStatus = detection_cases_under_test.CaseStatus
 ActionIntent = detection_cases_under_test.ActionIntent
 DeleteStatus = detection_cases_under_test.DeleteStatus
 OperationStatus = detection_cases_under_test.OperationStatus
+OperationType = detection_cases_under_test.OperationType
 ACTION_PRIORITY = detection_cases_under_test.ACTION_PRIORITY
 DetectionSignal = detection_cases_under_test.DetectionSignal
 effective_action = detection_cases_under_test.effective_action
@@ -81,6 +86,28 @@ class DetectionCaseDomainTests(unittest.TestCase):
         self.assertEqual(
             tuple(status.value for status in OperationStatus),
             ("pending", "running", "succeeded", "failed", "abandoned"),
+        )
+
+    def test_operation_type_values_are_stable_storage_vocabulary(self):
+        operation_type = getattr(detection_cases_under_test, "OperationType", None)
+
+        self.assertIsNotNone(operation_type)
+        self.assertEqual(
+            tuple(member.value for member in operation_type),
+            (
+                "message_process",
+                "role_apply",
+                "role_release",
+                "review_update",
+                "review_publish",
+                "source_delete",
+                "evidence_cleanup",
+                "cached_purge",
+                "moderation_action",
+                "moderator_ban",
+                "moderator_kick",
+                "moderator_ignore",
+            ),
         )
 
     def test_action_priority_is_immutable(self):
@@ -336,11 +363,11 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertEqual(
             {
                 name
-                for name in {
+                for name in (
                     "update_attachment_capture",
                     "set_evidence_publication",
                     "set_review_message",
-                }
+                )
                 if hasattr(DetectionCaseStore, name)
             },
             set(),
@@ -352,6 +379,37 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.database_path = Path(self.temp_dir.name) / "cases.sqlite3"
         self.store = DetectionCaseStore(self.database_path)
         self.store.initialize()
+
+    def test_initialize_sets_the_detection_schema_version_on_an_empty_database(self):
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+
+        self.assertEqual(version, 1)
+        self.assertIn("detection_cases", tables)
+        self.assertIn("detection_attachments", tables)
+
+    def test_initialize_preserves_current_schema_data_when_backfilling_version(self):
+        now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
+        stored_case = self.store.append_message(self.message(40, now), ()).case
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
+            connection.execute("PRAGMA user_version = 0")
+
+        DetectionCaseStore(self.database_path).initialize()
+
+        reopened = DetectionCaseStore(self.database_path)
+        snapshot = reopened.get_case(stored_case.case_id)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+
+        self.assertEqual(snapshot.case.case_id, stored_case.case_id)
+        self.assertEqual(snapshot.messages[0].message_id, 40)
+        self.assertEqual(version, 1)
 
     def test_case_subject_identity_survives_store_restart(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
@@ -492,6 +550,13 @@ class DetectionCaseStoreTests(unittest.TestCase):
                     PRIMARY KEY(case_id, message_sequence, position)
                 )"""
             )
+            connection.execute(
+                """INSERT INTO detection_attachments (
+                    case_id, message_sequence, position, filename, size,
+                    source_url, capture_status, match_metadata, learning_metadata
+                ) VALUES ('legacy-case', 1, 0, 'legacy.png', 128,
+                          'https://cdn.test/legacy.png', 'captured', '{}', '{}')"""
+            )
 
         DetectionCaseStore(legacy_path).initialize()
 
@@ -499,8 +564,16 @@ class DetectionCaseStoreTests(unittest.TestCase):
             columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(detection_attachments)")
             }
+            row = connection.execute(
+                """SELECT filename, description, spoiler
+                   FROM detection_attachments
+                   WHERE case_id = 'legacy-case'"""
+            ).fetchone()
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
         self.assertIn("description", columns)
         self.assertIn("spoiler", columns)
+        self.assertEqual(row, ("legacy.png", None, 0))
+        self.assertEqual(version, 1)
 
     def test_projection_endpoint_survives_store_restart(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
@@ -739,8 +812,8 @@ class DetectionCaseStoreTests(unittest.TestCase):
                 0,
                 "sha",
                 "phash",
-                {"matched": True},
-                None,
+                match_metadata={"matched": True},
+                error=None,
             )
         )
         self.assertTrue(
@@ -904,8 +977,8 @@ class DetectionCaseStoreTests(unittest.TestCase):
             0,
             "wrong-token",
             100,
-            "case/1/proof.png",
-            created_at + timedelta(seconds=1),
+            evidence_path="case/1/proof.png",
+            now=created_at + timedelta(seconds=1),
             max_attachment_bytes=100,
             max_case_bytes=100,
         )
@@ -915,8 +988,8 @@ class DetectionCaseStoreTests(unittest.TestCase):
             0,
             reservation.claim_token,
             100,
-            "case/1/proof.png",
-            created_at + timedelta(seconds=1),
+            evidence_path="case/1/proof.png",
+            now=created_at + timedelta(seconds=1),
             max_attachment_bytes=100,
             max_case_bytes=100,
         )
@@ -953,8 +1026,8 @@ class DetectionCaseStoreTests(unittest.TestCase):
             0,
             reservation.claim_token,
             101,
-            "case/1/proof.png",
-            created_at + timedelta(seconds=1),
+            evidence_path="case/1/proof.png",
+            now=created_at + timedelta(seconds=1),
             max_attachment_bytes=100,
             max_case_bytes=100,
         )
@@ -1001,8 +1074,8 @@ class DetectionCaseStoreTests(unittest.TestCase):
             0,
             reservation.claim_token,
             100,
-            "case/1/proof.png",
-            created_at + timedelta(seconds=3),
+            evidence_path="case/1/proof.png",
+            now=created_at + timedelta(seconds=3),
             max_attachment_bytes=100,
             max_case_bytes=100,
         )
@@ -1037,7 +1110,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
             0,
             first.claim_token,
             "capture_failed",
-            "read failed",
+            error="read failed",
         )
         failed = self.store.get_case(appended.case.case_id).attachments[0]
         retried = self.store.reserve_attachment_capture(
@@ -1453,6 +1526,53 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertEqual(first.attempts, 0)
         self.assertEqual(first.created_at, first.updated_at)
 
+    def test_operation_type_enum_roundtrips_through_store_restart(self):
+        created_at = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
+        case_id = self.store.append_message(
+            self.message(40, created_at), ()
+        ).case.case_id
+
+        self.store.ensure_operation(
+            case_id,
+            OperationType.ROLE_APPLY,
+            f"role-apply:{case_id}:55",
+        )
+        reopened = DetectionCaseStore(self.database_path)
+        reopened.initialize()
+        operation = reopened.get_case(case_id).operations[0]
+
+        self.assertIs(operation.operation_type, OperationType.ROLE_APPLY)
+
+    def test_unknown_persisted_operation_type_warns_and_remains_available(self):
+        created_at = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
+        case_id = self.store.append_message(
+            self.message(40, created_at), ()
+        ).case.case_id
+        self.store.ensure_operation(case_id, "future_operation", "future:operation")
+        reopened = DetectionCaseStore(self.database_path)
+        reopened.initialize()
+
+        with self.assertLogs(level="WARNING") as captured:
+            operation = reopened.get_case(case_id).operations[0]
+
+        self.assertEqual(operation.operation_type, "future_operation")
+        self.assertIn("future_operation", "\n".join(captured.output))
+
+    def test_known_operational_failure_source_returns_operation_type(self):
+        occurred_at = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
+
+        self.store.record_operational_failure(
+            guild_id=10,
+            source=OperationType.ROLE_APPLY,
+            summary="temporary",
+            occurred_at=occurred_at,
+        )
+        reopened = DetectionCaseStore(self.database_path)
+        reopened.initialize()
+        failure = reopened.list_operational_failures(10)[0]
+
+        self.assertIs(failure.source, OperationType.ROLE_APPLY)
+
     def test_publication_claim_renewal_prevents_stale_reclaim(self):
         now = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
         case_id = self.store.append_message(self.message(40, now), ()).case.case_id
@@ -1527,7 +1647,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
 
     def test_due_operations_wait_for_message_processing_dependencies(self):
         now = datetime.now(timezone.utc)
-        appended = self.store.append_message(
+        self.store.append_message(
             self.message(91, now),
             (
                 DetectionSignal(

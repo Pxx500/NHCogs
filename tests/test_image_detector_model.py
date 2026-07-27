@@ -1,7 +1,7 @@
-import unittest
 import sys
-from io import BytesIO
+import unittest
 from importlib import util
+from io import BytesIO
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "Honeypot" / "image_detector.py"
