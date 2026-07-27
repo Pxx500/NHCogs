@@ -812,6 +812,14 @@ async def imagescan_add(cog, ctx: commands.Context) -> None:
     await ctx.send(_("Imagescan add: {result}.").format(result=", ".join(parts) or _("no changes")))
 
 
+def _delete_imagescan_sample_file(path: Path) -> bool:
+    """Delete a sample file when it is present and report whether it was removed."""
+    if not path.exists():
+        return False
+    path.unlink()
+    return True
+
+
 async def imagescan_dropfile(cog, ctx: commands.Context, identifier: str) -> None:
     rows = await _imagescan_sample_rows(cog, ctx.guild.id)
     sample = match_imagescan_sample_identifier(rows, identifier)
@@ -825,13 +833,11 @@ async def imagescan_dropfile(cog, ctx: commands.Context, identifier: str) -> Non
         if not is_imagescan_sample_path_safe(cog._imagescan_files_path, path):
             await ctx.send(_("Refused to touch a file outside image scan storage."))
             return
-        if path.exists():
-            try:
-                path.unlink()
-                deleted = True
-            except OSError:
-                await ctx.send(_("Failed to delete sample file."))
-                return
+        try:
+            deleted = await asyncio.to_thread(_delete_imagescan_sample_file, path)
+        except OSError:
+            await ctx.send(_("Failed to delete sample file."))
+            return
     await _imagescan_update_sample_file(cog, ctx.guild.id, str(sample["sample_id"]), None, 0)
     await ctx.send(
         _("Sample file dropped: `{sample_id}` (`{sha}`). File deleted: {deleted}. Hash retained.").format(
@@ -855,13 +861,11 @@ async def imagescan_remove(cog, ctx: commands.Context, identifier: str) -> None:
         if not is_imagescan_sample_path_safe(cog._imagescan_files_path, path):
             await ctx.send(_("Refused to touch a file outside image scan storage."))
             return
-        if path.exists():
-            try:
-                path.unlink()
-                deleted_file = True
-            except OSError:
-                await ctx.send(_("Failed to delete sample file."))
-                return
+        try:
+            deleted_file = await asyncio.to_thread(_delete_imagescan_sample_file, path)
+        except OSError:
+            await ctx.send(_("Failed to delete sample file."))
+            return
     await _imagescan_delete_sample(cog, ctx.guild.id, str(sample["sample_id"]))
     raw_config = await cog.config.guild(ctx.guild).all()
     guild_settings = GuildSettings.from_mapping(raw_config)

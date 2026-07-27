@@ -66,12 +66,11 @@ ignore = [
 # not in the plan's approved decomposition set.
 "Honeypot/detection_cases.py" = ["PLR0912"]
 
-# ASYNC240: `target_dir.mkdir` runs on the event loop. Real, unfixed.
 # PLR2004: a retry-attempt comparison local to one reader.
 # TRY004: raising `RuntimeError` instead of `TypeError` for a non-callable
 # download interface is the established validation contract; swapping the type
 # is a behaviour change on a validation path.
-"Honeypot/detection_runtime.py" = ["ASYNC240", "PLR2004", "TRY004"]
+"Honeypot/detection_runtime.py" = ["PLR2004", "TRY004"]
 
 # PLR2004: doctor thresholds (24h, 30 days) used once each.
 # PLR0912/PLR0917: `_doctor_configuration_checks` was skipped in round B with a
@@ -84,13 +83,11 @@ ignore = [
 # round B with a reason. TRY004: same validation contract as detection_runtime.
 "Honeypot/honeypot.py" = ["PLR0911", "PLR0917", "PLR2004", "TRY004"]
 
-# ASYNC240: `path.exists`/`path.unlink` run on the event loop in the sample
-# maintenance commands. Real, unfixed.
 # PLR0912/PLR0915/PLR0917: `imagescan_add`, `imagescan_import_tp_zip`,
 # `_imagescan_add_attachment_sample`, `_imagescan_add_bytes_sample` and
 # `_scan_image_attachments` are in the plan's `< 40%` coverage band or its
 # deferred set. PLR2004: local batch sizes.
-"Honeypot/imagescan.py" = ["ASYNC240", "PLR0912", "PLR0915", "PLR0917", "PLR2004"]
+"Honeypot/imagescan.py" = ["PLR0912", "PLR0915", "PLR0917", "PLR2004"]
 
 # PLR0911/PLR0912/PLR0915: `on_member_join` (11%), `on_member_update` (0%),
 # `_apply_joinwatch_role_actions` (33%) and `_apply_joinwatch_assignment_actions`
@@ -98,14 +95,9 @@ ignore = [
 # PLR2004: the 10080-minute (7 day) joinwatch window, used once per branch.
 "Honeypot/joinwatch.py" = ["PLR0911", "PLR0912", "PLR0915", "PLR2004"]
 
-# ASYNC240: `evidence_path.exists()` runs on the event loop. The count dropped
-# from 7 to 6 in round C only because the blocking evidence tree-walk moved
-# into the sync `_contained_case_evidence_root`/`_remove_case_evidence_tree`,
-# which the async handler still calls directly - the loop still blocks and the
-# rule simply stopped seeing it. This is not an improvement.
 # PLC0415: `from ..honeypot import case_evidence_root` is deferred to call time
 # to break the cog <-> handler import cycle.
-"Honeypot/operations/evidence_cleanup.py" = ["ASYNC240", "PLC0415"]
+"Honeypot/operations/evidence_cleanup.py" = ["PLC0415"]
 
 # PLR0912: `_delete_source_message` is in the plan's deferred set.
 "Honeypot/operations/message_process.py" = ["PLR0912"]
