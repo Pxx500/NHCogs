@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from importlib import import_module
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -452,14 +452,21 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     await cog._execute_detection_case_operation(claimed, now)
 
+                due = cog._case_store.claim_due_operations(
+                    now + timedelta(days=1)
+                )
                 persisted = self._persisted_operation(
                     cog,
                     appended.case.case_id,
                     operation.operation_id,
                 )
+                self.assertNotIn(
+                    operation.operation_id,
+                    {item.operation_id for item in due},
+                )
                 self.assertEqual(
-                    (persisted.status, persisted.result),
-                    (honeypot.OperationStatus.FAILED, None),
+                    (persisted.status, persisted.result, persisted.retry_at),
+                    (honeypot.OperationStatus.FAILED, None, None),
                 )
 
     async def test_live_kick_uses_public_reason_and_persists_exact_result(self):

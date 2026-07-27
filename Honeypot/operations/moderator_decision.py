@@ -128,7 +128,7 @@ async def _apply_moderator_decision(
     action: ActionIntent,
     effect_started: bool,
     guild_settings: GuildSettings,
-) -> str:
+) -> OperationOutcome:
     """Apply a live (non dry-run) moderator decision and report its result."""
     snapshot = context.snapshot
     guild = cog.bot.get_guild(snapshot.case.guild_id)
@@ -139,10 +139,10 @@ async def _apply_moderator_decision(
         and action is ActionIntent.BAN
         and await _ban_already_applied(cog, guild, snapshot.case.user_id)
     ):
-        return action.value
+        return OperationOutcome(result=action.value)
     member = await _decision_target(cog, guild, snapshot.case.user_id, action)
     if member is None:
-        return OPERATION_RESULT_KICK_MISSING
+        return OperationOutcome(result=OPERATION_RESULT_KICK_MISSING)
     result = await _execute_moderator_action(
         cog,
         context,
@@ -152,10 +152,13 @@ async def _apply_moderator_decision(
         guild_settings=guild_settings,
     )
     if result.status is EffectStatus.PLANNED:
-        return f"{PLANNED_PREFIX}{action.value}"
+        return OperationOutcome(result=f"{PLANNED_PREFIX}{action.value}")
     if result.status is EffectStatus.FAILED:
-        raise RuntimeError(result.failed_message or result.label)
-    return action.value
+        return OperationOutcome(
+            error=RuntimeError(result.failed_message or result.label),
+            terminal_failure=True,
+        )
+    return OperationOutcome(result=action.value)
 
 
 async def moderator_decision_handler(
@@ -187,13 +190,11 @@ async def moderator_decision_handler(
     raw_config = await cog.config.guild_from_id(snapshot.case.guild_id).all()
     guild_settings = GuildSettings.from_mapping(raw_config)
     if guild_settings.dry_run:
-        operation_result = f"{PLANNED_PREFIX}{action.value}"
-    else:
-        operation_result = await _apply_moderator_decision(
-            cog,
-            context,
-            action=action,
-            effect_started=effect_started,
-            guild_settings=guild_settings,
-        )
-    return OperationOutcome(result=operation_result)
+        return OperationOutcome(result=f"{PLANNED_PREFIX}{action.value}")
+    return await _apply_moderator_decision(
+        cog,
+        context,
+        action=action,
+        effect_started=effect_started,
+        guild_settings=guild_settings,
+    )

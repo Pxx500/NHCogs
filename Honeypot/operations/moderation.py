@@ -134,7 +134,10 @@ async def moderation_action_handler(
         action=action.value,
     )
     if result.status is EffectStatus.FAILED:
-        raise RuntimeError(result.failed_message or result.label)
+        return OperationOutcome(
+            error=RuntimeError(result.failed_message or result.label),
+            terminal_failure=True,
+        )
     operation_result = (
         f"{PLANNED_PREFIX}{action.value}"
         if result.status is EffectStatus.PLANNED

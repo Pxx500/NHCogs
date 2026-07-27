@@ -571,12 +571,20 @@ async def _settle_detection_operation_failure(
     error: Exception,
     operation_type_value: str,
 ) -> None:
-    retry_at = now + (
-        timedelta(seconds=DETECTION_FAST_RETRY_SECONDS)
-        if operation.attempts <= DETECTION_FAST_RETRY_LIMIT
-        else timedelta(minutes=DETECTION_SLOW_RETRY_MINUTES)
+    retry_at = (
+        None
+        if outcome.terminal_failure
+        else now
+        + (
+            timedelta(seconds=DETECTION_FAST_RETRY_SECONDS)
+            if operation.attempts <= DETECTION_FAST_RETRY_LIMIT
+            else timedelta(minutes=DETECTION_SLOW_RETRY_MINUTES)
+        )
     )
-    if operation.operation_type == OperationType.SOURCE_DELETE:
+    if (
+        operation.operation_type == OperationType.SOURCE_DELETE
+        and not outcome.terminal_failure
+    ):
         retry_at = now + timedelta(seconds=DETECTION_FAST_RETRY_SECONDS)
     cached_purge_exhausted = (
         operation.operation_type == OperationType.CACHED_PURGE
@@ -604,6 +612,7 @@ async def _settle_detection_operation_failure(
         now,
         retry_at,
         result=outcome.result,
+        terminal_failure=outcome.terminal_failure,
     )
     if failure and snapshot is not None:
         await cog._record_operational_failure(

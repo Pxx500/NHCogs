@@ -1,6 +1,6 @@
 import unittest
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from importlib import import_module
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -159,6 +159,69 @@ class ModeratorDecisionHandlerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     (persisted.status, persisted.result),
                     (honeypot.OperationStatus.SUCCEEDED, "planned_kick"),
+                )
+
+    async def test_kick_not_found_with_warning_keeps_moderator_effect_terminal_failed(
+        self,
+    ):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                now = datetime.now(timezone.utc)
+                member = SimpleNamespace(
+                    id=20,
+                    kick=mock.AsyncMock(
+                        side_effect=honeypot.discord.NotFound("kick target missing")
+                    ),
+                )
+                guild = SimpleNamespace(
+                    id=10,
+                    me=SimpleNamespace(
+                        guild_permissions=SimpleNamespace(
+                            kick_members=True,
+                            ban_members=True,
+                        )
+                    ),
+                    get_member=lambda user_id: member,
+                )
+                bot = _Bot()
+                bot.get_guild = lambda guild_id: guild
+                cog = honeypot.Honeypot(bot)
+                cog.config = _Config(
+                    {
+                        "automated_kick_fail_warning": True,
+                        "dry_run": False,
+                    }
+                )
+                cog._get_user_or_object = mock.AsyncMock(return_value=member)
+                appended = self._append_case(honeypot, cog, now)
+                claimed = self._claim_moderator_action(
+                    honeypot, cog, appended, "kick", 777, now
+                )
+
+                with mock.patch.object(
+                    honeypot.modlog,
+                    "create_case",
+                    new=mock.AsyncMock(),
+                    create=True,
+                ):
+                    await cog._execute_detection_case_operation(claimed, now)
+
+                due = cog._case_store.claim_due_operations(
+                    now + timedelta(days=1)
+                )
+                snapshot = cog._case_store.get_case(appended.case.case_id)
+                persisted = next(
+                    item
+                    for item in snapshot.operations
+                    if item.operation_id == claimed.operation_id
+                )
+                self.assertNotIn(
+                    claimed.operation_id,
+                    {item.operation_id for item in due},
+                )
+                self.assertEqual(
+                    (persisted.status, persisted.result, persisted.retry_at),
+                    (honeypot.OperationStatus.FAILED, None, None),
                 )
 
 class ModeratorIgnoreTests(unittest.IsolatedAsyncioTestCase):
