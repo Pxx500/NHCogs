@@ -558,18 +558,6 @@ async def _apply_joinwatch_assignment_actions(
         if await cog._is_protected_member(member):
             await _delete_joinwatch_pending_assignment(cog, guild, member_id)
             continue
-        role_permission_error = cog._missing_role_assignment_permission(guild, role)
-        if role_permission_error is not None:
-            await cog._increment_stat(guild, "joinwatch_auto_role_failures")
-            await _reschedule_joinwatch_assignment_retry(
-                cog,
-                guild,
-                member_id_str,
-                data,
-                now,
-                failure=role_permission_error,
-            )
-            continue
         if role not in member.roles:
             if not await cog._punitive_effect_allowed(guild):
                 await _edit_joinwatch_alert_auto_role(
@@ -579,6 +567,18 @@ async def _apply_joinwatch_assignment_actions(
                     _("{role} planned (dry run).").format(role=role.mention),
                 )
                 await _delete_joinwatch_pending_assignment(cog, guild, member_id)
+                continue
+            role_permission_error = cog._missing_role_assignment_permission(guild, role)
+            if role_permission_error is not None:
+                await cog._increment_stat(guild, "joinwatch_auto_role_failures")
+                await _reschedule_joinwatch_assignment_retry(
+                    cog,
+                    guild,
+                    member_id_str,
+                    data,
+                    now,
+                    failure=role_permission_error,
+                )
                 continue
             try:
                 await member.add_roles(role, reason="Automated account status update.")

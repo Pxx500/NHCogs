@@ -320,6 +320,89 @@ class JoinwatchDryRunTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(str(member.id), assignments)
                 self.assertNotIn(str(member.id), pending_roles)
 
+    async def test_dry_run_permission_error_cannot_leave_retry_that_later_applies(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                role = _Ranked(5)
+                role.id = 501
+                role.mention = "<@&501>"
+                bot_permissions = SimpleNamespace(manage_roles=False)
+                guild = SimpleNamespace(
+                    id=100,
+                    me=SimpleNamespace(
+                        guild_permissions=bot_permissions,
+                        top_role=_Ranked(10),
+                    ),
+                    get_channel=lambda _channel_id: None,
+                    get_thread=lambda _channel_id: None,
+                    get_role=lambda role_id: role if role_id == role.id else None,
+                )
+                member = SimpleNamespace(
+                    id=200,
+                    guild=guild,
+                    roles=[],
+                    guild_permissions=SimpleNamespace(manage_guild=False),
+                    top_role=_Ranked(1),
+                    add_roles=mock.AsyncMock(),
+                )
+                guild.get_member = lambda member_id: (
+                    member if member_id == member.id else None
+                )
+                guild.fetch_member = mock.AsyncMock(return_value=member)
+                member_key = str(member.id)
+                assignments = {
+                    member_key: {
+                        "role_id": role.id,
+                        "apply_at": (
+                            datetime.now(timezone.utc) - timedelta(minutes=1)
+                        ).isoformat(),
+                    }
+                }
+                pending_roles = {}
+                stats = {}
+                raw_config = {
+                    "dry_run": True,
+                    "joinwatch_auto_role_enabled": True,
+                    "joinwatch_auto_role_id": role.id,
+                    "joinwatch_auto_role_timer_minutes": 30,
+                    "joinwatch_pending_role_assignments": assignments,
+                    "joinwatch_pending_roles": pending_roles,
+                }
+                guild_config = SimpleNamespace(
+                    all=mock.AsyncMock(side_effect=lambda: raw_config),
+                    joinwatch_pending_role_assignments=lambda: _Store(assignments),
+                    joinwatch_pending_roles=lambda: _Store(pending_roles),
+                    stats=lambda: _Store(stats),
+                )
+                bot = _Bot()
+                bot.guilds = [guild]
+                bot.owner_ids = ()
+                bot.is_mod = mock.AsyncMock(return_value=False)
+                bot.is_admin = mock.AsyncMock(return_value=False)
+                cog = honeypot.Honeypot(bot)
+                cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
+                cog._case_store.initialize()
+
+                with mock.patch.object(
+                    honeypot.discord,
+                    "utils",
+                    SimpleNamespace(format_dt=lambda value, style: value.isoformat()),
+                    create=True,
+                ):
+                    await cog.joinwatch_auto_role_loop.function(cog)
+
+                    raw_config["dry_run"] = False
+                    bot_permissions.manage_roles = True
+                    if member_key in assignments:
+                        assignments[member_key]["apply_at"] = (
+                            datetime.now(timezone.utc) - timedelta(minutes=1)
+                        ).isoformat()
+                    await cog.joinwatch_auto_role_loop.function(cog)
+
+                member.add_roles.assert_not_awaited()
+                self.assertNotIn(member_key, assignments)
+                self.assertNotIn(member_key, pending_roles)
+
 
 class BaitRoleSafetyTests(unittest.IsolatedAsyncioTestCase):
     async def _run_bait_ban(
