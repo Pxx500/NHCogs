@@ -68,6 +68,7 @@ class OperationOutcome:
     completion_mode: CompletionMode = CompletionMode.OPERATION
     resolve_failure_on_first_attempt: bool = False
     error: Exception | None = None
+    terminal_failure: bool = False
 
 
 @dataclass(frozen=True)

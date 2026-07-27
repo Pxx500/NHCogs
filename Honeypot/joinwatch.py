@@ -11,6 +11,7 @@ from redbot.core import commands, modlog
 from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import box, pagify
 
+from .effects import EffectStatus
 from .settings import (
     BOOL_OPTIONS,
     JOINWATCH_AUTO_ROLE_ACTION_OPTIONS,
@@ -413,8 +414,7 @@ async def _execute_joinwatch_action(
     action = settings.joinwatch_auto_role_action.value
     if action not in ("kick", "ban"):
         return (_("No joinwatch punishment configured."), None)
-    if settings.dry_run:
-        await cog._increment_stat(guild, "dry_run_actions")
+    if not await cog._punitive_effect_allowed(guild):
         return (cog._dry_run_label(action), None)
     missing_permission = cog._missing_action_permission(guild, action)
     if missing_permission is not None:
@@ -557,19 +557,28 @@ async def _apply_joinwatch_assignment_actions(
         if await cog._is_protected_member(member):
             await _delete_joinwatch_pending_assignment(cog, guild, member_id)
             continue
-        role_permission_error = cog._missing_role_assignment_permission(guild, role)
-        if role_permission_error is not None:
-            await cog._increment_stat(guild, "joinwatch_auto_role_failures")
-            await _reschedule_joinwatch_assignment_retry(
-                cog,
-                guild,
-                member_id_str,
-                data,
-                now,
-                failure=role_permission_error,
-            )
-            continue
         if role not in member.roles:
+            if not await cog._punitive_effect_allowed(guild):
+                await _edit_joinwatch_alert_auto_role(
+                    cog,
+                    guild,
+                    data,
+                    _("{role} planned (dry run).").format(role=role.mention),
+                )
+                await _delete_joinwatch_pending_assignment(cog, guild, member_id)
+                continue
+            role_permission_error = cog._missing_role_assignment_permission(guild, role)
+            if role_permission_error is not None:
+                await cog._increment_stat(guild, "joinwatch_auto_role_failures")
+                await _reschedule_joinwatch_assignment_retry(
+                    cog,
+                    guild,
+                    member_id_str,
+                    data,
+                    now,
+                    failure=role_permission_error,
+                )
+                continue
             try:
                 await member.add_roles(role, reason="Automated account status update.")
                 await cog._increment_stat(guild, "joinwatch_auto_roles")
@@ -925,6 +934,14 @@ async def on_member_join(cog, member: discord.Member) -> None:
                         ),
                         inline=False,
                     )
+                elif not await cog._punitive_effect_allowed(member.guild):
+                    embed.add_field(
+                        name=_("Auto-role:"),
+                        value=_("{role} planned (dry run).").format(
+                            role=role.mention,
+                        ),
+                        inline=False,
+                    )
                 else:
                     try:
                         await member.add_roles(role, reason="Automated account status update.")
@@ -1028,33 +1045,64 @@ async def on_member_update(cog, before: discord.Member, after: discord.Member) -
             return
         action = guild_settings.baitrole_action.value
         reason = "Took the bait role - potential DM bot/scammer."
-        try:
-            if action == "ban":
-                await after.ban(
-                    reason=reason,
-                    delete_message_seconds=cog._ban_delete_message_seconds(),
-                )
-                cog._schedule_post_ban_sweep(after.guild, after.id)
-                await cog._increment_stat(after.guild, "banned")
-            elif action == "kick":
-                await after.kick(reason=reason)
-                await cog._increment_stat(after.guild, "kicked")
-        except discord.HTTPException as exc:
-            log.warning("Failed to %s bait-role target %s in guild %s", action, after.id, after.guild.id)
+        effect = await cog._execute_action(
+            after.guild,
+            after,
+            datetime.now(timezone.utc),
+            guild_settings,
+            reason=reason,
+            action=action,
+            moderator=after.guild.me,
+        )
+        if effect.status is EffectStatus.PLANNED:
+            description = _(
+                "{mention} ({id}) took the bait role and would be {action} (dry run)."
+            ).format(mention=after.mention, id=after.id, action=action)
+        elif effect.status is EffectStatus.FAILED:
             await cog._record_operational_failure(
                 after.guild.id,
                 "bait_role_action",
-                f"Could not {action} bait-role target {after.id}: {exc}",
+                f"Could not {action} bait-role target {after.id}: {effect.failed_message or 'unknown error'}",
                 terminal=True,
+            )
+            description = _(
+                "{mention} ({id}) took the bait role, but the configured action failed."
+            ).format(mention=after.mention, id=after.id)
+        elif effect.status is EffectStatus.SUCCEEDED and effect.modlog_failed:
+            await cog._record_operational_failure(
+                after.guild.id,
+                "bait_role_modlog",
+                f"Could not create the modlog case after the {action} action for bait-role target {after.id}",
+                terminal=True,
+            )
+            action_past = _("banned") if action == "ban" else _("kicked")
+            description = _(
+                "{mention} ({id}) took the bait role and was {action}, but the modlog case failed."
+            ).format(
+                mention=after.mention,
+                id=after.id,
+                action=action_past,
+            )
+        elif effect.status is EffectStatus.SUCCEEDED:
+            action_past = _("banned") if action == "ban" else _("kicked")
+            description = _(
+                "{mention} ({id}) took the bait role and was {action}."
+            ).format(
+                mention=after.mention,
+                id=after.id,
+                action=action_past,
+            )
+        else:
+            description = _("{mention} ({id}) took the bait role.").format(
+                mention=after.mention,
+                id=after.id,
             )
         logs_channel_id = guild_settings.logs_channel
         logs_channel = cog._get_text_channel_or_thread(after.guild, logs_channel_id)
         if logs_channel is not None:
             embed = discord.Embed(
                 title=_("Bait role triggered"),
-                description=_("{mention} ({id}) took the bait role and was {action}.").format(
-                    mention=after.mention, id=after.id, action=action,
-                ),
+                description=description,
                 color=discord.Color.dark_red(),
                 timestamp=datetime.now(timezone.utc),
             )

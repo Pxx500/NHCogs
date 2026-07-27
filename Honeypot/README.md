@@ -193,6 +193,9 @@ fallback_action = kick/ban → instant punishment
 fallback_action = none     → log only
 ```
 
+Dry-run is checked immediately before every punishment or role addition. Turning
+it on while delayed or retried work is pending prevents those Discord side effects.
+
 ## Whitelist Modes
 
 | Mode | Behavior |
@@ -350,6 +353,8 @@ reward, or access role used to catch automated accounts.
 The bait role must be dedicated to this trap. Do not reuse the review mute role
 or the Joinwatch auto-role: receiving the bait role directly triggers its configured
 kick or ban action regardless of which system assigned it.
+`!honeypot doctor` warns when the bait role reuses either of those roles or a role
+configured as sticky by NHMisc.
 
 Setup:
 

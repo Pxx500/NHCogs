@@ -10,7 +10,13 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.harness import DetectionPipelineTestCase, _Bot, _isolated_honeypot_modules, active_case
+from tests.harness import (
+    DetectionPipelineTestCase,
+    _Bot,
+    _Config,
+    _isolated_honeypot_modules,
+    active_case,
+)
 
 
 class DetectionAdmissionTests(DetectionPipelineTestCase):
@@ -428,13 +434,16 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 )
 
                 restarted = honeypot.Honeypot(_Bot())
-                restarted.config = SimpleNamespace(
-                    guild_from_id=lambda guild_id: SimpleNamespace(
-                        all=mock.AsyncMock(return_value=config)
+                restarted.config = _Config()
+                restarted.config.register_guild(**config)
+                restarted.bot.get_guild = lambda guild_id: message.guild
+                restarted._execute_action = mock.AsyncMock(
+                    return_value=honeypot.ModerationEffectResult(
+                        "banned",
+                        None,
+                        honeypot.detection.EffectStatus.SUCCEEDED,
                     )
                 )
-                restarted.bot.get_guild = lambda guild_id: message.guild
-                restarted._execute_action = mock.AsyncMock(return_value=("banned", None))
                 restarted._publish_detection_case = mock.AsyncMock()
                 restarted._imagescan_load_samples = mock.AsyncMock(return_value=())
                 restarted._imagescan_model_state = mock.AsyncMock(
@@ -827,7 +836,11 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     if attempts == 1:
                         raise RuntimeError("crash after append")
                     await enforced()
-                    return ("banned", None)
+                    return honeypot.ModerationEffectResult(
+                        "banned",
+                        None,
+                        honeypot.detection.EffectStatus.SUCCEEDED,
+                    )
 
                 config = {
                     "enabled": True, "dry_run": False, "logs_channel": None,

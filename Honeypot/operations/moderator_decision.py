@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -10,14 +11,22 @@ import discord
 
 from ..detection_cases import (
     OPERATION_RESULT_KICK_MISSING,
+    OPERATION_RESULT_KICK_OUTCOME_UNKNOWN,
     PLANNED_PREFIX,
     ActionIntent,
+)
+from ..effects import (
+    EffectRetryDisposition,
+    EffectStatus,
+    ModerationEffectResult,
 )
 from ..settings import GuildSettings
 from .context import OperationContext, OperationOutcome
 
 if TYPE_CHECKING:
     from ..honeypot import Honeypot
+
+log = logging.getLogger("red.Honeypot")
 
 
 async def apply_moderator_ignore(
@@ -90,7 +99,7 @@ async def _execute_moderator_action(
     *,
     action: ActionIntent,
     guild_settings: GuildSettings,
-) -> None:
+) -> ModerationEffectResult:
     """Take the moderator's lease and carry the decision out on Discord."""
     operation = context.operation
     moderator = guild.get_member(operation.actor_id)
@@ -105,7 +114,7 @@ async def _execute_moderator_action(
     )
     if not started:
         raise RuntimeError("moderator action operation lease was lost")
-    _, failed = await cog._execute_action(
+    return await cog._execute_action(
         guild,
         member,
         effect_started_at,
@@ -114,8 +123,6 @@ async def _execute_moderator_action(
         action=action.value,
         moderator=moderator,
     )
-    if failed is not None:
-        raise RuntimeError(failed)
 
 
 async def _apply_moderator_decision(
@@ -123,26 +130,24 @@ async def _apply_moderator_decision(
     context: OperationContext,
     *,
     action: ActionIntent,
+    effect_started: bool,
     guild_settings: GuildSettings,
-) -> str:
+) -> OperationOutcome:
     """Apply a live (non dry-run) moderator decision and report its result."""
     snapshot = context.snapshot
     guild = cog.bot.get_guild(snapshot.case.guild_id)
     if guild is None:
         raise RuntimeError("detection case guild is unavailable")
-    effect_started = await asyncio.to_thread(
-        cog._case_store.operation_effect_started, context.operation.operation_id
-    )
     if (
         effect_started
         and action is ActionIntent.BAN
         and await _ban_already_applied(cog, guild, snapshot.case.user_id)
     ):
-        return action.value
+        return OperationOutcome(result=action.value)
     member = await _decision_target(cog, guild, snapshot.case.user_id, action)
     if member is None:
-        return OPERATION_RESULT_KICK_MISSING
-    await _execute_moderator_action(
+        return OperationOutcome(result=OPERATION_RESULT_KICK_MISSING)
+    result = await _execute_moderator_action(
         cog,
         context,
         guild,
@@ -150,7 +155,16 @@ async def _apply_moderator_decision(
         action=action,
         guild_settings=guild_settings,
     )
-    return action.value
+    if result.status is EffectStatus.PLANNED:
+        return OperationOutcome(result=f"{PLANNED_PREFIX}{action.value}")
+    if result.status is EffectStatus.FAILED:
+        return OperationOutcome(
+            error=RuntimeError(result.failed_message or result.label),
+            terminal_failure=(
+                result.retry_disposition is EffectRetryDisposition.TERMINAL
+            ),
+        )
+    return OperationOutcome(result=action.value)
 
 
 async def moderator_decision_handler(
@@ -161,12 +175,32 @@ async def moderator_decision_handler(
     action = ActionIntent(
         operation.operation_type.value.removeprefix("moderator_")
     )
+    effect_started = await asyncio.to_thread(
+        cog._case_store.operation_effect_started, operation.operation_id
+    )
+    if effect_started and action is ActionIntent.KICK:
+        guild = cog.bot.get_guild(snapshot.case.guild_id)
+        member = guild.get_member(snapshot.case.user_id) if guild is not None else None
+        await asyncio.to_thread(
+            cog._case_store.mark_case_needs_attention,
+            snapshot.case.case_id,
+        )
+        log.warning(
+            "Detection case moderator kick outcome is unknown; operation will not "
+            "be retried (case_id=%s, operation_id=%s, member_joined_at=%s)",
+            snapshot.case.case_id,
+            operation.operation_id,
+            getattr(member, "joined_at", None),
+        )
+        return OperationOutcome(result=OPERATION_RESULT_KICK_OUTCOME_UNKNOWN)
     raw_config = await cog.config.guild_from_id(snapshot.case.guild_id).all()
     guild_settings = GuildSettings.from_mapping(raw_config)
     if guild_settings.dry_run:
-        operation_result = f"{PLANNED_PREFIX}{action.value}"
-    else:
-        operation_result = await _apply_moderator_decision(
-            cog, context, action=action, guild_settings=guild_settings
-        )
-    return OperationOutcome(result=operation_result)
+        return OperationOutcome(result=f"{PLANNED_PREFIX}{action.value}")
+    return await _apply_moderator_decision(
+        cog,
+        context,
+        action=action,
+        effect_started=effect_started,
+        guild_settings=guild_settings,
+    )

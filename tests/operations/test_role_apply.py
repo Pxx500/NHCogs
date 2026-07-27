@@ -5,6 +5,7 @@ from importlib import import_module
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest import mock
 
 from tests.harness import _Bot, _isolated_honeypot_modules
 
@@ -21,14 +22,15 @@ class _StatsContext:
 
 
 class _GuildConfig:
-    def __init__(self, stats):
+    def __init__(self, stats, settings):
         self._stats = stats
+        self._settings = settings
 
     def stats(self):
         return _StatsContext(self._stats)
 
     async def all(self):
-        return {}
+        return dict(self._settings)
 
     async def joinwatch_pending_roles(self):
         return {}
@@ -37,12 +39,13 @@ class _GuildConfig:
 class _Config:
     def __init__(self):
         self.stats = {}
+        self.settings = {}
 
     def guild(self, guild):
-        return _GuildConfig(self.stats)
+        return _GuildConfig(self.stats, self.settings)
 
     def guild_from_id(self, guild_id):
-        return _GuildConfig(self.stats)
+        return _GuildConfig(self.stats, self.settings)
 
 
 class _Member:
@@ -292,6 +295,42 @@ class RoleApplyHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(config.stats, {"pending_mutes": 1})
 
+    async def test_current_dry_run_plans_role_apply_created_while_live(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                role_apply = import_module("Honeypot.operations.role_apply")
+                now = datetime.now(timezone.utc)
+                role = SimpleNamespace(id=55)
+                member = SimpleNamespace(
+                    id=20,
+                    roles=[],
+                    add_roles=mock.AsyncMock(),
+                )
+                guild = SimpleNamespace(
+                    id=10,
+                    get_member=lambda _user_id: member,
+                    get_role=lambda _role_id: role,
+                )
+                bot = _Bot()
+                bot.get_guild = lambda _guild_id: guild
+                cog = honeypot.Honeypot(bot)
+                config = _Config()
+                cog.config = config
+                appended = self._append_case(honeypot, cog, now)
+                _, claimed = self._claim_role_apply(
+                    honeypot, cog, appended.case.case_id, now
+                )
+                config.settings["dry_run"] = True
+
+                outcome = await role_apply.role_apply_handler(
+                    cog,
+                    self._handler_context(honeypot, cog, claimed, now),
+                )
+
+                self.assertEqual(outcome.result, "planned_role_apply")
+                self.assertFalse(outcome.role_was_added)
+                member.add_roles.assert_not_awaited()
+
     async def test_conflicting_durable_ownership_marks_added_role_ambiguous(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -362,6 +401,7 @@ class RoleApplyHandlerTests(unittest.IsolatedAsyncioTestCase):
                 bot = _Bot()
                 bot.get_guild = lambda _guild_id: guild
                 cog = honeypot.Honeypot(bot)
+                cog.config = _Config()
                 prior = self._append_case(honeypot, cog, now)
                 self._record_role_ownership(
                     honeypot, cog, prior.case.case_id, now
@@ -426,6 +466,7 @@ class RoleApplyHandlerTests(unittest.IsolatedAsyncioTestCase):
                 bot = _Bot()
                 bot.get_guild = lambda _guild_id: guild
                 cog = honeypot.Honeypot(bot)
+                cog.config = _Config()
                 appended = self._append_case(honeypot, cog, now)
                 _, claimed = self._claim_role_apply(
                     honeypot, cog, appended.case.case_id, now

@@ -18,6 +18,7 @@ from ..detection_cases import (
     OPERATION_RESULT_ROLE_ALREADY_OWNED,
     OPERATION_RESULT_SUPERSEDED_BY_MODERATION,
     OPERATION_RESULT_TRANSFERRED_ROLE_OWNERSHIP,
+    PLANNED_PREFIX,
     CaseSnapshot,
     CaseStatus,
     OperationStatus,
@@ -74,11 +75,14 @@ async def _add_case_role(
     cog: Honeypot,
     context: OperationContext,
     *,
+    guild: discord.Guild,
     member: discord.Member,
     role: discord.Role,
     role_id: int,
 ) -> OperationOutcome:
     """Add the review role to the member and record this case as its owner."""
+    if not await cog._punitive_effect_allowed(guild):
+        return OperationOutcome(result=f"{PLANNED_PREFIX}role_apply")
     started = await asyncio.to_thread(
         cog._case_store.start_role_apply_effect,
         context.operation.operation_id,
@@ -196,7 +200,12 @@ async def role_apply_handler(
     )
     if role not in member.roles:
         return await _add_case_role(
-            cog, context, member=member, role=role, role_id=role_id
+            cog,
+            context,
+            guild=guild,
+            member=member,
+            role=role,
+            role_id=role_id,
         )
     if effect_started:
         return await _mark_ambiguous_role_ownership(cog, context)
