@@ -9,13 +9,6 @@ target-version = "py310"
 extend-exclude = [
     ".worktrees",
     "local-data",
-    # NHMisc has its own Ruff cleanup PR. Keep this Honeypot refactor from
-    # imposing its new hard gate on that cog or the tests added with it.
-    "NHMisc",
-    "tests/test_activity_storage.py",
-    "tests/test_chatchart.py",
-    "tests/test_forum_autopin.py",
-    "tests/test_role_*.py",
 ]
 
 [tool.ruff.lint]

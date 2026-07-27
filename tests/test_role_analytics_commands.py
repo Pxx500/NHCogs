@@ -1,11 +1,9 @@
-import io
 import importlib.util
-from pathlib import Path
 import sys
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
-
 
 PACKAGE_NAME = "nhmisc_role_analytics_commands_test_package"
 PACKAGE_PATH = Path(__file__).parents[1] / "NHMisc"

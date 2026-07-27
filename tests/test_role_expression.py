@@ -3,7 +3,6 @@ import sys
 import unittest
 from pathlib import Path
 
-
 MODULE_PATH = Path(__file__).parents[1] / "NHMisc" / "role_expression.py"
 SPEC = importlib.util.spec_from_file_location("nhmisc_role_expression_test", MODULE_PATH)
 role_expression = importlib.util.module_from_spec(SPEC)
