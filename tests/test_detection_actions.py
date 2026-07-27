@@ -13,6 +13,15 @@ from tests.detection_case_fixtures import publish_primary
 from tests.harness import DetectionPipelineTestCase, _Bot, _isolated_honeypot_modules, active_case
 
 
+def _effect_result(honeypot, label, failed_message=None):
+    status = (
+        honeypot.detection.EffectStatus.FAILED
+        if failed_message is not None
+        else honeypot.detection.EffectStatus.SUCCEEDED
+    )
+    return honeypot.ModerationEffectResult(label, failed_message, status)
+
+
 class DetectionActionTests(DetectionPipelineTestCase):
     async def test_malformed_dry_run_setting_does_not_suppress_source_deletion(self):
         with TemporaryDirectory() as directory:
@@ -298,7 +307,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 async def execute_action(*args, **kwargs):
                     action_started.set()
                     await release_action.wait()
-                    return "banned", None
+                    return _effect_result(honeypot, "banned")
 
                 async def persist_image_matches(
                     _message,
@@ -471,7 +480,9 @@ class DetectionActionTests(DetectionPipelineTestCase):
                         60,
                     )
                 )
-                cog._execute_action = mock.AsyncMock(return_value=("ban", None))
+                cog._execute_action = mock.AsyncMock(
+                    return_value=_effect_result(honeypot, "ban")
+                )
                 published = []
 
                 async def publish_case(case_id, _config, _channel, **kwargs):
@@ -648,7 +659,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 async def execute_action(*args, **kwargs):
                     nonlocal banned
                     banned = True
-                    return ("banned", None)
+                    return _effect_result(honeypot, "banned")
 
                 async def fetch_ban(target):
                     if not banned:
@@ -912,7 +923,9 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 cog._is_forward_purge_active.return_value = False
                 cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
                 cog._execute_action = mock.AsyncMock(
-                    return_value=(None, "initial moderation failure")
+                    return_value=_effect_result(
+                        honeypot, None, "initial moderation failure"
+                    )
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
                 cog._publish_detection_case = mock.AsyncMock()
@@ -939,7 +952,9 @@ class DetectionActionTests(DetectionPipelineTestCase):
                     all=mock.AsyncMock(return_value=config)
                 )
                 cog._execute_action.reset_mock()
-                cog._execute_action.return_value = (None, "retry moderation failure")
+                cog._execute_action.return_value = _effect_result(
+                    honeypot, None, "retry moderation failure"
+                )
                 now = operation.retry_at
                 claimed = await asyncio.to_thread(
                     cog._case_store.claim_operation, operation.operation_id, now

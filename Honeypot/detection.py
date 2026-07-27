@@ -40,6 +40,7 @@ from .detection_cases import (
     OperationType,
     effective_action,
 )
+from .effects import EffectStatus, ModerationEffectResult
 from .operations import executor_operation_policy
 from .operations.context import (
     DETECTION_CACHED_PURGE_ATTEMPT_LIMIT,
@@ -1687,22 +1688,33 @@ async def _execute_action(
     reason: str,
     action: str | None = None,
     moderator: discord.Member | discord.User | discord.Object | None = None,
-) -> tuple[str | None, str | None]:
+) -> ModerationEffectResult:
     """Execute the configured action (kick/ban) against a guild member.
-    Returns (action_label, failed_message) where failed_message is None on success.
+    Return the effect outcome, including whether the punishment itself succeeded.
     """
     action = action or (
         settings.action.value if settings.action is not None else None
     )
     if action not in ("kick", "ban"):
-        return (_("No action configured."), None)
-    if settings.dry_run:
-        await cog._increment_stat(guild, "dry_run_actions")
-        return (cog._dry_run_label(action), None)
+        return ModerationEffectResult(
+            _("No action configured."),
+            None,
+            EffectStatus.NOT_CONFIGURED,
+        )
+    if not await cog._punitive_effect_allowed(guild):
+        return ModerationEffectResult(
+            cog._dry_run_label(action),
+            None,
+            EffectStatus.PLANNED,
+        )
     missing_permission = cog._missing_action_permission(guild, action)
     if missing_permission is not None:
         await cog._increment_stat(guild, "failed_actions")
-        return (None, missing_permission)
+        return ModerationEffectResult(
+            None,
+            missing_permission,
+            EffectStatus.FAILED,
+        )
     try:
         if action == "kick":
             _activate_forward_purge(
@@ -1718,7 +1730,16 @@ async def _execute_action(
                     settings.automated_kick_fail_warning
                 ):
                     cog._deactivate_forward_purge(guild.id, member.id)
-                    return await cog._create_kick_fail_warning(guild, member.id)
+                    label, failed_message = await cog._create_kick_fail_warning(
+                        guild, member.id
+                    )
+                    return ModerationEffectResult(
+                        label,
+                        failed_message,
+                        EffectStatus.FAILED
+                        if failed_message is not None
+                        else EffectStatus.SUCCEEDED,
+                    )
                 raise
             await cog._increment_stat(guild, "kicked")
         elif action == "ban":
@@ -1746,7 +1767,12 @@ async def _execute_action(
     except discord.HTTPException as e:
         cog._deactivate_forward_purge(guild.id, member.id)
         await cog._increment_stat(guild, "failed_actions")
-        return (None, _("**Action failed:**\n") + box(str(e), lang="py"))
+        return ModerationEffectResult(
+            None,
+            _("**Action failed:**\n") + box(str(e), lang="py"),
+            EffectStatus.FAILED,
+        )
+    modlog_failed = False
     try:
         await modlog.create_case(
             cog.bot,
@@ -1759,8 +1785,14 @@ async def _execute_action(
         )
     except Exception:
         log.exception("Failed to create modlog case in _execute_action")
+        modlog_failed = True
     label = _("The member has been kicked.") if action == "kick" else _("The member has been banned.")
-    return (label, None)
+    return ModerationEffectResult(
+        label,
+        None,
+        EffectStatus.SUCCEEDED,
+        modlog_failed=modlog_failed,
+    )
 
 
 async def on_message(cog, message: discord.Message) -> None:

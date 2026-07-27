@@ -18,6 +18,15 @@ from tests.harness import (
 )
 
 
+def _effect_result(honeypot, label, failed_message=None):
+    status = (
+        honeypot.detection.EffectStatus.FAILED
+        if failed_message is not None
+        else honeypot.detection.EffectStatus.SUCCEEDED
+    )
+    return honeypot.ModerationEffectResult(label, failed_message, status)
+
+
 class CaseModeratorDecisionTests(CaseExpiryTestCase):
     async def test_completed_moderation_waits_for_pending_attachment_capture(self):
         with TemporaryDirectory() as directory:
@@ -647,6 +656,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 )
                 cog = honeypot.Honeypot(bot)
                 cog.config = self._config({"dry_run": False})
+                cog.config.guild = lambda guild: cog.config.guild_from_id(guild.id)
                 cog._missing_action_permission = mock.Mock(return_value=None)
                 cog._ban_delete_message_seconds = mock.Mock(return_value=0)
                 cog._schedule_post_ban_sweep = mock.Mock()
@@ -772,7 +782,10 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 cog = honeypot.Honeypot(bot)
                 cog.config = self._config({"dry_run": False})
                 cog._execute_action = mock.AsyncMock(
-                    side_effect=[("ban", "temporary failure"), ("ban", None)]
+                    side_effect=[
+                        _effect_result(honeypot, "ban", "temporary failure"),
+                        _effect_result(honeypot, "ban"),
+                    ]
                 )
                 cog._case_review_rerender = mock.AsyncMock()
                 appended = self._append_case(
@@ -848,6 +861,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 bot.get_guild = lambda guild_id: guild
                 cog = honeypot.Honeypot(bot)
                 cog.config = self._config({"dry_run": False})
+                cog.config.guild = lambda guild: cog.config.guild_from_id(guild.id)
                 cog._missing_action_permission = mock.Mock(return_value=None)
                 cog._ban_delete_message_seconds = mock.Mock(return_value=0)
                 cog._schedule_post_ban_sweep = mock.Mock()
@@ -900,7 +914,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 async def blocked_action(*args, **kwargs):
                     action_started.set()
                     await release_action.wait()
-                    return "ban", None
+                    return _effect_result(honeypot, "ban")
 
                 member = SimpleNamespace(id=20, roles=[])
                 guild = SimpleNamespace(

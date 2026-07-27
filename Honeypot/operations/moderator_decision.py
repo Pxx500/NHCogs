@@ -105,7 +105,7 @@ async def _execute_moderator_action(
     )
     if not started:
         raise RuntimeError("moderator action operation lease was lost")
-    _, failed = await cog._execute_action(
+    result = await cog._execute_action(
         guild,
         member,
         effect_started_at,
@@ -114,8 +114,8 @@ async def _execute_moderator_action(
         action=action.value,
         moderator=moderator,
     )
-    if failed is not None:
-        raise RuntimeError(failed)
+    if result.failed_message is not None:
+        raise RuntimeError(result.failed_message)
 
 
 async def _apply_moderator_decision(
