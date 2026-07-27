@@ -710,6 +710,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.to_thread(restore_failed.wait, 2),
                         "case restoration did not fail",
                     )
+                    await asyncio.gather(cog._case_restore_task, return_exceptions=True)
                     await asyncio.sleep(0)
 
                     log_error.assert_called_once()

@@ -171,7 +171,7 @@ async def _capture_with_timeout(
             _capture_one(attachment, target_dir, position, max_bytes, reader),
             timeout=timeout_seconds,
         )
-    except TimeoutError as error:
+    except asyncio.TimeoutError as error:
         return CaptureResult(position, CaptureStatus.TIMEOUT, None, _bounded_error(error))
 
 

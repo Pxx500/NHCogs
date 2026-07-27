@@ -78,9 +78,25 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                 cog._publish_detection_case_serial = mock.AsyncMock()
                 for publication_lock in cog._detection_publication_locks:
                     await publication_lock.acquire()
+
+                async def wait_for_ready_evidence():
+                    while True:
+                        snapshot = await asyncio.to_thread(
+                            active_case,
+                            cog._case_store,
+                            message.guild.id,
+                            message.author.id,
+                        )
+                        if snapshot is not None and all(
+                            item.capture_status != "pending"
+                            for item in snapshot.attachments
+                        ):
+                            return
+                        await asyncio.sleep(0)
+
                 try:
                     processing = asyncio.create_task(cog.on_message(message))
-                    await asyncio.sleep(0.1)
+                    await asyncio.wait_for(wait_for_ready_evidence(), timeout=1)
                 finally:
                     for publication_lock in cog._detection_publication_locks:
                         publication_lock.release()

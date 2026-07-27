@@ -23,6 +23,7 @@ def _install_redbot_stubs() -> None:
     discord.TextChannel = object
     discord.Thread = object
     discord.File = object
+    discord.Guild = object
     discord.Embed = object
     discord.Member = object
     discord.User = object
