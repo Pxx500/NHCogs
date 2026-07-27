@@ -71,7 +71,7 @@ class FakeForumChannel:
 ALLOWED_MENTIONS_NONE = object()
 
 
-def load_nhmisc_module():
+def load_nhmisc_modules():
     discord = types.ModuleType("discord")
     discord.HTTPException = type("HTTPException", (Exception,), {})
     # Mirror the real discord.py hierarchy so except ordering is exercised.
@@ -129,6 +129,7 @@ def load_nhmisc_module():
         "redbot.core.data_manager",
         PACKAGE_NAME,
         f"{PACKAGE_NAME}.nhmisc",
+        f"{PACKAGE_NAME}.forum_autopin",
     )
     previous = {name: sys.modules.get(name) for name in module_names}
     sys.modules.update(
@@ -149,7 +150,7 @@ def load_nhmisc_module():
         module = importlib.util.module_from_spec(spec)
         sys.modules[qualified_name] = module
         spec.loader.exec_module(module)
-        return module, discord
+        return module, sys.modules[f"{PACKAGE_NAME}.forum_autopin"], discord
     finally:
         for name, old_module in previous.items():
             if old_module is None:
@@ -158,7 +159,7 @@ def load_nhmisc_module():
                 sys.modules[name] = old_module
 
 
-nhmisc, discord = load_nhmisc_module()
+nhmisc, forum_autopin, discord = load_nhmisc_modules()
 
 
 def make_permissions(
@@ -204,6 +205,18 @@ class FakeConfigRoot:
         return FakeGuildConfig(self.store_for(guild))
 
 
+class AlertRecorder:
+    """Stands in for the cog's alert-channel transport."""
+
+    def __init__(self, *, delivered=True):
+        self.messages = []
+        self.delivered = delivered
+
+    async def __call__(self, guild, content):
+        self.messages.append(content)
+        return self.delivered
+
+
 class FakeGuild:
     def __init__(self, guild_id=123):
         self.id = guild_id
@@ -241,7 +254,14 @@ class FakeMessage:
             raise self.pin_error
 
 
-def make_context(guild, config):
+def make_service(*, alerts=None):
+    config = FakeConfigRoot()
+    alerts = alerts if alerts is not None else AlertRecorder()
+    service = forum_autopin.ForumAutopinService(config, alert_sender=alerts)
+    return service, config, alerts
+
+
+def make_context(guild):
     return types.SimpleNamespace(
         guild=guild,
         author=types.SimpleNamespace(id=999),
@@ -254,7 +274,9 @@ class ForumAutopinCommandTests(unittest.IsolatedAsyncioTestCase):
         cog = object.__new__(nhmisc.NHMisc)
         cog.bot = types.SimpleNamespace(guilds=[], get_channel=lambda _id: None)
         cog.config = FakeConfigRoot()
-        cog._forum_autopin_alerted = set()
+        cog._forum_autopin = forum_autopin.ForumAutopinService(
+            cog.config, alert_sender=AlertRecorder()
+        )
         return cog
 
     def test_group_requires_manage_guild_via_decorator(self):
@@ -267,7 +289,7 @@ class ForumAutopinCommandTests(unittest.IsolatedAsyncioTestCase):
         forum = FakeForumChannel(
             42, guild=guild, permissions=make_permissions(pin_messages=False)
         )
-        ctx = make_context(guild, cog.config)
+        ctx = make_context(guild)
 
         with self.assertRaises(UserFeedbackCheckFailure) as caught:
             await nhmisc.NHMisc.nhmisc_forumautopin_add.callback(cog, ctx, forum)
@@ -281,7 +303,7 @@ class ForumAutopinCommandTests(unittest.IsolatedAsyncioTestCase):
         forum = FakeForumChannel(
             42, guild=guild, permissions=make_permissions(read_message_history=False)
         )
-        ctx = make_context(guild, cog.config)
+        ctx = make_context(guild)
 
         with self.assertRaises(UserFeedbackCheckFailure) as caught:
             await nhmisc.NHMisc.nhmisc_forumautopin_add.callback(cog, ctx, forum)
@@ -292,108 +314,118 @@ class ForumAutopinCommandTests(unittest.IsolatedAsyncioTestCase):
         cog = self.make_cog()
         guild = FakeGuild()
         forum = FakeForumChannel(42, guild=guild, permissions=make_permissions())
-        ctx = make_context(guild, cog.config)
+        ctx = make_context(guild)
 
         await nhmisc.NHMisc.nhmisc_forumautopin_add.callback(cog, ctx, forum)
         self.assertEqual(
             cog.config.store_for(guild)["forum_autopin_channel_ids"], [42]
         )
+        self.assertIn("is now enabled", ctx.send.await_args_list[-1].args[0])
 
         await nhmisc.NHMisc.nhmisc_forumautopin_add.callback(cog, ctx, forum)
         self.assertEqual(
             cog.config.store_for(guild)["forum_autopin_channel_ids"], [42]
         )
-        self.assertIn("already enabled", ctx.send.await_args_list[-1].args[0])
+        self.assertIn("is already enabled", ctx.send.await_args_list[-1].args[0])
 
     async def test_remove_deletes_only_the_requested_forum(self):
         cog = self.make_cog()
         guild = FakeGuild()
         cog.config.store_for(guild)["forum_autopin_channel_ids"] = [11, 42]
         forum = FakeForumChannel(42, guild=guild, permissions=make_permissions())
-        ctx = make_context(guild, cog.config)
+        ctx = make_context(guild)
 
         await nhmisc.NHMisc.nhmisc_forumautopin_remove.callback(cog, ctx, forum)
 
         self.assertEqual(
             cog.config.store_for(guild)["forum_autopin_channel_ids"], [11]
         )
+        self.assertIn("is disabled", ctx.send.await_args_list[-1].args[0])
 
     async def test_remove_reports_forum_that_was_not_configured(self):
         cog = self.make_cog()
         guild = FakeGuild()
         forum = FakeForumChannel(42, guild=guild, permissions=make_permissions())
-        ctx = make_context(guild, cog.config)
+        ctx = make_context(guild)
 
         await nhmisc.NHMisc.nhmisc_forumautopin_remove.callback(cog, ctx, forum)
 
-        self.assertIn("not enabled", ctx.send.await_args_list[-1].args[0])
+        self.assertIn("is not enabled", ctx.send.await_args_list[-1].args[0])
 
-
-class ForumAutopinListenerTests(unittest.IsolatedAsyncioTestCase):
-    def make_cog(self, guild, *, configured=(), alert_channel=None):
-        cog = object.__new__(nhmisc.NHMisc)
-        cog.bot = types.SimpleNamespace(guilds=[], get_channel=lambda _id: None)
-        cog.config = FakeConfigRoot()
-        cog._forum_autopin_alerted = set()
-        store = cog.config.store_for(guild)
-        store["forum_autopin_channel_ids"] = list(configured)
-        if alert_channel is not None:
-            store["alert_channel"] = alert_channel.id
-            guild.channels[alert_channel.id] = alert_channel
-        return cog
-
-    async def test_unconfigured_forum_is_ignored_without_fetching(self):
+    async def test_send_guild_alert_reports_missing_alert_channel(self):
+        cog = self.make_cog()
         guild = FakeGuild()
-        cog = self.make_cog(guild, configured=[99])
+
+        self.assertFalse(await cog._send_guild_alert(guild, "anything"))
+
+        alert_channel = FakeTextChannel()
+        guild.channels[alert_channel.id] = alert_channel
+        cog.config.store_for(guild)["alert_channel"] = alert_channel.id
+
+        self.assertTrue(await cog._send_guild_alert(guild, "delivered"))
+        self.assertEqual(alert_channel.sent, ["delivered"])
+
+
+class ForumAutopinServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unconfigured_forum_is_ignored_without_fetching(self):
+        service, config, _ = make_service()
+        guild = FakeGuild()
+        config.store_for(guild)["forum_autopin_channel_ids"] = [99]
         thread = FakeThread(guild, parent_id=42)
 
-        await nhmisc.NHMisc.on_thread_create(cog, thread)
+        await service.handle_thread_create(thread)
 
         self.assertEqual(thread.fetch_calls, 0)
 
     async def test_starter_message_is_pinned_with_audit_reason(self):
+        service, config, _ = make_service()
         guild = FakeGuild()
-        cog = self.make_cog(guild, configured=[42])
+        config.store_for(guild)["forum_autopin_channel_ids"] = [42]
         message = FakeMessage()
         thread = FakeThread(guild, parent_id=42, results=[message])
 
-        await nhmisc.NHMisc.on_thread_create(cog, thread)
+        await service.handle_thread_create(thread)
 
-        self.assertEqual(message.pin_reasons, [nhmisc.FORUM_AUTOPIN_AUDIT_REASON])
+        self.assertEqual(message.pin_reasons, [forum_autopin.AUDIT_REASON])
 
     async def test_missing_starter_message_is_retried_once_then_pinned(self):
+        service, config, _ = make_service()
         guild = FakeGuild()
-        cog = self.make_cog(guild, configured=[42])
+        config.store_for(guild)["forum_autopin_channel_ids"] = [42]
         message = FakeMessage()
         thread = FakeThread(
             guild, parent_id=42, results=[discord.NotFound(), message]
         )
 
-        with mock.patch.object(nhmisc.asyncio, "sleep", new=mock.AsyncMock()) as sleep:
-            await nhmisc.NHMisc.on_thread_create(cog, thread)
+        with mock.patch.object(
+            forum_autopin.asyncio, "sleep", new=mock.AsyncMock()
+        ) as sleep:
+            await service.handle_thread_create(thread)
 
-        sleep.assert_awaited_once_with(nhmisc.FORUM_AUTOPIN_RETRY_SECONDS)
+        sleep.assert_awaited_once_with(forum_autopin.RETRY_SECONDS)
         self.assertEqual(thread.fetch_calls, 2)
-        self.assertEqual(message.pin_reasons, [nhmisc.FORUM_AUTOPIN_AUDIT_REASON])
+        self.assertEqual(message.pin_reasons, [forum_autopin.AUDIT_REASON])
 
     async def test_starter_message_missing_twice_gives_up(self):
+        service, config, alerts = make_service()
         guild = FakeGuild()
-        cog = self.make_cog(guild, configured=[42])
+        config.store_for(guild)["forum_autopin_channel_ids"] = [42]
         thread = FakeThread(
             guild, parent_id=42, results=[discord.NotFound(), discord.NotFound()]
         )
 
-        with mock.patch.object(nhmisc.asyncio, "sleep", new=mock.AsyncMock()):
-            await nhmisc.NHMisc.on_thread_create(cog, thread)
+        with mock.patch.object(forum_autopin.asyncio, "sleep", new=mock.AsyncMock()):
+            await service.handle_thread_create(thread)
 
         self.assertEqual(thread.fetch_calls, 2)
+        self.assertEqual(alerts.messages, [])
 
     async def test_forbidden_pin_alerts_once_per_forum(self):
+        service, config, alerts = make_service()
         guild = FakeGuild()
-        alert_channel = FakeTextChannel()
+        config.store_for(guild)["forum_autopin_channel_ids"] = [42]
         forum = FakeForumChannel(42, guild=guild)
         guild.channels[42] = forum
-        cog = self.make_cog(guild, configured=[42], alert_channel=alert_channel)
 
         for _ in range(3):
             thread = FakeThread(
@@ -401,101 +433,136 @@ class ForumAutopinListenerTests(unittest.IsolatedAsyncioTestCase):
                 parent_id=42,
                 results=[FakeMessage(pin_error=discord.Forbidden())],
             )
-            await nhmisc.NHMisc.on_thread_create(cog, thread)
+            await service.handle_thread_create(thread)
 
-        self.assertEqual(len(alert_channel.sent), 1)
-        self.assertIn("pin messages", alert_channel.sent[0])
-        self.assertIn(forum.mention, alert_channel.sent[0])
+        self.assertEqual(len(alerts.messages), 1)
+        self.assertIn("pin messages", alerts.messages[0])
+        self.assertIn(forum.mention, alerts.messages[0])
 
     async def test_successful_pin_rearms_the_permission_alert(self):
+        service, config, alerts = make_service()
         guild = FakeGuild()
-        alert_channel = FakeTextChannel()
+        config.store_for(guild)["forum_autopin_channel_ids"] = [42]
         guild.channels[42] = FakeForumChannel(42, guild=guild)
-        cog = self.make_cog(guild, configured=[42], alert_channel=alert_channel)
 
-        failing = FakeThread(
-            guild, parent_id=42, results=[FakeMessage(pin_error=discord.Forbidden())]
+        await service.handle_thread_create(
+            FakeThread(
+                guild,
+                parent_id=42,
+                results=[FakeMessage(pin_error=discord.Forbidden())],
+            )
         )
-        await nhmisc.NHMisc.on_thread_create(cog, failing)
-
-        recovered = FakeThread(guild, parent_id=42, results=[FakeMessage()])
-        await nhmisc.NHMisc.on_thread_create(cog, recovered)
-        self.assertEqual(cog._forum_autopin_alerted, set())
-
-        failing_again = FakeThread(
-            guild, parent_id=42, results=[FakeMessage(pin_error=discord.Forbidden())]
+        await service.handle_thread_create(
+            FakeThread(guild, parent_id=42, results=[FakeMessage()])
         )
-        await nhmisc.NHMisc.on_thread_create(cog, failing_again)
+        await service.handle_thread_create(
+            FakeThread(
+                guild,
+                parent_id=42,
+                results=[FakeMessage(pin_error=discord.Forbidden())],
+            )
+        )
 
-        self.assertEqual(len(alert_channel.sent), 2)
+        self.assertEqual(len(alerts.messages), 2)
 
     async def test_forbidden_fetch_alerts_about_read_permissions(self):
+        service, config, alerts = make_service()
         guild = FakeGuild()
-        alert_channel = FakeTextChannel()
+        config.store_for(guild)["forum_autopin_channel_ids"] = [42]
         guild.channels[42] = FakeForumChannel(42, guild=guild)
-        cog = self.make_cog(guild, configured=[42], alert_channel=alert_channel)
         thread = FakeThread(guild, parent_id=42, results=[discord.Forbidden()])
 
-        await nhmisc.NHMisc.on_thread_create(cog, thread)
+        await service.handle_thread_create(thread)
 
-        self.assertEqual(len(alert_channel.sent), 1)
-        self.assertIn("Read Message History", alert_channel.sent[0])
+        self.assertEqual(len(alerts.messages), 1)
+        self.assertIn("Read Message History", alerts.messages[0])
 
-    async def test_permission_failure_without_alert_channel_is_not_recorded(self):
+    async def test_undelivered_alert_is_retried_on_the_next_failure(self):
+        alerts = AlertRecorder(delivered=False)
+        service, config, _ = make_service(alerts=alerts)
         guild = FakeGuild()
-        cog = self.make_cog(guild, configured=[42])
-        thread = FakeThread(
-            guild, parent_id=42, results=[FakeMessage(pin_error=discord.Forbidden())]
-        )
+        config.store_for(guild)["forum_autopin_channel_ids"] = [42]
 
-        await nhmisc.NHMisc.on_thread_create(cog, thread)
+        for _ in range(2):
+            await service.handle_thread_create(
+                FakeThread(
+                    guild,
+                    parent_id=42,
+                    results=[FakeMessage(pin_error=discord.Forbidden())],
+                )
+            )
 
-        self.assertEqual(cog._forum_autopin_alerted, set())
+        self.assertEqual(len(alerts.messages), 2)
+
+    async def test_unknown_forum_is_labelled_by_id_in_the_alert(self):
+        service, config, alerts = make_service()
+        guild = FakeGuild()
+        config.store_for(guild)["forum_autopin_channel_ids"] = [42]
+        thread = FakeThread(guild, parent_id=42, results=[discord.Forbidden()])
+
+        await service.handle_thread_create(thread)
+
+        self.assertIn("`42`", alerts.messages[0])
+
+    async def test_get_forum_ids_is_sorted_and_deduplicated(self):
+        service, config, _ = make_service()
+        guild = FakeGuild()
+        config.store_for(guild)["forum_autopin_channel_ids"] = [42, 11, 42]
+
+        self.assertEqual(await service.get_forum_ids(guild), [11, 42])
 
 
 class ForumAutopinChannelDeleteTests(unittest.IsolatedAsyncioTestCase):
-    def make_cog(self, guild, *, configured=(), alert_channel=None):
-        cog = object.__new__(nhmisc.NHMisc)
-        cog.bot = types.SimpleNamespace(guilds=[], get_channel=lambda _id: None)
-        cog.config = FakeConfigRoot()
-        cog._forum_autopin_alerted = set()
-        store = cog.config.store_for(guild)
-        store["forum_autopin_channel_ids"] = list(configured)
-        if alert_channel is not None:
-            store["alert_channel"] = alert_channel.id
-            guild.channels[alert_channel.id] = alert_channel
-        return cog
-
     async def test_deleted_forum_is_dropped_from_configuration(self):
+        service, config, alerts = make_service()
         guild = FakeGuild()
-        alert_channel = FakeTextChannel()
-        cog = self.make_cog(
-            guild, configured=[11, 42], alert_channel=alert_channel
-        )
-        cog._forum_autopin_alerted.add((guild.id, 42))
+        config.store_for(guild)["forum_autopin_channel_ids"] = [11, 42]
         forum = FakeForumChannel(42, guild=guild, name="announcements")
 
-        await nhmisc.NHMisc.on_guild_channel_delete(cog, forum)
+        self.assertTrue(await service.handle_channel_delete(forum))
 
-        self.assertEqual(
-            cog.config.store_for(guild)["forum_autopin_channel_ids"], [11]
-        )
-        self.assertEqual(cog._forum_autopin_alerted, set())
-        self.assertEqual(len(alert_channel.sent), 1)
-        self.assertIn("announcements", alert_channel.sent[0])
+        self.assertEqual(config.store_for(guild)["forum_autopin_channel_ids"], [11])
+        self.assertEqual(len(alerts.messages), 1)
+        self.assertIn("announcements", alerts.messages[0])
 
     async def test_unconfigured_channel_delete_is_ignored(self):
+        service, config, alerts = make_service()
         guild = FakeGuild()
-        alert_channel = FakeTextChannel()
-        cog = self.make_cog(guild, configured=[11], alert_channel=alert_channel)
+        config.store_for(guild)["forum_autopin_channel_ids"] = [11]
         channel = FakeForumChannel(42, guild=guild)
 
-        await nhmisc.NHMisc.on_guild_channel_delete(cog, channel)
+        self.assertFalse(await service.handle_channel_delete(channel))
 
-        self.assertEqual(
-            cog.config.store_for(guild)["forum_autopin_channel_ids"], [11]
+        self.assertEqual(config.store_for(guild)["forum_autopin_channel_ids"], [11])
+        self.assertEqual(alerts.messages, [])
+
+    async def test_deleting_a_forum_clears_its_pending_alert_state(self):
+        service, config, alerts = make_service()
+        guild = FakeGuild()
+        config.store_for(guild)["forum_autopin_channel_ids"] = [42]
+        guild.channels[42] = FakeForumChannel(42, guild=guild)
+
+        await service.handle_thread_create(
+            FakeThread(
+                guild,
+                parent_id=42,
+                results=[FakeMessage(pin_error=discord.Forbidden())],
+            )
         )
-        self.assertEqual(alert_channel.sent, [])
+        await service.handle_channel_delete(FakeForumChannel(42, guild=guild))
+
+        # Re-adding the same forum id must be able to alert again.
+        await service.enable(guild, 42)
+        await service.handle_thread_create(
+            FakeThread(
+                guild,
+                parent_id=42,
+                results=[FakeMessage(pin_error=discord.Forbidden())],
+            )
+        )
+
+        permission_alerts = [m for m in alerts.messages if "cannot pin messages" in m]
+        self.assertEqual(len(permission_alerts), 2)
 
 
 if __name__ == "__main__":

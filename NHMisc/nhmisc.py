@@ -24,6 +24,7 @@ from .activity_storage import (
     UserChannelDistribution,
     UserStats,
 )
+from .forum_autopin import ForumAutopinService
 from .sticky_roles import StickyRoleStore
 from .voice_activity import VoiceChannelVisitTracker
 
@@ -35,8 +36,6 @@ DEFAULT_VCJUMPING_WINDOW_SECONDS = 30
 DEFAULT_ACTIVITY_DETAIL_RETENTION_DAYS = 31
 DEFAULT_ACTIVITY_HISTORY_RETENTION_DAYS = -1
 RETENTION_CONFIRMATION = "I understand"
-FORUM_AUTOPIN_RETRY_SECONDS = 1.0
-FORUM_AUTOPIN_AUDIT_REASON = "NHMisc forum starter-message autopin"
 GATECOUNT_TIERS = (
     # For Each Tier: emoji ID, SP role ID, MP role ID
     (
@@ -97,7 +96,9 @@ class NHMisc(commands.Cog):
         )
         self._voice_visits = VoiceChannelVisitTracker()
         self._audit_log_tasks: set[asyncio.Task] = set()
-        self._forum_autopin_alerted: set[tuple[int, int]] = set()
+        self._forum_autopin = ForumAutopinService(
+            self.config, alert_sender=self._send_guild_alert, logger=log
+        )
         self._activity_store = ActivityStore(cog_data_path(self) / "activity.sqlite")
         self._sticky_roles = StickyRoleStore(cog_data_path(self) / "sticky_roles.sqlite")
         self._activity_task: asyncio.Task | None = None
@@ -205,26 +206,14 @@ class NHMisc(commands.Cog):
         channel: discord.ForumChannel,
     ) -> None:
         """Enable starter-message autopinning in a forum."""
-        missing_permission = self._missing_forum_autopin_permissions(ctx.guild, channel)
+        missing_permission = self._forum_autopin.missing_permissions(ctx.guild, channel)
         if missing_permission is not None:
             raise commands.UserFeedbackCheckFailure(missing_permission)
 
-        configured = set(
-            await self.config.guild(ctx.guild).forum_autopin_channel_ids()
-        )
-        if channel.id in configured:
-            await ctx.send(
-                f"Forum autopin is already enabled for {channel.mention}.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-
-        configured.add(channel.id)
-        await self.config.guild(ctx.guild).forum_autopin_channel_ids.set(
-            sorted(configured)
-        )
+        enabled = await self._forum_autopin.enable(ctx.guild, channel.id)
+        state = "is now enabled" if enabled else "is already enabled"
         await ctx.send(
-            f"Forum autopin is now enabled for {channel.mention}.",
+            f"Forum autopin {state} for {channel.mention}.",
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
@@ -235,31 +224,17 @@ class NHMisc(commands.Cog):
         channel: discord.ForumChannel,
     ) -> None:
         """Disable starter-message autopinning in a forum."""
-        configured = set(
-            await self.config.guild(ctx.guild).forum_autopin_channel_ids()
-        )
-        if channel.id not in configured:
-            await ctx.send(
-                f"Forum autopin is not enabled for {channel.mention}.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-
-        configured.remove(channel.id)
-        await self.config.guild(ctx.guild).forum_autopin_channel_ids.set(
-            sorted(configured)
-        )
+        disabled = await self._forum_autopin.disable(ctx.guild, channel.id)
+        state = "is disabled" if disabled else "is not enabled"
         await ctx.send(
-            f"Forum autopin is disabled for {channel.mention}.",
+            f"Forum autopin {state} for {channel.mention}.",
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
     @nhmisc_forumautopin.command(name="list")
     async def nhmisc_forumautopin_list(self, ctx: commands.Context) -> None:
         """List forums configured for starter-message autopinning."""
-        configured = sorted(
-            set(await self.config.guild(ctx.guild).forum_autopin_channel_ids())
-        )
+        configured = await self._forum_autopin.get_forum_ids(ctx.guild)
         if not configured:
             await ctx.send(
                 "No forums are configured for automatic starter-message pinning."
@@ -732,119 +707,12 @@ class NHMisc(commands.Cog):
     @commands.Cog.listener()
     async def on_thread_create(self, thread: discord.Thread) -> None:
         """Pin the starter message for a new post in a configured forum."""
-        parent_id = thread.parent_id
-        configured = set(
-            await self.config.guild(thread.guild).forum_autopin_channel_ids()
-        )
-        if parent_id not in configured:
-            return
-
-        starter_message = None
-        for attempt in range(2):
-            try:
-                starter_message = await thread.fetch_message(thread.id)
-                break
-            except discord.NotFound:
-                if attempt == 0:
-                    await asyncio.sleep(FORUM_AUTOPIN_RETRY_SECONDS)
-                    continue
-                log.warning(
-                    "Forum autopin could not find starter message %s "
-                    "in guild %s, forum %s",
-                    thread.id,
-                    thread.guild.id,
-                    parent_id,
-                )
-                return
-            except discord.Forbidden:
-                log.warning(
-                    "Forum autopin cannot fetch starter message %s "
-                    "in guild %s, forum %s due to missing permissions",
-                    thread.id,
-                    thread.guild.id,
-                    parent_id,
-                )
-                await self._alert_forum_autopin_permissions(
-                    thread.guild,
-                    parent_id,
-                    "read starter messages (View Channel and Read Message History)",
-                )
-                return
-            except discord.HTTPException:
-                log.exception(
-                    "Forum autopin failed to fetch starter message %s "
-                    "in guild %s, forum %s",
-                    thread.id,
-                    thread.guild.id,
-                    parent_id,
-                )
-                return
-
-        try:
-            await starter_message.pin(reason=FORUM_AUTOPIN_AUDIT_REASON)
-        except discord.Forbidden:
-            log.warning(
-                "Forum autopin cannot pin starter message %s "
-                "in guild %s, forum %s due to missing Pin Messages permission",
-                thread.id,
-                thread.guild.id,
-                parent_id,
-            )
-            await self._alert_forum_autopin_permissions(
-                thread.guild, parent_id, "pin messages (Pin Messages)"
-            )
-            return
-        except discord.NotFound:
-            log.warning(
-                "Forum autopin starter message %s disappeared "
-                "in guild %s, forum %s",
-                thread.id,
-                thread.guild.id,
-                parent_id,
-            )
-            return
-        except discord.HTTPException:
-            log.exception(
-                "Forum autopin failed to pin starter message %s "
-                "in guild %s, forum %s",
-                thread.id,
-                thread.guild.id,
-                parent_id,
-            )
-            return
-
-        self._forum_autopin_alerted.discard((thread.guild.id, parent_id))
+        await self._forum_autopin.handle_thread_create(thread)
 
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
         """Drop autopin configuration for a deleted forum."""
-        guild = channel.guild
-        configured = set(await self.config.guild(guild).forum_autopin_channel_ids())
-        if channel.id not in configured:
-            return
-
-        configured.remove(channel.id)
-        await self.config.guild(guild).forum_autopin_channel_ids.set(sorted(configured))
-        self._forum_autopin_alerted.discard((guild.id, channel.id))
-        log.info(
-            "Forum autopin configuration removed for deleted forum %s in guild %s",
-            channel.id,
-            guild.id,
-        )
-
-        alert_channel = self._get_log_channel(
-            guild, await self.config.guild(guild).alert_channel()
-        )
-        if alert_channel is None:
-            return
-
-        await self._send_voice_log(
-            alert_channel,
-            (
-                f"Forum autopin is no longer configured for deleted forum "
-                f"`{channel.name}` (`{channel.id}`)."
-            ),
-        )
+        await self._forum_autopin.handle_channel_delete(channel)
 
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member) -> None:
@@ -1098,43 +966,16 @@ class NHMisc(commands.Cog):
             return f"I need permission to send messages in {channel.mention}."
         return None
 
-    def _missing_forum_autopin_permissions(
-        self,
-        guild: discord.Guild,
-        channel: discord.ForumChannel,
-    ) -> str | None:
-        permissions = channel.permissions_for(guild.me)
-        if not permissions.view_channel:
-            return f"I need permission to view {channel.mention}."
-        if not permissions.read_message_history:
-            return f"I need Read Message History permission in {channel.mention}."
-        if not permissions.pin_messages:
-            return f"I need Pin Messages permission in {channel.mention}."
-        return None
-
-    async def _alert_forum_autopin_permissions(
-        self, guild: discord.Guild, forum_id: int, missing: str
-    ) -> None:
-        alert_key = (guild.id, forum_id)
-        if alert_key in self._forum_autopin_alerted:
-            return
-
+    async def _send_guild_alert(self, guild: discord.Guild, content: str) -> bool:
+        """Send to the configured alert channel. False when there is none."""
         alert_channel = self._get_log_channel(
             guild, await self.config.guild(guild).alert_channel()
         )
         if alert_channel is None:
-            return
+            return False
 
-        self._forum_autopin_alerted.add(alert_key)
-        forum = guild.get_channel(forum_id)
-        forum_label = forum.mention if forum is not None else f"`{forum_id}`"
-        await self._send_voice_log(
-            alert_channel,
-            (
-                f"Forum autopin cannot {missing} in {forum_label}. "
-                "New posts will not be pinned until the permission is restored."
-            ),
-        )
+        await self._send_voice_log(alert_channel, content)
+        return True
 
     def _schedule_audit_log_edit(
         self,
