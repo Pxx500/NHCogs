@@ -35,6 +35,22 @@ DEFAULT_VCJUMPING_WINDOW_SECONDS = 30
 DEFAULT_ACTIVITY_DETAIL_RETENTION_DAYS = 31
 DEFAULT_ACTIVITY_HISTORY_RETENTION_DAYS = -1
 RETENTION_CONFIRMATION = "I understand"
+
+# Categorical chart hues in fixed order. The ordering is the colourblind-safety
+# mechanism, not decoration: it is validated pairwise for adjacent slots, so
+# slots must be assigned front to back and never cycled or generated past the
+# end. Ranks beyond the last slot share the neutral "other" tone.
+CHATCHART_SERIES_COLORS = (
+    "#2a78d6",
+    "#eb6834",
+    "#1baf7a",
+    "#eda100",
+    "#e87ba4",
+    "#008300",
+    "#4a3aa7",
+    "#e34948",
+)
+CHATCHART_OTHER_COLOR = "#898781"
 GATECOUNT_TIERS = (
     # For Each Tier: emoji ID, SP role ID, MP role ID
     (
@@ -625,7 +641,12 @@ class NHMisc(commands.Cog):
             await ctx.send(f"No retained activity data for this channel in the last {days} days.")
             return
 
-        file = self._build_chatchart_file(ctx.guild, counts, days)
+        file = self._build_chatchart_file(
+            ctx.guild,
+            counts,
+            days,
+            self._chatchart_location_label(ctx.channel),
+        )
         await ctx.send(
             file=file,
             allowed_mentions=discord.AllowedMentions.none(),
@@ -1879,8 +1900,20 @@ class NHMisc(commands.Cog):
             current_length += extra_length
         return "\n".join(output) if output else "n/d"
 
+    def _chatchart_location_label(self, channel: object) -> str:
+        """Name the charted channel or thread for display inside the image."""
+        name = getattr(channel, "name", None) or "unknown-channel"
+        if self._activity_thread_id(channel) is None:
+            return f"#{name}"
+        parent_name = getattr(getattr(channel, "parent", None), "name", None)
+        return f"#{parent_name} / {name}" if parent_name else name
+
     def _build_chatchart_file(
-        self, guild: discord.Guild, counts: list[ChannelUserCount], days: int
+        self,
+        guild: discord.Guild,
+        counts: list[ChannelUserCount],
+        days: int,
+        location_label: str,
     ) -> discord.File:
         try:
             import matplotlib
@@ -1892,9 +1925,9 @@ class NHMisc(commands.Cog):
                 "Matplotlib is required for chatchart but is not installed."
             ) from exc
 
-        top_counts = counts[:10]
+        top_counts = counts[: len(CHATCHART_SERIES_COLORS)]
         top_count = sum(count.message_count for count in top_counts)
-        other_count = sum(count.message_count for count in counts[10:])
+        other_count = sum(count.message_count for count in counts[len(top_counts):])
         total_count = top_count + other_count
         labels: list[str] = []
         values: list[int] = []
@@ -1906,15 +1939,21 @@ class NHMisc(commands.Cog):
             labels.append(name)
             values.append(count.message_count)
 
+        bar_colors = [
+            CHATCHART_SERIES_COLORS[index]
+            if index < len(CHATCHART_SERIES_COLORS)
+            else CHATCHART_OTHER_COLOR
+            for index in range(len(values))
+        ]
+
         figure_height = max(5.5, 1.5 + len(top_counts) * 0.5)
         figure = plt.figure(figsize=(13, figure_height))
-        grid = figure.add_gridspec(1, 2, width_ratios=(3, 1), wspace=0.12)
+        grid = figure.add_gridspec(1, 2, width_ratios=(3, 1.35), wspace=0.02)
         ranking_axis = figure.add_subplot(grid[0, 0])
         donut_axis = figure.add_subplot(grid[0, 1])
 
         positions = list(range(len(values)))
-        bar_color = "#287eb6"
-        ranking_axis.barh(positions, values, color=bar_color, height=0.68)
+        ranking_axis.barh(positions, values, color=bar_colors, height=0.68)
         ranking_axis.set_yticks(positions, labels=labels)
         ranking_axis.invert_yaxis()
         ranking_axis.xaxis.set_visible(False)
@@ -1923,7 +1962,7 @@ class NHMisc(commands.Cog):
             spine.set_visible(False)
 
         largest_value = max(values)
-        ranking_axis.set_xlim(0, largest_value * 1.38)
+        ranking_axis.set_xlim(0, largest_value * 1.24)
         for position, value in zip(positions, values):
             percentage = value / total_count * 100
             ranking_axis.text(
@@ -1934,17 +1973,36 @@ class NHMisc(commands.Cog):
                 fontsize=9,
             )
 
-        donut_values = [top_count, other_count]
-        donut_axis.pie(
+        # Ranks past the last hue share one neutral wedge with everybody outside
+        # the top ten, so the grey bars map onto exactly one grey slice instead
+        # of splitting into wedges no reader can tell apart.
+        named_count = min(len(values), len(CHATCHART_SERIES_COLORS))
+        donut_values = list(values[:named_count])
+        donut_colors = list(bar_colors[:named_count])
+        neutral_count = sum(values[named_count:]) + other_count
+        if neutral_count:
+            donut_values.append(neutral_count)
+            donut_colors.append(CHATCHART_OTHER_COLOR)
+        # The named wedges are identified by the ranking beside them; the neutral
+        # one has no bar to point at, so it carries its own label outside the ring.
+        donut_labels = [""] * len(donut_values)
+        if neutral_count:
+            donut_labels[-1] = "Other"
+        _wedges, outside_labels, _percentages = donut_axis.pie(
             donut_values,
-            colors=[bar_color, "#6c757d"],
-            autopct=lambda percent: f"{percent:.1f}%" if percent > 0 else "",
-            pctdistance=0.81,
+            labels=donut_labels,
+            colors=donut_colors,
+            autopct=lambda percent: f"{percent:.0f}%" if percent >= 6 else "",
+            pctdistance=0.79,
+            labeldistance=1.08,
             startangle=90,
             counterclock=False,
-            wedgeprops={"width": 0.38, "edgecolor": "white"},
-            textprops={"color": "white", "fontsize": 11, "fontweight": "bold"},
+            wedgeprops={"width": 0.38, "edgecolor": "white", "linewidth": 2},
+            textprops={"color": "white", "fontsize": 10, "fontweight": "bold"},
         )
+        for outside_label in outside_labels:
+            outside_label.set_color("#52514e")
+            outside_label.set_fontweight("normal")
         donut_axis.text(
             0,
             0,
@@ -1953,10 +2011,25 @@ class NHMisc(commands.Cog):
             va="center",
             fontsize=11,
         )
-        donut_axis.set_title("Top 10 vs other", pad=12)
+        donut_axis.set_title("Share by user", pad=12)
         donut_axis.axis("equal")
 
-        figure.suptitle(f"Messages by user - last {days} days", fontsize=16)
+        title_y = 0.97
+        figure.suptitle(
+            f"Messages by user - last {days} days",
+            fontsize=16,
+            y=title_y,
+            va="center",
+        )
+        figure.text(
+            0.008,
+            title_y,
+            location_label,
+            ha="left",
+            va="center",
+            fontsize=12,
+            color="#52514e",
+        )
         buffer = io.BytesIO()
         figure.savefig(buffer, format="png", bbox_inches="tight", dpi=160)
         plt.close(figure)

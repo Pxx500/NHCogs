@@ -197,28 +197,73 @@ class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(width, 1_700)
         self.assertGreater(width / height, 1.6)
 
+        figure_text = {text.get_text() for text in captured_figures[0].texts}
+        self.assertIn("#test-channel", figure_text)
+        self.assertIn("Messages by user - last 31 days", figure_text)
+        channel_label = next(
+            text
+            for text in captured_figures[0].texts
+            if text.get_text() == "#test-channel"
+        )
+        self.assertEqual(channel_label.get_horizontalalignment(), "left")
+        self.assertLess(channel_label.get_position()[0], 0.1)
+        self.assertGreater(channel_label.get_position()[1], 0.9)
+
+        named = len(nhmisc.CHATCHART_SERIES_COLORS)
         ranking_axis, donut_axis = captured_figures[0].axes
         self.assertEqual(
             [bar.get_width() for bar in ranking_axis.patches],
-            [count.message_count for count in counts[:10]],
+            [count.message_count for count in counts[:named]],
         )
+        # Percentages stay relative to every user, not just the ranked ones.
         ranking_annotations = {text.get_text() for text in ranking_axis.texts}
         self.assertIn("9,600 · 10.8%", ranking_annotations)
-        self.assertIn("6,000 · 6.8%", ranking_annotations)
+        self.assertIn("6,800 · 7.7%", ranking_annotations)
 
-        self.assertEqual(len(donut_axis.patches), 2)
-        self.assertEqual(
-            donut_axis.patches[0].get_facecolor(),
-            ranking_axis.patches[0].get_facecolor(),
-        )
+        # One distinct hue per ranked user, so no bar shares the neutral tone.
+        ranking_colors = [bar.get_facecolor() for bar in ranking_axis.patches]
+        self.assertEqual(len(set(ranking_colors)), named)
+
+        # Every hue slot plus exactly one neutral wedge for everyone else.
+        self.assertEqual(len(donut_axis.patches), named + 1)
+        donut_colors = [wedge.get_facecolor() for wedge in donut_axis.patches]
+        self.assertEqual(donut_colors[:named], ranking_colors)
+        self.assertNotIn(donut_colors[named], ranking_colors)
+
         donut_text = {text.get_text() for text in donut_axis.texts if text.get_text()}
-        self.assertEqual(donut_text, {"87.8%", "12.2%", "88,800\nmessages"})
+        self.assertIn("88,800\nmessages", donut_text)
+        self.assertIn("Other", donut_text)
         percentage_labels = [
             text for text in donut_axis.texts if text.get_text().endswith("%")
         ]
+        self.assertTrue(percentage_labels)
         for label in percentage_labels:
-            self.assertAlmostEqual(math.hypot(*label.get_position()), 0.81, places=2)
+            self.assertAlmostEqual(math.hypot(*label.get_position()), 0.79, places=2)
         self.assertIsNone(donut_axis.get_legend())
+
+    def test_location_label_names_channels_threads_and_missing_parents(self):
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._activity_thread_id = lambda channel: getattr(channel, "thread_id", None)
+
+        channel = types.SimpleNamespace(name="general", thread_id=None)
+        self.assertEqual(cog._chatchart_location_label(channel), "#general")
+
+        thread = types.SimpleNamespace(
+            name="side-quest",
+            thread_id=99,
+            parent=types.SimpleNamespace(name="general"),
+        )
+        self.assertEqual(
+            cog._chatchart_location_label(thread), "#general / side-quest"
+        )
+
+        orphan_thread = types.SimpleNamespace(
+            name="side-quest", thread_id=99, parent=None
+        )
+        self.assertEqual(cog._chatchart_location_label(orphan_thread), "side-quest")
+
+        unnamed = types.SimpleNamespace(thread_id=None)
+        self.assertEqual(cog._chatchart_location_label(unnamed), "#unknown-channel")
 
 
 class YapperCommandTests(unittest.IsolatedAsyncioTestCase):

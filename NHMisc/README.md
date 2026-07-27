@@ -278,8 +278,11 @@ used, top locations in the range, and the dominant location for each retained da
 ```
 
 Creates a chart of message activity for the channel where the command is used. A horizontal
-ranking compares the ten most active users, while a donut shows the Top 10 share against all
-other users. If the command is used in a thread, it charts that specific thread. The requested
+ranking compares the eight most active users, while a donut shows each of their shares of the
+total plus one `Other` slice for everyone else. Each ranked user keeps the same colour in both
+halves of the chart. The ranking stops at eight because more than eight hues stop being
+reliably distinguishable for colourblind readers. If the command is used in a thread, it charts
+that specific thread. The requested
 day count is capped to the configured detail retention. The chart includes message counts and
 overall percentages for each shown user.
 
