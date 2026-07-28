@@ -83,6 +83,7 @@ CHATCHART_SERIES_COLORS = (
 CHATCHART_OTHER_COLOR = "#898781"
 DEFAULT_CHATCHART_USER_COUNT = 10
 MAX_CHATCHART_USER_COUNT = 20
+DISCORD_SNOWFLAKE_MIN_DIGITS = 15
 GATECOUNT_TIERS = (
     # For Each Tier: emoji ID, SP role ID, MP role ID
     (
@@ -879,11 +880,22 @@ class NHMisc(commands.Cog):
     async def nhmisc_chatchart(
         self,
         ctx: commands.Context,
-        days: int,
-        amount: int = DEFAULT_CHATCHART_USER_COUNT,
+        target_or_days: str,
+        days_or_amount: int | None = None,
+        amount: int | None = None,
     ) -> None:
-        """Render a chart of user activity in the current channel."""
+        """Render a chart of user activity in the selected or current channel."""
         await self._require_activity_staff(ctx)
+        target, days, amount = self._resolve_chatchart_request(
+            ctx,
+            target_or_days,
+            days_or_amount,
+            amount,
+        )
+        if target is not ctx.channel and not target.permissions_for(ctx.author).view_channel:
+            raise commands.UserFeedbackCheckFailure(
+                "You cannot view that channel or thread."
+            )
         await self._close_stale_activity_days_for_guild(ctx.guild, send_reports=True)
         if days < 1:
             raise commands.UserFeedbackCheckFailure("Days must be at least 1.")
@@ -893,11 +905,11 @@ class NHMisc(commands.Cog):
             )
 
         days = await self._cap_detail_days(ctx.guild, days)
-        channel_id = self._activity_parent_channel_id(ctx.channel)
+        channel_id = self._activity_parent_channel_id(target)
         counts = await self._activity_store.get_channel_user_counts(
             ctx.guild.id,
             channel_id,
-            self._activity_thread_id(ctx.channel),
+            self._activity_thread_id(target),
             self._utc_today(),
             days,
         )
@@ -909,7 +921,7 @@ class NHMisc(commands.Cog):
             ctx.guild,
             counts,
             days,
-            self._chatchart_location_label(ctx.channel),
+            self._chatchart_location_label(target),
             amount,
         )
         content = "One is a bit low, no? 🤨" if amount == 1 else None
@@ -1840,6 +1852,49 @@ class NHMisc(commands.Cog):
         if isinstance(channel, (discord.TextChannel, discord.Thread)):
             return channel
         raise commands.UserFeedbackCheckFailure("Channel or thread was not found in this server.")
+
+    def _resolve_chatchart_request(
+        self,
+        ctx: commands.Context,
+        target_or_days: str,
+        days_or_amount: int | None,
+        amount: int | None,
+    ) -> tuple[discord.TextChannel | discord.Thread, int, int]:
+        token = str(target_or_days).strip()
+        resolved_channel = None
+        if token.isdigit() and len(token) >= DISCORD_SNOWFLAKE_MIN_DIGITS:
+            resolved_channel = ctx.guild.get_channel_or_thread(int(token))
+
+        is_channel_reference = (
+            token.startswith("<#")
+            or (token.isdigit() and len(token) >= DISCORD_SNOWFLAKE_MIN_DIGITS)
+            or isinstance(resolved_channel, (discord.TextChannel, discord.Thread))
+        )
+        if is_channel_reference:
+            target = self._resolve_text_channel_or_thread(ctx.guild, token)
+            if days_or_amount is None:
+                raise commands.UserFeedbackCheckFailure(
+                    "Days must follow the channel or thread."
+                )
+            return (
+                target,
+                days_or_amount,
+                amount if amount is not None else DEFAULT_CHATCHART_USER_COUNT,
+            )
+
+        if not token.isdigit():
+            raise commands.UserFeedbackCheckFailure(
+                "Pass a channel/thread mention, raw channel ID, or number of days."
+            )
+        if amount is not None:
+            raise commands.UserFeedbackCheckFailure(
+                "Too many arguments for current-channel chatchart."
+            )
+        return (
+            ctx.channel,
+            int(token),
+            days_or_amount if days_or_amount is not None else DEFAULT_CHATCHART_USER_COUNT,
+        )
 
     def _activity_parent_channel_id(self, channel: object) -> int:
         parent = getattr(channel, "parent", None)

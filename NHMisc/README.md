@@ -305,15 +305,18 @@ used, top locations in the range, and the dominant location for each retained da
 
 ```ini
 [p]nhmisc chatchart 7 [amount]
+[p]nhmisc chatchart #general 7 [amount]
 ```
 
-Creates a chart of message activity for the channel where the command is used. `amount`
-controls how many of the most active users are shown, defaults to `10`, and accepts values from
-`1` through `20`. Each displayed user keeps the same distinct colour in the horizontal ranking
-and donut, while `Other` contains everyone outside the selected ranking. Choosing `1` adds
-`One is a bit low, no? 🤨` to the chart message. If the command is used in a thread, it charts
-that specific thread. The requested day count is capped to the configured detail retention.
-The chart includes message counts and overall percentages for each shown user.
+Creates a chart of message activity for the current or selected channel. The optional first
+argument accepts a channel/thread mention or raw ID; when omitted, the command charts the
+channel or thread where it is used. An explicit target must be visible to the moderator. The
+result is posted where the command was invoked. `amount` controls how many of the most active
+users are shown, defaults to `10`, and accepts values from `1` through `20`. Each displayed user
+keeps the same distinct colour in the horizontal ranking and donut, while `Other` contains
+everyone outside the selected ranking. Choosing `1` adds `One is a bit low, no? 🤨` to the
+chart message. The requested day count is capped to the configured detail retention. The chart
+includes message counts and overall percentages for each shown user.
 
 ```ini
 [p]nhmisc topyapper 30 10
