@@ -6,7 +6,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-
 NHMISC_PATH = Path(__file__).resolve().parents[1] / "NHMisc" / "nhmisc.py"
 
 
