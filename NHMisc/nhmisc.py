@@ -85,36 +85,41 @@ DEFAULT_CHATCHART_USER_COUNT = 10
 MAX_CHATCHART_USER_COUNT = 20
 DISCORD_SNOWFLAKE_MIN_DIGITS = 15
 GATECOUNT_TIERS = (
-    # For Each Tier: emoji ID, SP role ID, MP role ID
+    # For each tier: emoji ID, SP role ID, MP role ID, gates per member
     (
         "stargate",
         769315278953381928,
         1348078501986828461,
         798700443979087892,
+        1,
     ),
     (
         "gatefinity",
         1004823049037680702,
         1348078496710135888,
         1004822424921055233,
+        2,
     ),
     (
         "gateforce",
         1097204464919773205,
         1348078483384958986,
         1097204292198338692,
+        3,
     ),
     (
         "gateflower",
         1442240252084486286,
         1442209676530815076,
         1442209801374269682,
+        4,
     ),
     (
         "gatelympics",
         1442208021655715961,
         1442208051212976158,
         1437811360208781406,
+        5,
     ),
 )
 
@@ -465,7 +470,13 @@ class NHMisc(commands.Cog):
     async def gatecount(self, ctx: commands.Context) -> None:
         """Show the current SP and MP gate role member counts."""
         resolved_roles = []
-        for emoji_name, emoji_id, sp_role_id, mp_role_id in GATECOUNT_TIERS:
+        for (
+            emoji_name,
+            emoji_id,
+            sp_role_id,
+            mp_role_id,
+            gates_per_member,
+        ) in GATECOUNT_TIERS:
             label = emoji_name.title()
             sp_role = ctx.guild.get_role(sp_role_id)
             if sp_role is None:
@@ -481,17 +492,38 @@ class NHMisc(commands.Cog):
                     f"({mp_role_id}) was not found in this server."
                 )
 
-            resolved_roles.append((emoji_name, emoji_id, sp_role, mp_role))
-
-        lines = [
-            (
-                f"<:{emoji_name}:{emoji_id}> — "
-                f"**{len(sp_role.members)} SP** | **{len(mp_role.members)} MP**"
+            resolved_roles.append(
+                (emoji_name, emoji_id, sp_role, mp_role, gates_per_member)
             )
-            for emoji_name, emoji_id, sp_role, mp_role in resolved_roles
-        ]
+
+        lines = []
+        sp_gate_total = 0
+        mp_gate_total = 0
+        for (
+            emoji_name,
+            emoji_id,
+            sp_role,
+            mp_role,
+            gates_per_member,
+        ) in resolved_roles:
+            sp_count = len(sp_role.members)
+            mp_count = len(mp_role.members)
+            lines.append(
+                f"<:{emoji_name}:{emoji_id}> — "
+                f"**{sp_count} SP** | **{mp_count} MP**"
+            )
+            sp_gate_total += sp_count * gates_per_member
+            mp_gate_total += mp_count * gates_per_member
+
+        lines.extend(
+            (
+                "",
+                f"**Total Gates: {sp_gate_total} SP + {mp_gate_total} MP = "
+                f"{sp_gate_total + mp_gate_total}**",
+            )
+        )
         embed = discord.Embed(
-            title="Current Gatecount",
+            title="Current Gatecount:",
             description="\n".join(lines),
             color=discord.Color.blue(),
         )
