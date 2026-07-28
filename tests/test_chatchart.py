@@ -56,6 +56,27 @@ class FakeFile:
         self.data = fp.read()
 
 
+class FakePermissions:
+    def __init__(self, *, view_channel=True):
+        self.view_channel = view_channel
+
+
+class FakeTextChannel:
+    def __init__(self, channel_id, name, *, view_channel=True):
+        self.id = channel_id
+        self.name = name
+        self._permissions = FakePermissions(view_channel=view_channel)
+
+    def permissions_for(self, _member):
+        return self._permissions
+
+
+class FakeThread(FakeTextChannel):
+    def __init__(self, channel_id, name, parent, *, view_channel=True):
+        super().__init__(channel_id, name, view_channel=view_channel)
+        self.parent = parent
+
+
 ALLOWED_MENTIONS_NONE = object()
 
 
@@ -64,6 +85,8 @@ def load_nhmisc_module():
     discord.Forbidden = type("Forbidden", (Exception,), {})
     discord.HTTPException = type("HTTPException", (Exception,), {})
     discord.File = FakeFile
+    discord.TextChannel = FakeTextChannel
+    discord.Thread = FakeThread
     discord.AllowedMentions = types.SimpleNamespace(none=lambda: ALLOWED_MENTIONS_NONE)
     discord.MessageType = types.SimpleNamespace(default=0, reply=1)
     discord.Color = types.SimpleNamespace(
@@ -146,7 +169,8 @@ nhmisc = load_nhmisc_module()
 class FakeContext:
     def __init__(self, guild):
         self.guild = guild
-        self.channel = types.SimpleNamespace(id=456, name="test-channel")
+        self.channel = FakeTextChannel(456, "test-channel")
+        self.author = object()
         self.sent = []
 
     async def send(self, content=None, **kwargs):
@@ -156,15 +180,17 @@ class FakeContext:
 
 
 class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
-    def _command_fixture(self):
-        guild = types.SimpleNamespace(id=123)
+    def _command_fixture(self, *targets):
+        channels = {target.id: target for target in targets}
+        guild = types.SimpleNamespace(
+            id=123,
+            get_channel_or_thread=channels.get,
+        )
         ctx = FakeContext(guild)
         cog = object.__new__(nhmisc.NHMisc)
         cog._require_activity_staff = mock.AsyncMock()
         cog._close_stale_activity_days_for_guild = mock.AsyncMock()
         cog._cap_detail_days = mock.AsyncMock(return_value=31)
-        cog._activity_parent_channel_id = lambda channel: channel.id
-        cog._activity_thread_id = lambda channel: None
         cog._utc_today = lambda: None
         cog._activity_store = types.SimpleNamespace(
             get_channel_user_counts=mock.AsyncMock(
@@ -173,6 +199,110 @@ class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         cog._build_chatchart_file = mock.Mock(return_value=object())
         return cog, ctx
+
+    async def test_explicit_channel_queries_target_and_posts_in_invocation_channel(self):
+        target = FakeTextChannel(789, "general")
+        cog, ctx = self._command_fixture(target)
+
+        await nhmisc.NHMisc.nhmisc_chatchart.callback(cog, ctx, "<#789>", 31, 7)
+
+        cog._activity_store.get_channel_user_counts.assert_awaited_once_with(
+            123,
+            789,
+            None,
+            None,
+            31,
+        )
+        self.assertEqual(cog._build_chatchart_file.call_args.args[3], "#general")
+        self.assertEqual(cog._build_chatchart_file.call_args.args[-1], 7)
+        self.assertEqual(len(ctx.sent), 1)
+
+    async def test_raw_thread_id_queries_only_that_thread(self):
+        parent = FakeTextChannel(123456789012345678, "general")
+        target = FakeThread(123456789012345679, "side-quest", parent)
+        cog, ctx = self._command_fixture(target)
+
+        await nhmisc.NHMisc.nhmisc_chatchart.callback(
+            cog,
+            ctx,
+            "123456789012345679",
+            31,
+        )
+
+        cog._activity_store.get_channel_user_counts.assert_awaited_once_with(
+            123,
+            123456789012345678,
+            123456789012345679,
+            None,
+            31,
+        )
+        self.assertEqual(
+            cog._build_chatchart_file.call_args.args[3],
+            "#general / side-quest",
+        )
+        self.assertEqual(cog._build_chatchart_file.call_args.args[-1], 10)
+
+    async def test_explicit_channel_must_be_visible_to_invoking_moderator(self):
+        target = FakeTextChannel(789, "hidden", view_channel=False)
+        cog, ctx = self._command_fixture(target)
+
+        with self.assertRaisesRegex(
+            UserFeedbackCheckFailure,
+            "You cannot view that channel or thread",
+        ):
+            await nhmisc.NHMisc.nhmisc_chatchart.callback(cog, ctx, "<#789>", 31)
+
+        cog._activity_store.get_channel_user_counts.assert_not_awaited()
+
+    async def test_explicit_channel_requires_day_count(self):
+        target = FakeTextChannel(789, "general")
+        cog, ctx = self._command_fixture(target)
+
+        with self.assertRaisesRegex(
+            UserFeedbackCheckFailure,
+            "Days must follow the channel or thread",
+        ):
+            await nhmisc.NHMisc.nhmisc_chatchart.callback(cog, ctx, "<#789>")
+
+        cog._activity_store.get_channel_user_counts.assert_not_awaited()
+
+    async def test_first_argument_must_be_channel_reference_or_day_count(self):
+        cog, ctx = self._command_fixture()
+
+        with self.assertRaisesRegex(
+            UserFeedbackCheckFailure,
+            "Pass a channel/thread mention, raw channel ID, or number of days",
+        ):
+            await nhmisc.NHMisc.nhmisc_chatchart.callback(cog, ctx, "general")
+
+        cog._activity_store.get_channel_user_counts.assert_not_awaited()
+
+    async def test_unknown_raw_channel_id_is_not_treated_as_day_count(self):
+        cog, ctx = self._command_fixture()
+
+        with self.assertRaisesRegex(
+            UserFeedbackCheckFailure,
+            "Channel or thread was not found in this server",
+        ):
+            await nhmisc.NHMisc.nhmisc_chatchart.callback(
+                cog,
+                ctx,
+                "123456789012345678",
+                31,
+            )
+
+        cog._activity_store.get_channel_user_counts.assert_not_awaited()
+
+    async def test_current_channel_form_rejects_third_numeric_argument(self):
+        cog, ctx = self._command_fixture()
+
+        with self.assertRaisesRegex(
+            UserFeedbackCheckFailure,
+            "Too many arguments for current-channel chatchart",
+        ):
+            await nhmisc.NHMisc.nhmisc_chatchart.callback(cog, ctx, "31", 7, 8)
+
+        cog._activity_store.get_channel_user_counts.assert_not_awaited()
 
     async def test_command_defaults_to_ten_users(self):
         cog, ctx = self._command_fixture()
@@ -339,14 +469,11 @@ class YapperCommandTests(unittest.IsolatedAsyncioTestCase):
         ctx = FakeContext(guild)
         store = types.SimpleNamespace(
             get_guild_user_counts=mock.AsyncMock(return_value=counts),
-            get_channel_user_counts=mock.AsyncMock(return_value=counts),
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._require_activity_staff = mock.AsyncMock()
         cog._close_stale_activity_days_for_guild = mock.AsyncMock()
         cog._cap_detail_days = mock.AsyncMock(return_value=7)
-        cog._activity_parent_channel_id = lambda channel: channel.id
-        cog._activity_thread_id = lambda channel: 789
         cog._utc_today = lambda: date(2026, 7, 27)
         cog._activity_store = store
         return cog, ctx, store
@@ -369,55 +496,25 @@ class YapperCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("2. Beta (20) — 80 messages", content)
         self.assertIs(ctx.sent[0]["allowed_mentions"], ALLOWED_MENTIONS_NONE)
 
-    async def test_channelyapper_uses_current_thread_and_limits_output(self):
-        counts = [
-            types.SimpleNamespace(user_id=10, message_count=120),
-            types.SimpleNamespace(user_id=20, message_count=80),
-            types.SimpleNamespace(user_id=30, message_count=40),
-        ]
-        cog, ctx, store = self.build_fixture(counts)
-
-        await nhmisc.NHMisc.nhmisc_channelyapper.callback(cog, ctx, 30, 2)
-
-        store.get_channel_user_counts.assert_awaited_once_with(
-            123, 456, 789, date(2026, 7, 27), 7
-        )
-        content = ctx.sent[0]["content"]
-        self.assertIn("1. Alpha (10) — 120 messages", content)
-        self.assertIn("2. Beta (20) — 80 messages", content)
-        self.assertNotIn("30", content)
-        self.assertIs(ctx.sent[0]["allowed_mentions"], ALLOWED_MENTIONS_NONE)
-
-    async def test_yapper_commands_reject_invalid_days_and_amount(self):
-        commands_to_test = (
-            nhmisc.NHMisc.nhmisc_topyapper,
-            nhmisc.NHMisc.nhmisc_channelyapper,
-        )
-        for command in commands_to_test:
-            for days, amount in ((0, 1), (1, 0), (1, 21)):
-                with self.subTest(command=command, days=days, amount=amount):
-                    cog, ctx, _ = self.build_fixture([])
-                    with self.assertRaises(UserFeedbackCheckFailure):
-                        await command.callback(cog, ctx, days, amount)
-
-    async def test_yapper_commands_report_when_no_activity_is_retained(self):
-        commands_to_test = (
-            (nhmisc.NHMisc.nhmisc_topyapper, "server"),
-            (nhmisc.NHMisc.nhmisc_channelyapper, "channel"),
-        )
-        for command, scope in commands_to_test:
-            with self.subTest(command=command):
+    async def test_topyapper_rejects_invalid_days_and_amount(self):
+        for days, amount in ((0, 1), (1, 0), (1, 21)):
+            with self.subTest(days=days, amount=amount):
                 cog, ctx, _ = self.build_fixture([])
+                with self.assertRaises(UserFeedbackCheckFailure):
+                    await nhmisc.NHMisc.nhmisc_topyapper.callback(
+                        cog, ctx, days, amount
+                    )
 
-                await command.callback(cog, ctx, 7, 10)
+    async def test_topyapper_reports_when_no_activity_is_retained(self):
+        cog, ctx, _ = self.build_fixture([])
 
-                self.assertIn(
-                    f"No retained activity data for this {scope}",
-                    ctx.sent[0]["content"],
-                )
-                self.assertIs(
-                    ctx.sent[0]["allowed_mentions"], ALLOWED_MENTIONS_NONE
-                )
+        await nhmisc.NHMisc.nhmisc_topyapper.callback(cog, ctx, 7, 10)
+
+        self.assertIn(
+            "No retained activity data for this server",
+            ctx.sent[0]["content"],
+        )
+        self.assertIs(ctx.sent[0]["allowed_mentions"], ALLOWED_MENTIONS_NONE)
 
 
 if __name__ == "__main__":
