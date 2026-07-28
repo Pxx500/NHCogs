@@ -936,14 +936,7 @@ class NHMisc(commands.Cog):
         self, ctx: commands.Context, days: int, amount: int
     ) -> None:
         """Show the most active users across this server."""
-        await self._send_yapper_ranking(ctx, days, amount, guild_wide=True)
-
-    @nhmisc.command(name="channelyapper")
-    async def nhmisc_channelyapper(
-        self, ctx: commands.Context, days: int, amount: int
-    ) -> None:
-        """Show the most active users in the current channel or thread."""
-        await self._send_yapper_ranking(ctx, days, amount, guild_wide=False)
+        await self._send_yapper_ranking(ctx, days, amount)
 
     @commands.command(name="selfchart")
     @commands.guild_only()
@@ -1736,8 +1729,6 @@ class NHMisc(commands.Cog):
         ctx: commands.Context,
         days: int,
         amount: int,
-        *,
-        guild_wide: bool,
     ) -> None:
         await self._require_activity_staff(ctx)
         if days < 1:
@@ -1750,24 +1741,13 @@ class NHMisc(commands.Cog):
         await self._close_stale_activity_days_for_guild(ctx.guild, send_reports=True)
         days = await self._cap_detail_days(ctx.guild, days)
         end_date_utc = self._utc_today()
-        if guild_wide:
-            counts = await self._activity_store.get_guild_user_counts(
-                ctx.guild.id,
-                end_date_utc,
-                days,
-                amount,
-            )
-            scope = "server"
-        else:
-            counts = await self._activity_store.get_channel_user_counts(
-                ctx.guild.id,
-                self._activity_parent_channel_id(ctx.channel),
-                self._activity_thread_id(ctx.channel),
-                end_date_utc,
-                days,
-            )
-            counts = counts[:amount]
-            scope = "channel"
+        counts = await self._activity_store.get_guild_user_counts(
+            ctx.guild.id,
+            end_date_utc,
+            days,
+            amount,
+        )
+        scope = "server"
 
         if not counts:
             await ctx.send(

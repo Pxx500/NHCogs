@@ -325,13 +325,6 @@ includes message counts and overall percentages for each shown user.
 Shows the users who sent the most messages across the server in the retained date range.
 The result count must be between 1 and 20.
 
-```ini
-[p]nhmisc channelyapper 30 10
-```
-
-Shows the users who sent the most messages in the current channel. When used in a thread,
-the ranking covers that thread only. The result count must be between 1 and 20.
-
 ### User Command
 
 ```ini
