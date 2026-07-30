@@ -20,6 +20,58 @@ from tests.harness import (
 
 
 class DetectionAdmissionTests(DetectionPipelineTestCase):
+    async def test_bot_messages_are_registered_before_detection_filters(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                bot = _Bot()
+                bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
+                cog = honeypot.Honeypot(bot)
+                await cog._message_registry.initialize()
+                message = self._message(honeypot, attachment_count=0)
+                message.author.bot = True
+                message.pinned = False
+
+                await cog.on_message(message)
+
+                self.assertEqual(
+                    await cog._message_registry.recent_by_author(
+                        message.guild.id,
+                        message.author.id,
+                    ),
+                    (
+                        honeypot.MessageRecord(
+                            message_id=message.id,
+                            guild_id=message.guild.id,
+                            channel_id=message.channel.id,
+                            author_id=message.author.id,
+                            created_at=message.created_at,
+                            pinned=False,
+                            author_kind="bot",
+                            fingerprint=None,
+                        ),
+                    ),
+                )
+
+    async def test_registry_observation_failure_does_not_stop_detection(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                message = self._message(honeypot, attachment_count=0)
+                self._configure_public_boundary(
+                    cog,
+                    {"enabled": True, "logs_channel": None},
+                )
+                cog._observe_message = mock.AsyncMock(
+                    side_effect=RuntimeError("registry unavailable")
+                )
+                cog._record_operational_failure = mock.AsyncMock()
+                cog._collect_detection_signals = mock.AsyncMock(return_value=())
+
+                await cog.on_message(message)
+
+                cog._collect_detection_signals.assert_awaited_once()
+                cog._record_operational_failure.assert_awaited_once()
+
     async def test_malformed_enabled_setting_does_not_enter_detection_pipeline(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -29,6 +81,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 bot.is_mod = mock.AsyncMock(return_value=True)
                 bot.is_admin = mock.AsyncMock(return_value=False)
                 cog = honeypot.Honeypot(bot)
+                cog._observe_message = mock.AsyncMock()
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -413,7 +466,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 }
                 self._configure_public_boundary(crashed, config)
                 crashed._is_forward_purge_active.return_value = False
-                crashed._spam_suspicion_reasons = mock.Mock(
+                crashed._spam_suspicion_reasons = mock.AsyncMock(
                     return_value=["duplicate"]
                 )
                 with mock.patch.object(
@@ -434,6 +487,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 )
 
                 restarted = honeypot.Honeypot(_Bot())
+                await restarted._message_registry.initialize()
                 restarted.config = _Config()
                 restarted.config.register_guild(**config)
                 restarted.bot.get_guild = lambda guild_id: message.guild
@@ -775,7 +829,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 }
                 self._configure_public_boundary(cog, config)
                 cog._is_forward_purge_active.return_value = False
-                cog._spam_suspicion_reasons = mock.Mock(
+                cog._spam_suspicion_reasons = mock.AsyncMock(
                     side_effect=[[], ["duplicate"]]
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
@@ -851,7 +905,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 }
                 self._configure_public_boundary(cog, config)
                 cog._is_forward_purge_active.return_value = False
-                cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
+                cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
                 cog._execute_action = mock.AsyncMock(side_effect=execute)
                 cog._scan_all_case_message_images = mock.AsyncMock()
                 cog._publish_detection_case = mock.AsyncMock()

@@ -146,7 +146,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                 message = self._message(attachments=[object()] * 4)
                 message.delete = mock.AsyncMock()
                 cog._is_forward_purge_active = mock.Mock(return_value=True)
-                cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
+                cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
                 cog._firstpost_loaded_guilds.add(message.guild.id)
                 cog._initial_image_signal = mock.AsyncMock()
                 cog._send_review = mock.AsyncMock()
@@ -180,7 +180,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                 cog = honeypot.Honeypot(_Bot())
                 message = self._message(attachments=[object()] * 4)
                 cog._is_forward_purge_active = mock.Mock(return_value=False)
-                cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
+                cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
                 cog._firstpost_loaded_guilds.add(message.guild.id)
 
                 signals = await cog._collect_detection_signals(
@@ -205,7 +205,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                 cog = honeypot.Honeypot(_Bot())
                 message = self._message()
                 cog._is_forward_purge_active = mock.Mock(return_value=False)
-                cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
+                cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
 
                 signals = await cog._collect_detection_signals(
                     message,
@@ -222,7 +222,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                 cog = honeypot.Honeypot(_Bot())
                 message = self._message()
                 cog._is_forward_purge_active = mock.Mock(return_value=False)
-                cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
+                cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
 
                 signals = await cog._collect_detection_signals(
                     message,
@@ -243,7 +243,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                 cog = honeypot.Honeypot(_Bot())
                 message = self._message()
                 cog._is_forward_purge_active = mock.Mock(return_value=False)
-                cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
+                cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
                 cog._is_protected_member = mock.AsyncMock(return_value=True)
 
                 signals = await cog._collect_detection_signals(
@@ -547,7 +547,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                 )
                 message = self._message(attachments=[attachment])
                 cog._is_forward_purge_active = mock.Mock(return_value=False)
-                cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
+                cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
 
                 signals = await cog._collect_detection_signals(
                     message,

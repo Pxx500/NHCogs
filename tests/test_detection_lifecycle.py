@@ -23,6 +23,81 @@ from tests.harness import (
 
 
 class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_user_privacy_deletion_attempts_cases_after_registry_failure(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog._message_registry.forget_user = mock.AsyncMock(
+                    side_effect=RuntimeError("registry unavailable")
+                )
+                delete_cases = mock.AsyncMock()
+
+                with mock.patch.object(
+                    honeypot.review_publication,
+                    "_delete_detection_case_scope",
+                    new=delete_cases,
+                ):
+                    with self.assertRaises(RuntimeError):
+                        await cog.red_delete_data_for_user(
+                            requester="discord_deleted_user",
+                            user_id=42,
+                        )
+
+                delete_cases.assert_awaited_once_with(
+                    cog,
+                    cog._case_store.plan_user_case_deletion,
+                    42,
+                )
+
+    async def test_guild_privacy_deletion_attempts_cases_after_registry_failure(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog._message_registry.forget_guild = mock.AsyncMock(
+                    side_effect=RuntimeError("registry unavailable")
+                )
+                delete_cases = mock.AsyncMock()
+
+                with mock.patch.object(
+                    honeypot.review_publication,
+                    "_delete_detection_case_scope",
+                    new=delete_cases,
+                ):
+                    with self.assertRaises(RuntimeError):
+                        await cog.on_guild_remove(SimpleNamespace(id=84))
+
+                delete_cases.assert_awaited_once_with(
+                    cog,
+                    cog._case_store.plan_guild_case_deletion,
+                    84,
+                )
+
+    async def test_gateway_delete_and_pin_events_synchronize_message_registry(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog._message_registry = SimpleNamespace(
+                    forget=mock.AsyncMock(),
+                    forget_many=mock.AsyncMock(),
+                    set_pinned=mock.AsyncMock(),
+                    forget_channel=mock.AsyncMock(),
+                )
+
+                await cog.on_raw_message_delete(SimpleNamespace(message_id=10))
+                await cog.on_raw_bulk_message_delete(
+                    SimpleNamespace(message_ids={11, 12})
+                )
+                await cog.on_raw_message_edit(
+                    SimpleNamespace(message_id=13, data={"pinned": True})
+                )
+                channel = SimpleNamespace(id=14, guild=SimpleNamespace(id=15))
+                await cog.on_guild_channel_delete(channel)
+
+                cog._message_registry.forget.assert_awaited_once_with(10)
+                cog._message_registry.forget_many.assert_awaited_once_with({11, 12})
+                cog._message_registry.set_pinned.assert_awaited_once_with(13, True)
+                cog._message_registry.forget_channel.assert_awaited_once_with(15, 14)
+
     def test_fallback_keeps_diagnostic_commands_on_cog_and_exposes_implementations(self):
         implementation_names = (
             "config_dump",
@@ -585,6 +660,10 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(cog._detection_case_db_path, data_path / "detection_cases.sqlite")
                 self.assertEqual(cog._detection_case_files_path, data_path / "detection_case_files")
+                self.assertEqual(
+                    cog._message_registry.database_path,
+                    data_path / "message_registry.sqlite",
+                )
                 self.assertEqual(cog._case_views, {})
                 self.assertFalse(cog._detection_case_files_path.exists())
 
@@ -609,6 +688,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotEqual(initialize_thread_id, event_loop_thread_id)
                 self.assertTrue(evidence_directory_existed)
                 self.assertTrue(restore_called.is_set())
+                self.assertTrue(cog._message_registry.database_path.is_file())
                 for loop_name in (
                     "joinwatch_auto_role_loop",
                     "purge_cache_cleanup_loop",

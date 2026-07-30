@@ -93,7 +93,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 }
                 self._configure_public_boundary(cog, config)
                 cog._is_forward_purge_active.return_value = False
-                cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
+                cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
                 cog._scan_all_case_message_images = mock.AsyncMock()
                 cog._publish_detection_case = mock.AsyncMock()
                 cog._record_operational_failure = mock.AsyncMock(
@@ -799,7 +799,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 }
                 self._configure_public_boundary(cog, config)
                 cog._is_forward_purge_active.return_value = False
-                cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
+                cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
                 cog._scan_all_case_message_images = mock.AsyncMock()
                 cog._publish_detection_case = mock.AsyncMock()
 
@@ -1259,7 +1259,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                     side_effect=RuntimeError("admission failed")
                 )
                 cog._is_protected_member = mock.AsyncMock(return_value=False)
-                cog._record_recent_user_message = mock.Mock()
+                cog._observe_message = mock.AsyncMock()
                 cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
                 cog.config.guild = lambda guild: SimpleNamespace(
                     all=mock.AsyncMock(return_value={"enabled": True, "logs_channel": None})

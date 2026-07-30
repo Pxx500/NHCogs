@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import logging
 import re
+import sqlite3
 import typing
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -45,6 +46,7 @@ from .effects import (
     EffectStatus,
     ModerationEffectResult,
 )
+from .message_registry import MessageRecord
 from .operations import executor_operation_policy
 from .operations.context import (
     DETECTION_CACHED_PURGE_ATTEMPT_LIMIT,
@@ -82,6 +84,7 @@ PURGE_PERMISSION_REQUIREMENTS = (
 )
 POST_BAN_SWEEP_DELAY_SECONDS = 5
 PURGE_MIN_RETENTION_SECONDS = 60
+MESSAGE_REGISTRY_RETENTION_DAYS = 14
 PURGE_BACKWARD_MAX_SECONDS = 3600
 PURGE_FORWARD_MAX_SECONDS = 300
 SPAM_WINDOW_MIN_SECONDS = 3
@@ -92,13 +95,6 @@ SPAM_CHANNEL_MAX = 10
 GENERIC_ATTACHMENT_NAME_RE = re.compile(r"^(?:image(?: ?\(\d+\))?|\d+)$", re.IGNORECASE)
 ATTACHMENT_ONLY_SCAM_KEYWORDS = {"bro"}
 WORD_KEYWORD_RE = re.compile(r"^[\w ]+$")
-
-
-class MessageRef(typing.NamedTuple):
-    channel_id: int
-    message_id: int
-    created_at: datetime
-    fingerprint: str
 
 
 def missing_purge_permissions(permissions: object) -> list[str]:
@@ -153,6 +149,30 @@ def message_spam_fingerprint(message: discord.Message) -> str:
     )
     raw = repr((content, attachments))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+async def _observe_message(cog, message: discord.Message) -> None:
+    if message.webhook_id is not None:
+        author_kind = "webhook"
+        fingerprint = None
+    elif message.author.bot:
+        author_kind = "bot"
+        fingerprint = None
+    else:
+        author_kind = "member"
+        fingerprint = message_spam_fingerprint(message)
+    await cog._message_registry.observe(
+        MessageRecord(
+            message_id=message.id,
+            guild_id=message.guild.id,
+            channel_id=message.channel.id,
+            author_id=message.author.id,
+            created_at=message.created_at,
+            pinned=bool(getattr(message, "pinned", False)),
+            author_kind=author_kind,
+            fingerprint=fingerprint,
+        )
+    )
 
 
 async def _record_detection_stats(
@@ -318,12 +338,13 @@ def _missing_role_assignment_permission(cog, guild: discord.Guild, role: discord
 
 
 async def purge_cache_cleanup_loop(cog) -> None:
-    raw_configs = await cog.config.all_guilds()
-    guild_settings_by_id = {
-        int(guild_id): GuildSettings.from_mapping(raw_config)
-        for guild_id, raw_config in raw_configs.items()
-    }
-    _prune_purge_cache(cog, guild_settings_by_id)
+    try:
+        await cog._message_registry.prune(
+            datetime.now(timezone.utc) - timedelta(days=MESSAGE_REGISTRY_RETENTION_DAYS)
+        )
+    except sqlite3.Error:
+        log.exception("Message registry retention prune failed")
+    _prune_purge_cache(cog)
 
 
 async def detection_case_loop(cog) -> None:
@@ -831,12 +852,12 @@ def _signal_action(value: object, valid_actions: tuple[str, ...]) -> ActionInten
     return ActionIntent(typing.cast(str, action))
 
 
-def _spam_signal(
+async def _spam_signal(
     cog, message: discord.Message, guild_settings: GuildSettings
 ) -> DetectionSignal | None:
     if not guild_settings.spam_enabled:
         return None
-    reasons = cog._spam_suspicion_reasons(message, guild_settings)
+    reasons = await cog._spam_suspicion_reasons(message, guild_settings)
     if not reasons:
         return None
     return DetectionSignal(
@@ -1006,7 +1027,7 @@ async def _collect_detection_signals(
         if image is not None:
             signals.append(image)
     else:
-        spam = _spam_signal(cog, message, guild_settings)
+        spam = await _spam_signal(cog, message, guild_settings)
         if spam is not None:
             signals.append(spam)
         firstpost = await _firstpost_signal(cog, message, guild_settings)
@@ -1340,30 +1361,6 @@ async def _suspicion_reasons(
     return reasons
 
 
-def _record_recent_user_message(
-    cog, message: discord.Message, guild_settings: GuildSettings
-) -> None:
-    if message.guild is None:
-        return
-    refs = cog._recent_user_messages[message.guild.id][message.author.id]
-    refs.append(
-        MessageRef(
-            message.channel.id,
-            message.id,
-            message.created_at,
-            message_spam_fingerprint(message),
-        )
-    )
-    _prune_recent_user_messages(
-        cog,
-        message.guild.id,
-        message.author.id,
-        retention_seconds=_purge_retention_seconds(
-            guild_settings.purge_backward_seconds
-        ),
-    )
-
-
 def _purge_backward_seconds(value: int) -> int:
     return max(PURGE_MIN_RETENTION_SECONDS, min(value, PURGE_BACKWARD_MAX_SECONDS))
 
@@ -1381,38 +1378,8 @@ def _purge_retention_seconds(purge_backward_seconds: int | None = None) -> int:
     )
 
 
-def _prune_recent_user_messages(
-    cog, guild_id: int, user_id: int, *, retention_seconds: int = PURGE_MIN_RETENTION_SECONDS
-) -> None:
-    refs = cog._recent_user_messages.get(guild_id, {}).get(user_id)
-    if not refs:
-        return
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=retention_seconds)
-    while refs and refs[0].created_at < cutoff:
-        refs.popleft()
-    if not refs:
-        cog._recent_user_messages[guild_id].pop(user_id, None)
-
-
-def _prune_purge_cache(
-    cog,
-    settings_by_guild_id: dict[int, GuildSettings] | None = None,
-) -> None:
+def _prune_purge_cache(cog) -> None:
     now = datetime.now(timezone.utc)
-    for guild_id, users in list(cog._recent_user_messages.items()):
-        guild_settings = (settings_by_guild_id or {}).get(guild_id)
-        retention_seconds = _purge_retention_seconds(
-            guild_settings.purge_backward_seconds
-            if guild_settings is not None
-            else None
-        )
-        for user_id in list(users):
-            _prune_recent_user_messages(
-                cog,
-                guild_id, user_id, retention_seconds=retention_seconds
-            )
-        if not users:
-            cog._recent_user_messages.pop(guild_id, None)
     for guild_id, users in list(cog._hot_purge_users.items()):
         for user_id, expires_at in list(users.items()):
             if expires_at <= now:
@@ -1455,9 +1422,7 @@ def _get_cached_message_channel(
     return guild.get_channel(channel_id) or guild.get_thread(channel_id)
 
 
-async def _delete_cached_message_ref(
-    cog, guild: discord.Guild, user_id: int, ref: MessageRef
-) -> bool:
+async def _delete_cached_message_ref(cog, guild: discord.Guild, user_id: int, ref) -> bool:
     channel = cog._get_cached_message_channel(guild, ref.channel_id)
     if channel is None:
         return False
@@ -1466,8 +1431,10 @@ async def _delete_cached_message_ref(
         return False
     try:
         await get_partial_message(ref.message_id).delete()
+        await cog._message_registry.forget(ref.message_id)
         return True
     except discord.NotFound:
+        await cog._message_registry.forget(ref.message_id)
         return False
     except (discord.Forbidden, discord.HTTPException) as exc:
         await cog._record_operational_failure(
@@ -1493,15 +1460,14 @@ async def _delete_recent_cached_user_messages(
     exclude_message_id: int | None = None,
     retention_seconds: int = PURGE_MIN_RETENTION_SECONDS,
 ) -> int:
-    _prune_recent_user_messages(
-        cog,
-        guild.id, user_id, retention_seconds=retention_seconds
+    refs = await cog._message_registry.recent_by_author(
+        guild.id,
+        user_id,
+        since_utc=datetime.now(timezone.utc) - timedelta(seconds=retention_seconds),
+        exclude_message_id=exclude_message_id,
     )
-    refs = list(cog._recent_user_messages.get(guild.id, {}).get(user_id, ()))
     deleted = 0
     for ref in refs:
-        if exclude_message_id is not None and ref.message_id == exclude_message_id:
-            continue
         if await _delete_cached_message_ref(cog, guild, user_id, ref):
             deleted += 1
     return deleted
@@ -1583,15 +1549,14 @@ async def _purge_detection_case_cached_messages(
     retention_seconds = _purge_retention_seconds(
         guild_settings.purge_backward_seconds
     )
-    _prune_recent_user_messages(
-        cog,
-        guild.id, user_id, retention_seconds=retention_seconds
+    refs = await cog._message_registry.recent_by_author(
+        guild.id,
+        user_id,
+        since_utc=datetime.now(timezone.utc) - timedelta(seconds=retention_seconds),
+        exclude_message_id=exclude_message_id,
     )
-    refs = tuple(cog._recent_user_messages.get(guild.id, {}).get(user_id, ()))
     deleted = 0
     for ref in refs:
-        if exclude_message_id is not None and ref.message_id == exclude_message_id:
-            continue
         operation = await asyncio.to_thread(
             cog._case_store.ensure_operation,
             case_id,
@@ -1662,7 +1627,7 @@ def _firstpost_suspicion_reasons(
     return reasons
 
 
-def _spam_suspicion_reasons(
+async def _spam_suspicion_reasons(
     cog, message: discord.Message, guild_settings: GuildSettings
 ) -> list[str]:
     window_seconds = guild_settings.spam_window_seconds or 10
@@ -1676,16 +1641,29 @@ def _spam_suspicion_reasons(
         return []
     current_fingerprint = message_spam_fingerprint(message)
     cutoff = message.created_at - timedelta(seconds=window_seconds)
-    channel_ids = {
-        ref.channel_id
-        for ref in cog._recent_user_messages.get(message.guild.id, {}).get(message.author.id, ())
-        if ref.fingerprint == current_fingerprint and ref.created_at >= cutoff
-    }
-    if len(channel_ids) < min_channels:
+    try:
+        channel_count = await cog._message_registry.matching_channel_count(
+            message.guild.id,
+            message.author.id,
+            current_fingerprint,
+            since_utc=cutoff,
+        )
+    except Exception as error:
+        log.exception("Message registry spam lookup failed")
+        try:
+            await cog._record_operational_failure(
+                message.guild.id,
+                "message_registry_spam_lookup",
+                f"{type(error).__name__}: {error}",
+            )
+        except Exception:
+            log.exception("Failed to record message registry spam lookup error")
+        return []
+    if channel_count < min_channels:
         return []
     return [
         _("Same message in {count} channels within {seconds}s").format(
-            count=len(channel_ids),
+            count=channel_count,
             seconds=window_seconds,
         )
     ]
@@ -1810,6 +1788,20 @@ async def _execute_action(
 async def on_message(cog, message: discord.Message) -> None:
     if message.guild is None:
         return
+    if await cog.bot.cog_disabled_in_guild(cog, message.guild):
+        return
+    try:
+        await cog._observe_message(message)
+    except Exception as error:
+        log.exception("Message registry observation failed")
+        try:
+            await cog._record_operational_failure(
+                message.guild.id,
+                "message_registry_observation",
+                f"{type(error).__name__}: {error}",
+            )
+        except Exception:
+            log.exception("Failed to record message registry observation error")
     if message.author.bot:
         return
     if message.webhook_id is not None:
@@ -1826,8 +1818,6 @@ async def on_message(cog, message: discord.Message) -> None:
         admission_lock_owned = True
         try:
             queue_wait_ms = (perf_counter() - pipeline_started) * 1000
-            if await cog.bot.cog_disabled_in_guild(cog, message.guild):
-                return
             raw_config = await cog.config.guild(message.guild).all()
             guild_settings = GuildSettings.from_mapping(raw_config)
             if not guild_settings.enabled:
@@ -1837,7 +1827,6 @@ async def on_message(cog, message: discord.Message) -> None:
             )
             if await cog._is_protected_member(message.author, message.guild):
                 return
-            cog._record_recent_user_message(message, guild_settings)
             signals_started = perf_counter()
             signals = await cog._collect_detection_signals(
                 message, guild_settings

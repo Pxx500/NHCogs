@@ -20,6 +20,6 @@
     10,
     0
   ],
-    "end_user_data_statement": "This cog stores Discord user IDs with passively collected message-count aggregates for configurable short-term activity detail retention. Closed daily summary history stores aggregate counts and channel IDs, but not user IDs. Sticky roles store guild IDs, user IDs, and role IDs. Opt-in role analytics stores guild IDs, current member user IDs, bot flags, and current role IDs; usernames and display names are only resolved from Discord when creating an export and are not persisted. It does not store message content or message IDs."
+    "end_user_data_statement": "This cog stores Discord user IDs with passively collected message-count aggregates for configurable short-term activity detail retention. Closed daily summary history stores aggregate counts and channel IDs, but not user IDs. Sticky roles store guild IDs, user IDs, and role IDs. Opt-in role analytics stores guild IDs, current member user IDs, bot flags, and current role IDs; usernames and display names are only resolved from Discord when creating an export and are not persisted. It does not store message content or message IDs. Its cleanup commands add no NHMisc storage and delegate to Honeypot's separately disclosed message registry."
 }
 

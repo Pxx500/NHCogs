@@ -938,6 +938,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = honeypot.Honeypot(_Bot())
+                await cog._message_registry.initialize()
                 target = self._append_case(honeypot, cog, user_id=20, message_id=40)
                 retained = self._append_case(honeypot, cog, user_id=21, message_id=41)
                 target_directory = (
@@ -973,6 +974,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 bot = _Bot()
                 cog = honeypot.Honeypot(bot)
+                await cog._message_registry.initialize()
                 target = self._append_case(honeypot, cog, user_id=20, message_id=40)
                 cog._case_store.activate_projection_endpoint(
                     target.case.case_id,
@@ -1009,6 +1011,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 bot = _Bot()
                 cog = honeypot.Honeypot(bot)
+                await cog._message_registry.initialize()
                 target = self._append_case(honeypot, cog, user_id=20, message_id=40)
                 cog._case_store.activate_projection_endpoint(
                     target.case.case_id,
@@ -1073,6 +1076,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = honeypot.Honeypot(_Bot())
+                await cog._message_registry.initialize()
                 target = self._append_case(honeypot, cog, user_id=20, message_id=40)
                 target_directory = (
                     cog._detection_case_files_path
@@ -1112,6 +1116,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = honeypot.Honeypot(_Bot())
+                await cog._message_registry.initialize()
                 target = self._append_case(
                     honeypot, cog, guild_id=10, user_id=20, message_id=40
                 )

@@ -99,6 +99,9 @@ def load_nhmisc_modules():
     commands.admin_or_permissions = lambda **permissions: _tag(
         "admin_or_permissions", permissions
     )
+    commands.mod_or_permissions = lambda **permissions: _tag(
+        "mod_or_permissions", permissions
+    )
     commands.has_permissions = lambda **permissions: _tag(
         "required_permissions", permissions
     )

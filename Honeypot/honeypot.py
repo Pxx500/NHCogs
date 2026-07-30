@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import typing
-from collections import defaultdict, deque
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,6 +14,7 @@ from redbot.core.data_manager import cog_data_path
 from redbot.core.i18n import Translator, cog_i18n
 
 from . import (
+    cleanup,
     detection,
     detection_runtime,
     diagnostics,
@@ -29,6 +30,7 @@ from .case_review import (
     render_case,
     render_timeline,  # noqa: F401 - public module re-export
 )
+from .cleanup import CleanupResult
 from .console_dump import ReadOnlyLogBuffer
 from .detection_cases import (
     ActionIntent,
@@ -46,6 +48,10 @@ from .effects import ModerationEffectResult, punitive_effect_allowed
 from .firstpost_store import FirstPostStore
 from .image_detector import ImageSample
 from .imagescan_store import ImageScanStore
+from .message_registry import (
+    MessageRecord,  # noqa: F401 - public module re-export
+    MessageRegistry,
+)
 from .operations import OperationHandlerRegistry
 from .operations.context import (
     DETECTION_FAST_RETRY_LIMIT,
@@ -126,9 +132,6 @@ summarize_imagescan_sample_storage = imagescan.summarize_imagescan_sample_storag
 case_evidence_root = review_publication.case_evidence_root
 
 
-MessageRef = detection.MessageRef
-
-
 IMAGE_ATTACHMENT_EXTENSIONS = imagescan.IMAGE_ATTACHMENT_EXTENSIONS
 
 
@@ -161,10 +164,10 @@ class Honeypot(Cog):
         self._console_log_buffer = ReadOnlyLogBuffer()
         self._post_ban_sweep_tasks: set[asyncio.Task] = set()
         self._case_review_tasks: set[asyncio.Task] = set()
-        self._recent_user_messages: dict[int, dict[int, deque[MessageRef]]] = defaultdict(
-            lambda: defaultdict(deque)
-        )
         self._hot_purge_users: dict[int, dict[int, datetime]] = defaultdict(dict)
+        self._message_registry = MessageRegistry(
+            cog_data_path(self) / "message_registry.sqlite"
+        )
         self._firstpost_db_path = cog_data_path(self) / "firstpost_seen.sqlite"
         self._firstpost_store = FirstPostStore(self._firstpost_db_path)
         self._firstpost_db_lock: asyncio.Lock = asyncio.Lock()
@@ -203,17 +206,77 @@ class Honeypot(Cog):
     async def red_delete_data_for_user(
         self, *, requester: typing.Any, user_id: int
     ) -> None:
-        """Delete detection-case metadata and evidence associated with a Red user."""
-        await review_publication._delete_detection_case_scope(
-            self, self._case_store.plan_user_case_deletion, user_id
+        """Delete retained message and detection-case data for a Red user."""
+        await self._delete_retained_data_scope(
+            self._message_registry.forget_user,
+            self._case_store.plan_user_case_deletion,
+            user_id,
         )
 
     @commands.Cog.listener()
     async def on_guild_remove(self, guild: discord.Guild) -> None:
-        """Delete detection-case metadata and evidence when Red leaves a guild."""
-        await review_publication._delete_detection_case_scope(
-            self, self._case_store.plan_guild_case_deletion, guild.id
+        """Delete retained message and detection-case data when Red leaves a guild."""
+        await self._delete_retained_data_scope(
+            self._message_registry.forget_guild,
+            self._case_store.plan_guild_case_deletion,
+            guild.id,
         )
+
+    async def _delete_retained_data_scope(
+        self,
+        forget_scope: typing.Callable[[int], typing.Awaitable[typing.Any]],
+        plan_scope: typing.Callable[[int], typing.Any],
+        scope_id: int,
+    ) -> None:
+        failures: list[Exception] = []
+        try:
+            await forget_scope(scope_id)
+        except Exception as error:
+            failures.append(error)
+        try:
+            await review_publication._delete_detection_case_scope(
+                self,
+                plan_scope,
+                scope_id,
+            )
+        except Exception as error:
+            failures.append(error)
+        if not failures:
+            return
+        if len(failures) > 1:
+            log.error(
+                "Multiple retained-data deletion operations failed",
+                exc_info=(
+                    type(failures[1]),
+                    failures[1],
+                    failures[1].__traceback__,
+                ),
+            )
+        raise failures[0]
+
+    @commands.Cog.listener()
+    async def on_raw_message_delete(self, payload: typing.Any) -> None:
+        await self._message_registry.forget(payload.message_id)
+
+    @commands.Cog.listener()
+    async def on_raw_bulk_message_delete(self, payload: typing.Any) -> None:
+        await self._message_registry.forget_many(payload.message_ids)
+
+    @commands.Cog.listener()
+    async def on_raw_message_edit(self, payload: typing.Any) -> None:
+        if "pinned" in payload.data:
+            await self._message_registry.set_pinned(
+                payload.message_id,
+                bool(payload.data["pinned"]),
+            )
+
+    @commands.Cog.listener()
+    async def on_guild_channel_delete(self, channel: typing.Any) -> None:
+        await self._message_registry.forget_channel(channel.guild.id, channel.id)
+
+    @commands.Cog.listener()
+    async def on_thread_delete(self, thread: typing.Any) -> None:
+        await self._message_registry.forget_channel(thread.guild.id, thread.id)
 
     async def cog_after_invoke(self, ctx: commands.Context) -> commands.Context | None:
         """Finish command cleanup without AAA3A_utils' redundant success reaction."""
@@ -228,6 +291,16 @@ class Honeypot(Cog):
         if callable(getattr(task, "cancel", None)):
             task.cancel()
         return ctx
+
+    async def cleanup_channel(
+        self, ctx: commands.Context, count: int
+    ) -> CleanupResult:
+        return await cleanup.cleanup_channel(self, ctx, count)
+
+    async def cleanup_user(
+        self, ctx: commands.Context, user_id: int, count: int
+    ) -> CleanupResult:
+        return await cleanup.cleanup_user(self, ctx, user_id, count)
 
     async def _increment_stat(self, guild: discord.Guild, key: str, amount: int = 1) -> None:
         guild_config = getattr(self.config, "guild", None)
@@ -383,10 +456,8 @@ class Honeypot(Cog):
     ) -> list[str]:
         return await detection._suspicion_reasons(self, message, guild_settings)
 
-    def _record_recent_user_message(
-        self, message: discord.Message, guild_settings: GuildSettings
-    ) -> None:
-        return detection._record_recent_user_message(self, message, guild_settings)
+    async def _observe_message(self, message: discord.Message) -> None:
+        return await detection._observe_message(self, message)
 
     def _deactivate_forward_purge(self, guild_id: int, user_id: int) -> None:
         return detection._deactivate_forward_purge(self, guild_id, user_id)
@@ -434,10 +505,10 @@ class Honeypot(Cog):
             exclude_message_id=exclude_message_id,
         )
 
-    def _spam_suspicion_reasons(
+    async def _spam_suspicion_reasons(
         self, message: discord.Message, guild_settings: GuildSettings
     ) -> list[str]:
-        return detection._spam_suspicion_reasons(self, message, guild_settings)
+        return await detection._spam_suspicion_reasons(self, message, guild_settings)
 
     async def _punitive_effect_allowed(self, guild: discord.Guild) -> bool:
         return await punitive_effect_allowed(self, guild)
@@ -734,6 +805,7 @@ class Honeypot(Cog):
         await super().cog_load()
         await self._init_firstpost_seen_store()
         await self._init_imagescan_store()
+        await self._message_registry.initialize()
         self._detection_case_files_path.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(self._case_store.initialize)
         await self._run_detection_reconciliation()
