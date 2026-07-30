@@ -48,33 +48,29 @@ class ImageScanSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PurgeMaintenanceSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
-    async def test_malformed_retention_defaults_before_cache_cleanup(self):
+    async def test_maintenance_prunes_registry_at_fourteen_days(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = honeypot.Honeypot(_Bot())
-                cog._recent_user_messages[100][200].append(
-                    honeypot.MessageRef(
-                        300,
-                        400,
-                        datetime.now(timezone.utc) - timedelta(minutes=10),
-                        "fingerprint",
-                    )
-                )
-                cog.config = SimpleNamespace(
-                    all_guilds=mock.AsyncMock(
-                        return_value={
-                            "100": {
-                                "purge_backward_seconds": "999",
-                            }
-                        }
+                await cog._message_registry.initialize()
+                await cog._message_registry.observe(
+                    honeypot.MessageRecord(
+                        message_id=400,
+                        guild_id=100,
+                        channel_id=300,
+                        author_id=200,
+                        created_at=datetime.now(timezone.utc) - timedelta(days=15),
+                        pinned=False,
+                        author_kind="member",
+                        fingerprint="fingerprint",
                     )
                 )
 
                 await cog.purge_cache_cleanup_loop.function(cog)
 
-                self.assertNotIn(
-                    200,
-                    cog._recent_user_messages.get(100, {}),
+                self.assertEqual(
+                    await cog._message_registry.recent_by_author(100, 200),
+                    (),
                 )
 
 

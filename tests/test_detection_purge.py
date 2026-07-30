@@ -3,6 +3,7 @@ terminal states and the statistics they increment.
 """
 
 import asyncio
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -13,6 +14,23 @@ from tests.harness import DetectionPipelineTestCase, _Bot, _isolated_honeypot_mo
 
 
 class DetectionPurgeTests(DetectionPipelineTestCase):
+    async def test_registry_prune_failure_does_not_stop_other_cache_retention(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog._message_registry.prune = mock.AsyncMock(
+                    side_effect=sqlite3.OperationalError("database is locked")
+                )
+
+                with mock.patch.object(
+                    honeypot.detection,
+                    "_prune_purge_cache",
+                ) as prune_purge_cache:
+                    with self.assertLogs("red.Honeypot", level="ERROR"):
+                        await honeypot.detection.purge_cache_cleanup_loop(cog)
+
+                prune_purge_cache.assert_called_once_with(cog)
+
     async def test_background_message_recovery_purges_cached_messages_once(self):
         class SimulatedCrash(BaseException):
             pass
@@ -54,7 +72,7 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                 self._configure_public_boundary(cog, config)
                 del cog._purge_detection_case_cached_messages
                 cog._is_forward_purge_active.return_value = False
-                cog._spam_suspicion_reasons = mock.Mock(
+                cog._spam_suspicion_reasons = mock.AsyncMock(
                     side_effect=[[], ["duplicate"]]
                 )
                 cog._publish_detection_case = mock.AsyncMock()
@@ -191,7 +209,7 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                 }
                 self._configure_public_boundary(cog, config)
                 cog._is_forward_purge_active.return_value = False
-                cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
+                cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
                 cog._scan_all_case_message_images = mock.AsyncMock()
                 cog._publish_detection_case = mock.AsyncMock()
                 await cog.on_message(message)
@@ -295,9 +313,7 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                 cog._is_forward_purge_active = is_forward_purge_active
                 cog._scan_all_case_message_images = mock.AsyncMock()
                 cog._publish_detection_case = mock.AsyncMock()
-                cog._record_recent_user_message(
-                    previous, honeypot.GuildSettings.from_mapping(config)
-                )
+                await cog._observe_message(previous)
 
                 await cog.on_message(message)
                 await cog.on_message(follow_up)
@@ -350,7 +366,7 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                 self._configure_public_boundary(cog, config)
                 del cog._purge_detection_case_cached_messages
                 cog._is_forward_purge_active.return_value = False
-                cog._spam_suspicion_reasons = mock.Mock(
+                cog._spam_suspicion_reasons = mock.AsyncMock(
                     side_effect=[[], ["duplicate"]]
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
@@ -376,6 +392,14 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                 self.assertEqual(operation.attempts, 1)
                 self.assertIn(f":{prior.channel.id}:{prior.id}", operation.idempotency_key)
                 cached_delete.assert_awaited_once()
+                remaining_ids = {
+                    record.message_id
+                    for record in await cog._message_registry.recent_by_author(
+                        message.guild.id,
+                        message.author.id,
+                    )
+                }
+                self.assertNotIn(prior.id, remaining_ids)
 
     async def test_cached_purge_missing_channel_is_terminal_and_moderator_visible(self):
         with TemporaryDirectory() as directory:
@@ -510,7 +534,7 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                 self._configure_public_boundary(cog, config)
                 del cog._purge_detection_case_cached_messages
                 cog._is_forward_purge_active.return_value = False
-                cog._spam_suspicion_reasons = mock.Mock(
+                cog._spam_suspicion_reasons = mock.AsyncMock(
                     side_effect=[[], ["duplicate"]]
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
@@ -581,7 +605,7 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                 self._configure_public_boundary(cog, config)
                 del cog._purge_detection_case_cached_messages
                 cog._is_forward_purge_active.return_value = False
-                cog._spam_suspicion_reasons = mock.Mock(
+                cog._spam_suspicion_reasons = mock.AsyncMock(
                     side_effect=[[], ["duplicate"]]
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()

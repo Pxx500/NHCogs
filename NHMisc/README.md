@@ -13,6 +13,26 @@ is typed as `!nhmisc status`.
 [p]load NHMisc
 ```
 
+## Message Cleanup
+
+NHMisc exposes moderator commands backed by Honeypot's durable message registry:
+
+```ini
+[p]nhmisc cleanup <1-100>
+[p]nhmisc cleanup user <member-mention-or-id> <1-100>
+```
+
+The first command removes the requested number of recently observed, unpinned
+messages before the command in the current channel. The second removes a user's
+latest observed, unpinned messages across the server, including messages from a
+user who has already left. Both require Manage Messages or Red moderator status.
+
+Honeypot must be loaded. Cleanup uses only messages seen through Gateway events
+while Honeypot was active for the guild; it never fetches channel history, so it
+cannot remove messages sent while the bot was offline. The bot needs View Channel
+and Manage Messages in every affected channel. Red's top-level Cleanup cog can
+remain loaded because these commands are nested under `nhmisc`.
+
 ## Forum Autopin
 
 NHMisc can automatically pin the starter message of each new post in selected Discord
@@ -408,6 +428,9 @@ Administrators can disable role analytics and delete the guild's analytics data:
 
 Configuration commands require Manage Server or bot admin permissions.
 
+`[p]nhmisc cleanup` and its `user` subcommand require Manage Messages or Red moderator
+status. The bot needs View Channel and Manage Messages in affected channels.
+
 Sticky-role commands require Manage Server or bot admin permissions.
 
 Server-wide activity commands and moderator tools require Manage Messages, Manage
@@ -437,3 +460,6 @@ Role analytics stores guild IDs, current member user IDs, bot flags, and current
 IDs in a local SQLite database. It stores no usernames, display names, role-change
 history, or message data. Members who leave and roles that are deleted are removed from
 the current-state index. Disabling role analytics deletes the guild's analytics data.
+
+The cleanup commands do not add an NHMisc database. They delegate to Honeypot,
+which owns its 14-day Gateway-observed message registry and its privacy deletion.

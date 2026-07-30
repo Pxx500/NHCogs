@@ -48,4 +48,5 @@ async def cached_purge_handler(
             result=result.status.value,
             error=RuntimeError(result.error or result.status.value),
         )
+    await cog._message_registry.forget(int(message_id))
     return OperationOutcome(result=result.status.value)

@@ -38,6 +38,14 @@ def _decorator(*args, **kwargs):
     return wrapper
 
 
+def _permission_decorator(name, permissions):
+    def wrapper(function):
+        setattr(function, name, permissions)
+        return function
+
+    return wrapper
+
+
 class _Cog:
     @classmethod
     def listener(cls, *args, **kwargs):
@@ -57,6 +65,9 @@ def _load_nhmisc():
     commands.group = _decorator
     commands.guild_only = lambda: (lambda function: function)
     commands.admin_or_permissions = lambda **kwargs: (lambda function: function)
+    commands.mod_or_permissions = lambda **kwargs: _permission_decorator(
+        "mod_or_permissions", kwargs
+    )
     commands.has_permissions = lambda **kwargs: (lambda function: function)
     commands.cooldown = _decorator
     commands.BucketType = SimpleNamespace(user="user", guild="guild")

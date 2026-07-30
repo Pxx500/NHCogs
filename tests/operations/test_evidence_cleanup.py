@@ -16,6 +16,7 @@ class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _append_case(honeypot, cog, created_at, *, attachments=()):
         cog._case_store.initialize()
+        cog._message_registry._initialize_sync()
         return cog._case_store.append_message(
             honeypot.NewMessage(
                 guild_id=10,

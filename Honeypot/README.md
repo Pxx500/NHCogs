@@ -418,10 +418,24 @@ case rows and case evidence.
 Firstpost seen authors are stored separately in `firstpost_seen.sqlite` under
 the cog data directory so large servers do not inflate Red Config.
 
+Honeypot also maintains `message_registry.sqlite`, a 14-day index of guild,
+channel, author, and message IDs observed through Discord Gateway events. It
+stores the observation timestamp, latest observed pin state, author kind, and an
+optional one-way spam fingerprint. It does not store message content or
+attachments. The registry powers automatic purge, duplicate-spam detection, and
+NHMisc's cleanup commands. User-data deletion, guild removal, and channel or
+thread deletion remove the matching registry rows.
+
 ## Operational Notes
 
 - Bot owners, mods, admins, users with `Manage Server`, and users at or above the bot's top role are ignored
-- Purge uses a Gateway message cache; it does not scan channel history
+- Purge and `[p]nhmisc cleanup` use the durable Gateway-observed message registry;
+  they never scan channel history
+- `[p]nhmisc cleanup <1-100>` removes observed messages before the command in the
+  current channel; `[p]nhmisc cleanup user <mention-or-id> <1-100>` removes the
+  user's latest observed messages across the server
+- Cleanup covers only messages observed while Honeypot was loaded and enabled for
+  the guild, skips messages last observed as pinned, and requires NHMisc to be loaded
 - When using review mode, a mute role is used as temporary containment until moderators decide
 - `!honeypot doctor` checks all permissions and configuration at once
 - Stats are per-server
