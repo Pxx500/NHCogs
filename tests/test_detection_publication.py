@@ -733,7 +733,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                 del cog._handle_spam_message
                 cog._handle_firstpost_message.return_value = False
                 cog._handle_imagescan_detector_message.return_value = False
-                cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
+                cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
                 honeypot.discord.Color = SimpleNamespace(
                     red=lambda: 1, orange=lambda: 2, dark_red=lambda: 3, gold=lambda: 4
                 )
@@ -763,9 +763,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                 )
                 second.guild = first.guild
 
-                cog._record_recent_user_message(
-                    first, honeypot.GuildSettings.from_mapping(config)
-                )
+                await cog._observe_message(first)
                 task = asyncio.create_task(cog.on_message(second))
                 await asyncio.wait_for(publication_started.wait(), timeout=1)
                 try:

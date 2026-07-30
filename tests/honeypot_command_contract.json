@@ -11,10 +11,15 @@
     "honeypot debug reviewdump"
   ],
   "listeners": [
+    "on_guild_channel_delete",
     "on_guild_remove",
     "on_member_join",
     "on_member_update",
-    "on_message"
+    "on_message",
+    "on_raw_bulk_message_delete",
+    "on_raw_message_delete",
+    "on_raw_message_edit",
+    "on_thread_delete"
   ],
   "loops": [
     "detection_case_loop",

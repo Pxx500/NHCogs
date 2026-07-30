@@ -463,6 +463,7 @@ def _isolated_honeypot_modules(data_path: Path):
         command=lambda *args, **kwargs: _command_decorator("command", **kwargs),
         guild_only=lambda: (lambda function: function),
         admin_or_permissions=lambda **kwargs: (lambda function: function),
+        mod_or_permissions=lambda **kwargs: (lambda function: function),
         bot_has_guild_permissions=lambda **kwargs: (lambda function: function),
         permissions_check=lambda predicate: (lambda function: function),
     )
@@ -686,6 +687,7 @@ class DetectionPipelineTestCase(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _configure_public_boundary(cog, config):
         cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
+        cog._message_registry._initialize_sync()
         cog.config = SimpleNamespace(
             guild=lambda guild: SimpleNamespace(all=mock.AsyncMock(return_value=config)),
             guild_from_id=lambda guild_id: SimpleNamespace(

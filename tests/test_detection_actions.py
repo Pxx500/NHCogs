@@ -33,6 +33,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 bot.is_admin = mock.AsyncMock(return_value=False)
                 cog = honeypot.Honeypot(bot)
                 await asyncio.to_thread(cog._case_store.initialize)
+                await cog._message_registry.initialize()
                 config = {
                     "enabled": True,
                     "dry_run": "false",
@@ -77,6 +78,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 bot.is_admin = mock.AsyncMock(return_value=False)
                 cog = honeypot.Honeypot(bot)
                 await asyncio.to_thread(cog._case_store.initialize)
+                await cog._message_registry.initialize()
                 config = {
                     "enabled": True,
                     "dry_run": "false",
@@ -243,7 +245,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 }
                 self._configure_public_boundary(cog, config)
                 cog._is_forward_purge_active.return_value = False
-                cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
+                cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
                 cog._missing_action_permission = mock.Mock(return_value=None)
                 cog._ban_delete_message_seconds = mock.Mock(return_value=0)
                 cog._schedule_post_ban_sweep = mock.Mock()
@@ -531,7 +533,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 }
                 self._configure_public_boundary(cog, config)
                 cog._is_forward_purge_active.return_value = False
-                cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
+                cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
                 cog._missing_action_permission = mock.Mock(return_value=None)
                 cog._ban_delete_message_seconds = mock.Mock(return_value=0)
                 cog._schedule_post_ban_sweep = mock.Mock()
@@ -575,7 +577,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 }
                 self._configure_public_boundary(cog, config)
                 cog._is_forward_purge_active.return_value = False
-                cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
+                cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
                 cog._execute_action = mock.AsyncMock(
                     side_effect=AssertionError("missing member cannot be kicked")
                 )
@@ -614,7 +616,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                     }
                     self._configure_public_boundary(cog, config)
                     cog._is_forward_purge_active.return_value = False
-                    cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
+                    cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
                     cog._execute_action = mock.AsyncMock(
                         side_effect=AssertionError("dry-run cannot execute moderation")
                     )
@@ -782,7 +784,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 }
                 self._configure_public_boundary(cog, config)
                 cog._is_forward_purge_active.return_value = False
-                cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
+                cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
                 cog._execute_action = mock.AsyncMock(side_effect=fail_action)
                 cog._scan_all_case_message_images = mock.AsyncMock()
                 cog._publish_detection_case = mock.AsyncMock()
@@ -866,7 +868,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 }
                 self._configure_public_boundary(cog, config)
                 cog._is_forward_purge_active.return_value = False
-                cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
+                cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
                 cog._purge_detection_case_cached_messages = mock.AsyncMock(
                     side_effect=purge_cached
                 )
@@ -921,7 +923,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 }
                 self._configure_public_boundary(cog, config)
                 cog._is_forward_purge_active.return_value = False
-                cog._spam_suspicion_reasons = mock.Mock(return_value=["duplicate"])
+                cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
                 cog._execute_action = mock.AsyncMock(
                     return_value=_effect_result(
                         honeypot, None, "initial moderation failure"

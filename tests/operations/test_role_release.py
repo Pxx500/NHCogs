@@ -41,6 +41,7 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _append_case(honeypot, cog, created_at, *, message_id=40):
         cog._case_store.initialize()
+        cog._message_registry._initialize_sync()
         return cog._case_store.append_message(
             honeypot.NewMessage(
                 guild_id=10,

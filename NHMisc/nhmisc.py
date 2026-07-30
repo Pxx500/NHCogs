@@ -54,6 +54,7 @@ DEFAULT_VCJUMPING_VISIT_COUNT = 3
 DEFAULT_VCJUMPING_WINDOW_SECONDS = 30
 DEFAULT_ACTIVITY_DETAIL_RETENTION_DAYS = 31
 DEFAULT_ACTIVITY_HISTORY_RETENTION_DAYS = -1
+CLEANUP_RESPONSE_TTL_SECONDS = 10
 RETENTION_CONFIRMATION = "I understand"
 
 # Categorical chart hues in fixed rank order, arranged so neighboring bars use
@@ -322,6 +323,68 @@ class NHMisc(commands.Cog):
     async def nhmisc(self, ctx: commands.Context) -> None:
         """Configure NHMisc."""
         await ctx.send_help()
+
+    def _loaded_honeypot(self):
+        honeypot = self.bot.get_cog("Honeypot")
+        if honeypot is None:
+            return None
+        if not callable(getattr(honeypot, "cleanup_channel", None)):
+            return None
+        if not callable(getattr(honeypot, "cleanup_user", None)):
+            return None
+        return honeypot
+
+    @nhmisc.group(name="cleanup", invoke_without_command=True)
+    @commands.mod_or_permissions(manage_messages=True)
+    async def nhmisc_cleanup(self, ctx: commands.Context, count: int) -> None:
+        """Delete recently observed messages from the current channel."""
+        if not 1 <= count <= 100:
+            raise commands.UserFeedbackCheckFailure(
+                "Count must be between 1 and 100."
+            )
+        honeypot = self._loaded_honeypot()
+        if honeypot is None:
+            await ctx.send("Honeypot is not loaded, so cleanup is unavailable.")
+            return
+        try:
+            result = await honeypot.cleanup_channel(ctx, count)
+        except Exception:
+            log.exception("Honeypot channel cleanup failed")
+            await ctx.send("Cleanup failed. Check the bot logs and try again.")
+            return
+        await ctx.send(
+            result.public_message,
+            delete_after=CLEANUP_RESPONSE_TTL_SECONDS,
+        )
+
+    @nhmisc_cleanup.command(name="user")
+    @commands.mod_or_permissions(manage_messages=True)
+    async def nhmisc_cleanup_user(
+        self,
+        ctx: commands.Context,
+        target: str,
+        count: int,
+    ) -> None:
+        """Delete recently observed messages from a user across this server."""
+        if not 1 <= count <= 100:
+            raise commands.UserFeedbackCheckFailure(
+                "Count must be between 1 and 100."
+            )
+        user_id = self._parse_user_id(target)
+        honeypot = self._loaded_honeypot()
+        if honeypot is None:
+            await ctx.send("Honeypot is not loaded, so cleanup is unavailable.")
+            return
+        try:
+            result = await honeypot.cleanup_user(ctx, user_id, count)
+        except Exception:
+            log.exception("Honeypot user cleanup failed")
+            await ctx.send("Cleanup failed. Check the bot logs and try again.")
+            return
+        await ctx.send(
+            result.public_message,
+            delete_after=CLEANUP_RESPONSE_TTL_SECONDS,
+        )
 
     @nhmisc.group(name="roleanalytics", invoke_without_command=True)
     @commands.admin_or_permissions(administrator=True)
