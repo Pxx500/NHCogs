@@ -123,6 +123,39 @@ GATECOUNT_TIERS = (
         5,
     ),
 )
+TIER_DISTRIBUTION_ROLES = (
+    ("Stone", "stoneTier", 757571320945967205, 757645112267243541),
+    ("Steam", "steamTier", 757571510880829540, 757643319265460224),
+    ("LV", "lvTier", 757571726790885378, 630848584539045926),
+    ("MV", "mvTier", 757571761159012383, 631180331839389738),
+    ("HV", "hvTier", 757571801961201714, 631180321727184896),
+    ("EV", "evTier", 757571842209873991, 631180312906563594),
+    ("IV", "ivTier", 757571883268046908, 631180295252738099),
+    ("LuV", "luvTier", 757571961114066994, 631180266982866986),
+    ("ZPM", "zpmTier", 757571992500305962, 631180246837624852),
+    ("UV", "uvTier", 757572023269720078, 631180223928336414),
+    ("UHV", "uhvTier", 757572062058643467, 631180193960296478),
+    ("UEV", "uevTier", 888133083931476009, 631180158262575174),
+    ("UIV", "uivTier", 888133292547772467, 631180143385247754),
+    ("UMV", "umvTier", 888133377620852776, 631180120782012426),
+    ("UXV", "uxvTier", 888133463461494864, 631180089782042625),
+)
+
+
+def _require_guild_role(
+    guild,
+    role_id: int,
+    *,
+    report_name: str,
+    role_label: str,
+):
+    role = guild.get_role(role_id)
+    if role is None:
+        raise commands.UserFeedbackCheckFailure(
+            f"{report_name} is misconfigured: {role_label} role "
+            f"({role_id}) was not found in this server."
+        )
+    return role
 
 
 class NHMisc(commands.Cog):
@@ -541,19 +574,18 @@ class NHMisc(commands.Cog):
             gates_per_member,
         ) in GATECOUNT_TIERS:
             label = emoji_name.title()
-            sp_role = ctx.guild.get_role(sp_role_id)
-            if sp_role is None:
-                raise commands.UserFeedbackCheckFailure(
-                    f"Gatecount is misconfigured: {label} SP role "
-                    f"({sp_role_id}) was not found in this server."
-                )
-
-            mp_role = ctx.guild.get_role(mp_role_id)
-            if mp_role is None:
-                raise commands.UserFeedbackCheckFailure(
-                    f"Gatecount is misconfigured: {label} MP role "
-                    f"({mp_role_id}) was not found in this server."
-                )
+            sp_role = _require_guild_role(
+                ctx.guild,
+                sp_role_id,
+                report_name="Gatecount",
+                role_label=f"{label} SP",
+            )
+            mp_role = _require_guild_role(
+                ctx.guild,
+                mp_role_id,
+                report_name="Gatecount",
+                role_label=f"{label} MP",
+            )
 
             resolved_roles.append(
                 (emoji_name, emoji_id, sp_role, mp_role, gates_per_member)
@@ -587,6 +619,65 @@ class NHMisc(commands.Cog):
         )
         embed = discord.Embed(
             title="Current Gatecount:",
+            description="\n".join(lines),
+            color=discord.Color.blue(),
+        )
+        await ctx.send(embed=embed)
+
+    @commands.command(name="tierdistribution")
+    @commands.guild_only()
+    async def tierdistribution(self, ctx: commands.Context) -> None:
+        """Show the current distribution of progression and Gate player roles."""
+        resolved_tiers = []
+        for label, emoji_name, emoji_id, role_id in TIER_DISTRIBUTION_ROLES:
+            role = _require_guild_role(
+                ctx.guild,
+                role_id,
+                report_name="Tier distribution",
+                role_label=label,
+            )
+            resolved_tiers.append((emoji_name, emoji_id, role))
+
+        resolved_gate_roles = []
+        for emoji_name, _, sp_role_id, mp_role_id, _ in GATECOUNT_TIERS:
+            label = emoji_name.title()
+            resolved_gate_roles.append(
+                _require_guild_role(
+                    ctx.guild,
+                    sp_role_id,
+                    report_name="Tier distribution",
+                    role_label=f"{label} SP",
+                )
+            )
+            resolved_gate_roles.append(
+                _require_guild_role(
+                    ctx.guild,
+                    mp_role_id,
+                    report_name="Tier distribution",
+                    role_label=f"{label} MP",
+                )
+            )
+
+        tier_counts = [
+            (emoji_name, emoji_id, len(role.members))
+            for emoji_name, emoji_id, role in resolved_tiers
+        ]
+        gate_count = sum(len(role.members) for role in resolved_gate_roles)
+        total_count = sum(count for _, _, count in tier_counts) + gate_count
+
+        def format_count(count: int) -> str:
+            player_label = "Player" if count == 1 else "Players"
+            percentage = count / total_count * 100 if total_count else 0.0
+            return f"**{count} {player_label}** ({percentage:.1f}%)"
+
+        lines = [
+            f"<:{emoji_name}:{emoji_id}> — {format_count(count)}"
+            for emoji_name, emoji_id, count in tier_counts
+        ]
+        lines.append(f"Gate — {format_count(gate_count)}")
+
+        embed = discord.Embed(
+            title="Current Tier Distribution:",
             description="\n".join(lines),
             color=discord.Color.blue(),
         )
