@@ -242,7 +242,7 @@ class TierDistributionCommandTests(unittest.IsolatedAsyncioTestCase):
             "<:uivTier:888133292547772467> — **10 Players** (0.3%)\n"
             "<:umvTier:888133377620852776> — **4 Players** (0.1%)\n"
             "<:uxvTier:888133463461494864> — **1 Player** (0.0%)\n"
-            "Gate — **800 Players** (21.1%)",
+            "<:stargate:769315278953381928> — **800 Players** (21.1%)",
         )
 
     async def test_tierdistribution_handles_an_empty_distribution(self):
@@ -303,7 +303,11 @@ class TierDistributionCommandTests(unittest.IsolatedAsyncioTestCase):
             "<:stoneTier:757571320945967205> — **1 Player** (33.3%)",
             description,
         )
-        self.assertTrue(description.endswith("Gate — **2 Players** (66.7%)"))
+        self.assertTrue(
+            description.endswith(
+                "<:stargate:769315278953381928> — **2 Players** (66.7%)"
+            )
+        )
 
 
 if __name__ == "__main__":

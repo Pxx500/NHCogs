@@ -85,11 +85,13 @@ CHATCHART_OTHER_COLOR = "#898781"
 DEFAULT_CHATCHART_USER_COUNT = 10
 MAX_CHATCHART_USER_COUNT = 20
 DISCORD_SNOWFLAKE_MIN_DIGITS = 15
+STARGATE_EMOJI_NAME = "stargate"
+STARGATE_EMOJI_ID = 769315278953381928
 GATECOUNT_TIERS = (
     # For each tier: emoji ID, SP role ID, MP role ID, gates per member
     (
-        "stargate",
-        769315278953381928,
+        STARGATE_EMOJI_NAME,
+        STARGATE_EMOJI_ID,
         1348078501986828461,
         798700443979087892,
         1,
@@ -674,7 +676,10 @@ class NHMisc(commands.Cog):
             f"<:{emoji_name}:{emoji_id}> — {format_count(count)}"
             for emoji_name, emoji_id, count in tier_counts
         ]
-        lines.append(f"Gate — {format_count(gate_count)}")
+        lines.append(
+            f"<:{STARGATE_EMOJI_NAME}:{STARGATE_EMOJI_ID}> — "
+            f"{format_count(gate_count)}"
+        )
 
         embed = discord.Embed(
             title="Current Tier Distribution:",
