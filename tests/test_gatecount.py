@@ -110,9 +110,8 @@ class _Guild:
     def __init__(self, role_members):
         self._roles = {}
         for role_id, members in role_members.items():
-            if isinstance(members, int):
-                members = [object()] * members
-            self._roles[role_id] = SimpleNamespace(members=list(members))
+            normalized_members = [object()] * members if isinstance(members, int) else members
+            self._roles[role_id] = SimpleNamespace(members=list(normalized_members))
 
     def get_role(self, role_id):
         return self._roles.get(role_id)
@@ -247,7 +246,7 @@ class TierDistributionCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tierdistribution_handles_an_empty_distribution(self):
         ctx = SimpleNamespace(
-            guild=_Guild({role_id: 0 for role_id in ALL_DISTRIBUTION_ROLE_IDS}),
+            guild=_Guild(dict.fromkeys(ALL_DISTRIBUTION_ROLE_IDS, 0)),
             send=mock.AsyncMock(),
         )
 
