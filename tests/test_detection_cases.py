@@ -790,6 +790,53 @@ class DetectionCaseStoreTests(unittest.TestCase):
             (1, 1, 1, 1),
         )
 
+    def test_new_message_reuses_case_scoped_initial_operation_without_rollback(self):
+        created_at = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
+        initial_operations = (
+            (
+                OperationType.MESSAGE_PROCESS,
+                "message-process:{case_id}:{sequence}",
+            ),
+            (OperationType.ROLE_APPLY, "role-apply:{case_id}:55"),
+        )
+        first = self.store.append_message(
+            self.message(40, created_at), (), initial_operations
+        )
+
+        try:
+            second = self.store.append_message(
+                self.message(41, created_at + timedelta(seconds=1)),
+                (),
+                initial_operations,
+            )
+        except sqlite3.IntegrityError as exc:
+            self.fail(f"second case message rolled back: {exc}")
+
+        snapshot = self.store.get_case(first.case.case_id)
+        message_process_operations = tuple(
+            operation
+            for operation in snapshot.operations
+            if operation.operation_type == OperationType.MESSAGE_PROCESS
+        )
+        role_apply_operations = tuple(
+            operation
+            for operation in snapshot.operations
+            if operation.operation_type == OperationType.ROLE_APPLY
+        )
+
+        self.assertTrue(second.message_created)
+        self.assertEqual(
+            tuple(message.message_id for message in snapshot.messages), (40, 41)
+        )
+        self.assertEqual(
+            tuple(
+                operation.message_sequence
+                for operation in message_process_operations
+            ),
+            (1, 2),
+        )
+        self.assertEqual(len(role_apply_operations), 1)
+
     def test_containment_updates_are_atomic_and_refuse_second_delete_transition(self):
         created_at = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
         attachment = NewAttachment(
