@@ -179,29 +179,44 @@ GATE_MEMBERSHIP_COUNTS = {
 }
 
 ALL_DISTRIBUTION_ROLE_IDS = tuple(TIER_COUNTS) + tuple(GATE_MEMBERSHIP_COUNTS)
+GATE_ROLE_IDS = tuple(GATE_MEMBERSHIP_COUNTS)
 
 
 class GatecountCommandTests(unittest.IsolatedAsyncioTestCase):
-    async def test_gatecount_shows_weighted_sp_mp_and_combined_totals(self):
-        ctx = SimpleNamespace(
-            guild=_Guild(
-                {
-                    1348078501986828461: 168,
-                    798700443979087892: 509,
-                    1348078496710135888: 16,
-                    1004822424921055233: 68,
-                    1348078483384958986: 3,
-                    1097204292198338692: 13,
-                    1442209676530815076: 0,
-                    1442209801374269682: 3,
-                    1442208051212976158: 0,
-                    1437811360208781406: 3,
-                }
-            ),
-            send=mock.AsyncMock(),
+    async def run_gatecount(self, role_members):
+        guild = _Guild(role_members)
+        temp_dir = TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        store = nhmisc.RoleAnalyticsStore(
+            Path(temp_dir.name) / "role_analytics.sqlite"
         )
+        await store.initialize()
+        generation = await store.next_generation(guild.id)
+        members = guild.analytics_members()
+        await store.write_generation(guild.id, generation, members)
+        await store.activate_generation(guild.id, generation, len(members))
 
-        await nhmisc.NHMisc.gatecount(None, ctx)
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._role_analytics_store = store
+        ctx = SimpleNamespace(guild=guild, send=mock.AsyncMock())
+        await nhmisc.NHMisc.gatecount(cog, ctx)
+        return ctx
+
+    async def test_gatecount_shows_weighted_sp_mp_and_combined_totals(self):
+        ctx = await self.run_gatecount(
+            {
+                1348078501986828461: 168,
+                798700443979087892: 509,
+                1348078496710135888: 16,
+                1004822424921055233: 68,
+                1348078483384958986: 3,
+                1097204292198338692: 13,
+                1442209676530815076: 0,
+                1442209801374269682: 3,
+                1442208051212976158: 0,
+                1437811360208781406: 3,
+            }
+        )
 
         ctx.send.assert_awaited_once()
         embed = ctx.send.await_args.kwargs["embed"]
@@ -216,6 +231,53 @@ class GatecountCommandTests(unittest.IsolatedAsyncioTestCase):
             "<:gatelympics:1442208021655715961> — **0 SP** | **3 MP**\n\n"
             "**Total Gates: 209 SP + 711 MP = 920**",
         )
+
+    async def test_gatecount_counts_each_member_only_in_their_highest_sp_and_mp_tier(
+        self,
+    ):
+        member = object()
+        role_members = dict.fromkeys(GATE_ROLE_IDS, ())
+        role_members.update(
+            {
+                1348078501986828461: (member,),
+                1348078496710135888: (member,),
+                798700443979087892: (member,),
+                1097204292198338692: (member,),
+            }
+        )
+
+        ctx = await self.run_gatecount(role_members)
+
+        embed = ctx.send.await_args.kwargs["embed"]
+        self.assertEqual(
+            embed.description,
+            "<:stargate:769315278953381928> — **0 SP** | **0 MP**\n"
+            "<:gatefinity:1004823049037680702> — **1 SP** | **0 MP**\n"
+            "<:gateforce:1097204464919773205> — **0 SP** | **1 MP**\n"
+            "<:gateflower:1442240252084486286> — **0 SP** | **0 MP**\n"
+            "<:gatelympics:1442208021655715961> — **0 SP** | **0 MP**\n\n"
+            "**Total Gates: 2 SP + 3 MP = 5**",
+        )
+
+    async def test_gatecount_reports_unavailable_role_analytics(self):
+        guild = _Guild(dict.fromkeys(GATE_ROLE_IDS, ()))
+        temp_dir = TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        store = nhmisc.RoleAnalyticsStore(
+            Path(temp_dir.name) / "role_analytics.sqlite"
+        )
+        await store.initialize()
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._role_analytics_store = store
+        ctx = SimpleNamespace(guild=guild, send=mock.AsyncMock())
+
+        with self.assertRaisesRegex(
+            commands.UserFeedbackCheckFailure,
+            r"^Role analytics are unavailable right now$",
+        ):
+            await nhmisc.NHMisc.gatecount(cog, ctx)
+
+        ctx.send.assert_not_awaited()
 
     async def test_gatecount_rejects_missing_role_without_sending_an_embed(self):
         ctx = SimpleNamespace(

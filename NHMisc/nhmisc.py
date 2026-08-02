@@ -566,7 +566,7 @@ class NHMisc(commands.Cog):
     @commands.command(name="gatecount")
     @commands.guild_only()
     async def gatecount(self, ctx: commands.Context) -> None:
-        """Show the current SP and MP gate role member counts."""
+        """Show member counts for the highest SP and MP gate tiers."""
         resolved_roles = []
         for (
             emoji_name,
@@ -593,18 +593,23 @@ class NHMisc(commands.Cog):
                 (emoji_name, emoji_id, sp_role, mp_role, gates_per_member)
             )
 
+        sp_counts = await self._count_highest_role_buckets(
+            ctx.guild,
+            tuple(sp_role.id for _, _, sp_role, _, _ in resolved_roles),
+        )
+        mp_counts = await self._count_highest_role_buckets(
+            ctx.guild,
+            tuple(mp_role.id for _, _, _, mp_role, _ in resolved_roles),
+        )
+
         lines = []
         sp_gate_total = 0
         mp_gate_total = 0
         for (
-            emoji_name,
-            emoji_id,
-            sp_role,
-            mp_role,
-            gates_per_member,
-        ) in resolved_roles:
-            sp_count = len(sp_role.members)
-            mp_count = len(mp_role.members)
+            (emoji_name, emoji_id, _, _, gates_per_member),
+            sp_count,
+            mp_count,
+        ) in zip(resolved_roles, sp_counts, mp_counts, strict=True):
             lines.append(
                 f"<:{emoji_name}:{emoji_id}> — "
                 f"**{sp_count} SP** | **{mp_count} MP**"
