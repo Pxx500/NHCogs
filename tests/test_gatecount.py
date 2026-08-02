@@ -3,6 +3,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
@@ -106,15 +107,44 @@ def _load_nhmisc():
 nhmisc, discord, commands = _load_nhmisc()
 
 
+class _Role:
+    def __init__(self, role_id, members):
+        self.id = role_id
+        self.members = list(members)
+
+    def is_default(self):
+        return False
+
+
 class _Guild:
     def __init__(self, role_members):
-        self._roles = {}
+        self.id = 123
+        self.default_role = SimpleNamespace(id=0)
+        self._roles: dict[int, _Role] = {}
         for role_id, members in role_members.items():
-            normalized_members = [object()] * members if isinstance(members, int) else members
-            self._roles[role_id] = SimpleNamespace(members=list(normalized_members))
+            normalized_members = (
+                [object() for _ in range(members)]
+                if isinstance(members, int)
+                else members
+            )
+            self._roles[role_id] = _Role(role_id, normalized_members)
 
     def get_role(self, role_id):
         return self._roles.get(role_id)
+
+    def analytics_members(self):
+        memberships = {}
+        for role_id, role in self._roles.items():
+            for member in role.members:
+                memberships.setdefault(member, set()).add(role_id)
+        return [
+            SimpleNamespace(
+                user_id=user_id,
+                is_bot=False,
+                role_ids=tuple(sorted(role_ids)),
+            )
+            for user_id, role_ids in enumerate(memberships.values(), start=1)
+        ]
 
 
 TIER_COUNTS = {
@@ -212,13 +242,29 @@ class GatecountCommandTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TierDistributionCommandTests(unittest.IsolatedAsyncioTestCase):
-    async def test_tierdistribution_shows_ordered_player_percentages(self):
-        ctx = SimpleNamespace(
-            guild=_Guild({**TIER_COUNTS, **GATE_MEMBERSHIP_COUNTS}),
-            send=mock.AsyncMock(),
+    async def run_tierdistribution(self, role_members):
+        guild = _Guild(role_members)
+        temp_dir = TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        store = nhmisc.RoleAnalyticsStore(
+            Path(temp_dir.name) / "role_analytics.sqlite"
         )
+        await store.initialize()
+        generation = await store.next_generation(guild.id)
+        members = guild.analytics_members()
+        await store.write_generation(guild.id, generation, members)
+        await store.activate_generation(guild.id, generation, len(members))
 
-        await nhmisc.NHMisc.tierdistribution(None, ctx)
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._role_analytics_store = store
+        ctx = SimpleNamespace(guild=guild, send=mock.AsyncMock())
+        await nhmisc.NHMisc.tierdistribution(cog, ctx)
+        return ctx
+
+    async def test_tierdistribution_shows_ordered_player_percentages(self):
+        ctx = await self.run_tierdistribution(
+            {**TIER_COUNTS, **GATE_MEMBERSHIP_COUNTS}
+        )
 
         ctx.send.assert_awaited_once()
         embed = ctx.send.await_args.kwargs["embed"]
@@ -245,12 +291,9 @@ class TierDistributionCommandTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_tierdistribution_handles_an_empty_distribution(self):
-        ctx = SimpleNamespace(
-            guild=_Guild(dict.fromkeys(ALL_DISTRIBUTION_ROLE_IDS, 0)),
-            send=mock.AsyncMock(),
+        ctx = await self.run_tierdistribution(
+            dict.fromkeys(ALL_DISTRIBUTION_ROLE_IDS, 0)
         )
-
-        await nhmisc.NHMisc.tierdistribution(None, ctx)
 
         description = ctx.send.await_args.kwargs["embed"].description
         lines = description.splitlines()
@@ -287,24 +330,46 @@ class TierDistributionCommandTests(unittest.IsolatedAsyncioTestCase):
 
         ctx.send.assert_not_awaited()
 
-    async def test_tierdistribution_counts_duplicate_role_memberships(self):
+    async def test_tierdistribution_reports_unavailable_role_analytics(self):
+        guild = _Guild(dict.fromkeys(ALL_DISTRIBUTION_ROLE_IDS, 0))
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._role_analytics_store = SimpleNamespace(
+            count_matching=mock.AsyncMock(
+                side_effect=nhmisc.AnalyticsUnavailableError("not ready")
+            )
+        )
+        ctx = SimpleNamespace(guild=guild, send=mock.AsyncMock())
+
+        with self.assertRaisesRegex(
+            commands.UserFeedbackCheckFailure,
+            "^Role analytics are unavailable right now$",
+        ):
+            await nhmisc.NHMisc.tierdistribution(cog, ctx)
+
+        ctx.send.assert_not_awaited()
+
+    async def test_tierdistribution_uses_highest_tier_and_unique_gate_members(self):
+        stone_player = object()
         shared_player = object()
         members = {role_id: [] for role_id in ALL_DISTRIBUTION_ROLE_IDS}
-        members[757645112267243541] = [shared_player]
+        members[757645112267243541] = [stone_player, shared_player]
+        members[631180331839389738] = [shared_player]
         members[1348078501986828461] = [shared_player]
         members[798700443979087892] = [shared_player]
-        ctx = SimpleNamespace(guild=_Guild(members), send=mock.AsyncMock())
-
-        await nhmisc.NHMisc.tierdistribution(None, ctx)
+        ctx = await self.run_tierdistribution(members)
 
         description = ctx.send.await_args.kwargs["embed"].description
         self.assertIn(
             "<:stoneTier:757571320945967205> — **1 Player** (33.3%)",
             description,
         )
+        self.assertIn(
+            "<:mvTier:757571761159012383> — **1 Player** (33.3%)",
+            description,
+        )
         self.assertTrue(
             description.endswith(
-                "<:stargate:769315278953381928> — **2 Players** (66.7%)"
+                "<:stargate:769315278953381928> — **1 Player** (33.3%)"
             )
         )
 

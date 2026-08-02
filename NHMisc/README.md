@@ -120,11 +120,11 @@ command can be used by any server member.
 [p]tierdistribution
 ```
 
-Shows the current player-role distribution from Stone through UXV, plus an
-estimated Gate player count. Each row includes its percentage of all displayed
-role memberships. The Gate estimate sums the configured SP and MP gate-role
-member counts without applying gate weights, so players with multiple configured
-roles may be counted more than once. This command can be used by any server member.
+Shows the current player-role distribution from Stone through UXV, plus the
+number of players with a configured Gate role. Each player contributes only to
+their highest progression tier and at most once to Gate. Percentages use the
+total of those displayed progression and Gate counts. This command can be used
+by any server member.
 
 ## Sticky Roles
 
