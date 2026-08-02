@@ -114,6 +114,18 @@ Defaults:
 Shows the current SP and MP role member counts for each configured gate tier. This
 command can be used by any server member.
 
+## Tier Distribution
+
+```ini
+[p]tierdistribution
+```
+
+Shows the current player-role distribution from Stone through UXV, plus the
+number of players with a configured Gate role. Each player contributes only to
+their highest progression tier and at most once to Gate. Percentages use the
+total of those displayed progression and Gate counts. This command can be used
+by any server member.
+
 ## Sticky Roles
 
 Sticky roles remember selected roles when a member leaves and restore them when the
