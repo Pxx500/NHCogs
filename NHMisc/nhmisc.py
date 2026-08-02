@@ -531,7 +531,7 @@ class NHMisc(commands.Cog):
     @commands.command(name="gatecount")
     @commands.guild_only()
     async def gatecount(self, ctx: commands.Context) -> None:
-        """Show the current SP and MP gate role member counts."""
+        """Show member counts for the highest SP and MP gate tiers."""
         resolved_roles = []
         for (
             emoji_name,
@@ -559,18 +559,23 @@ class NHMisc(commands.Cog):
                 (emoji_name, emoji_id, sp_role, mp_role, gates_per_member)
             )
 
+        sp_counts = await self._count_highest_role_buckets(
+            ctx.guild,
+            tuple(sp_role.id for _, _, sp_role, _, _ in resolved_roles),
+        )
+        mp_counts = await self._count_highest_role_buckets(
+            ctx.guild,
+            tuple(mp_role.id for _, _, _, mp_role, _ in resolved_roles),
+        )
+
         lines = []
         sp_gate_total = 0
         mp_gate_total = 0
         for (
-            emoji_name,
-            emoji_id,
-            sp_role,
-            mp_role,
-            gates_per_member,
-        ) in resolved_roles:
-            sp_count = len(sp_role.members)
-            mp_count = len(mp_role.members)
+            (emoji_name, emoji_id, _, _, gates_per_member),
+            sp_count,
+            mp_count,
+        ) in zip(resolved_roles, sp_counts, mp_counts, strict=True):
             lines.append(
                 f"<:{emoji_name}:{emoji_id}> — "
                 f"**{sp_count} SP** | **{mp_count} MP**"
@@ -1576,6 +1581,36 @@ class NHMisc(commands.Cog):
 
         predicate_sql, parameters = compile_role_expression(parsed)
         return parsed, predicate_sql, parameters
+
+    async def _count_role_expression(
+        self, guild: discord.Guild, expression: str
+    ) -> int:
+        _, predicate_sql, parameters = self._prepare_role_expression(
+            guild, expression
+        )
+        try:
+            return await self._role_analytics_store.count_matching(
+                guild.id, predicate_sql, parameters
+            )
+        except AnalyticsUnavailableError as error:
+            raise commands.UserFeedbackCheckFailure(
+                "Role analytics are unavailable right now"
+            ) from error
+
+    async def _count_highest_role_buckets(
+        self, guild: discord.Guild, ordered_role_ids: tuple[int, ...]
+    ) -> list[int]:
+        counts = []
+        for index, role_id in enumerate(ordered_role_ids):
+            higher_role_ids = ordered_role_ids[index + 1 :]
+            expression = str(role_id)
+            if higher_role_ids:
+                higher_roles = " OR ".join(
+                    str(higher_role_id) for higher_role_id in higher_role_ids
+                )
+                expression = f"{expression} AND NOT ({higher_roles})"
+            counts.append(await self._count_role_expression(guild, expression))
+        return counts
 
     def _require_private_role_export_channel(self, ctx: commands.Context) -> None:
         everyone_permissions = ctx.channel.permissions_for(ctx.guild.default_role)

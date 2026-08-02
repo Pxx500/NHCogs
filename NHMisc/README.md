@@ -111,8 +111,9 @@ Defaults:
 [p]gatecount
 ```
 
-Shows the current SP and MP role member counts for each configured gate tier. This
-command can be used by any server member.
+Shows the current SP and MP member counts for each configured gate tier using the
+role analytics database. Each member is counted only in their highest SP tier and,
+separately, their highest MP tier. This command can be used by any server member.
 
 ## Sticky Roles
 
