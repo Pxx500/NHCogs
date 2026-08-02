@@ -1215,7 +1215,7 @@ class DetectionCaseStore:
                     case_id=case_id, sequence=sequence
                 )
                 connection.execute(
-                    """INSERT INTO detection_operations
+                    """INSERT OR IGNORE INTO detection_operations
                        (operation_id, case_id, message_sequence, operation_type, status, attempts,
                         created_at, updated_at, retry_at, last_error, idempotency_key)
                        VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, NULL, NULL, ?)""",
