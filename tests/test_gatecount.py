@@ -174,7 +174,7 @@ TIER_COUNTS = {
 GATE_MEMBERSHIP_COUNTS = dict(
     zip(
         nhmisc.GATE_TIER_ROLE_IDS,
-        (200, 100, 75, 75, 75, 0, 0, 0, 0, 0),
+        (200, 100, 75, 75, 75, 0),
         strict=True,
     )
 )
@@ -207,7 +207,7 @@ class GatecountCommandTests(RoleAnalyticsCommandTestCase):
         tier_roles = tuple(nhmisc.GATE_TIER_ROLE_IDS)
         singleplayer = object()
         boolean_only = object()
-        tier_ten = object()
+        tier_six = object()
         members = {role_id: [] for role_id in tier_roles}
         members[nhmisc.SINGLEPLAYER_GATE_COMPLETED_ROLE_ID] = [
             singleplayer,
@@ -215,7 +215,7 @@ class GatecountCommandTests(RoleAnalyticsCommandTestCase):
         ]
         members[tier_roles[0]] = [singleplayer]
         members[tier_roles[2]] = [singleplayer]
-        members[tier_roles[9]] = [tier_ten]
+        members[tier_roles[5]] = [tier_six]
 
         ctx = await self.run_command(nhmisc.NHMisc.gatecount, members)
 
@@ -228,11 +228,7 @@ class GatecountCommandTests(RoleAnalyticsCommandTestCase):
             f"<@&{tier_roles[2]}> — **1 player**\n"
             f"<@&{tier_roles[3]}> — **0 players**\n"
             f"<@&{tier_roles[4]}> — **0 players**\n"
-            f"<@&{tier_roles[5]}> — **0 players**\n"
-            f"<@&{tier_roles[6]}> — **0 players**\n"
-            f"<@&{tier_roles[7]}> — **0 players**\n"
-            f"<@&{tier_roles[8]}> — **0 players**\n"
-            f"<@&{tier_roles[9]}> — **1 player**",
+            f"<@&{tier_roles[5]}> — **1 player**",
         )
         self.assertEqual(send_kwargs["allowed_mentions"], "no-mentions")
         self.assertNotIn("Tier", send_kwargs["embed"].description)
