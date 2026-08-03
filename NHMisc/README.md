@@ -113,8 +113,9 @@ Defaults:
 
 Shows how many members completed Singleplayer and the member count for every linear
 Gate tier from 1 through 10 using the role analytics database. Each member is counted
-only in their highest Gate tier, and tiers with no members are still displayed. This
-command can be used by any server member.
+only in their highest Gate tier, and tiers with no members are still displayed. Each
+count is labeled with a non-pinging role mention. This command can be used by any
+server member.
 
 ## Tier Distribution
 
