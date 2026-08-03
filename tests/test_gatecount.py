@@ -183,7 +183,9 @@ GATE_ROLE_IDS = tuple(GATE_MEMBERSHIP_COUNTS)
 
 
 class GatecountCommandTests(unittest.IsolatedAsyncioTestCase):
-    async def run_gatecount(self, role_members):
+    async def run_gatecount(
+        self, role_members, schema_state=nhmisc.SchemaState.LEGACY
+    ):
         guild = _Guild(role_members)
         temp_dir = TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
@@ -198,9 +200,52 @@ class GatecountCommandTests(unittest.IsolatedAsyncioTestCase):
 
         cog = object.__new__(nhmisc.NHMisc)
         cog._role_analytics_store = store
+        cog._gate_migration_store = SimpleNamespace(
+            get_schema_state=mock.AsyncMock(return_value=schema_state)
+        )
         ctx = SimpleNamespace(guild=guild, send=mock.AsyncMock())
         await nhmisc.NHMisc.gatecount(cog, ctx)
         return ctx
+
+    async def test_current_gatecount_shows_boolean_and_highest_linear_tiers(self):
+        tier_roles = tuple(nhmisc.TARGET_TIER_ROLE_IDS)
+        singleplayer = object()
+        boolean_only = object()
+        tier_ten = object()
+        members = {role_id: [] for role_id in tier_roles}
+        members[nhmisc.SINGLEPLAYER_COMPLETED_ROLE_ID] = [
+            singleplayer,
+            boolean_only,
+        ]
+        members[tier_roles[0]] = [singleplayer]
+        members[tier_roles[2]] = [singleplayer]
+        members[tier_roles[9]] = [tier_ten]
+
+        ctx = await self.run_gatecount(members, nhmisc.SchemaState.CURRENT)
+
+        description = ctx.send.await_args.kwargs["embed"].description
+        self.assertEqual(
+            description,
+            "Singleplayer completed — **2**\n"
+            "Tier 1 — **0**\n"
+            "Tier 2 — **0**\n"
+            "Tier 3 — **1**\n"
+            "Tier 4 — **0**\n"
+            "Tier 5 — **0**\n"
+            "Tier 6 — **0**\n"
+            "Tier 7 — **0**\n"
+            "Tier 8 — **0**\n"
+            "Tier 9 — **0**\n"
+            "Tier 10 — **1**",
+        )
+        self.assertNotIn("Total Gates", description)
+
+    async def test_gatecount_is_unavailable_while_migrating(self):
+        ctx = await self.run_gatecount({}, nhmisc.SchemaState.MIGRATING)
+
+        ctx.send.assert_awaited_once_with(
+            "Gate reports are unavailable during migration"
+        )
 
     async def test_gatecount_shows_weighted_sp_mp_and_combined_totals(self):
         ctx = await self.run_gatecount(
@@ -269,6 +314,11 @@ class GatecountCommandTests(unittest.IsolatedAsyncioTestCase):
         await store.initialize()
         cog = object.__new__(nhmisc.NHMisc)
         cog._role_analytics_store = store
+        cog._gate_migration_store = SimpleNamespace(
+            get_schema_state=mock.AsyncMock(
+                return_value=nhmisc.SchemaState.LEGACY
+            )
+        )
         ctx = SimpleNamespace(guild=guild, send=mock.AsyncMock())
 
         with self.assertRaisesRegex(
@@ -290,6 +340,12 @@ class GatecountCommandTests(unittest.IsolatedAsyncioTestCase):
             ),
             send=mock.AsyncMock(),
         )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._gate_migration_store = SimpleNamespace(
+            get_schema_state=mock.AsyncMock(
+                return_value=nhmisc.SchemaState.LEGACY
+            )
+        )
 
         with self.assertRaisesRegex(
             commands.UserFeedbackCheckFailure,
@@ -298,13 +354,15 @@ class GatecountCommandTests(unittest.IsolatedAsyncioTestCase):
                 r"\(1004822424921055233\) was not found in this server\.$"
             ),
         ):
-            await nhmisc.NHMisc.gatecount(None, ctx)
+            await nhmisc.NHMisc.gatecount(cog, ctx)
 
         ctx.send.assert_not_awaited()
 
 
 class TierDistributionCommandTests(unittest.IsolatedAsyncioTestCase):
-    async def run_tierdistribution(self, role_members):
+    async def run_tierdistribution(
+        self, role_members, schema_state=nhmisc.SchemaState.LEGACY
+    ):
         guild = _Guild(role_members)
         temp_dir = TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
@@ -319,9 +377,39 @@ class TierDistributionCommandTests(unittest.IsolatedAsyncioTestCase):
 
         cog = object.__new__(nhmisc.NHMisc)
         cog._role_analytics_store = store
+        cog._gate_migration_store = SimpleNamespace(
+            get_schema_state=mock.AsyncMock(return_value=schema_state)
+        )
         ctx = SimpleNamespace(guild=guild, send=mock.AsyncMock())
         await nhmisc.NHMisc.tierdistribution(cog, ctx)
         return ctx
+
+    async def test_current_tierdistribution_counts_linear_gate_roles_not_boolean(self):
+        gate_member = object()
+        boolean_only = object()
+        members = {role_id: [] for role_id in TIER_COUNTS}
+        members.update({role_id: [] for role_id in nhmisc.TARGET_TIER_ROLE_IDS})
+        members[nhmisc.TARGET_TIER_ROLE_IDS[0]] = [gate_member]
+        members[nhmisc.TARGET_TIER_ROLE_IDS[4]] = [gate_member]
+        members[nhmisc.SINGLEPLAYER_COMPLETED_ROLE_ID] = [gate_member, boolean_only]
+
+        ctx = await self.run_tierdistribution(
+            members, nhmisc.SchemaState.CURRENT
+        )
+
+        description = ctx.send.await_args.kwargs["embed"].description
+        self.assertTrue(
+            description.endswith(
+                "<:stargate:769315278953381928> — **1 Player** (100.0%)"
+            )
+        )
+
+    async def test_tierdistribution_is_unavailable_while_migrating(self):
+        ctx = await self.run_tierdistribution({}, nhmisc.SchemaState.MIGRATING)
+
+        ctx.send.assert_awaited_once_with(
+            "Gate reports are unavailable during migration"
+        )
 
     async def test_tierdistribution_shows_ordered_player_percentages(self):
         ctx = await self.run_tierdistribution(
@@ -368,13 +456,19 @@ class TierDistributionCommandTests(unittest.IsolatedAsyncioTestCase):
         counts = {**TIER_COUNTS, **GATE_MEMBERSHIP_COUNTS}
         del counts[757645112267243541]
         ctx = SimpleNamespace(guild=_Guild(counts), send=mock.AsyncMock())
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._gate_migration_store = SimpleNamespace(
+            get_schema_state=mock.AsyncMock(
+                return_value=nhmisc.SchemaState.LEGACY
+            )
+        )
 
         with self.assertRaisesRegex(
             commands.UserFeedbackCheckFailure,
             r"^Tier distribution is misconfigured: Stone role "
             r"\(757645112267243541\) was not found in this server\.$",
         ):
-            await nhmisc.NHMisc.tierdistribution(None, ctx)
+            await nhmisc.NHMisc.tierdistribution(cog, ctx)
 
         ctx.send.assert_not_awaited()
 
@@ -382,13 +476,19 @@ class TierDistributionCommandTests(unittest.IsolatedAsyncioTestCase):
         counts = {**TIER_COUNTS, **GATE_MEMBERSHIP_COUNTS}
         del counts[1004822424921055233]
         ctx = SimpleNamespace(guild=_Guild(counts), send=mock.AsyncMock())
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._gate_migration_store = SimpleNamespace(
+            get_schema_state=mock.AsyncMock(
+                return_value=nhmisc.SchemaState.LEGACY
+            )
+        )
 
         with self.assertRaisesRegex(
             commands.UserFeedbackCheckFailure,
             r"^Tier distribution is misconfigured: Gatefinity MP role "
             r"\(1004822424921055233\) was not found in this server\.$",
         ):
-            await nhmisc.NHMisc.tierdistribution(None, ctx)
+            await nhmisc.NHMisc.tierdistribution(cog, ctx)
 
         ctx.send.assert_not_awaited()
 
@@ -398,6 +498,11 @@ class TierDistributionCommandTests(unittest.IsolatedAsyncioTestCase):
         cog._role_analytics_store = SimpleNamespace(
             count_matching=mock.AsyncMock(
                 side_effect=nhmisc.AnalyticsUnavailableError("not ready")
+            )
+        )
+        cog._gate_migration_store = SimpleNamespace(
+            get_schema_state=mock.AsyncMock(
+                return_value=nhmisc.SchemaState.LEGACY
             )
         )
         ctx = SimpleNamespace(guild=guild, send=mock.AsyncMock())

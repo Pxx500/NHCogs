@@ -50,6 +50,17 @@ class FakeFile:
         self.data = fp.read()
 
 
+class FakeEmbed:
+    def __init__(self, *, title=None, description=None, color=None):
+        self.title = title
+        self.description = description
+        self.color = color
+        self.fields = []
+
+    def add_field(self, *, name, value, inline=True):
+        self.fields.append(types.SimpleNamespace(name=name, value=value, inline=inline))
+
+
 ALLOWED_MENTIONS_NONE = object()
 
 
@@ -65,7 +76,7 @@ def load_nhmisc_module():
     discord.Color = types.SimpleNamespace(
         blue=lambda: 0, green=lambda: 0, orange=lambda: 0, red=lambda: 0
     )
-    discord.Embed = object
+    discord.Embed = FakeEmbed
 
     commands = types.ModuleType("redbot.core.commands")
     commands.Cog = FakeCog
@@ -163,6 +174,7 @@ class FakeMember:
 
 class FakeChannel:
     def __init__(self, guild, *, public=False, bot_permissions=None):
+        self.id = 321
         self.guild = guild
         self.public = public
         self.bot_permissions = bot_permissions or types.SimpleNamespace(
@@ -215,9 +227,11 @@ def make_context(guild):
 class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
     def make_cog(self):
         cog = object.__new__(nhmisc.NHMisc)
-        cog.bot = types.SimpleNamespace(guilds=[])
+        cog.bot = types.SimpleNamespace(guilds=[], wait_for=mock.AsyncMock())
         cog._role_analytics_store = mock.AsyncMock()
         cog._role_analytics = mock.Mock()
+        cog._gate_migration_store = mock.AsyncMock()
+        cog._gate_migration = mock.AsyncMock()
         return cog
 
     def test_commands_require_manage_messages_and_expected_cooldowns(self):
@@ -232,6 +246,150 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             nhmisc.NHMisc.roleusers.callback.cooldown, (1, 10, "guild")
         )
+
+    def test_gate_migration_commands_are_hidden_guild_only_manage_messages(self):
+        command_names = (
+            "checklegacystargateusers",
+            "gatemigration",
+            "gatemigration_apply",
+            "gatemigration_status",
+            "gatemigration_resume",
+            "gatemigration_verify",
+            "gatemigration_restore",
+            "gatemigration_export",
+            "gatemigration_finalize",
+        )
+        for command_name in command_names:
+            command = getattr(nhmisc.NHMisc, command_name)
+            self.assertTrue(command.attrs["hidden"])
+            self.assertEqual(
+                command.callback.required_permissions,
+                {"manage_messages": True},
+            )
+            self.assertTrue(command.callback.guild_only)
+
+    async def test_gate_migration_root_does_not_expose_subcommands_through_help(self):
+        guild = FakeGuild()
+        ctx = make_context(guild)
+        ctx.send_help = mock.AsyncMock()
+        cog = self.make_cog()
+
+        await nhmisc.NHMisc.gatemigration.callback(cog, ctx)
+
+        ctx.send_help.assert_not_awaited()
+        ctx.send.assert_awaited_once_with(
+            "Gate migration operation required",
+            allowed_mentions=ALLOWED_MENTIONS_NONE,
+        )
+
+    async def test_gate_migration_apply_rejects_early_confirm_then_accepts_new_one(self):
+        guild = FakeGuild()
+        for tier, role_id in enumerate(nhmisc.TARGET_TIER_ROLE_IDS, start=1):
+            role = FakeRole(role_id)
+            role.name = f"Legacy role {tier}"
+            guild.roles[role_id] = role
+        ctx = make_context(guild)
+        cog = self.make_cog()
+        prepared = types.SimpleNamespace(run=types.SimpleNamespace(run_id="generated"))
+        cog._gate_migration.prepare_run.return_value = prepared
+        cog._gate_migration.publish_preparation.return_value = object()
+        cog._gate_migration.apply_run.return_value = types.SimpleNamespace(
+            completed=4,
+            departed=1,
+            skipped_unmodifiable=2,
+            tier_role_counts=(200, 20, 3, 0, 0, 0, 0, 0, 0, 1),
+        )
+        early = types.SimpleNamespace(
+            author=ctx.author,
+            channel=ctx.channel,
+            guild=ctx.guild,
+            content="confirm",
+        )
+        valid = types.SimpleNamespace(
+            author=ctx.author,
+            channel=ctx.channel,
+            guild=ctx.guild,
+            content="  CONFIRM  ",
+        )
+        cog.bot.wait_for.side_effect = [early, valid]
+
+        with mock.patch.object(
+            nhmisc.time, "monotonic", side_effect=[0, 1, 2, 10, 11]
+        ):
+            await nhmisc.NHMisc.gatemigration_apply.callback(cog, ctx)
+
+        sent_text = [
+            call.args[0]
+            for call in ctx.send.await_args_list
+            if call.args and isinstance(call.args[0], str)
+        ]
+        self.assertIn("READ BOUBOU READ (8 seconds left)", sent_text)
+        cog._gate_migration_store.transition_run.assert_awaited_once_with(
+            mock.ANY, nhmisc.RunState.CONFIRMED
+        )
+        cog._gate_migration.apply_run.assert_awaited_once()
+        completion = ctx.send.await_args_list[-1]
+        embed = completion.kwargs["embed"]
+        self.assertEqual(embed.title, "Stargate migration complete")
+        self.assertEqual(embed.description, "4 completed, 1 departed, 2 skipped")
+        self.assertEqual(embed.fields[0].name, "Stargate role membership")
+        self.assertIn("Tier 1 — Legacy role 1: 200 players", embed.fields[0].value)
+        self.assertIn("Tier 2 — Legacy role 2: 20 players", embed.fields[0].value)
+        self.assertIn("Tier 10 — Legacy role 10: 1 player", embed.fields[0].value)
+        self.assertEqual(completion.kwargs["allowed_mentions"], ALLOWED_MENTIONS_NONE)
+
+    async def test_gate_migration_resume_sends_completion_membership_embed(self):
+        guild = FakeGuild()
+        ctx = make_context(guild)
+        cog = self.make_cog()
+        cog._gate_migration_store.get_active_run.return_value = types.SimpleNamespace(
+            run_id="existing-run",
+            state=nhmisc.RunState.APPLY_FAILED,
+        )
+        cog._gate_migration.apply_run.return_value = types.SimpleNamespace(
+            completed=8,
+            departed=0,
+            skipped_unmodifiable=0,
+            tier_role_counts=(7, 1, 0, 0, 0, 0, 0, 0, 0, 0),
+        )
+
+        await nhmisc.NHMisc.gatemigration_resume.callback(cog, ctx)
+
+        cog._gate_migration.apply_run.assert_awaited_once()
+        completion = ctx.send.await_args_list[-1]
+        embed = completion.kwargs["embed"]
+        self.assertEqual(embed.title, "Stargate migration complete")
+        self.assertIn("Tier 1: 7 players", embed.fields[0].value)
+        self.assertIn("Tier 2: 1 player", embed.fields[0].value)
+
+    async def test_gate_migration_ignores_unrecognized_messages_until_confirm(self):
+        guild = FakeGuild()
+        ctx = make_context(guild)
+        cog = self.make_cog()
+        ignored = types.SimpleNamespace(
+            author=ctx.author,
+            channel=ctx.channel,
+            guild=ctx.guild,
+            content="not the confirmation",
+        )
+        valid = types.SimpleNamespace(
+            author=ctx.author,
+            channel=ctx.channel,
+            guild=ctx.guild,
+            content="confirm",
+        )
+        cog.bot.wait_for.side_effect = [ignored, valid]
+
+        with mock.patch.object(
+            nhmisc.time, "monotonic", side_effect=[0, 1, 11, 11]
+        ):
+            confirmed = await cog._await_gate_migration_confirmation(ctx, "run-confirm")
+
+        self.assertTrue(confirmed)
+        cog._gate_migration_store.transition_run.assert_awaited_once_with(
+            "run-confirm", nhmisc.RunState.CONFIRMED
+        )
+        ctx.send.assert_not_awaited()
 
     async def test_rolestats_allows_public_channel_and_never_pings_roles(self):
         cog = self.make_cog()
