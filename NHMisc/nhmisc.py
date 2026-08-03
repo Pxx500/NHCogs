@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import math
 import time
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as datetime_time
 
@@ -26,6 +28,22 @@ from .activity_storage import (
     UserStats,
 )
 from .forum_autopin import ForumAutopinService
+from .gate_migration import (
+    SINGLEPLAYER_COMPLETED_ROLE_ID,
+    TARGET_TIER_ROLE_IDS,
+)
+from .gate_migration_service import (
+    ApplyProgress,
+    GateMigrationService,
+    MigrationPreflightError,
+)
+from .gate_migration_store import (
+    GateMigrationStore,
+    MemberStatus,
+    RestoreStatus,
+    RunState,
+    SchemaState,
+)
 from .role_analytics_service import (
     FullMemberRequestCooldownError,
     MemberIntentRequiredError,
@@ -196,20 +214,31 @@ class NHMisc(commands.Cog):
         self._role_analytics = RoleAnalyticsService(
             self.bot, self._role_analytics_store, logger=log
         )
+        self._gate_migration_store = GateMigrationStore(
+            cog_data_path(self) / "gate_migration.sqlite"
+        )
+        self._gate_migration = GateMigrationService(
+            self.bot, self._role_analytics, self._gate_migration_store
+        )
         self._activity_task: asyncio.Task | None = None
         self._role_analytics_startup_task: asyncio.Task | None = None
         self._role_analytics_daily_task: asyncio.Task | None = None
+        self._gate_migration_startup_task: asyncio.Task | None = None
 
     async def cog_load(self) -> None:
         await self._activity_store.initialize()
         await self._sticky_roles.initialize()
         await self._role_analytics_store.initialize()
+        await self._gate_migration_store.initialize()
         self._activity_task = asyncio.create_task(self._activity_midnight_loop())
         self._role_analytics_startup_task = asyncio.create_task(
             self._role_analytics_startup_reconcile()
         )
         self._role_analytics_daily_task = asyncio.create_task(
             self._role_analytics_daily_loop()
+        )
+        self._gate_migration_startup_task = asyncio.create_task(
+            self._expire_unconfirmed_gate_migrations()
         )
 
     def cog_unload(self) -> None:
@@ -221,6 +250,8 @@ class NHMisc(commands.Cog):
             self._role_analytics_startup_task.cancel()
         if self._role_analytics_daily_task is not None:
             self._role_analytics_daily_task.cancel()
+        if self._gate_migration_startup_task is not None:
+            self._gate_migration_startup_task.cancel()
         self._role_analytics.cancel()
 
     async def configured_sticky_role_ids(self, guild_id: int) -> frozenset[int]:
@@ -232,6 +263,27 @@ class NHMisc(commands.Cog):
             await self._role_analytics.reconcile_enabled_guilds(tuple(self.bot.guilds))
         except Exception:
             log.exception("Failed to reconcile role analytics on startup")
+
+    async def _expire_unconfirmed_gate_migrations(self) -> None:
+        await self.bot.wait_until_ready()
+        for guild in tuple(self.bot.guilds):
+            try:
+                run = await self._gate_migration_store.get_active_run(int(guild.id))
+                if run is None:
+                    continue
+                if run.state is RunState.PREPARING:
+                    await self._gate_migration_store.transition_run(
+                        run.run_id, RunState.CANCELLED
+                    )
+                elif run.state is RunState.PREPARED:
+                    await self._gate_migration_store.transition_run(
+                        run.run_id, RunState.EXPIRED
+                    )
+            except Exception:
+                log.exception(
+                    "Failed to expire unconfirmed gate migration for guild %s",
+                    guild.id,
+                )
 
     async def _role_analytics_daily_loop(self) -> None:
         await self.bot.wait_until_ready()
@@ -350,6 +402,257 @@ class NHMisc(commands.Cog):
         await ctx.send(
             f"{len(user_ids)} users match: {render_role_expression(parsed)}",
             file=discord.File(io.BytesIO(payload.data), filename=payload.filename),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @commands.command(name="checklegacystargateusers", hidden=True)
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def checklegacystargateusers(self, ctx: commands.Context) -> None:
+        self._require_private_role_export_channel(ctx)
+        try:
+            result = await self._gate_migration.audit_legacy_users(ctx.guild)
+        except MigrationPreflightError as error:
+            raise commands.UserFeedbackCheckFailure(error.public_message) from error
+        if not result.members:
+            await ctx.send(
+                "No users have duplicate legacy Stargate roles",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        lines = [
+            (
+                f"{member.snapshot.username} ({member.snapshot.user_id}) — "
+                "SP duplicates: "
+                f"{self._format_inert_role_ids(member.duplicate_sp_role_ids)}; "
+                "MP duplicates: "
+                f"{self._format_inert_role_ids(member.duplicate_mp_role_ids)}"
+            )
+            for member in result.members
+        ]
+        for page in self._paginate_gate_migration_lines(lines):
+            await ctx.send(page, allowed_mentions=discord.AllowedMentions.none())
+        await ctx.send(
+            file=discord.File(
+                io.BytesIO(result.csv_data), filename="legacy-stargate-users.csv"
+            ),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @commands.group(
+        name="gatemigration", invoke_without_command=True, hidden=True
+    )
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def gatemigration(self, ctx: commands.Context) -> None:
+        self._require_private_role_export_channel(ctx)
+        await ctx.send(
+            "Gate migration operation required",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @gatemigration.command(name="apply", hidden=True)
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def gatemigration_apply(self, ctx: commands.Context) -> None:
+        self._require_private_role_export_channel(ctx)
+        run_id = uuid.uuid4().hex
+        prepared = None
+        try:
+            prepared = await self._gate_migration.prepare_run(
+                ctx.guild,
+                run_id=run_id,
+                operator_id=int(ctx.author.id),
+                channel_id=int(ctx.channel.id),
+                created_at=datetime.now(timezone.utc).isoformat(),
+                max_part_size=int(ctx.guild.filesize_limit),
+            )
+            await self._gate_migration.publish_preparation(
+                prepared,
+                send_attachment=lambda filename, data: ctx.send(
+                    file=discord.File(io.BytesIO(data), filename=filename),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                ),
+                send_text=lambda content: ctx.send(
+                    content, allowed_mentions=discord.AllowedMentions.none()
+                ),
+            )
+        except MigrationPreflightError as error:
+            raise commands.UserFeedbackCheckFailure(error.public_message) from error
+        except Exception as error:
+            if prepared is not None:
+                try:
+                    await self._gate_migration_store.transition_run(
+                        run_id, RunState.CANCELLED
+                    )
+                except Exception:
+                    log.exception(
+                        "Failed to cancel incomplete gate migration preparation"
+                    )
+            log.exception("Gate migration preparation failed for guild %s", ctx.guild.id)
+            raise commands.UserFeedbackCheckFailure(
+                "Gate migration preparation failed"
+            ) from error
+
+        await ctx.send(
+            "Type `confirm` after reading the complete migration summary",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        if not await self._await_gate_migration_confirmation(ctx, run_id):
+            return
+        try:
+            result = await self._gate_migration.apply_run(
+                ctx.guild,
+                run_id,
+                progress_callback=lambda progress: self._send_gate_migration_progress(
+                    ctx, progress
+                ),
+            )
+        except MigrationPreflightError as error:
+            raise commands.UserFeedbackCheckFailure(error.public_message) from error
+        await ctx.send(
+            embed=self._build_gate_migration_apply_embed(ctx.guild, result),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @gatemigration.command(name="status", hidden=True)
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def gatemigration_status(self, ctx: commands.Context) -> None:
+        self._require_private_role_export_channel(ctx)
+        run = await self._active_gate_migration_run(ctx)
+        status = await self._gate_migration_feedback(
+            self._gate_migration.status_run(ctx.guild, run.run_id)
+        )
+        member_counts = ", ".join(
+            f"{member_status.value}: {status.member_counts[member_status]}"
+            for member_status in MemberStatus
+        )
+        restore_counts = ", ".join(
+            f"{restore_status.value}: {status.restore_counts[restore_status]}"
+            for restore_status in RestoreStatus
+        )
+        target_distribution = ", ".join(
+            f"Tier {tier}: {count}"
+            for tier, count in enumerate(status.target_distribution, start=1)
+        )
+        await ctx.send(
+            "\n".join(
+                (
+                    f"State: {status.run.state.value}",
+                    f"Schema: {status.schema_state.value}",
+                    f"Backup verified: {'yes' if status.backup_verified else 'no'}",
+                    f"Members: {member_counts}",
+                    f"Restore: {restore_counts}",
+                    f"Current tiers: {target_distribution}",
+                    f"Latest failure: {status.latest_failure or 'none'}",
+                )
+            ),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @gatemigration.command(name="resume", hidden=True)
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def gatemigration_resume(self, ctx: commands.Context) -> None:
+        self._require_private_role_export_channel(ctx)
+        run = await self._active_gate_migration_run(ctx)
+        if run.state is RunState.PREPARED:
+            raise commands.UserFeedbackCheckFailure(
+                "The gate migration has not been confirmed"
+            )
+        result = await self._gate_migration_feedback(
+            self._gate_migration.apply_run(
+                ctx.guild,
+                run.run_id,
+                progress_callback=lambda progress: self._send_gate_migration_progress(
+                    ctx, progress
+                ),
+            )
+        )
+        await ctx.send(
+            embed=self._build_gate_migration_apply_embed(ctx.guild, result),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @gatemigration.command(name="verify", hidden=True)
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def gatemigration_verify(self, ctx: commands.Context) -> None:
+        self._require_private_role_export_channel(ctx)
+        run = await self._active_gate_migration_run(ctx)
+        result = await self._gate_migration_feedback(
+            self._gate_migration.verify_run(ctx.guild, run.run_id)
+        )
+        await ctx.send(
+            f"Verification complete: {result.matched} matched, "
+            f"{result.departed} departed",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @gatemigration.command(name="restore", hidden=True)
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def gatemigration_restore(self, ctx: commands.Context) -> None:
+        self._require_private_role_export_channel(ctx)
+        run = await self._active_gate_migration_run(ctx)
+        result = await self._gate_migration_feedback(
+            self._gate_migration.restore_run(ctx.guild, run.run_id)
+        )
+        outcome = (
+            "Restore incomplete"
+            if result.skipped_unmodifiable
+            else "Restore complete"
+        )
+        await ctx.send(
+            f"{outcome}: "
+            f"{result.completed} completed, {result.departed} departed, "
+            f"{result.skipped_unmodifiable} skipped",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @gatemigration.command(name="export", hidden=True)
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def gatemigration_export(self, ctx: commands.Context) -> None:
+        self._require_private_role_export_channel(ctx)
+        run = await self._active_gate_migration_run(ctx)
+        backup = await self._gate_migration_feedback(
+            self._gate_migration.export_run(
+                ctx.guild,
+                run.run_id,
+                max_part_size=int(ctx.guild.filesize_limit),
+            )
+        )
+        for part in backup.parts:
+            await ctx.send(
+                file=discord.File(io.BytesIO(part.data), filename=part.filename),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        if backup.manifest is not None:
+            await ctx.send(
+                file=discord.File(
+                    io.BytesIO(backup.manifest.data),
+                    filename=backup.manifest.filename,
+                ),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+    @gatemigration.command(name="finalize", hidden=True)
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def gatemigration_finalize(self, ctx: commands.Context) -> None:
+        self._require_private_role_export_channel(ctx)
+        run = await self._active_gate_migration_run(ctx)
+        await self._gate_migration_feedback(
+            self._gate_migration.finalize_run(
+                ctx.guild,
+                run.run_id,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
+        )
+        await ctx.send(
+            "Gate migration finalized",
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
@@ -567,6 +870,13 @@ class NHMisc(commands.Cog):
     @commands.guild_only()
     async def gatecount(self, ctx: commands.Context) -> None:
         """Show member counts for the highest SP and MP gate tiers."""
+        schema_state = await self._gate_migration_store.get_schema_state(ctx.guild.id)
+        if schema_state is SchemaState.MIGRATING:
+            await ctx.send("Gate reports are unavailable during migration")
+            return
+        if schema_state is SchemaState.CURRENT:
+            await self._current_gatecount(ctx)
+            return
         resolved_roles = []
         for (
             emoji_name,
@@ -631,10 +941,46 @@ class NHMisc(commands.Cog):
         )
         await ctx.send(embed=embed)
 
+    async def _current_gatecount(self, ctx: commands.Context) -> None:
+        _require_guild_role(
+            ctx.guild,
+            SINGLEPLAYER_COMPLETED_ROLE_ID,
+            report_name="Gatecount",
+            role_label="Singleplayer completed",
+        )
+        for tier, role_id in enumerate(TARGET_TIER_ROLE_IDS, start=1):
+            _require_guild_role(
+                ctx.guild,
+                role_id,
+                report_name="Gatecount",
+                role_label=f"Tier {tier}",
+            )
+        singleplayer_count = await self._count_role_expression(
+            ctx.guild, str(SINGLEPLAYER_COMPLETED_ROLE_ID)
+        )
+        tier_counts = await self._count_highest_role_buckets(
+            ctx.guild, TARGET_TIER_ROLE_IDS
+        )
+        lines = [f"Singleplayer completed — **{singleplayer_count}**"]
+        lines.extend(
+            f"Tier {tier} — **{count}**"
+            for tier, count in enumerate(tier_counts, start=1)
+        )
+        embed = discord.Embed(
+            title="Current Gatecount:",
+            description="\n".join(lines),
+            color=discord.Color.blue(),
+        )
+        await ctx.send(embed=embed)
+
     @commands.command(name="tierdistribution")
     @commands.guild_only()
     async def tierdistribution(self, ctx: commands.Context) -> None:
         """Show the current distribution of progression and Gate player roles."""
+        schema_state = await self._gate_migration_store.get_schema_state(ctx.guild.id)
+        if schema_state is SchemaState.MIGRATING:
+            await ctx.send("Gate reports are unavailable during migration")
+            return
         resolved_tiers = []
         for label, emoji_name, emoji_id, role_id in TIER_DISTRIBUTION_ROLES:
             role = _require_guild_role(
@@ -646,24 +992,35 @@ class NHMisc(commands.Cog):
             resolved_tiers.append((emoji_name, emoji_id, role))
 
         resolved_gate_roles = []
-        for emoji_name, _, sp_role_id, mp_role_id, _ in GATECOUNT_TIERS:
-            label = emoji_name.title()
-            resolved_gate_roles.append(
-                _require_guild_role(
-                    ctx.guild,
-                    sp_role_id,
-                    report_name="Tier distribution",
-                    role_label=f"{label} SP",
+        if schema_state is SchemaState.CURRENT:
+            for tier, role_id in enumerate(TARGET_TIER_ROLE_IDS, start=1):
+                resolved_gate_roles.append(
+                    _require_guild_role(
+                        ctx.guild,
+                        role_id,
+                        report_name="Tier distribution",
+                        role_label=f"Gate Tier {tier}",
+                    )
                 )
-            )
-            resolved_gate_roles.append(
-                _require_guild_role(
-                    ctx.guild,
-                    mp_role_id,
-                    report_name="Tier distribution",
-                    role_label=f"{label} MP",
+        else:
+            for emoji_name, _, sp_role_id, mp_role_id, _ in GATECOUNT_TIERS:
+                label = emoji_name.title()
+                resolved_gate_roles.append(
+                    _require_guild_role(
+                        ctx.guild,
+                        sp_role_id,
+                        report_name="Tier distribution",
+                        role_label=f"{label} SP",
+                    )
                 )
-            )
+                resolved_gate_roles.append(
+                    _require_guild_role(
+                        ctx.guild,
+                        mp_role_id,
+                        report_name="Tier distribution",
+                        role_label=f"{label} MP",
+                    )
+                )
 
         tier_bucket_counts = await self._count_highest_role_buckets(
             ctx.guild,
@@ -1748,6 +2105,136 @@ class NHMisc(commands.Cog):
             raise commands.UserFeedbackCheckFailure(
                 "Role export is unavailable in this channel"
             )
+
+    async def _active_gate_migration_run(self, ctx: commands.Context):
+        run = await self._gate_migration_store.get_active_run(int(ctx.guild.id))
+        if run is None:
+            raise commands.UserFeedbackCheckFailure(
+                "There is no active gate migration"
+            )
+        return run
+
+    async def _gate_migration_feedback(self, operation):
+        try:
+            return await operation
+        except MigrationPreflightError as error:
+            raise commands.UserFeedbackCheckFailure(error.public_message) from error
+
+    async def _send_gate_migration_progress(
+        self, ctx: commands.Context, progress: ApplyProgress
+    ) -> None:
+        try:
+            await ctx.send(
+                f"Migration progress: {progress.processed} processed, "
+                f"{progress.remaining} remaining, {progress.completed} completed, "
+                f"{progress.departed} departed, {progress.failed} failed, "
+                f"{progress.skipped_unmodifiable} skipped",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            log.exception("Failed to report Gate migration progress")
+
+    async def _await_gate_migration_confirmation(
+        self, ctx: commands.Context, run_id: str
+    ) -> bool:
+        started_at = time.monotonic()
+        confirm_at = started_at + 10
+        expires_at = started_at + 310
+
+        def check(message) -> bool:
+            return (
+                getattr(message.author, "id", None) == ctx.author.id
+                and message.channel == ctx.channel
+                and message.guild == ctx.guild
+            )
+
+        while True:
+            remaining_window = expires_at - time.monotonic()
+            if remaining_window <= 0:
+                await self._gate_migration_store.transition_run(
+                    run_id, RunState.EXPIRED
+                )
+                await ctx.send(
+                    "Gate migration confirmation expired",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return False
+            try:
+                message = await self.bot.wait_for(
+                    "message", check=check, timeout=remaining_window
+                )
+            except TimeoutError:
+                await self._gate_migration_store.transition_run(
+                    run_id, RunState.EXPIRED
+                )
+                await ctx.send(
+                    "Gate migration confirmation expired",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return False
+
+            response = message.content.strip().casefold()
+            if response != "confirm":
+                continue
+            now = time.monotonic()
+            if now < confirm_at:
+                seconds_left = math.ceil(confirm_at - now)
+                await ctx.send(
+                    f"READ BOUBOU READ ({seconds_left} seconds left)",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                continue
+            await self._gate_migration_store.transition_run(
+                run_id, RunState.CONFIRMED
+            )
+            return True
+
+    @staticmethod
+    def _build_gate_migration_apply_embed(guild, result) -> discord.Embed:
+        embed = discord.Embed(
+            title="Stargate migration complete",
+            description=(
+                f"{result.completed} completed, {result.departed} departed, "
+                f"{result.skipped_unmodifiable} skipped"
+            ),
+            color=discord.Color.green(),
+        )
+        lines = []
+        for tier, (role_id, count) in enumerate(
+            zip(TARGET_TIER_ROLE_IDS, result.tier_role_counts, strict=True), start=1
+        ):
+            role = guild.get_role(role_id)
+            current_name = f" — {role.name}" if role is not None else ""
+            noun = "player" if count == 1 else "players"
+            lines.append(f"Tier {tier}{current_name}: {count} {noun}")
+        embed.add_field(
+            name="Stargate role membership",
+            value="\n".join(lines),
+            inline=False,
+        )
+        return embed
+
+    @staticmethod
+    def _format_inert_role_ids(role_ids) -> str:
+        return ", ".join(str(role_id) for role_id in role_ids) or "none"
+
+    @staticmethod
+    def _paginate_gate_migration_lines(lines: list[str]) -> tuple[str, ...]:
+        pages = []
+        current = []
+        current_length = 0
+        for line in lines:
+            additional_length = len(line) + (1 if current else 0)
+            if current and current_length + additional_length > 1900:
+                pages.append("\n".join(current))
+                current = []
+                current_length = 0
+                additional_length = len(line)
+            current.append(line)
+            current_length += additional_length
+        if current:
+            pages.append("\n".join(current))
+        return tuple(pages)
 
     async def _repair_role_analytics_cache(self, guild: discord.Guild) -> None:
         await self._role_analytics_store.set_status(
