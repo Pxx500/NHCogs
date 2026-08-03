@@ -228,7 +228,8 @@ class GatecountCommandTests(RoleAnalyticsCommandTestCase):
             f"<@&{tier_roles[2]}> — **1 player**\n"
             f"<@&{tier_roles[3]}> — **0 players**\n"
             f"<@&{tier_roles[4]}> — **0 players**\n"
-            f"<@&{tier_roles[5]}> — **1 player**",
+            f"<@&{tier_roles[5]}> — **1 player**\n\n"
+            "**Total Gates: 9**",
         )
         self.assertEqual(send_kwargs["allowed_mentions"], "no-mentions")
         self.assertNotIn("Tier", send_kwargs["embed"].description)

@@ -557,6 +557,9 @@ class NHMisc(commands.Cog):
         tier_counts = await self._count_highest_role_buckets(
             ctx.guild, GATE_TIER_ROLE_IDS
         )
+        total_gates = sum(
+            tier * count for tier, count in enumerate(tier_counts, start=1)
+        )
 
         def format_role_count(role_id: int, count: int) -> str:
             player_label = "player" if count == 1 else "players"
@@ -571,6 +574,7 @@ class NHMisc(commands.Cog):
             format_role_count(role_id, count)
             for role_id, count in zip(GATE_TIER_ROLE_IDS, tier_counts, strict=True)
         )
+        lines.extend(("", f"**Total Gates: {total_gates}**"))
         embed = discord.Embed(
             title="Current Gatecount:",
             description="\n".join(lines),
