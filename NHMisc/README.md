@@ -111,9 +111,10 @@ Defaults:
 [p]gatecount
 ```
 
-Shows the current SP and MP member counts for each configured gate tier using the
-role analytics database. Each member is counted only in their highest SP tier and,
-separately, their highest MP tier. This command can be used by any server member.
+Shows how many members completed Singleplayer and the member count for every linear
+Gate tier from 1 through 10 using the role analytics database. Each member is counted
+only in their highest Gate tier, and tiers with no members are still displayed. This
+command can be used by any server member.
 
 ## Tier Distribution
 
@@ -124,8 +125,9 @@ separately, their highest MP tier. This command can be used by any server member
 Shows the current player-role distribution from Stone through UXV, plus the
 number of players with a configured Gate role. Each player contributes only to
 their highest progression tier and at most once to Gate. Percentages use the
-total of those displayed progression and Gate counts. This command can be used
-by any server member.
+total of those displayed progression and Gate counts. The Singleplayer-completed
+role alone does not count as Gate membership. This command can be used by any server
+member.
 
 ## Sticky Roles
 

@@ -67,7 +67,9 @@ class RoleAnalyticsService:
     def is_syncing(self, guild_id: int) -> bool:
         return self._sync_locks[int(guild_id)].locked()
 
-    async def sync_guild(self, guild: Any, *, manual: bool) -> SyncResult:
+    async def sync_guild(
+        self, guild: Any, *, manual: bool, force_fresh: bool = False
+    ) -> SyncResult:
         guild_id = int(guild.id)
         lock = self._sync_locks[guild_id]
         if lock.locked():
@@ -88,7 +90,8 @@ class RoleAnalyticsService:
                 raise MemberIntentRequiredError("The members intent is required")
 
             started = self._monotonic()
-            if not bool(guild.chunked):
+            needs_member_request = force_fresh or not bool(guild.chunked)
+            if needs_member_request:
                 last_request = self._last_full_request.get(guild_id)
                 if last_request is not None:
                     retry_after = 30.0 - (started - last_request)
@@ -107,7 +110,7 @@ class RoleAnalyticsService:
                     self._sync_generations[guild_id] = generation
                     self._event_queues[guild_id].clear()
 
-                if not bool(guild.chunked):
+                if needs_member_request:
                     source = "gateway-chunk"
                     self._last_full_request[guild_id] = self._monotonic()
                     await guild.chunk(cache=True)

@@ -134,6 +134,19 @@ class RoleAnalyticsServiceTests(unittest.IsolatedAsyncioTestCase):
         state = await self.store.get_state(guild.id)
         self.assertEqual(state.status, role_analytics_store.SyncStatus.READY)
 
+    async def test_forced_sync_requests_fresh_members_despite_complete_cache(self):
+        guild = FakeGuild(
+            [FakeMember(1, (123, 10)), FakeMember(2, (123, 20))],
+            chunked=True,
+        )
+        service = role_analytics_service.RoleAnalyticsService(FakeBot(), self.store)
+
+        result = await service.sync_guild(guild, manual=True, force_fresh=True)
+
+        self.assertEqual(guild.chunk_calls, 1)
+        self.assertEqual(result.source, "gateway-chunk")
+        self.assertEqual(result.member_count, 2)
+
     async def test_member_event_during_snapshot_is_replayed_before_activation(self):
         guild = FakeGuild([FakeMember(1, (123, 10))], chunked=True)
         gated_store = GatedStore(self.store)
