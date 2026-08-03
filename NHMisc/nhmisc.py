@@ -2143,8 +2143,7 @@ class NHMisc(commands.Cog):
 
         def check(message) -> bool:
             return (
-                getattr(message.author, "id", None) == ctx.author.id
-                and message.channel == ctx.channel
+                message.channel == ctx.channel
                 and message.guild == ctx.guild
             )
 
@@ -2174,7 +2173,19 @@ class NHMisc(commands.Cog):
                 return False
 
             response = message.content.strip().casefold()
-            if response != "confirm":
+            if response == "liberum veto":
+                await self._gate_migration_store.transition_run(
+                    run_id, RunState.CANCELLED
+                )
+                await ctx.send(
+                    "Liberum veto! The Gate migration has been cancelled",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return False
+            if (
+                response != "confirm"
+                or getattr(message.author, "id", None) != ctx.author.id
+            ):
                 continue
             now = time.monotonic()
             if now < confirm_at:

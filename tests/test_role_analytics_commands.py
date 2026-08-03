@@ -362,6 +362,39 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Tier 1: 7 players", embed.fields[0].value)
         self.assertIn("Tier 2: 1 player", embed.fields[0].value)
 
+    async def test_any_guild_member_can_liberum_veto_without_confirm_authority(self):
+        guild = FakeGuild()
+        ctx = make_context(guild)
+        cog = self.make_cog()
+        other_author = types.SimpleNamespace(id=ctx.author.id + 1)
+        foreign_confirm = types.SimpleNamespace(
+            author=other_author,
+            channel=ctx.channel,
+            guild=ctx.guild,
+            content="confirm",
+        )
+        veto = types.SimpleNamespace(
+            author=other_author,
+            channel=ctx.channel,
+            guild=ctx.guild,
+            content="  LiBeRuM VeTo  ",
+        )
+        cog.bot.wait_for.side_effect = [foreign_confirm, veto]
+
+        with mock.patch.object(nhmisc.time, "monotonic", side_effect=[0, 1, 2]):
+            confirmed = await cog._await_gate_migration_confirmation(
+                ctx, "run-veto"
+            )
+
+        self.assertFalse(confirmed)
+        cog._gate_migration_store.transition_run.assert_awaited_once_with(
+            "run-veto", nhmisc.RunState.CANCELLED
+        )
+        ctx.send.assert_awaited_once_with(
+            "Liberum veto! The Gate migration has been cancelled",
+            allowed_mentions=nhmisc.discord.AllowedMentions.none(),
+        )
+
     async def test_gate_migration_ignores_unrecognized_messages_until_confirm(self):
         guild = FakeGuild()
         ctx = make_context(guild)
