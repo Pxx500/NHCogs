@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import sys
 import unittest
 from types import ModuleType, SimpleNamespace
@@ -61,6 +63,143 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             response=SimpleNamespace(defer=mock.AsyncMock()),
             edit_original_response=mock.AsyncMock(),
         )
+
+    async def _assert_deferred_before_store_wait(
+        self,
+        callback,
+        *,
+        ephemeral,
+    ):
+        store_started = asyncio.Event()
+        release_store = asyncio.Event()
+        deferred = asyncio.Event()
+        events = []
+
+        async def blocked_is_bootstrapped(_guild_id):
+            events.append("store")
+            store_started.set()
+            await release_store.wait()
+            return True
+
+        async def defer(**_kwargs):
+            events.append("defer")
+            deferred.set()
+
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=1),
+            user=SimpleNamespace(id=99),
+            permissions=SimpleNamespace(manage_messages=True),
+            response=SimpleNamespace(defer=mock.AsyncMock(side_effect=defer)),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(side_effect=blocked_is_bootstrapped)
+        )
+        task = asyncio.create_task(callback(cog, interaction))
+        try:
+            await asyncio.wait_for(deferred.wait(), timeout=0.1)
+            self.assertEqual(events[0], "defer")
+            interaction.response.defer.assert_awaited_once_with(
+                ephemeral=ephemeral,
+                thinking=True,
+            )
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def test_achievements_slash_defers_before_waiting_for_store(self):
+        await self._assert_deferred_before_store_wait(
+            lambda cog, interaction: cog._achievements_slash(interaction),
+            ephemeral=False,
+        )
+
+    async def test_achievements_user_action_defers_before_waiting_for_store(self):
+        target = SimpleNamespace(id=123)
+        await self._assert_deferred_before_store_wait(
+            lambda cog, interaction: cog._achievements_user_context_action(
+                interaction,
+                target,
+            ),
+            ephemeral=True,
+        )
+
+    async def test_grant_action_defers_before_waiting_for_store(self):
+        source_message = SimpleNamespace()
+        await self._assert_deferred_before_store_wait(
+            lambda cog, interaction: cog._grant_achievements_context_action(
+                interaction,
+                source_message,
+            ),
+            ephemeral=True,
+        )
+
+    async def test_achievements_slash_edits_public_deferred_response(self):
+        guild = SimpleNamespace(id=1)
+        target = SimpleNamespace(id=123)
+        profile = object()
+        definitions = (object(),)
+        embed = object()
+        interaction = SimpleNamespace(
+            guild=guild,
+            user=SimpleNamespace(id=99),
+            response=SimpleNamespace(defer=mock.AsyncMock()),
+            edit_original_response=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(return_value=True),
+            get_profile=mock.AsyncMock(return_value=profile),
+            list_definitions=mock.AsyncMock(return_value=definitions),
+        )
+        cog._build_achievements_embed = mock.Mock(return_value=embed)
+
+        await cog._achievements_slash(interaction, target)
+
+        interaction.response.defer.assert_awaited_once_with(
+            ephemeral=False,
+            thinking=True,
+        )
+        interaction.edit_original_response.assert_awaited_once()
+        self.assertIs(
+            interaction.edit_original_response.await_args.kwargs["embed"],
+            embed,
+        )
+        cog._achievement_store.get_profile.assert_awaited_once_with(1, 123)
+        cog._achievement_store.list_definitions.assert_awaited_once_with(1)
+
+    async def test_achievements_slash_timeout_finishes_with_private_error(self):
+        async def blocked_is_bootstrapped(_guild_id):
+            await asyncio.Event().wait()
+
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=1),
+            user=SimpleNamespace(id=99),
+            response=SimpleNamespace(defer=mock.AsyncMock()),
+            delete_original_response=mock.AsyncMock(),
+            followup=SimpleNamespace(send=mock.AsyncMock()),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(side_effect=blocked_is_bootstrapped)
+        )
+
+        with (
+            mock.patch.object(
+                nhmisc,
+                "ACHIEVEMENT_INTERACTION_DB_TIMEOUT_SECONDS",
+                0.01,
+            ),
+            self.assertLogs("red.NHMisc", level="ERROR") as logs,
+        ):
+            await cog._achievements_slash(interaction)
+
+        interaction.delete_original_response.assert_awaited_once_with()
+        interaction.followup.send.assert_awaited_once_with(
+            "Achievement data is busy. Try again in a moment",
+            ephemeral=True,
+        )
+        self.assertIn("Achievement interaction timed out", logs.output[0])
 
     async def test_startup_requests_initialization_without_importing_roles(self):
         guild = SimpleNamespace(id=1)
@@ -639,8 +778,8 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             notice="Source message is unavailable"
         )
 
-    async def test_audit_notification_skips_bot_restore_entry(self):
-        human = SimpleNamespace(bot=False, send=mock.AsyncMock())
+    async def test_audit_notification_pings_human_actor_in_alert_channel(self):
+        human = SimpleNamespace(id=42, bot=False, send=mock.AsyncMock())
         entries = (
             SimpleNamespace(
                 target=SimpleNamespace(id=10),
@@ -666,6 +805,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             audit_logs=audit_logs,
         )
         cog = object.__new__(nhmisc.NHMisc)
+        cog._send_guild_alert = mock.AsyncMock(return_value=True)
         previous_action = getattr(nhmisc.discord, "AuditLogAction", None)
         nhmisc.discord.AuditLogAction = SimpleNamespace(member_role_update=object())
         try:
@@ -677,7 +817,38 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             else:
                 nhmisc.discord.AuditLogAction = previous_action
 
-        human.send.assert_awaited_once()
+        human.send.assert_not_awaited()
+        cog._send_guild_alert.assert_awaited_once_with(
+            guild,
+            "<@42> Gate roles must be changed through the bot. "
+            "Your manual role change was automatically reverted",
+            ping_user=human,
+        )
+
+    async def test_guild_alert_enables_only_requested_user_mention(self):
+        guild = SimpleNamespace(id=1)
+        channel = SimpleNamespace(id=2)
+        user = SimpleNamespace(id=42)
+        config = SimpleNamespace(alert_channel=mock.AsyncMock(return_value=2))
+        cog = object.__new__(nhmisc.NHMisc)
+        cog.config = SimpleNamespace(guild=mock.Mock(return_value=config))
+        cog._get_log_channel = mock.Mock(return_value=channel)
+        cog._send_voice_log = mock.AsyncMock(return_value=object())
+
+        delivered = await cog._send_guild_alert(
+            guild,
+            "<@42> warning",
+            ping_user=user,
+        )
+
+        self.assertTrue(delivered)
+        allowed_mentions = cog._send_voice_log.await_args.kwargs[
+            "allowed_mentions"
+        ]
+        self.assertEqual(allowed_mentions.users, [user])
+        self.assertFalse(allowed_mentions.everyone)
+        self.assertFalse(allowed_mentions.roles)
+        self.assertFalse(allowed_mentions.replied_user)
 
     async def test_manual_solo_role_addition_is_reverted_from_database_state(self):
         default_role = SimpleNamespace(id=0)
