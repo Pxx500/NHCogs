@@ -14,12 +14,15 @@ from redbot.core import Config, commands
 from redbot.core.data_manager import cog_data_path
 
 from .achievement_definitions import (
-    ACHIEVEMENT_DEFINITIONS,
-    GRANTABLE_BOOLEAN_ACHIEVEMENTS,
-    REVOCABLE_BOOLEAN_ACHIEVEMENTS,
+    SOLO_GATER_DEFINITION,
     SOLO_GATER_KEY,
 )
 from .achievement_store import AchievementProfile, AchievementStore
+from .achievement_sync import (
+    DiscordRoleSnapshot,
+    build_discord_priority_plan,
+    build_discord_role_snapshot,
+)
 from .activity_storage import (
     ActivityConsistencyReport,
     ActivityDatabaseStats,
@@ -265,7 +268,6 @@ class NHMisc(commands.Cog):
             activity_detail_retention_days=DEFAULT_ACTIVITY_DETAIL_RETENTION_DAYS,
             activity_history_retention_days=DEFAULT_ACTIVITY_HISTORY_RETENTION_DAYS,
             sticky_debug_logging_enabled=False,
-            sticky_debug_logging_channel=None,
             forum_autopin_channel_ids=[],
         )
         self._voice_visits = VoiceChannelVisitTracker()
@@ -283,6 +285,7 @@ class NHMisc(commands.Cog):
         )
         achievements_path = cog_data_path(self) / "achievements.sqlite"
         self._achievement_store = AchievementStore(achievements_path)
+        self._achievement_syncing_guilds: set[int] = set()
         self._activity_task: asyncio.Task | None = None
         self._role_analytics_startup_task: asyncio.Task | None = None
         self._role_analytics_daily_task: asyncio.Task | None = None
@@ -413,36 +416,42 @@ class NHMisc(commands.Cog):
     async def configured_sticky_role_ids(self, guild_id: int) -> frozenset[int]:
         return frozenset(await self._sticky_roles.get_sticky_roles(guild_id))
 
-    async def _bootstrap_achievements_for_guild(
-        self, guild: discord.Guild
-    ) -> bool:
-        if await self._achievement_store.is_bootstrapped(guild.id):
-            return True
+    async def _achievement_discord_snapshot(
+        self, guild_id: int
+    ) -> DiscordRoleSnapshot | None:
+        state = await self._role_analytics_store.get_state(guild_id)
+        if state.status is not SyncStatus.READY or state.last_completed_at is None:
+            return None
+        if await self._achievement_store.is_bootstrapped(guild_id):
+            definitions = await self._achievement_store.list_definitions(guild_id)
+        else:
+            definitions = (SOLO_GATER_DEFINITION,)
+        bound_definitions = tuple(
+            definition for definition in definitions if definition.role_id is not None
+        )
+        role_ids = (
+            *GATE_TIER_ROLE_IDS,
+            *(definition.role_id for definition in bound_definitions),
+        )
         users_by_role = await self._role_analytics_users_with_roles(
-            guild.id,
-            (*GATE_TIER_ROLE_IDS, SINGLEPLAYER_GATE_COMPLETED_ROLE_ID),
+            guild_id,
+            role_ids,
         )
         if users_by_role is None:
-            return False
-        users_by_gate_role = users_by_role[:-1]
-        solo_users = users_by_role[-1]
-        gate_tiers: dict[int, int] = {}
-        for tier, user_ids in enumerate(users_by_gate_role, start=1):
-            for user_id in user_ids:
-                gate_tiers[user_id] = tier
-        created = await self._achievement_store.bootstrap_guild(
-            guild.id,
-            gate_tiers=gate_tiers,
-            boolean_users={SOLO_GATER_KEY: solo_users},
+            return None
+        gate_role_count = len(GATE_TIER_ROLE_IDS)
+        return build_discord_role_snapshot(
+            snapshot_at=state.last_completed_at,
+            users_by_gate_role=users_by_role[:gate_role_count],
+            boolean_users={
+                definition.key: holders
+                for definition, holders in zip(
+                    bound_definitions,
+                    users_by_role[gate_role_count:],
+                    strict=True,
+                )
+            },
         )
-        if created:
-            await self._send_guild_alert(
-                guild,
-                "Achievement database initialized from current roles. "
-                f"Gate holders: {len(gate_tiers)}; "
-                f"Solo Gater holders: {len(solo_users)}",
-            )
-        return True
 
     async def _role_analytics_users_with_roles(
         self,
@@ -475,21 +484,32 @@ class NHMisc(commands.Cog):
     async def _reconcile_achievement_roles_for_guild(
         self, guild: discord.Guild
     ) -> None:
+        definitions = tuple(
+            definition
+            for definition in await self._achievement_store.list_definitions(guild.id)
+            if definition.role_id is not None
+        )
         users_by_role = await self._role_analytics_users_with_roles(
             guild.id,
-            (*GATE_TIER_ROLE_IDS, SINGLEPLAYER_GATE_COMPLETED_ROLE_ID),
+            (
+                *GATE_TIER_ROLE_IDS,
+                *(definition.role_id for definition in definitions),
+            ),
         )
         if users_by_role is None:
             return
+        gate_role_count = len(GATE_TIER_ROLE_IDS)
         actual_gate_roles: dict[int, set[int]] = {}
         for role_id, user_ids in zip(
             GATE_TIER_ROLE_IDS,
-            users_by_role[:-1],
+            users_by_role[:gate_role_count],
             strict=True,
         ):
             for user_id in user_ids:
                 actual_gate_roles.setdefault(user_id, set()).add(role_id)
         projections = await self._achievement_store.list_gate_projections(guild.id)
+        corrected = 0
+        failed = 0
         for user_id in set(actual_gate_roles) | set(projections):
             completed_count = projections.get(user_id, 0)
             expected = (
@@ -501,12 +521,13 @@ class NHMisc(commands.Cog):
                 continue
             try:
                 member = await guild.fetch_member(user_id)
-                await self._restore_gate_projection(
+                if await self._restore_gate_projection(
                     guild,
                     member,
                     completed_count,
-                    reason="Achievement startup reconciliation",
-                )
+                    reason="Achievement database reconciliation",
+                ):
+                    corrected += 1
             except (
                 commands.UserFeedbackCheckFailure,
                 discord.NotFound,
@@ -518,25 +539,52 @@ class NHMisc(commands.Cog):
                     guild.id,
                     user_id,
                 )
+                failed += 1
 
-        actual_solo_users = set(users_by_role[-1])
-        stored_solo_users = set(
-            await self._achievement_store.active_users_for_boolean(
-                guild.id,
-                SOLO_GATER_KEY,
+        for definition, actual_user_ids in zip(
+            definitions,
+            users_by_role[gate_role_count:],
+            strict=True,
+        ):
+            actual_users = set(actual_user_ids)
+            stored_users = set(
+                await self._achievement_store.projected_users_for_boolean(
+                    guild.id,
+                    definition.key,
+                )
             )
-        )
-        for user_id in actual_solo_users - stored_solo_users:
-            await self._achievement_store.grant_boolean(
-                guild.id,
-                user_id,
-                SOLO_GATER_KEY,
+            for user_id in actual_users ^ stored_users:
+                should_have_role = user_id in stored_users
+                try:
+                    member = await guild.fetch_member(user_id)
+                    await self._edit_achievement_roles(
+                        guild,
+                        member,
+                        add_role_ids=(definition.role_id,) if should_have_role else (),
+                        remove_role_ids=() if should_have_role else (definition.role_id,),
+                        reason="Achievement database reconciliation",
+                    )
+                    corrected += 1
+                except (
+                    commands.UserFeedbackCheckFailure,
+                    discord.NotFound,
+                    discord.Forbidden,
+                    discord.HTTPException,
+                ):
+                    failed += 1
+                    log.exception(
+                        "Failed to reconcile achievement %s for guild %s member %s",
+                        definition.key,
+                        guild.id,
+                        user_id,
+                    )
+        if corrected or failed:
+            await self._send_guild_alert(
+                guild,
+                "Achievement role reconciliation complete\n"
+                f"Members corrected: {corrected}\n"
+                f"Members skipped: {failed}",
             )
-        await self._achievement_store.revoke_booleans(
-            guild.id,
-            tuple(stored_solo_users - actual_solo_users),
-            (SOLO_GATER_KEY,),
-        )
 
     @staticmethod
     async def _restore_gate_projection(
@@ -594,8 +642,16 @@ class NHMisc(commands.Cog):
         try:
             await self._role_analytics.reconcile_enabled_guilds(tuple(self.bot.guilds))
             for guild in self.bot.guilds:
-                if await self._bootstrap_achievements_for_guild(guild):
-                    await self._reconcile_achievement_roles_for_guild(guild)
+                if not await self._achievement_store.is_bootstrapped(guild.id):
+                    await self._send_guild_alert(
+                        guild,
+                        "Achievement initialization is required\n\n"
+                        "The achievement database has not been initialized from the "
+                        "current Discord roles.\n"
+                        "Run `!rolesync discord`.",
+                    )
+                    continue
+                await self._reconcile_achievement_roles_for_guild(guild)
         except Exception:
             log.exception("Failed to reconcile role analytics on startup")
 
@@ -607,8 +663,21 @@ class NHMisc(commands.Cog):
                 await self._role_analytics.run_daily_reconciliation(
                     tuple(self.bot.guilds)
                 )
+                for guild in self.bot.guilds:
+                    if await self._achievement_store.is_bootstrapped(guild.id):
+                        await self._reconcile_achievement_roles_for_guild(guild)
             except Exception:
                 log.exception("Failed to run daily role analytics reconciliation")
+
+    @commands.Cog.listener()
+    async def on_resumed(self) -> None:
+        try:
+            await self._role_analytics.reconcile_enabled_guilds(tuple(self.bot.guilds))
+            for guild in self.bot.guilds:
+                if await self._achievement_store.is_bootstrapped(guild.id):
+                    await self._reconcile_achievement_roles_for_guild(guild)
+        except Exception:
+            log.exception("Failed to reconcile achievement roles after resume")
 
     async def red_delete_data_for_user(self, *, requester, user_id: int) -> None:
         await self._activity_store.delete_user_everywhere(user_id)
@@ -639,11 +708,15 @@ class NHMisc(commands.Cog):
             interaction.guild.id,
             target.id,
         )
+        definitions = await self._achievement_store.list_definitions(
+            interaction.guild.id
+        )
         await interaction.response.send_message(
             embed=self._build_achievements_embed(
                 interaction.guild.id,
                 target,
                 profile,
+                definitions,
             ),
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -669,11 +742,15 @@ class NHMisc(commands.Cog):
             interaction.guild.id,
             user.id,
         )
+        definitions = await self._achievement_store.list_definitions(
+            interaction.guild.id
+        )
         await interaction.response.send_message(
             embed=self._build_achievements_embed(
                 interaction.guild.id,
                 user,
                 profile,
+                definitions,
             ),
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
@@ -684,6 +761,7 @@ class NHMisc(commands.Cog):
         guild_id: int,
         user: discord.User | discord.Member,
         profile: AchievementProfile,
+        definitions,
     ) -> discord.Embed:
         embed = discord.Embed(title=f"Achievements — {user.display_name}")
         embed.add_field(
@@ -709,7 +787,7 @@ class NHMisc(commands.Cog):
         active_boolean_keys = set(profile.boolean_keys)
         boolean_lines = [
             definition.display_name
-            for definition in ACHIEVEMENT_DEFINITIONS
+            for definition in definitions
             if definition.key in active_boolean_keys
             and definition.key != "stargate_completed"
         ]
@@ -760,7 +838,14 @@ class NHMisc(commands.Cog):
                 ephemeral=True,
             )
             return
-        if not GRANTABLE_BOOLEAN_ACHIEVEMENTS:
+        definitions = tuple(
+            definition
+            for definition in await self._achievement_store.list_definitions(
+                interaction.guild.id
+            )
+            if definition.grantable
+        )
+        if not definitions:
             await interaction.response.send_message(
                 "No achievements are available for manual grants",
                 ephemeral=True,
@@ -773,7 +858,7 @@ class NHMisc(commands.Cog):
             source_message,
             interaction.user.id,
             candidates,
-            GRANTABLE_BOOLEAN_ACHIEVEMENTS,
+            definitions,
         )
         await interaction.response.send_message(
             embed=view.render_embed(),
@@ -822,9 +907,27 @@ class NHMisc(commands.Cog):
         )
         selected_definitions = tuple(
             definition
-            for definition in GRANTABLE_BOOLEAN_ACHIEVEMENTS
+            for definition in view.definitions
             if definition.key in view.selected_keys
         )
+        current_definitions = {
+            definition.key: definition
+            for definition in await self._achievement_store.list_definitions(
+                source_message.guild.id
+            )
+        }
+        if any(
+            current_definitions.get(definition.key) != definition
+            for definition in selected_definitions
+        ):
+            await interaction.edit_original_response(
+                embed=view.render_embed(
+                    notice="Achievement configuration changed. Start again"
+                ),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
         try:
             projected_roles = self._validate_achievement_role_projection(
                 source_message.guild,
@@ -843,36 +946,15 @@ class NHMisc(commands.Cog):
         already_count = 0
         failed_members = 0
         for member in selected_members:
-            created_keys = []
-            for definition in selected_definitions:
-                result = await self._achievement_store.grant_boolean(
-                    source_message.guild.id,
-                    member.id,
-                    definition.key,
-                    source_channel_id=source_message.channel.id,
-                    source_message_id=source_message.id,
-                )
-                created_count += int(result.created)
-                if result.created:
-                    created_keys.append(definition.key)
-                else:
-                    already_count += 1
-            if projected_roles:
-                try:
-                    await self._edit_achievement_roles(
-                        source_message.guild,
-                        member,
-                        add_role_ids=tuple(role.id for role in projected_roles),
-                        reason=f"Achievement grant from message {source_message.id}",
-                    )
-                except (discord.Forbidden, discord.HTTPException):
-                    failed_members += 1
-                    created_count -= len(created_keys)
-                    await self._achievement_store.revoke_booleans(
-                        source_message.guild.id,
-                        (member.id,),
-                        tuple(created_keys),
-                    )
+            created, already, failed = await self._grant_achievements_to_member(
+                source_message,
+                member,
+                selected_definitions,
+                projected_roles,
+            )
+            created_count += created
+            already_count += already
+            failed_members += int(failed)
         view.stop()
         status = f"Granted {created_count} achievements"
         if already_count:
@@ -905,7 +987,328 @@ class NHMisc(commands.Cog):
         )
         await ctx.send(embed=embed)
 
+    @achievement.command(name="create")
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def achievement_create(
+        self, ctx: commands.Context, *, display_name: str
+    ) -> None:
+        """Create a boolean achievement without a Discord role."""
+        if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
+            raise commands.UserFeedbackCheckFailure(
+                "Achievement data is still initializing. Run `!rolesync discord` first"
+            )
+        try:
+            definition = await self._achievement_store.create_boolean_definition(
+                ctx.guild.id,
+                display_name,
+            )
+        except ValueError as error:
+            raise commands.UserFeedbackCheckFailure(str(error)) from error
+        await ctx.send(f"Created achievement: {definition.display_name}")
+
+    @achievement.group(name="role", invoke_without_command=True)
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def achievement_role(self, ctx: commands.Context) -> None:
+        """Manage optional Discord role bindings for achievements."""
+        await self.achievement_role_list.callback(self, ctx)
+
+    @achievement_role.command(name="bind")
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def achievement_role_bind(
+        self, ctx: commands.Context, role: discord.Role
+    ) -> None:
+        """Choose an achievement and bind it to an existing Discord role."""
+        if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
+            raise commands.UserFeedbackCheckFailure(
+                "Achievement data is still initializing. Run `!rolesync discord` first"
+            )
+        if role.id in GATE_TIER_ROLE_IDS:
+            raise commands.UserFeedbackCheckFailure(
+                "Gate progression roles cannot be bound as boolean achievements"
+            )
+        definitions = await self._achievement_store.list_definitions(ctx.guild.id)
+        if any(definition.role_id == role.id for definition in definitions):
+            raise commands.UserFeedbackCheckFailure(
+                "This role is already bound to an achievement"
+            )
+        unbound = tuple(
+            definition for definition in definitions if definition.role_id is None
+        )
+        if not unbound:
+            raise commands.UserFeedbackCheckFailure(
+                "There are no unbound achievements"
+            )
+        if len(unbound) > 25:
+            raise commands.UserFeedbackCheckFailure(
+                "There are too many unbound achievements for one selection menu"
+            )
+        users_by_role = await self._role_analytics_users_with_roles(
+            ctx.guild.id,
+            (role.id,),
+        )
+        if users_by_role is None:
+            raise commands.UserFeedbackCheckFailure(
+                "Role analytics is not ready. Run `!rolesync` first"
+            )
+        from .achievement_views import AchievementRoleBindView
+
+        view = AchievementRoleBindView(
+            self,
+            ctx.author.id,
+            role,
+            users_by_role[0],
+            unbound,
+        )
+        view.message = await ctx.send(
+            embed=view.render_embed(),
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _grant_achievements_to_member(
+        self,
+        source_message: discord.Message,
+        member: discord.Member,
+        definitions: tuple,
+        projected_roles: tuple,
+    ) -> tuple[int, int, bool]:
+        created_keys = []
+        already_count = 0
+        for definition in definitions:
+            result = await self._achievement_store.grant_boolean(
+                source_message.guild.id,
+                member.id,
+                definition.key,
+                source_channel_id=source_message.channel.id,
+                source_message_id=source_message.id,
+            )
+            if result.created:
+                created_keys.append(definition.key)
+            else:
+                already_count += 1
+        if not projected_roles:
+            return len(created_keys), already_count, False
+        try:
+            await self._edit_achievement_roles(
+                source_message.guild,
+                member,
+                add_role_ids=tuple(role.id for role in projected_roles),
+                reason=f"Achievement grant from message {source_message.id}",
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            await self._achievement_store.revoke_booleans(
+                source_message.guild.id,
+                (member.id,),
+                tuple(created_keys),
+            )
+            return 0, already_count, True
+        return len(created_keys), already_count, False
+
+    async def _confirm_achievement_role_bind(self, interaction, view) -> None:
+        await interaction.response.defer()
+        definitions = await self._achievement_store.list_definitions(
+            interaction.guild.id
+        )
+        selected = next(
+            (
+                definition
+                for definition in definitions
+                if definition.key == view.selected_key
+                and definition.role_id is None
+            ),
+            None,
+        )
+        role_is_bound = any(
+            definition.role_id == view.role.id for definition in definitions
+        )
+        if selected is None or role_is_bound:
+            await interaction.edit_original_response(
+                embed=view.render_embed(
+                    notice="Achievement configuration changed. Start again"
+                ),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        users_by_role = await self._role_analytics_users_with_roles(
+            interaction.guild.id,
+            (view.role.id,),
+        )
+        if users_by_role is None:
+            await interaction.edit_original_response(
+                embed=view.render_embed(notice="Role analytics is not ready"),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        if users_by_role[0] != view.holder_ids:
+            view.holder_ids = users_by_role[0]
+            await interaction.edit_original_response(
+                embed=view.render_embed(
+                    notice="Role holders changed. Review the plan again"
+                ),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        result = await self._achievement_store.bind_role(
+            interaction.guild.id,
+            selected.key,
+            role_id=view.role.id,
+            user_ids=view.holder_ids,
+        )
+        view.stop()
+        await interaction.edit_original_response(
+            content=(
+                f"Bound {view.role.mention} to {result.definition.display_name}; "
+                f"imported {result.imported_count} achievements"
+            ),
+            embed=None,
+            view=None,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        await self._reconcile_achievement_roles_for_guild(interaction.guild)
+
+    @achievement_role.command(name="unbind")
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def achievement_role_unbind(
+        self, ctx: commands.Context, role: discord.Role
+    ) -> None:
+        """Stop tracking a Discord role without deleting achievement history."""
+        if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
+            raise commands.UserFeedbackCheckFailure(
+                "Achievement data is still initializing. Run `!rolesync discord` first"
+            )
+        try:
+            definition = await self._achievement_store.unbind_role(
+                ctx.guild.id,
+                role.id,
+            )
+        except LookupError as error:
+            raise commands.UserFeedbackCheckFailure(
+                "This role is not bound to an achievement"
+            ) from error
+        await ctx.send(
+            f"Stopped tracking {role.mention} for {definition.display_name}",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @achievement_role.command(name="replace")
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def achievement_role_replace(
+        self,
+        ctx: commands.Context,
+        old_role: discord.Role,
+        new_role: discord.Role,
+    ) -> None:
+        """Move an achievement binding to another Discord role."""
+        if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
+            raise commands.UserFeedbackCheckFailure(
+                "Achievement data is still initializing. Run `!rolesync discord` first"
+            )
+        if old_role.id == new_role.id:
+            raise commands.UserFeedbackCheckFailure("Choose two different roles")
+        if new_role.id in GATE_TIER_ROLE_IDS:
+            raise commands.UserFeedbackCheckFailure(
+                "Gate progression roles cannot be bound as boolean achievements"
+            )
+        definitions = await self._achievement_store.list_definitions(ctx.guild.id)
+        definition = next(
+            (
+                item for item in definitions if item.role_id == old_role.id
+            ),
+            None,
+        )
+        if definition is None:
+            raise commands.UserFeedbackCheckFailure(
+                "The old role is not bound to an achievement"
+            )
+        if any(item.role_id == new_role.id for item in definitions):
+            raise commands.UserFeedbackCheckFailure(
+                "The new role is already bound to an achievement"
+            )
+        users_by_role = await self._role_analytics_users_with_roles(
+            ctx.guild.id,
+            (new_role.id,),
+        )
+        if users_by_role is None:
+            raise commands.UserFeedbackCheckFailure(
+                "Role analytics is not ready. Run `!rolesync` first"
+            )
+        await ctx.send(
+            f"Replace {old_role.mention} with {new_role.mention} for "
+            f"{definition.display_name}\n"
+            f"Current new-role holders: {len(users_by_role[0])}\n"
+            "Type `confirm` to continue",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+        def confirmation_check(message: discord.Message) -> bool:
+            return (
+                message.guild is not None
+                and message.guild.id == ctx.guild.id
+                and message.channel.id == ctx.channel.id
+                and message.author.id == ctx.author.id
+                and message.content.strip().lower() == "confirm"
+            )
+
+        try:
+            await self.bot.wait_for(
+                "message",
+                check=confirmation_check,
+                timeout=300,
+            )
+        except TimeoutError:
+            await ctx.send("Achievement role replacement expired")
+            return
+        fresh_users_by_role = await self._role_analytics_users_with_roles(
+            ctx.guild.id,
+            (new_role.id,),
+        )
+        if fresh_users_by_role is None or fresh_users_by_role != users_by_role:
+            await ctx.send("Role holders changed. Start the command again")
+            return
+        result = await self._achievement_store.replace_role(
+            ctx.guild.id,
+            old_role_id=old_role.id,
+            new_role_id=new_role.id,
+            user_ids=users_by_role[0],
+        )
+        await ctx.send(
+            f"Bound {new_role.mention} to {result.definition.display_name}; "
+            f"imported {result.imported_count} achievements",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        await self._reconcile_achievement_roles_for_guild(ctx.guild)
+
+    @achievement_role.command(name="list")
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def achievement_role_list(self, ctx: commands.Context) -> None:
+        """List all active achievement role bindings."""
+        if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
+            raise commands.UserFeedbackCheckFailure(
+                "Achievement data is still initializing. Run `!rolesync discord` first"
+            )
+        definitions = await self._achievement_store.list_definitions(ctx.guild.id)
+        lines = [
+            f"<@&{definition.role_id}> {definition.display_name}"
+            for definition in definitions
+            if definition.role_id is not None
+        ]
+        await ctx.send(
+            "\n".join(lines) if lines else "No achievement roles are configured",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     @achievement.command(name="revoke")
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
     async def achievement_revoke(
         self,
         ctx: commands.Context,
@@ -929,10 +1332,11 @@ class NHMisc(commands.Cog):
                 tuple(member.id for member in unique_members),
             )
         )
+        catalog = await self._achievement_store.list_definitions(ctx.guild.id)
         definitions = tuple(
             definition
-            for definition in REVOCABLE_BOOLEAN_ACHIEVEMENTS
-            if definition.key in shared_keys
+            for definition in catalog
+            if definition.revocable and definition.key in shared_keys
         )
         if not definitions:
             raise commands.UserFeedbackCheckFailure(
@@ -971,9 +1375,27 @@ class NHMisc(commands.Cog):
             return
         selected_definitions = tuple(
             definition
-            for definition in REVOCABLE_BOOLEAN_ACHIEVEMENTS
+            for definition in view.definitions
             if definition.key in view.selected_keys
         )
+        current_definitions = {
+            definition.key: definition
+            for definition in await self._achievement_store.list_definitions(
+                interaction.guild.id
+            )
+        }
+        if any(
+            current_definitions.get(definition.key) != definition
+            for definition in selected_definitions
+        ):
+            await interaction.edit_original_response(
+                embed=view.render_embed(
+                    notice="Achievement configuration changed. Start again"
+                ),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
         try:
             projected_roles = self._validate_achievement_role_projection(
                 interaction.guild,
@@ -994,6 +1416,11 @@ class NHMisc(commands.Cog):
         revoked_count = 0
         failed_members = 0
         for member in view.members:
+            revoked_count += await self._achievement_store.revoke_booleans(
+                interaction.guild.id,
+                (member.id,),
+                achievement_keys,
+            )
             try:
                 if role_ids:
                     await self._edit_achievement_roles(
@@ -1005,12 +1432,6 @@ class NHMisc(commands.Cog):
             except (discord.Forbidden, discord.HTTPException):
                 failed_members += 1
                 continue
-            await self._achievement_store.revoke_booleans(
-                interaction.guild.id,
-                (member.id,),
-                achievement_keys,
-            )
-            revoked_count += len(achievement_keys)
         view.stop()
         await interaction.edit_original_response(
             content=(
@@ -1088,7 +1509,7 @@ class NHMisc(commands.Cog):
             return
         await member.edit(roles=desired_roles, reason=reason)
 
-    @commands.command(name="rolesync")
+    @commands.group(name="rolesync", invoke_without_command=True)
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
     async def rolesync(self, ctx: commands.Context) -> None:
@@ -1115,13 +1536,180 @@ class NHMisc(commands.Cog):
                 "Role synchronization failed"
             ) from error
 
-        if await self._bootstrap_achievements_for_guild(ctx.guild):
+        if await self._achievement_store.is_bootstrapped(ctx.guild.id):
             await self._reconcile_achievement_roles_for_guild(ctx.guild)
 
         await ctx.send(
             f"Role synchronization complete: {result.member_count} members, "
             f"{result.membership_count} role memberships in {result.elapsed_seconds:.1f}s"
         )
+
+    async def _achievement_discord_sync_summary(
+        self,
+        guild_id: int,
+        snapshot: DiscordRoleSnapshot,
+        *,
+        bootstrapped: bool,
+    ) -> str:
+        if not bootstrapped:
+            return snapshot.render_initialization_summary()
+        stored_gate_tiers = await self._achievement_store.list_gate_projections(
+            guild_id
+        )
+        stored_boolean_users = {
+            key: await self._achievement_store.active_users_for_boolean(
+                guild_id, key
+            )
+            for key in snapshot.boolean_users
+        }
+        plan = build_discord_priority_plan(
+            snapshot,
+            stored_gate_tiers=stored_gate_tiers,
+            stored_boolean_users=stored_boolean_users,
+        )
+        return plan.render_summary()
+
+    async def _wait_for_achievement_sync_confirmation(
+        self,
+        *,
+        guild_id: int,
+        channel: discord.TextChannel,
+        moderator_id: int,
+    ) -> bool:
+        def confirmation_check(message: discord.Message) -> bool:
+            return (
+                message.guild is not None
+                and message.guild.id == guild_id
+                and message.channel.id == channel.id
+                and message.author.id == moderator_id
+                and message.content.strip().lower() == "confirm"
+            )
+
+        try:
+            await self.bot.wait_for(
+                "message",
+                check=confirmation_check,
+                timeout=300,
+            )
+        except TimeoutError:
+            await self._send_voice_log(
+                channel,
+                "Achievement synchronization confirmation expired",
+            )
+            return False
+        return True
+
+    async def _apply_achievement_discord_snapshot(
+        self,
+        guild_id: int,
+        snapshot: DiscordRoleSnapshot,
+        *,
+        bootstrapped: bool,
+    ) -> str | None:
+        if bootstrapped:
+            result = await self._achievement_store.apply_discord_snapshot(
+                guild_id,
+                gate_tiers=snapshot.gate_tiers,
+                boolean_users=snapshot.boolean_users,
+            )
+            return (
+                "Achievement synchronization complete\n"
+                f"Users changed: {result.changed_users}\n"
+                f"Gate users changed: {result.gate_users_changed}\n"
+                f"Achievements created: {result.boolean_grants}\n"
+                f"Achievements revoked: {result.boolean_revocations}"
+            )
+
+        created = await self._achievement_store.bootstrap_guild(
+            guild_id,
+            gate_tiers=snapshot.gate_tiers,
+            boolean_definitions=(SOLO_GATER_DEFINITION,),
+            boolean_users=snapshot.boolean_users,
+        )
+        if not created:
+            return None
+        return (
+            "Achievement initialization complete\n"
+            f"Gate holders: {len(snapshot.gate_tiers)}\n"
+            "Solo Gater holders: "
+            f"{len(snapshot.boolean_users.get(SOLO_GATER_KEY, ()))}"
+        )
+
+    @rolesync.command(name="discord")
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def rolesync_discord(self, ctx: commands.Context) -> None:
+        """Replace achievement state with the current Discord role snapshot."""
+        guild_id = ctx.guild.id
+        if guild_id in self._achievement_syncing_guilds:
+            raise commands.UserFeedbackCheckFailure(
+                "Achievement synchronization is already awaiting confirmation"
+            )
+        self._achievement_syncing_guilds.add(guild_id)
+        try:
+            snapshot = await self._achievement_discord_snapshot(guild_id)
+            if snapshot is None:
+                await ctx.send(
+                    "Role analytics is not ready. Run `!rolesync` first, then run "
+                    "`!rolesync discord` again."
+                )
+                return
+            alert_channel = self._get_log_channel(
+                ctx.guild,
+                await self.config.guild(ctx.guild).alert_channel(),
+            )
+            if alert_channel is None:
+                raise commands.UserFeedbackCheckFailure(
+                    "Configure the NHMisc alert channel first"
+                )
+
+            bootstrapped = await self._achievement_store.is_bootstrapped(guild_id)
+            summary = await self._achievement_discord_sync_summary(
+                guild_id,
+                snapshot,
+                bootstrapped=bootstrapped,
+            )
+
+            plan_message = await self._send_voice_log(alert_channel, summary)
+            if plan_message is None:
+                raise commands.UserFeedbackCheckFailure(
+                    "Could not publish the synchronization plan"
+                )
+            if ctx.channel.id != alert_channel.id:
+                await ctx.send(
+                    f"Synchronization plan sent to {alert_channel.mention}"
+                )
+
+            confirmed = await self._wait_for_achievement_sync_confirmation(
+                guild_id=guild_id,
+                channel=alert_channel,
+                moderator_id=ctx.author.id,
+            )
+            if not confirmed:
+                return
+
+            fresh_snapshot = await self._achievement_discord_snapshot(guild_id)
+            if fresh_snapshot != snapshot:
+                await self._send_voice_log(
+                    alert_channel,
+                    "Role analytics changed. Run `!rolesync discord` again.",
+                )
+                return
+
+            completion = await self._apply_achievement_discord_snapshot(
+                guild_id,
+                snapshot,
+                bootstrapped=bootstrapped,
+            )
+            if completion is None:
+                await self._send_voice_log(
+                    alert_channel,
+                    "Achievement initialization was already completed",
+                )
+                return
+            await self._send_voice_log(alert_channel, completion)
+        finally:
+            self._achievement_syncing_guilds.discard(guild_id)
 
     @commands.command(name="rolestats")
     @commands.guild_only()
@@ -2409,10 +2997,10 @@ class NHMisc(commands.Cog):
             current=(
                 "Enabled: "
                 + ("Yes" if config["sticky_debug_logging_enabled"] else "No"),
-                "Channel: "
+                "Alert channel: "
                 + self._configured_channel_label(
                     ctx.guild,
-                    config["sticky_debug_logging_channel"]
+                    config["alert_channel"]
                 ),
             ),
             action_heading="Change it",
@@ -2428,19 +3016,6 @@ class NHMisc(commands.Cog):
         await self.config.guild(ctx.guild).sticky_debug_logging_enabled.set(enabled)
         state = "enabled" if enabled else "disabled"
         await ctx.send(f"Sticky role debug logging {state}.")
-
-    @nhmisc_stickyroles_debuglogging.command(name="channel")
-    async def nhmisc_stickyroles_debuglogging_channel(
-        self, ctx: commands.Context, channel: discord.TextChannel
-    ) -> None:
-        """Set the sticky role debug logging channel."""
-        await self._require_manage_guild(ctx)
-        missing_permissions = self._missing_log_permissions(ctx.guild, channel)
-        if missing_permissions is not None:
-            raise commands.UserFeedbackCheckFailure(missing_permissions)
-
-        await self.config.guild(ctx.guild).sticky_debug_logging_channel.set(channel.id)
-        await ctx.send(f"Sticky role debug logging channel set to {channel.mention}.")
 
     @nhmisc.group(name="activity", invoke_without_command=True)
     async def nhmisc_activity(self, ctx: commands.Context) -> None:
@@ -2897,7 +3472,25 @@ class NHMisc(commands.Cog):
 
     @commands.Cog.listener()
     async def on_guild_role_delete(self, role: discord.Role) -> None:
-        """Ask how to handle sticky role DB rows when a Discord role is deleted."""
+        """Clean up role-backed state when a Discord role is deleted."""
+        definition = next(
+            (
+                definition
+                for definition in await self._achievement_store.list_definitions(
+                    role.guild.id
+                )
+                if definition.role_id == role.id
+            ),
+            None,
+        )
+        if definition is not None:
+            await self._achievement_store.unbind_role(role.guild.id, role.id)
+            await self._send_guild_alert(
+                role.guild,
+                f"Stopped tracking deleted role {role.name} for "
+                f"{definition.display_name}",
+            )
+
         config_exists, saved_rows = await self._sticky_roles.get_role_state(
             role.guild.id, role.id
         )
@@ -2905,10 +3498,10 @@ class NHMisc(commands.Cog):
             return
 
         config = await self.config.guild(role.guild).all()
-        channel = self._get_log_channel(role.guild, config["sticky_debug_logging_channel"])
+        channel = self._get_log_channel(role.guild, config["alert_channel"])
         if channel is None:
             log.warning(
-                "Sticky role %s was deleted in guild %s but no sticky debug channel is set",
+                "Sticky role %s was deleted in guild %s but no alert channel is set",
                 role.id,
                 role.guild.id,
             )
@@ -2957,57 +3550,107 @@ class NHMisc(commands.Cog):
             return
         before_role_ids = {role.id for role in before.roles}
         after_role_ids = {role.id for role in after.roles}
+        changed_role_ids = before_role_ids ^ after_role_ids
+        definitions = tuple(
+            definition
+            for definition in await self._achievement_store.list_definitions(
+                after.guild.id
+            )
+            if definition.role_id is not None
+        )
+        protected_role_ids = set(GATE_TIER_ROLE_IDS) | {
+            definition.role_id for definition in definitions
+        }
+        if not changed_role_ids & protected_role_ids:
+            return
 
-        before_solo = SINGLEPLAYER_GATE_COMPLETED_ROLE_ID in before_role_ids
-        after_solo = SINGLEPLAYER_GATE_COMPLETED_ROLE_ID in after_role_ids
-        if before_solo != after_solo:
-            if after_solo:
-                await self._achievement_store.grant_boolean(
-                    after.guild.id,
-                    after.id,
-                    SOLO_GATER_KEY,
-                )
-            else:
-                await self._achievement_store.revoke_booleans(
-                    after.guild.id,
-                    (after.id,),
-                    (SOLO_GATER_KEY,),
-                )
-
+        corrected_roles: list[int] = []
         before_gate_roles = before_role_ids & set(GATE_TIER_ROLE_IDS)
         after_gate_roles = after_role_ids & set(GATE_TIER_ROLE_IDS)
-        if before_gate_roles == after_gate_roles:
-            return
-        completed_count = await self._achievement_store.get_gate_projection(
-            after.guild.id,
-            after.id,
-        )
-        expected_gate_roles = (
-            {GATE_TIER_ROLE_IDS[completed_count - 1]}
-            if 0 < completed_count <= len(GATE_TIER_ROLE_IDS)
-            else set()
-        )
-        if after_gate_roles == expected_gate_roles:
-            return
-        try:
-            restored = await self._restore_gate_projection(
-                after.guild,
-                after,
-                completed_count,
-                reason="Revert unauthorized Gate role change",
-            )
-        except (
-            commands.UserFeedbackCheckFailure,
-            discord.Forbidden,
-            discord.HTTPException,
-        ):
-            log.exception(
-                "Failed to revert Gate role change for guild %s member %s",
+        restored_gate = False
+        if before_gate_roles != after_gate_roles:
+            completed_count = await self._achievement_store.get_gate_projection(
                 after.guild.id,
                 after.id,
             )
-            return
-        if restored:
+            expected_gate_roles = (
+                {GATE_TIER_ROLE_IDS[completed_count - 1]}
+                if 0 < completed_count <= len(GATE_TIER_ROLE_IDS)
+                else set()
+            )
+            if after_gate_roles != expected_gate_roles:
+                try:
+                    restored_gate = await self._restore_gate_projection(
+                        after.guild,
+                        after,
+                        completed_count,
+                        reason="Revert unauthorized Gate role change",
+                    )
+                except (
+                    commands.UserFeedbackCheckFailure,
+                    discord.Forbidden,
+                    discord.HTTPException,
+                ):
+                    log.exception(
+                        "Failed to revert Gate role change for guild %s member %s",
+                        after.guild.id,
+                        after.id,
+                    )
+                    await self._send_guild_alert(
+                        after.guild,
+                        f"Failed to restore Gate roles for <@{after.id}>",
+                    )
+                    return
+                if restored_gate:
+                    corrected_roles.extend(after_gate_roles ^ expected_gate_roles)
+
+        for definition in definitions:
+            role_id = definition.role_id
+            if role_id is None or role_id not in changed_role_ids:
+                continue
+            should_have_role = after.id in set(
+                await self._achievement_store.projected_users_for_boolean(
+                    after.guild.id,
+                    definition.key,
+                )
+            )
+            if (role_id in after_role_ids) == should_have_role:
+                continue
+            try:
+                await self._edit_achievement_roles(
+                    after.guild,
+                    after,
+                    add_role_ids=(role_id,) if should_have_role else (),
+                    remove_role_ids=() if should_have_role else (role_id,),
+                    reason="Revert unauthorized achievement role change",
+                )
+            except (
+                commands.UserFeedbackCheckFailure,
+                discord.Forbidden,
+                discord.HTTPException,
+            ):
+                log.exception(
+                    "Failed to restore achievement role %s for guild %s member %s",
+                    role_id,
+                    after.guild.id,
+                    after.id,
+                )
+                await self._send_guild_alert(
+                    after.guild,
+                    f"Failed to restore <@&{role_id}> for <@{after.id}>",
+                )
+                return
+            corrected_roles.append(role_id)
+
+        if corrected_roles:
+            rendered_roles = ", ".join(
+                f"<@&{role_id}>" for role_id in sorted(set(corrected_roles))
+            )
+            await self._send_guild_alert(
+                after.guild,
+                f"Restored achievement roles for <@{after.id}>: {rendered_roles}",
+            )
+        if restored_gate:
             task = asyncio.create_task(
                 self._notify_unauthorized_gate_actor(after.guild, after.id)
             )
@@ -3680,7 +4323,7 @@ class NHMisc(commands.Cog):
         if not config["sticky_debug_logging_enabled"]:
             return
 
-        channel = self._get_log_channel(guild, config["sticky_debug_logging_channel"])
+        channel = self._get_log_channel(guild, config["alert_channel"])
         if channel is None:
             return
 

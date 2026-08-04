@@ -298,13 +298,13 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Configured role is missing", current)
         self.assertNotIn("606", current)
 
-    async def test_sticky_debuglogging_group_shows_toggle_and_channel(self):
+    async def test_sticky_debuglogging_group_uses_global_alert_channel(self):
         self.ctx.author.guild_permissions.manage_guild = True
         self.channels[321] = types.SimpleNamespace(mention="<#321>")
         self.cog.config = FakeConfig(
             {
                 "sticky_debug_logging_enabled": True,
-                "sticky_debug_logging_channel": 321,
+                "alert_channel": 321,
             }
         )
 
@@ -318,8 +318,62 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         current = fields["Current configuration"]
         self.assertEqual(embed.title, "Sticky role debug logging")
         self.assertIn("Enabled: Yes", current)
-        self.assertIn("Channel: <#321>", current)
+        self.assertIn("Alert channel: <#321>", current)
+        self.assertFalse(
+            hasattr(nhmisc.NHMisc, "nhmisc_stickyroles_debuglogging_channel")
+        )
         self.ctx.send_help.assert_not_awaited()
+
+    async def test_sticky_debug_output_uses_global_alert_channel(self):
+        channel = types.SimpleNamespace(send=mock.AsyncMock())
+        self.channels[321] = channel
+        self.cog.config = FakeConfig(
+            {
+                "sticky_debug_logging_enabled": True,
+                "alert_channel": 321,
+            }
+        )
+        self.cog._get_log_channel = mock.Mock(return_value=channel)
+
+        await self.cog._send_sticky_debug_log(self.guild, "Sticky role restored")
+
+        self.cog._get_log_channel.assert_called_once_with(self.guild, 321)
+        channel.send.assert_awaited_once()
+        self.assertEqual(channel.send.await_args.args, ("Sticky role restored",))
+
+    async def test_deleted_sticky_role_prompt_uses_alert_channel_even_if_debug_is_off(
+        self,
+    ):
+        channel = types.SimpleNamespace(send=mock.AsyncMock())
+        self.channels[321] = channel
+        self.cog.config = FakeConfig(
+            {
+                "sticky_debug_logging_enabled": False,
+                "alert_channel": 321,
+            }
+        )
+        self.cog._sticky_roles = types.SimpleNamespace(
+            get_role_state=mock.AsyncMock(return_value=(True, 2))
+        )
+        self.cog._achievement_store = types.SimpleNamespace(
+            list_definitions=mock.AsyncMock(return_value=())
+        )
+        self.cog._get_log_channel = mock.Mock(return_value=channel)
+        self.cog._prompt_sticky_role_db_action = mock.AsyncMock()
+        role = types.SimpleNamespace(
+            id=456,
+            name="Sticky",
+            guild=self.guild,
+        )
+
+        await self.cog.on_guild_role_delete(role)
+
+        self.cog._get_log_channel.assert_called_once_with(self.guild, 321)
+        self.cog._prompt_sticky_role_db_action.assert_awaited_once()
+        self.assertIs(
+            self.cog._prompt_sticky_role_db_action.await_args.kwargs["channel"],
+            channel,
+        )
 
     async def test_roleanalytics_group_shows_database_state(self):
         state = types.SimpleNamespace(

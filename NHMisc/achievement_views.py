@@ -303,3 +303,107 @@ class AchievementRevokeView(discord.ui.View):
                 await self.message.delete()
             except discord.HTTPException:
                 pass
+
+
+class AchievementRoleBindView(discord.ui.View):
+    def __init__(
+        self,
+        cog: NHMisc,
+        opener_id: int,
+        role: discord.Role,
+        holder_ids: tuple[int, ...],
+        definitions: tuple[AchievementDefinition, ...],
+    ) -> None:
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.opener_id = opener_id
+        self.role = role
+        self.holder_ids = holder_ids
+        self.definitions = definitions
+        self.selected_key: str | None = None
+        self.message: discord.Message | None = None
+        self.achievement_select.options = [
+            discord.SelectOption(
+                label=definition.display_name[:100],
+                value=definition.key,
+            )
+            for definition in definitions
+        ]
+        self.confirm.disabled = True
+
+    def render_embed(self, *, notice: str | None = None) -> discord.Embed:
+        selected = next(
+            (
+                definition.display_name
+                for definition in self.definitions
+                if definition.key == self.selected_key
+            ),
+            "Select an achievement",
+        )
+        embed = discord.Embed(title="Bind achievement role")
+        embed.add_field(name="Achievement", value=selected, inline=False)
+        embed.add_field(name="Discord role", value=self.role.mention, inline=False)
+        embed.add_field(
+            name="Current role holders",
+            value=str(len(self.holder_ids)),
+            inline=False,
+        )
+        embed.add_field(
+            name="Achievements to import without proof",
+            value=str(len(self.holder_ids)),
+            inline=False,
+        )
+        if notice:
+            embed.description = notice
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.opener_id:
+            return True
+        await interaction.response.send_message(
+            "Only the moderator who opened this can use it",
+            ephemeral=True,
+        )
+        return False
+
+    async def on_timeout(self) -> None:
+        self.achievement_select.disabled = True
+        self.confirm.disabled = True
+        self.cancel.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    @discord.ui.select(placeholder="Select achievement", min_values=1, max_values=1)
+    async def achievement_select(
+        self,
+        interaction: discord.Interaction,
+        select: discord.ui.Select,
+    ) -> None:
+        self.selected_key = select.values[0]
+        self.confirm.disabled = False
+        await interaction.response.edit_message(embed=self.render_embed(), view=self)
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, row=1)
+    async def confirm(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        await self.cog._confirm_achievement_role_bind(interaction, self)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=1)
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        self.stop()
+        await interaction.response.defer()
+        if self.message is not None:
+            try:
+                await self.message.delete()
+            except discord.HTTPException:
+                pass
