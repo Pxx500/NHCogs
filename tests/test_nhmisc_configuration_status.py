@@ -366,6 +366,20 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("retention", commands)
         self.ctx.send_help.assert_not_awaited()
 
+    async def test_achievement_group_shows_revoke_command_instead_of_generic_help(self):
+        self.ctx.command = types.SimpleNamespace(
+            commands=(command_metadata("achievement revoke", "<members...>"),)
+        )
+
+        await nhmisc.NHMisc.achievement.callback(self.cog, self.ctx)
+
+        self.ctx.send.assert_awaited_once()
+        embed = self.ctx.send.await_args.kwargs["embed"]
+        fields = {field.name: field.value for field in embed.fields}
+        self.assertEqual(embed.title, "Achievements")
+        self.assertIn("!achievement revoke <members...>", fields["Commands"])
+        self.ctx.send_help.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()
