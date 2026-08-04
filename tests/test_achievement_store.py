@@ -102,6 +102,14 @@ class AchievementStoreTests(unittest.IsolatedAsyncioTestCase):
         created = await self.store.bootstrap_guild(
             50,
             gate_tiers={10: 3, 11: 1},
+            boolean_definitions=(
+                achievement_store.AchievementDefinition(
+                    key="solo_gater",
+                    display_name="Solo Gater",
+                    kind=achievement_store.AchievementKind.BOOLEAN,
+                    role_id=99,
+                ),
+            ),
             boolean_users={"solo_gater": (10,)},
         )
 
@@ -110,6 +118,7 @@ class AchievementStoreTests(unittest.IsolatedAsyncioTestCase):
         repeated = await self.store.bootstrap_guild(
             50,
             gate_tiers={10: 6},
+            boolean_definitions=(),
             boolean_users={},
         )
 
@@ -119,6 +128,148 @@ class AchievementStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.boolean_keys, ("solo_gater",))
         self.assertEqual(second.stargate_count, 1)
         self.assertTrue(await self.store.is_bootstrapped(50))
+
+    async def test_unbinding_seeded_role_keeps_awards_and_survives_restart(self):
+        solo = achievement_store.AchievementDefinition(
+            key="solo_gater",
+            display_name="Solo Gater",
+            kind=achievement_store.AchievementKind.BOOLEAN,
+            role_id=99,
+            display_order=0,
+        )
+        await self.store.bootstrap_guild(
+            50,
+            gate_tiers={},
+            boolean_definitions=(solo,),
+            boolean_users={"solo_gater": (10,)},
+        )
+
+        unbound = await self.store.unbind_role(50, 99)
+        reopened = achievement_store.AchievementStore(self.path)
+        await reopened.initialize()
+
+        self.assertEqual(unbound.key, "solo_gater")
+        self.assertIsNone(unbound.role_id)
+        self.assertEqual(
+            (await reopened.get_profile(50, 10)).boolean_keys,
+            ("solo_gater",),
+        )
+        self.assertIsNone((await reopened.list_definitions(50))[0].role_id)
+
+    async def test_binding_role_imports_current_holders_without_proofs(self):
+        await self.store.mark_bootstrapped(50)
+        definition = await self.store.create_boolean_definition(50, "All Quests")
+
+        result = await self.store.bind_role(
+            50,
+            definition.key,
+            role_id=123,
+            user_ids=(10, 11),
+        )
+
+        self.assertEqual(result.definition.role_id, 123)
+        self.assertEqual(result.imported_count, 2)
+        self.assertEqual(
+            (await self.store.get_profile(50, 10)).boolean_keys,
+            (definition.key,),
+        )
+        connection = sqlite3.connect(self.path)
+        try:
+            proof = connection.execute(
+                """
+                SELECT source_channel_id, source_message_id
+                FROM achievement_awards
+                WHERE guild_id = 50 AND user_id = 10
+                """
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(proof, (None, None))
+
+    async def test_one_role_cannot_bind_to_two_achievements(self):
+        first = await self.store.create_boolean_definition(50, "First")
+        second = await self.store.create_boolean_definition(50, "Second")
+        await self.store.bind_role(
+            50,
+            first.key,
+            role_id=123,
+            user_ids=(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "already bound"):
+            await self.store.bind_role(
+                50,
+                second.key,
+                role_id=123,
+                user_ids=(),
+            )
+
+    async def test_role_replacement_rejects_an_already_bound_target(self):
+        first = await self.store.create_boolean_definition(50, "First")
+        second = await self.store.create_boolean_definition(50, "Second")
+        await self.store.bind_role(50, first.key, role_id=123, user_ids=())
+        await self.store.bind_role(50, second.key, role_id=456, user_ids=())
+
+        with self.assertRaisesRegex(ValueError, "already bound"):
+            await self.store.replace_role(
+                50,
+                old_role_id=123,
+                new_role_id=456,
+                user_ids=(),
+            )
+
+    async def test_replacing_role_preserves_owners_and_imports_new_holders(self):
+        await self.store.mark_bootstrapped(50)
+        definition = await self.store.create_boolean_definition(50, "All Quests")
+        await self.store.bind_role(
+            50,
+            definition.key,
+            role_id=123,
+            user_ids=(10,),
+        )
+
+        result = await self.store.replace_role(
+            50,
+            old_role_id=123,
+            new_role_id=456,
+            user_ids=(11,),
+        )
+
+        self.assertEqual(result.definition.role_id, 456)
+        self.assertEqual(result.imported_count, 1)
+        self.assertEqual(
+            await self.store.active_users_for_boolean(50, definition.key),
+            (10, 11),
+        )
+
+    async def test_discord_snapshot_replaces_active_role_projection_atomically(self):
+        solo = achievement_store.AchievementDefinition(
+            key="solo_gater",
+            display_name="Solo Gater",
+            kind=achievement_store.AchievementKind.BOOLEAN,
+            role_id=99,
+        )
+        await self.store.bootstrap_guild(
+            50,
+            gate_tiers={10: 3},
+            boolean_definitions=(solo,),
+            boolean_users={"solo_gater": (10,)},
+        )
+
+        result = await self.store.apply_discord_snapshot(
+            50,
+            gate_tiers={10: 1, 11: 2},
+            boolean_users={"solo_gater": (11,)},
+        )
+
+        self.assertEqual(await self.store.get_gate_projection(50, 10), 1)
+        self.assertEqual(await self.store.get_gate_projection(50, 11), 2)
+        self.assertEqual((await self.store.get_profile(50, 10)).boolean_keys, ())
+        self.assertEqual(
+            (await self.store.get_profile(50, 11)).boolean_keys,
+            ("solo_gater",),
+        )
+        self.assertEqual(result.changed_users, 2)
 
     async def test_gate_projection_counts_pending_reserved_awards(self):
         await self.store.import_gate_progress(1, 2, 2)
@@ -137,6 +288,25 @@ class AchievementStoreTests(unittest.IsolatedAsyncioTestCase):
             connection.close()
 
         self.assertEqual(await self.store.get_gate_projection(1, 2), 3)
+
+    async def test_boolean_projection_counts_pending_reserved_awards(self):
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute(
+                """
+                INSERT INTO achievement_awards (
+                    guild_id, user_id, achievement_key, awarded_at, state
+                ) VALUES (1, 2, 'solo_gater', 'now', 'pending')
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        self.assertEqual(
+            await self.store.projected_users_for_boolean(1, "solo_gater"),
+            (2,),
+        )
 
 
 if __name__ == "__main__":
