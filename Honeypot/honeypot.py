@@ -740,6 +740,74 @@ class Honeypot(Cog):
     def _format_bool_setting(self, value: bool) -> str:
         return _("enabled") if value else _("disabled")
 
+    @staticmethod
+    def _group_overview_is_private(ctx: commands.Context) -> bool:
+        guild = getattr(ctx, "guild", None)
+        channel = getattr(ctx, "channel", None)
+        default_role = getattr(guild, "default_role", None)
+        permissions_for = getattr(channel, "permissions_for", None)
+        if default_role is None or not callable(permissions_for):
+            return False
+        try:
+            permissions = permissions_for(default_role)
+        except (AttributeError, TypeError):
+            return False
+        return not bool(getattr(permissions, "view_channel", True))
+
+    async def _send_group_overview(
+        self,
+        ctx: commands.Context,
+        config_sender: typing.Callable[..., typing.Awaitable[None]] | None = None,
+    ) -> None:
+        private = self._group_overview_is_private(ctx)
+        if private and config_sender is not None:
+            await config_sender(self, ctx)
+
+        command = ctx.command
+        embed = discord.Embed(
+            title=command.name.replace("_", " ").title(),
+            description=command.short_doc,
+        )
+        if not private and config_sender is not None:
+            embed.add_field(
+                name=_("Current configuration"),
+                value=_(
+                    "Current values are hidden in channels visible to regular members. "
+                    "Run this command in a private moderator channel to view them."
+                ),
+                inline=False,
+            )
+
+        command_lines = []
+        for child in command.commands:
+            usage = f"{ctx.clean_prefix}{child.qualified_name}"
+            if child.signature:
+                usage = f"{usage} {child.signature}"
+            command_lines.append(f"`{usage}` — {child.short_doc}")
+
+        chunks: list[str] = []
+        current: list[str] = []
+        for line in command_lines:
+            candidate = "\n".join((*current, line))
+            if current and len(candidate) > 1024:
+                chunks.append("\n".join(current))
+                current = [line]
+            else:
+                current.append(line)
+        if current:
+            chunks.append("\n".join(current))
+
+        for index, chunk in enumerate(chunks):
+            embed.add_field(
+                name=_("Commands") if index == 0 else _("Commands (continued)"),
+                value=chunk,
+                inline=False,
+            )
+        await ctx.send(
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     async def _is_protected_member(
         self,
         member: discord.Member | discord.User,
@@ -1245,17 +1313,20 @@ class Honeypot(Cog):
 
     @commands.guild_only()
     @commands.permissions_check(lambda ctx: ctx.author.id == ctx.guild.owner_id or ctx.author.id in ctx.bot.owner_ids)
-    @commands.group()
+    @commands.group(invoke_without_command=True)
     async def honeypot(self, ctx: commands.Context) -> None:
         """Configure server safety and honeypot protections."""
+        return await self._send_group_overview(ctx, detection.config_all)
 
-    @honeypot.group(name="debug")
+    @honeypot.group(name="debug", invoke_without_command=True)
     async def debug(self, ctx: commands.Context) -> None:
         """Maintenance, debug, and export tools."""
+        return await self._send_group_overview(ctx)
 
-    @debug.group(name="imagescan")
+    @debug.group(name="imagescan", invoke_without_command=True)
     async def debug_imagescan(self, ctx: commands.Context) -> None:
         """Maintenance tools for image scan training data."""
+        return await self._send_group_overview(ctx)
 
     @debug_imagescan.command(name="cleanup_events")
     async def imagescan_cleanup_events(self, ctx: commands.Context, confirm: str = None) -> None:
@@ -1303,9 +1374,10 @@ class Honeypot(Cog):
 
     # ─── honeypot sub-group ───────────────────────────────────────────
 
-    @honeypot.group(name="honeypot")
+    @honeypot.group(name="honeypot", invoke_without_command=True)
     async def honeypot_settings(self, ctx: commands.Context) -> None:
         """Configure the main honeypot detection layer."""
+        return await self._send_group_overview(ctx, detection.config_honeypot)
 
     @honeypot_settings.command(name="toggle")
     async def honeypot_toggle(self, ctx: commands.Context, value: bool = None) -> None:
@@ -1339,9 +1411,10 @@ class Honeypot(Cog):
 
     # ─── channel sub-group ────────────────────────────────────────────
 
-    @honeypot.group(name="channel")
+    @honeypot.group(name="channel", invoke_without_command=True)
     async def channels(self, ctx: commands.Context) -> None:
         """Configure honeypot and log channels."""
+        return await self._send_group_overview(ctx, detection.config_channel)
 
     @commands.bot_has_guild_permissions(manage_channels=True)
     @channels.command()
@@ -1371,9 +1444,10 @@ class Honeypot(Cog):
 
     # ─── punishment sub-group ─────────────────────────────────────────
 
-    @honeypot.group()
+    @honeypot.group(invoke_without_command=True)
     async def punishment(self, ctx: commands.Context) -> None:
         """Configure roles used while a case is awaiting review."""
+        return await self._send_group_overview(ctx, detection.config_punishment)
 
     @punishment.command(name="mute_role")
     async def punishment_mute_role(self, ctx: commands.Context, role: discord.Role = None) -> None:
@@ -1382,9 +1456,10 @@ class Honeypot(Cog):
 
     # ─── purge sub-group ───────────────────────────────────────────────
 
-    @honeypot.group(name="purge")
+    @honeypot.group(name="purge", invoke_without_command=True)
     async def purge(self, ctx: commands.Context) -> None:
         """Configure event-registry message purge windows."""
+        return await self._send_group_overview(ctx, detection.config_purge)
 
     @purge.command(name="backward")
     async def purge_backward(self, ctx: commands.Context, seconds: int = None) -> None:
@@ -1398,9 +1473,10 @@ class Honeypot(Cog):
 
     # ─── spam sub-group ────────────────────────────────────────────────
 
-    @honeypot.group()
+    @honeypot.group(invoke_without_command=True)
     async def spam(self, ctx: commands.Context) -> None:
         """Configure duplicate-message spam detection."""
+        return await self._send_group_overview(ctx, detection.config_spam)
 
     @spam.command(name="toggle")
     async def spam_toggle(self, ctx: commands.Context, value: bool = None) -> None:
@@ -1424,9 +1500,10 @@ class Honeypot(Cog):
 
     # ─── imagescan sub-group ───────────────────────────────────────────
 
-    @honeypot.group(name="imagescan")
+    @honeypot.group(name="imagescan", invoke_without_command=True)
     async def imagescan(self, ctx: commands.Context) -> None:
         """Configure adaptive scam-image detection."""
+        return await self._send_group_overview(ctx, imagescan.config_imagescan)
 
     @imagescan.command(name="add")
     async def imagescan_add(self, ctx: commands.Context) -> None:
@@ -1457,9 +1534,10 @@ class Honeypot(Cog):
         """Set the channel for image shadow reviews."""
         return await imagescan.imagescan_channel(self, ctx, channel)
 
-    @imagescan.group(name="detector")
+    @imagescan.group(name="detector", invoke_without_command=True)
     async def imagescan_detector(self, ctx: commands.Context) -> None:
         """Configure production image detector behavior."""
+        return await self._send_group_overview(ctx, imagescan.config_imagescan)
 
     @imagescan_detector.command(name="toggle")
     async def imagescan_detector_toggle(self, ctx: commands.Context, value: bool = None) -> None:
@@ -1498,9 +1576,10 @@ class Honeypot(Cog):
         """Import true-positive scam images from attached zip files."""
         return await imagescan.imagescan_import_tp_zip(self, ctx)
 
-    @honeypot.group()
+    @honeypot.group(invoke_without_command=True)
     async def firstpost(self, ctx: commands.Context) -> None:
         """Configure first-message detection."""
+        return await self._send_group_overview(ctx, detection.config_firstpost)
 
     @firstpost.command(name="toggle")
     async def firstpost_toggle(self, ctx: commands.Context, value: bool = None) -> None:
@@ -1519,9 +1598,10 @@ class Honeypot(Cog):
 
     # ─── review sub-group ─────────────────────────────────────────────
 
-    @honeypot.group()
+    @honeypot.group(invoke_without_command=True)
     async def review(self, ctx: commands.Context) -> None:
         """Configure moderator review for suspicious cases."""
+        return await self._send_group_overview(ctx, detection.config_review)
 
     @review.command(name="toggle")
     async def review_toggle(self, ctx: commands.Context, value: bool = None) -> None:
@@ -1542,9 +1622,10 @@ class Honeypot(Cog):
 
     # ─── roles sub-group (was whitelistedroles) ───────────────────────
 
-    @honeypot_settings.group()
+    @honeypot_settings.group(invoke_without_command=True)
     async def roles(self, ctx: commands.Context) -> None:
         """Manage roles trusted by the main honeypot layer."""
+        return await self._send_group_overview(ctx, detection.config_roles)
 
     @roles.command(name="add")
     async def roles_add(self, ctx: commands.Context, role: discord.Role) -> None:
@@ -1563,9 +1644,10 @@ class Honeypot(Cog):
 
     # ─── keywords sub-group (was scamkeywords) ────────────────────────
 
-    @honeypot_settings.group()
+    @honeypot_settings.group(invoke_without_command=True)
     async def keywords(self, ctx: commands.Context) -> None:
         """Manage text and attachment patterns used by honeypot detection."""
+        return await self._send_group_overview(ctx, detection.config_keywords)
 
     @keywords.command(name="add")
     async def keywords_add(self, ctx: commands.Context, *, keyword: str) -> None:
@@ -1587,9 +1669,10 @@ class Honeypot(Cog):
         """Reset honeypot keywords to defaults."""
         return await detection.keywords_reset(self, ctx)
 
-    @keywords.group(name="attachments")
+    @keywords.group(name="attachments", invoke_without_command=True)
     async def keyword_attachments(self, ctx: commands.Context) -> None:
         """Manage attachment filename patterns used by honeypot detection."""
+        return await self._send_group_overview(ctx, detection.config_keywords)
 
     @keyword_attachments.command(name="add")
     async def keyword_attachments_add(self, ctx: commands.Context, *, pattern: str) -> None:
@@ -1613,9 +1696,10 @@ class Honeypot(Cog):
 
     # ─── joinwatch sub-group ──────────────────────────────────────────
 
-    @honeypot.group()
+    @honeypot.group(invoke_without_command=True)
     async def joinwatch(self, ctx: commands.Context) -> None:
         """Configure young-account join monitoring."""
+        return await self._send_group_overview(ctx, joinwatch.config_joinwatch)
 
     @joinwatch.command(name="toggle")
     async def joinwatch_toggle(self, ctx: commands.Context, value: bool = None) -> None:
@@ -1627,9 +1711,10 @@ class Honeypot(Cog):
         """Set the channel for young-account join alerts."""
         return await joinwatch.channel(self, ctx, target)
 
-    @joinwatch.group(name="alert")
+    @joinwatch.group(name="alert", invoke_without_command=True)
     async def joinwatch_alert(self, ctx: commands.Context) -> None:
         """Configure joinwatch alert delivery."""
+        return await self._send_group_overview(ctx, joinwatch.config_joinwatch)
 
     @joinwatch_alert.command(name="toggle")
     async def joinwatch_alert_toggle(self, ctx: commands.Context, value: bool = None) -> None:
@@ -1641,9 +1726,10 @@ class Honeypot(Cog):
         """Set the maximum account age for joinwatch alerts."""
         return await joinwatch.max_age(self, ctx, hours)
 
-    @joinwatch.group(name="autorole")
+    @joinwatch.group(name="autorole", invoke_without_command=True)
     async def joinwatch_autorole(self, ctx: commands.Context) -> None:
         """Configure temporary roles for young accounts."""
+        return await self._send_group_overview(ctx, joinwatch.config_joinwatch)
 
     @joinwatch_autorole.command(name="toggle")
     async def joinwatch_autorole_toggle(self, ctx: commands.Context, value: bool = None) -> None:
@@ -1670,9 +1756,10 @@ class Honeypot(Cog):
         """List active joinwatch auto-role timers."""
         return await joinwatch.joinwatch_autorole_bantimers(self, ctx)
 
-    @joinwatch_autorole.group(name="randomize")
+    @joinwatch_autorole.group(name="randomize", invoke_without_command=True)
     async def joinwatch_autorole_randomize(self, ctx: commands.Context) -> None:
         """Configure randomized auto-role delay."""
+        return await self._send_group_overview(ctx, joinwatch.config_joinwatch)
 
     @joinwatch_autorole_randomize.command(name="toggle")
     async def joinwatch_autorole_randomize_toggle(
@@ -1697,9 +1784,10 @@ class Honeypot(Cog):
 
     # ─── bait role sub-group ──────────────────────────────────────────
 
-    @honeypot.group(name="bait_role")
+    @honeypot.group(name="bait_role", invoke_without_command=True)
     async def bait_role(self, ctx: commands.Context) -> None:
         """Configure the bait role trap."""
+        return await self._send_group_overview(ctx, detection.config_bait)
 
     @bait_role.command(name="toggle")
     async def bait_toggle(self, ctx: commands.Context, value: bool = None) -> None:
@@ -1718,10 +1806,10 @@ class Honeypot(Cog):
 
     # ─── config dump ───────────────────────────────────────────────────
 
-    @honeypot.group(name="config")
+    @honeypot.group(name="config", invoke_without_command=True)
     async def config_dump(self, ctx: commands.Context) -> None:
         """Show current honeypot configuration by section."""
-        return await diagnostics.config_dump(self, ctx)
+        return await diagnostics.config_dump(self, ctx, detection.config_all)
 
     @config_dump.command(name="honeypot")
     async def config_honeypot(self, ctx: commands.Context) -> None:

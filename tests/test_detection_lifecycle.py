@@ -126,7 +126,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 cog = object.__new__(honeypot.Honeypot)
                 ctx = SimpleNamespace(
                     command=honeypot.Honeypot.debug,
-                    invoked_subcommand=None,
+                    invoked_subcommand=object(),
                 )
                 self.assertTrue(hasattr(ctx.command, "invoke_without_command"))
 

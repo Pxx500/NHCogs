@@ -426,8 +426,13 @@ async def review_dump(cog, ctx: commands.Context) -> None:
             shutil.rmtree(temp_root, ignore_errors=True)
 
 
-async def config_dump(cog, ctx: commands.Context) -> None:
+async def config_dump(
+    cog,
+    ctx: commands.Context,
+    config_sender: typing.Callable[..., typing.Awaitable[None]],
+) -> None:
     """Show current honeypot configuration by section."""
+    return await cog._send_group_overview(ctx, config_sender)
 
 
 async def honeypot_errors(cog, ctx: commands.Context) -> None:
