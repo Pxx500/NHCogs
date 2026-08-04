@@ -4,6 +4,7 @@ import importlib.util
 import sqlite3
 import sys
 import unittest
+from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -45,6 +46,20 @@ class AchievementStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.award.award_id, first.award.award_id)
         self.assertEqual(second.award.source_channel_id, 3)
         self.assertEqual(second.award.source_message_id, 4)
+
+    async def test_database_backup_contains_committed_achievement_state(self):
+        await self.store.grant_boolean(1, 2, "solo_gater")
+
+        backup_bytes = await self.store.backup_database()
+
+        backup_path = Path(self.temp_dir.name) / "backup.sqlite"
+        backup_path.write_bytes(backup_bytes)
+        with closing(sqlite3.connect(backup_path)) as connection:
+            award_count = connection.execute("SELECT COUNT(*) FROM achievement_awards").fetchone()[
+                0
+            ]
+        self.assertTrue(backup_bytes.startswith(b"SQLite format 3"))
+        self.assertEqual(award_count, 1)
 
     async def test_imported_gate_progress_creates_stable_proofless_ordinals(self):
         await self.store.import_gate_progress(1, 2, 3)

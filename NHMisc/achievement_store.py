@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 STARGATE_COMPLETED_KEY = "stargate_completed"
@@ -85,6 +86,10 @@ class AchievementStore:
     async def initialize(self) -> None:
         async with self._lock:
             await asyncio.to_thread(self._initialize_sync)
+
+    async def backup_database(self) -> bytes:
+        async with self._lock:
+            return await asyncio.to_thread(self._backup_database_sync)
 
     async def grant_boolean(
         self,
@@ -319,6 +324,13 @@ class AchievementStore:
             yield connection
         finally:
             connection.close()
+
+    def _backup_database_sync(self) -> bytes:
+        with TemporaryDirectory() as directory:
+            backup_path = Path(directory) / "achievements.sqlite"
+            with self._connection() as source, closing(sqlite3.connect(backup_path)) as destination:
+                source.backup(destination)
+            return backup_path.read_bytes()
 
     def _initialize_sync(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)

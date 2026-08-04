@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import gzip
+import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True, slots=True)
@@ -11,6 +13,9 @@ class DiscordRoleSnapshot:
     gate_distribution: tuple[int, ...]
     duplicate_gate_users: tuple[int, ...]
     boolean_users: dict[str, tuple[int, ...]]
+    role_holders: dict[int, tuple[int, ...]] = field(default_factory=dict)
+    cached_member_count: int = 0
+    reported_member_count: int = 0
 
     @property
     def affected_users(self) -> tuple[int, ...]:
@@ -64,11 +69,56 @@ class DiscordPriorityPlan:
         )
 
 
+def build_discord_role_backup(
+    *,
+    guild_id: int,
+    snapshot_at: str,
+    cached_member_count: int,
+    reported_member_count: int,
+    role_holders: Mapping[int, tuple[int, ...]],
+    user_names: Mapping[int, tuple[str, str]],
+) -> bytes:
+    tracked_role_ids = sorted(role_holders)
+    role_ids_by_user: dict[int, list[int]] = {}
+    for role_id in tracked_role_ids:
+        for user_id in role_holders[role_id]:
+            role_ids_by_user.setdefault(user_id, []).append(role_id)
+
+    rows = [
+        {
+            "type": "metadata",
+            "guild_id": guild_id,
+            "snapshot_at": snapshot_at,
+            "cached_member_count": cached_member_count,
+            "reported_member_count": reported_member_count,
+            "tracked_role_ids": tracked_role_ids,
+        }
+    ]
+    for user_id in sorted(role_ids_by_user):
+        username, display_name = user_names[user_id]
+        rows.append(
+            {
+                "type": "member",
+                "user_id": user_id,
+                "username": username,
+                "display_name": display_name,
+                "role_ids": role_ids_by_user[user_id],
+            }
+        )
+    jsonl = "".join(
+        f"{json.dumps(row, sort_keys=True, separators=(',', ':'))}\n" for row in rows
+    ).encode("utf-8")
+    return gzip.compress(jsonl, mtime=0)
+
+
 def build_discord_role_snapshot(
     *,
     snapshot_at: str,
     users_by_gate_role: tuple[tuple[int, ...], ...],
     boolean_users: Mapping[str, tuple[int, ...]],
+    role_holders: Mapping[int, tuple[int, ...]] | None = None,
+    cached_member_count: int = 0,
+    reported_member_count: int = 0,
 ) -> DiscordRoleSnapshot:
     gate_tiers: dict[int, int] = {}
     gate_role_counts: dict[int, int] = {}
@@ -84,6 +134,13 @@ def build_discord_role_snapshot(
             sorted(user_id for user_id, count in gate_role_counts.items() if count > 1)
         ),
         boolean_users={key: tuple(user_ids) for key, user_ids in boolean_users.items()},
+        role_holders=(
+            {role_id: tuple(user_ids) for role_id, user_ids in role_holders.items()}
+            if role_holders is not None
+            else {}
+        ),
+        cached_member_count=cached_member_count,
+        reported_member_count=reported_member_count,
     )
 
 
