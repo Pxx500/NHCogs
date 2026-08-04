@@ -57,6 +57,19 @@ DEFAULT_ACTIVITY_HISTORY_RETENTION_DAYS = -1
 CLEANUP_RESPONSE_TTL_SECONDS = 10
 RETENTION_CONFIRMATION = "I understand"
 
+
+def _parse_sticky_db_decision(content: str) -> tuple[str, int | None, str]:
+    command, separator, remainder = content.strip().partition(" ")
+    if not separator:
+        return command.lower(), None, ""
+
+    role_id_text, _, argument = remainder.strip().partition(" ")
+    try:
+        role_id = int(role_id_text)
+    except ValueError:
+        role_id = None
+    return command.lower(), role_id, argument.strip()
+
 # Categorical chart hues in fixed rank order, arranged so neighboring bars use
 # clearly different colors. The neutral tone is reserved for undisplayed users.
 CHATCHART_SERIES_COLORS = (
@@ -1758,9 +1771,9 @@ class NHMisc(commands.Cog):
             f"Configured as sticky: {'yes' if config_exists else 'no'}\n"
             f"Saved user-role rows: {saved_rows}\n"
             "Reply with one of:\n"
-            "`remove` - delete this role from sticky DB and saved users\n"
-            "`keep` - stop configuring this role as sticky, but keep saved user rows\n"
-            "`change <role mention or ID>` - move config and saved users to another role",
+            f"`remove {role_id}` - delete this role from sticky DB and saved users\n"
+            f"`keep {role_id}` - stop configuring this role as sticky, but keep saved user rows\n"
+            f"`change {role_id} <role mention or ID>` - move config and saved users to another role",
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
@@ -1772,7 +1785,12 @@ class NHMisc(commands.Cog):
                 return
 
             def check(message: discord.Message) -> bool:
-                return message.channel.id == channel.id and not message.author.bot
+                _, target_role_id, _ = _parse_sticky_db_decision(message.content)
+                return (
+                    message.channel.id == channel.id
+                    and not message.author.bot
+                    and target_role_id == role_id
+                )
 
             try:
                 message = await self.bot.wait_for("message", check=check, timeout=remaining)
@@ -1783,9 +1801,7 @@ class NHMisc(commands.Cog):
             if not await self._can_answer_sticky_db_prompt(message, guild, requester):
                 continue
 
-            content = message.content.strip()
-            command, _, argument = content.partition(" ")
-            command = command.lower()
+            command, _, argument = _parse_sticky_db_decision(message.content)
             if command == "remove" and not argument:
                 config_removed, rows_removed = await self._sticky_roles.remove_sticky_role(
                     guild.id, role_id
@@ -1806,14 +1822,15 @@ class NHMisc(commands.Cog):
                     f"Saved user-role rows kept: {saved_rows}"
                 )
                 return
-            if command == "change":
+            if command == "change" and argument:
                 await self._handle_sticky_role_db_change(
-                    channel, guild, role_id, argument.strip()
+                    channel, guild, role_id, argument
                 )
                 return
 
             await channel.send(
-                "Invalid response. Use `remove`, `keep`, or `change <role mention or ID>`."
+                f"Invalid response. Use `remove {role_id}`, `keep {role_id}`, or "
+                f"`change {role_id} <role mention or ID>`."
             )
 
     async def _can_answer_sticky_db_prompt(
