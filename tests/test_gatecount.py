@@ -28,6 +28,12 @@ class _Embed:
 
 
 class _AllowedMentions:
+    def __init__(self, **kwargs):
+        self.users = kwargs.get("users")
+        self.everyone = kwargs.get("everyone")
+        self.roles = kwargs.get("roles")
+        self.replied_user = kwargs.get("replied_user")
+
     @staticmethod
     def none():
         return "no-mentions"

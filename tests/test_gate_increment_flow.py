@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import unittest
 from pathlib import Path
@@ -432,6 +434,48 @@ class GateIncrementLifecycleTests(unittest.TestCase):
 
 
 class GateIncrementReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_context_action_defers_before_waiting_for_store(self):
+        release_store = asyncio.Event()
+        deferred = asyncio.Event()
+        events = []
+
+        async def blocked_is_bootstrapped(_guild_id):
+            events.append("store")
+            await release_store.wait()
+            return True
+
+        async def defer(**_kwargs):
+            events.append("defer")
+            deferred.set()
+
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=1),
+            user=SimpleNamespace(id=42),
+            permissions=SimpleNamespace(manage_messages=True),
+            response=SimpleNamespace(defer=mock.AsyncMock(side_effect=defer)),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(side_effect=blocked_is_bootstrapped)
+        )
+        task = asyncio.create_task(
+            cog._gate_increment_context_action(
+                interaction,
+                SimpleNamespace(),
+            )
+        )
+        try:
+            await asyncio.wait_for(deferred.wait(), timeout=0.1)
+            self.assertEqual(events[0], "defer")
+            interaction.response.defer.assert_awaited_once_with(
+                ephemeral=True,
+                thinking=True,
+            )
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
     @staticmethod
     def _interaction():
         return SimpleNamespace(
