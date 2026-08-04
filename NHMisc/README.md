@@ -141,6 +141,11 @@ through the bot.
 /achievements [user]
 Apps → View achievements
 Apps → Grant achievements
+[p]achievement create <display name>
+[p]achievement role bind @Role
+[p]achievement role unbind @Role
+[p]achievement role replace @OldRole @NewRole
+[p]achievement role list
 [p]achievement revoke <users...>
 ```
 
@@ -152,6 +157,13 @@ The message Apps grant action uses the message author and mentions as its candid
 list, then lets a moderator select up to 25 recipients and one or more achievements.
 The revoke command finds only revocable achievements shared by every selected user and
 opens a confirmation review. Grant and revoke actions require Manage Messages.
+
+Achievement creation and role commands also require Manage Messages. Achievements do
+not need Discord roles. `role bind` uses the mentioned role ID, then lets the moderator
+choose an unbound achievement from a dropdown. Binding imports current role holders
+without proof. Unbinding stops role tracking without removing the role or achievement
+history. Replacing a binding keeps existing history and imports holders of the new role.
+Deleting a bound Discord role automatically stops tracking it without deleting awards.
 
 ## Tier Distribution
 
@@ -208,16 +220,9 @@ saved user-role rows that are no longer configured as sticky. Choices are `remov
 ```
 
 Enables or disables sticky-role debug logs. When enabled, the bot logs sticky-role
-snapshot writes on member leave and snapshot reads/restores on member join.
-
-```ini
-[p]nhmisc stickyroles debuglogging channel #sticky-debug
-```
-
-Sets the channel used for sticky-role debug logs.
-
-This channel is also used for deleted-role prompts when Discord deletes a role that is
-still present in the sticky role database.
+snapshot writes on member leave and snapshot reads/restores on member join. Debug logs
+use the configured NHMisc alert channel. Deleted-role prompts always use that same alert
+channel, even when debug logging is disabled.
 
 ## Activity Analytics
 
@@ -426,6 +431,18 @@ initial synchronization, member and role events keep the database current. The b
 reconciles enabled guilds after startup, after a resumed gateway session, and once every
 24 hours. A manual `rolesync` forces an immediate reconciliation.
 
+After installing the achievement system, configure the NHMisc alert channel and run:
+
+```ini
+[p]rolesync discord
+```
+
+The command prepares an import plan from the role-analytics snapshot and posts it in the
+alert channel. The invoking moderator must type `confirm` there before anything changes.
+This initializes achievement data from current Discord roles. Later uses deliberately
+replace achievement progress with Discord's current role state. In every normal sync,
+the achievement database has priority and Discord roles are restored from it.
+
 A reconciliation builds the replacement snapshot in a separate generation and swaps it in
 atomically, so `rolestats` and `roleusers` keep answering from the previous snapshot for
 the whole duration. If a reconciliation fails, the previous snapshot stays queryable and
@@ -512,6 +529,11 @@ Role analytics stores guild IDs, current member user IDs, bot flags, and current
 IDs in a local SQLite database. It stores no usernames, display names, role-change
 history, or message data. Members who leave and roles that are deleted are removed from
 the current-state index. Disabling role analytics deletes the guild's analytics data.
+
+Achievements store guild and user IDs, achievement keys, display names, optional bound
+role IDs, timestamps, state, and optional proof-message IDs. Role synchronization uses
+this data to keep bound achievement roles and Gate progression consistent. It does not
+store message content or usernames.
 
 The cleanup commands do not add an NHMisc database. They delegate to Honeypot,
 which owns its 14-day Gateway-observed message registry and its privacy deletion.

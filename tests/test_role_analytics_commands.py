@@ -236,13 +236,31 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
         cog._achievement_store.is_bootstrapped.return_value = True
         cog._reconcile_achievement_roles_for_guild = mock.AsyncMock()
         cog._gate_increment_store = mock.AsyncMock()
+        cog._achievement_syncing_guilds = set()
         return cog
 
     def test_commands_require_manage_messages_and_expected_cooldowns(self):
-        for command_name in ("rolesync", "rolestats", "roleusers"):
-            callback = getattr(nhmisc.NHMisc, command_name).callback
-            self.assertEqual(callback.required_permissions, {"manage_messages": True})
-            self.assertTrue(callback.guild_only)
+        for command_name in (
+            "rolesync",
+            "rolesync_discord",
+            "rolestats",
+            "roleusers",
+            "achievement",
+            "achievement_create",
+            "achievement_role",
+            "achievement_role_bind",
+            "achievement_role_unbind",
+            "achievement_role_replace",
+            "achievement_role_list",
+            "achievement_revoke",
+        ):
+            with self.subTest(command=command_name):
+                callback = getattr(nhmisc.NHMisc, command_name).callback
+                self.assertEqual(
+                    callback.required_permissions,
+                    {"manage_messages": True},
+                )
+                self.assertTrue(callback.guild_only)
 
         self.assertEqual(
             nhmisc.NHMisc.rolestats.callback.cooldown, (1, 5, "user")
@@ -298,6 +316,104 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
                 "240000 role memberships in 12.3s",
             ],
         )
+        cog._reconcile_achievement_roles_for_guild.assert_awaited_once_with(
+            ctx.guild
+        )
+
+    async def test_rolesync_discord_requires_existing_analytics_snapshot(self):
+        cog = self.make_cog()
+        guild = FakeGuild(public=True)
+
+        async def snapshot(_guild_id):
+            self.assertIn(guild.id, cog._achievement_syncing_guilds)
+
+        cog._achievement_discord_snapshot = mock.AsyncMock(side_effect=snapshot)
+        ctx = make_context(guild)
+
+        await nhmisc.NHMisc.rolesync_discord.callback(cog, ctx)
+
+        ctx.send.assert_awaited_once_with(
+            "Role analytics is not ready. Run `!rolesync` first, then run "
+            "`!rolesync discord` again."
+        )
+        cog._achievement_store.bootstrap_guild.assert_not_awaited()
+        self.assertNotIn(guild.id, cog._achievement_syncing_guilds)
+
+    async def test_rolesync_discord_bootstraps_only_after_confirmation(self):
+        cog = self.make_cog()
+        guild = FakeGuild(public=True)
+        ctx = make_context(guild)
+        alert_channel = types.SimpleNamespace(id=321, mention="#alerts")
+        snapshot = nhmisc.build_discord_role_snapshot(
+            snapshot_at="2026-08-04T12:00:00+00:00",
+            users_by_gate_role=((10,), (), (), (), (), ()),
+            boolean_users={"solo_gater": (11,)},
+        )
+        cog._achievement_store.is_bootstrapped.return_value = False
+        cog._achievement_discord_snapshot = mock.AsyncMock(
+            side_effect=(snapshot, snapshot)
+        )
+        cog.config = types.SimpleNamespace(
+            guild=lambda _guild: types.SimpleNamespace(
+                alert_channel=mock.AsyncMock(return_value=321)
+            )
+        )
+        cog._get_log_channel = mock.Mock(return_value=alert_channel)
+        cog._send_voice_log = mock.AsyncMock(return_value=types.SimpleNamespace())
+        cog.bot.wait_for = mock.AsyncMock(
+            return_value=types.SimpleNamespace(
+                guild=guild,
+                channel=alert_channel,
+                author=ctx.author,
+                content="confirm",
+            )
+        )
+        cog._achievement_store.bootstrap_guild.return_value = True
+
+        await nhmisc.NHMisc.rolesync_discord.callback(cog, ctx)
+
+        cog._achievement_store.bootstrap_guild.assert_awaited_once_with(
+            guild.id,
+            gate_tiers={10: 1},
+            boolean_definitions=(nhmisc.SOLO_GATER_DEFINITION,),
+            boolean_users={"solo_gater": (11,)},
+        )
+        confirmation_check = cog.bot.wait_for.await_args.kwargs["check"]
+        self.assertTrue(
+            confirmation_check(
+                types.SimpleNamespace(
+                    guild=guild,
+                    channel=alert_channel,
+                    author=ctx.author,
+                    content="confirm",
+                )
+            )
+        )
+        self.assertFalse(
+            confirmation_check(
+                types.SimpleNamespace(
+                    guild=guild,
+                    channel=alert_channel,
+                    author=types.SimpleNamespace(id=ctx.author.id + 1),
+                    content="confirm",
+                )
+            )
+        )
+        self.assertNotIn(guild.id, cog._achievement_syncing_guilds)
+
+    async def test_rolesync_discord_rejects_a_second_pending_plan(self):
+        cog = self.make_cog()
+        guild = FakeGuild(public=True)
+        cog._achievement_syncing_guilds.add(guild.id)
+        ctx = make_context(guild)
+
+        with self.assertRaisesRegex(
+            UserFeedbackCheckFailure,
+            "already awaiting confirmation",
+        ):
+            await nhmisc.NHMisc.rolesync_discord.callback(cog, ctx)
+
+        cog._achievement_store.bootstrap_guild.assert_not_awaited()
 
     async def test_roleusers_refuses_public_channel_before_querying(self):
         cog = self.make_cog()
