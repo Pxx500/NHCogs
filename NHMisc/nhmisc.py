@@ -5,9 +5,11 @@ import hashlib
 import io
 import logging
 import time
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as datetime_time
+from typing import TypeVar
 from uuid import uuid4
 
 import discord
@@ -81,8 +83,11 @@ from .voice_activity import VoiceChannelVisitTracker
 
 log = logging.getLogger("red.NHMisc")
 
+_InteractionResult = TypeVar("_InteractionResult")
+
 DEFAULT_VCJUMPING_VISIT_COUNT = 3
 DEFAULT_VCJUMPING_WINDOW_SECONDS = 30
+ACHIEVEMENT_INTERACTION_DB_TIMEOUT_SECONDS = 15
 DEFAULT_ACTIVITY_DETAIL_RETENTION_DAYS = 31
 DEFAULT_ACTIVITY_HISTORY_RETENTION_DAYS = -1
 CLEANUP_RESPONSE_TTL_SECONDS = 10
@@ -736,75 +741,171 @@ class NHMisc(commands.Cog):
         await self._achievement_store.delete_user_everywhere(user_id)
         await self._gate_increment_store.redact_user_data(user_id)
 
+    @staticmethod
+    def _log_achievement_interaction_start(
+        action: str,
+        interaction: discord.Interaction,
+    ) -> None:
+        log.info(
+            "Achievement interaction started: action=%s guild=%s user=%s",
+            action,
+            getattr(interaction.guild, "id", None),
+            getattr(interaction.user, "id", None),
+        )
+
+    @staticmethod
+    async def _await_achievement_interaction_data(
+        awaitable: Awaitable[_InteractionResult],
+    ) -> _InteractionResult:
+        return await asyncio.wait_for(
+            awaitable,
+            timeout=ACHIEVEMENT_INTERACTION_DB_TIMEOUT_SECONDS,
+        )
+
+    @staticmethod
+    async def _send_achievement_interaction_error(
+        interaction: discord.Interaction,
+        message: str,
+        *,
+        public_defer: bool,
+    ) -> None:
+        if public_defer:
+            await interaction.delete_original_response()
+            await interaction.followup.send(message, ephemeral=True)
+            return
+        await interaction.edit_original_response(content=message)
+
+    async def _handle_achievement_interaction_failure(
+        self,
+        interaction: discord.Interaction,
+        action: str,
+        error: Exception,
+        *,
+        public_defer: bool,
+    ) -> None:
+        if isinstance(error, TimeoutError):
+            log.error(
+                "Achievement interaction timed out: action=%s guild=%s user=%s",
+                action,
+                getattr(interaction.guild, "id", None),
+                getattr(interaction.user, "id", None),
+            )
+            message = "Achievement data is busy. Try again in a moment"
+        else:
+            log.error(
+                "Achievement interaction failed: action=%s guild=%s user=%s",
+                action,
+                getattr(interaction.guild, "id", None),
+                getattr(interaction.user, "id", None),
+                exc_info=error,
+            )
+            message = "Achievement data could not be loaded. Try again later"
+        await self._send_achievement_interaction_error(
+            interaction,
+            message,
+            public_defer=public_defer,
+        )
+
     async def _achievements_slash(
         self,
         interaction: discord.Interaction,
         user: discord.Member | None = None,
     ) -> None:
+        action = "achievements slash"
+        self._log_achievement_interaction_start(action, interaction)
         if interaction.guild is None:
             await interaction.response.send_message(
                 "This command can only be used in a server",
                 ephemeral=True,
             )
             return
-        if not await self._achievement_store.is_bootstrapped(interaction.guild.id):
-            await interaction.response.send_message(
-                "Achievement data is still initializing",
-                ephemeral=True,
+        await interaction.response.defer(ephemeral=False, thinking=True)
+        try:
+            is_bootstrapped = await self._await_achievement_interaction_data(
+                self._achievement_store.is_bootstrapped(interaction.guild.id)
             )
-            return
-        target = user or interaction.user
-        profile = await self._achievement_store.get_profile(
-            interaction.guild.id,
-            target.id,
-        )
-        definitions = await self._achievement_store.list_definitions(
-            interaction.guild.id
-        )
-        await interaction.response.send_message(
-            embed=self._build_achievements_embed(
-                interaction.guild.id,
-                target,
-                profile,
-                definitions,
-            ),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+            if not is_bootstrapped:
+                await self._send_achievement_interaction_error(
+                    interaction,
+                    "Achievement data is still initializing",
+                    public_defer=True,
+                )
+                return
+            target = user or interaction.user
+            profile = await self._await_achievement_interaction_data(
+                self._achievement_store.get_profile(
+                    interaction.guild.id,
+                    target.id,
+                )
+            )
+            definitions = await self._await_achievement_interaction_data(
+                self._achievement_store.list_definitions(interaction.guild.id)
+            )
+            await interaction.edit_original_response(
+                embed=self._build_achievements_embed(
+                    interaction.guild.id,
+                    target,
+                    profile,
+                    definitions,
+                ),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception as error:
+            await self._handle_achievement_interaction_failure(
+                interaction,
+                action,
+                error,
+                public_defer=True,
+            )
 
     async def _achievements_user_context_action(
         self,
         interaction: discord.Interaction,
         user: discord.Member,
     ) -> None:
+        action = "view achievements context action"
+        self._log_achievement_interaction_start(action, interaction)
         if interaction.guild is None:
             await interaction.response.send_message(
                 "This action can only be used in a server",
                 ephemeral=True,
             )
             return
-        if not await self._achievement_store.is_bootstrapped(interaction.guild.id):
-            await interaction.response.send_message(
-                "Achievement data is still initializing",
-                ephemeral=True,
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            is_bootstrapped = await self._await_achievement_interaction_data(
+                self._achievement_store.is_bootstrapped(interaction.guild.id)
             )
-            return
-        profile = await self._achievement_store.get_profile(
-            interaction.guild.id,
-            user.id,
-        )
-        definitions = await self._achievement_store.list_definitions(
-            interaction.guild.id
-        )
-        await interaction.response.send_message(
-            embed=self._build_achievements_embed(
-                interaction.guild.id,
-                user,
-                profile,
-                definitions,
-            ),
-            ephemeral=True,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+            if not is_bootstrapped:
+                await interaction.edit_original_response(
+                    content="Achievement data is still initializing"
+                )
+                return
+            profile = await self._await_achievement_interaction_data(
+                self._achievement_store.get_profile(
+                    interaction.guild.id,
+                    user.id,
+                )
+            )
+            definitions = await self._await_achievement_interaction_data(
+                self._achievement_store.list_definitions(interaction.guild.id)
+            )
+            await interaction.edit_original_response(
+                embed=self._build_achievements_embed(
+                    interaction.guild.id,
+                    user,
+                    profile,
+                    definitions,
+                ),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception as error:
+            await self._handle_achievement_interaction_failure(
+                interaction,
+                action,
+                error,
+                public_defer=False,
+            )
 
     @staticmethod
     def _build_achievements_embed(
@@ -856,6 +957,8 @@ class NHMisc(commands.Cog):
         interaction: discord.Interaction,
         source_message: discord.Message,
     ) -> None:
+        action = "grant achievements context action"
+        self._log_achievement_interaction_start(action, interaction)
         permissions = interaction.permissions
         if (
             interaction.guild is None
@@ -867,56 +970,67 @@ class NHMisc(commands.Cog):
                 ephemeral=True,
             )
             return
-        if not await self._achievement_store.is_bootstrapped(
-            interaction.guild.id
-        ):
-            await interaction.response.send_message(
-                "Achievement data is still initializing. Run rolesync first",
-                ephemeral=True,
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            is_bootstrapped = await self._await_achievement_interaction_data(
+                self._achievement_store.is_bootstrapped(interaction.guild.id)
             )
-            return
-        candidates = _build_achievement_candidates(source_message)
-        if not candidates:
-            await interaction.response.send_message(
-                "This message has no eligible recipients",
-                ephemeral=True,
+            if not is_bootstrapped:
+                await interaction.edit_original_response(
+                    content=(
+                        "Achievement data is still initializing. Run rolesync first"
+                    )
+                )
+                return
+            candidates = _build_achievement_candidates(source_message)
+            if not candidates:
+                await interaction.edit_original_response(
+                    content="This message has no eligible recipients"
+                )
+                return
+            if len(candidates) > MAX_ACHIEVEMENT_RECIPIENTS:
+                await interaction.edit_original_response(
+                    content=(
+                        "This action supports at most "
+                        f"{MAX_ACHIEVEMENT_RECIPIENTS} users"
+                    )
+                )
+                return
+            all_definitions = await self._await_achievement_interaction_data(
+                self._achievement_store.list_definitions(interaction.guild.id)
             )
-            return
-        if len(candidates) > MAX_ACHIEVEMENT_RECIPIENTS:
-            await interaction.response.send_message(
-                f"This action supports at most {MAX_ACHIEVEMENT_RECIPIENTS} users",
-                ephemeral=True,
+            definitions = tuple(
+                definition
+                for definition in all_definitions
+                if definition.grantable
             )
-            return
-        definitions = tuple(
-            definition
-            for definition in await self._achievement_store.list_definitions(
-                interaction.guild.id
-            )
-            if definition.grantable
-        )
-        if not definitions:
-            await interaction.response.send_message(
-                "No achievements are available for manual grants",
-                ephemeral=True,
-            )
-            return
-        from .achievement_views import AchievementGrantView
+            if not definitions:
+                await interaction.edit_original_response(
+                    content="No achievements are available for manual grants"
+                )
+                return
+            from .achievement_views import AchievementGrantView
 
-        view = AchievementGrantView(
-            self,
-            source_message,
-            interaction.user.id,
-            candidates,
-            definitions,
-        )
-        await interaction.response.send_message(
-            embed=view.render_embed(),
-            view=view,
-            ephemeral=True,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-        view.message = await interaction.original_response()
+            view = AchievementGrantView(
+                self,
+                source_message,
+                interaction.user.id,
+                candidates,
+                definitions,
+            )
+            await interaction.edit_original_response(
+                embed=view.render_embed(),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            view.message = await interaction.original_response()
+        except Exception as error:
+            await self._handle_achievement_interaction_failure(
+                interaction,
+                action,
+                error,
+                public_defer=False,
+            )
 
     async def _confirm_achievement_grant(self, interaction, view) -> None:
         await interaction.response.defer()
@@ -2309,6 +2423,8 @@ class NHMisc(commands.Cog):
         interaction: discord.Interaction,
         source_message: discord.Message,
     ) -> None:
+        action = "increment gate roles context action"
+        self._log_achievement_interaction_start(action, interaction)
         permissions = interaction.permissions
         if (
             interaction.guild is None
@@ -2320,25 +2436,47 @@ class NHMisc(commands.Cog):
                 ephemeral=True,
             )
             return
-        if not await self._achievement_store.is_bootstrapped(
-            interaction.guild.id
-        ):
-            await interaction.response.send_message(
-                "Achievement data is still initializing. Run rolesync first",
-                ephemeral=True,
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            is_bootstrapped = await self._await_achievement_interaction_data(
+                self._achievement_store.is_bootstrapped(interaction.guild.id)
             )
-            return
-        existing = await self._gate_increment_store.get_operation(
-            self._gate_increment_key(source_message)
+            if not is_bootstrapped:
+                await interaction.edit_original_response(
+                    content=(
+                        "Achievement data is still initializing. Run rolesync first"
+                    )
+                )
+                return
+            await self._gate_increment_context_action_after_defer(
+                interaction,
+                source_message,
+            )
+        except Exception as error:
+            await self._handle_achievement_interaction_failure(
+                interaction,
+                action,
+                error,
+                public_defer=False,
+            )
+
+    async def _gate_increment_context_action_after_defer(
+        self,
+        interaction: discord.Interaction,
+        source_message: discord.Message,
+    ) -> None:
+        existing = await self._await_achievement_interaction_data(
+            self._gate_increment_store.get_operation(
+                self._gate_increment_key(source_message)
+            )
         )
         if existing is not None:
             existing = await self._retry_gate_increment_publication(
                 source_message, existing
             )
             if existing.operation.state is OperationState.COMPLETED:
-                await interaction.response.send_message(
-                    self._format_gate_increment_operation(existing),
-                    ephemeral=True,
+                await interaction.edit_original_response(
+                    content=self._format_gate_increment_operation(existing),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
             else:
@@ -2348,10 +2486,9 @@ class NHMisc(commands.Cog):
                     existing,
                     ephemeral=True,
                 )
-                await interaction.response.send_message(
+                await interaction.edit_original_response(
                     embed=view.render_embed(),
                     view=view,
-                    ephemeral=True,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
                 view.message = await interaction.original_response()
@@ -2364,12 +2501,11 @@ class NHMisc(commands.Cog):
                 ephemeral=True,
             )
         except commands.UserFeedbackCheckFailure as error:
-            await interaction.response.send_message(str(error), ephemeral=True)
+            await interaction.edit_original_response(content=str(error))
             return
-        await interaction.response.send_message(
+        await interaction.edit_original_response(
             embed=view.render_embed(),
             view=view,
-            ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
         view.message = await interaction.original_response()
@@ -3829,10 +3965,18 @@ class NHMisc(commands.Cog):
                 actor = getattr(entry, "user", None)
                 if actor is None or actor.bot:
                     continue
-                await actor.send(
-                    "Gate roles must be changed through the bot. "
-                    "Your manual role change was automatically reverted"
+                delivered = await self._send_guild_alert(
+                    guild,
+                    f"<@{actor.id}> Gate roles must be changed through the bot. "
+                    "Your manual role change was automatically reverted",
+                    ping_user=actor,
                 )
+                if not delivered:
+                    log.warning(
+                        "Could not notify the moderator about a reverted Gate "
+                        "change in guild %s because the alert channel is unavailable",
+                        guild.id,
+                    )
                 return
         except (discord.Forbidden, discord.HTTPException):
             log.warning(
@@ -3976,7 +4120,13 @@ class NHMisc(commands.Cog):
             return f"I need permission to send messages in {channel.mention}."
         return None
 
-    async def _send_guild_alert(self, guild: discord.Guild, content: str) -> bool:
+    async def _send_guild_alert(
+        self,
+        guild: discord.Guild,
+        content: str,
+        *,
+        ping_user: discord.abc.Snowflake | None = None,
+    ) -> bool:
         """Send to the configured alert channel. False when there is none."""
         alert_channel = self._get_log_channel(
             guild, await self.config.guild(guild).alert_channel()
@@ -3984,8 +4134,24 @@ class NHMisc(commands.Cog):
         if alert_channel is None:
             return False
 
-        await self._send_voice_log(alert_channel, content)
-        return True
+        allowed_mentions = (
+            discord.AllowedMentions(
+                everyone=False,
+                users=[ping_user],
+                roles=False,
+                replied_user=False,
+            )
+            if ping_user is not None
+            else None
+        )
+        return (
+            await self._send_voice_log(
+                alert_channel,
+                content,
+                allowed_mentions=allowed_mentions,
+            )
+            is not None
+        )
 
     def _schedule_audit_log_edit(
         self,
@@ -4090,10 +4256,16 @@ class NHMisc(commands.Cog):
         return f"{name} ({user.id})"
 
     async def _send_voice_log(
-        self, channel: discord.TextChannel, content: str
+        self,
+        channel: discord.TextChannel,
+        content: str,
+        *,
+        allowed_mentions: discord.AllowedMentions | None = None,
     ) -> discord.Message | None:
+        if allowed_mentions is None:
+            allowed_mentions = discord.AllowedMentions.none()
         try:
-            return await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+            return await channel.send(content, allowed_mentions=allowed_mentions)
         except discord.HTTPException:
             log.exception("Failed to send voice log message to channel %s", channel.id)
         return None
