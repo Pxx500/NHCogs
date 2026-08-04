@@ -4,13 +4,22 @@ import asyncio
 import io
 import logging
 import time
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as datetime_time
+from uuid import uuid4
 
 import discord
 from redbot.core import Config, commands
 from redbot.core.data_manager import cog_data_path
 
+from .achievement_definitions import (
+    ACHIEVEMENT_DEFINITIONS,
+    GRANTABLE_BOOLEAN_ACHIEVEMENTS,
+    REVOCABLE_BOOLEAN_ACHIEVEMENTS,
+    SOLO_GATER_KEY,
+)
+from .achievement_store import AchievementProfile, AchievementStore
 from .activity_storage import (
     ActivityConsistencyReport,
     ActivityDatabaseStats,
@@ -26,6 +35,23 @@ from .activity_storage import (
     UserStats,
 )
 from .forum_autopin import ForumAutopinService
+from .gate_increment_store import (
+    GateIncrementMemberPlan,
+    GateIncrementSnapshot,
+    GateIncrementStore,
+    GateProgressConflict,
+    MemberState,
+    OperationState,
+    RecoveryAction,
+    SourceMessageKey,
+    classify_member_recovery,
+)
+from .gate_roles import (
+    GATE_TIER_ROLE_IDS,
+    SINGLEPLAYER_GATE_COMPLETED_ROLE_ID,
+    build_role_ids_for_target,
+    plan_gate_transition,
+)
 from .role_analytics_service import (
     FullMemberRequestCooldownError,
     MemberIntentRequiredError,
@@ -100,15 +126,8 @@ MAX_CHATCHART_USER_COUNT = 20
 DISCORD_SNOWFLAKE_MIN_DIGITS = 15
 STARGATE_EMOJI_NAME = "stargate"
 STARGATE_EMOJI_ID = 769315278953381928
-GATE_TIER_ROLE_IDS = (
-    798700443979087892,
-    1004822424921055233,
-    1097204292198338692,
-    1442209801374269682,
-    1437811360208781406,
-    1522017144878137385,
-)
-SINGLEPLAYER_GATE_COMPLETED_ROLE_ID = 1442208051212976158
+MAX_GATE_INCREMENT_CANDIDATES = 25
+MAX_ACHIEVEMENT_RECIPIENTS = 25
 TIER_DISTRIBUTION_ROLES = (
     ("Stone", "stoneTier", 757571320945967205, 757645112267243541),
     ("Steam", "steamTier", 757571510880829540, 757643319265460224),
@@ -142,6 +161,88 @@ def _require_guild_role(
             f"({role_id}) was not found in this server."
         )
     return role
+
+
+@dataclass(frozen=True, slots=True)
+class GateIncrementCandidate:
+    user_id: int
+    display_name: str
+    current_gate_role_ids: tuple[int, ...]
+    current_tier: int | None
+    target_role_id: int | None
+    has_solo_gater: bool = False
+
+
+def _gate_increment_candidate_ids(source_message) -> tuple[int, ...]:
+    ordered_user_ids = []
+    if source_message.webhook_id is None:
+        ordered_user_ids.append(source_message.author.id)
+    ordered_user_ids.extend(source_message.raw_mentions)
+    return tuple(dict.fromkeys(ordered_user_ids))
+
+
+def _build_gate_increment_candidates(
+    source_message,
+) -> tuple[GateIncrementCandidate, ...]:
+    guild = source_message.guild
+
+    candidates = []
+    for user_id in _gate_increment_candidate_ids(source_message):
+        member = guild.get_member(user_id)
+        if member is None or member.bot:
+            continue
+        candidates.append(_build_gate_increment_candidate(member))
+    return tuple(candidates)
+
+
+def _build_achievement_candidates(source_message) -> tuple:
+    guild = source_message.guild
+    candidates = []
+    for user_id in _gate_increment_candidate_ids(source_message):
+        member = guild.get_member(user_id)
+        if member is None or member.bot:
+            continue
+        candidates.append(member)
+    return tuple(candidates)
+
+
+def _build_gate_increment_candidate(member) -> GateIncrementCandidate:
+    member_role_ids = tuple(role.id for role in member.roles)
+    transition = plan_gate_transition(member_role_ids)
+    target_role_id = (
+        GATE_TIER_ROLE_IDS[transition.target_tier - 1]
+        if transition.target_tier is not None
+        else None
+    )
+    return GateIncrementCandidate(
+        user_id=member.id,
+        display_name=member.display_name,
+        current_gate_role_ids=transition.current_role_ids,
+        current_tier=transition.current_tier,
+        target_role_id=target_role_id,
+        has_solo_gater=SINGLEPLAYER_GATE_COMPLETED_ROLE_ID in member_role_ids,
+    )
+
+
+def _validate_gate_increment_configuration(guild) -> tuple:
+    bot_member = guild.me
+    permissions = getattr(bot_member, "guild_permissions", None)
+    if bot_member is None or not permissions or not permissions.manage_roles:
+        raise commands.UserFeedbackCheckFailure("I need Manage Roles permission")
+
+    roles = []
+    for role_id in GATE_TIER_ROLE_IDS:
+        role = guild.get_role(role_id)
+        if (
+            role is None
+            or role.managed
+            or role.position >= bot_member.top_role.position
+        ):
+            raise commands.UserFeedbackCheckFailure(
+                "Gate roles are configured incorrectly"
+            )
+        roles.append(role)
+    return tuple(roles)
 
 
 class NHMisc(commands.Cog):
@@ -180,20 +281,62 @@ class NHMisc(commands.Cog):
         self._role_analytics = RoleAnalyticsService(
             self.bot, self._role_analytics_store, logger=log
         )
+        achievements_path = cog_data_path(self) / "achievements.sqlite"
+        self._achievement_store = AchievementStore(achievements_path)
         self._activity_task: asyncio.Task | None = None
         self._role_analytics_startup_task: asyncio.Task | None = None
         self._role_analytics_daily_task: asyncio.Task | None = None
+        self._gate_increment_store = GateIncrementStore(
+            achievements_path
+        )
+        self._gate_increment_recovery_task: asyncio.Task | None = None
+        self._gate_increment_context_menu = discord.app_commands.ContextMenu(
+            name="Increment Gate roles",
+            callback=self._gate_increment_context_action,
+        )
+        self._gate_increment_context_menu.default_permissions = discord.Permissions(
+            manage_messages=True
+        )
+        self._gate_increment_context_menu.guild_only = True
+        self._gate_increment_context_registered = False
+        self._achievements_slash_command = discord.app_commands.Command(
+            name="achievements",
+            description="Show a member's achievements",
+            callback=self._achievements_slash,
+        )
+        self._achievements_slash_command.guild_only = True
+        self._achievements_user_context_menu = discord.app_commands.ContextMenu(
+            name="View achievements",
+            callback=self._achievements_user_context_action,
+        )
+        self._achievements_user_context_menu.guild_only = True
+        self._grant_achievements_context_menu = discord.app_commands.ContextMenu(
+            name="Grant achievements",
+            callback=self._grant_achievements_context_action,
+        )
+        self._grant_achievements_context_menu.default_permissions = (
+            discord.Permissions(manage_messages=True)
+        )
+        self._grant_achievements_context_menu.guild_only = True
+        self._achievement_commands_registered = False
 
     async def cog_load(self) -> None:
         await self._activity_store.initialize()
         await self._sticky_roles.initialize()
         await self._role_analytics_store.initialize()
+        await self._achievement_store.initialize()
+        await self._gate_increment_store.initialize()
+        self._register_gate_increment_context_menu()
+        self._register_achievement_commands()
         self._activity_task = asyncio.create_task(self._activity_midnight_loop())
         self._role_analytics_startup_task = asyncio.create_task(
             self._role_analytics_startup_reconcile()
         )
         self._role_analytics_daily_task = asyncio.create_task(
             self._role_analytics_daily_loop()
+        )
+        self._gate_increment_recovery_task = asyncio.create_task(
+            self._recover_interrupted_gate_increments()
         )
 
     def cog_unload(self) -> None:
@@ -205,15 +348,254 @@ class NHMisc(commands.Cog):
             self._role_analytics_startup_task.cancel()
         if self._role_analytics_daily_task is not None:
             self._role_analytics_daily_task.cancel()
+        if self._gate_increment_recovery_task is not None:
+            self._gate_increment_recovery_task.cancel()
+        self._unregister_gate_increment_context_menu()
+        self._unregister_achievement_commands()
         self._role_analytics.cancel()
+
+    def _register_gate_increment_context_menu(self) -> None:
+        command_type = discord.AppCommandType.message
+        existing = self.bot.tree.get_command(
+            self._gate_increment_context_menu.name,
+            type=command_type,
+        )
+        if existing is self._gate_increment_context_menu:
+            self._gate_increment_context_registered = True
+            return
+        self.bot.tree.add_command(
+            self._gate_increment_context_menu,
+            override=True,
+        )
+        self._gate_increment_context_registered = True
+
+    def _unregister_gate_increment_context_menu(self) -> None:
+        if not self._gate_increment_context_registered:
+            return
+        command_type = discord.AppCommandType.message
+        existing = self.bot.tree.get_command(
+            self._gate_increment_context_menu.name,
+            type=command_type,
+        )
+        if existing is self._gate_increment_context_menu:
+            self.bot.tree.remove_command(
+                self._gate_increment_context_menu.name,
+                type=command_type,
+            )
+        self._gate_increment_context_registered = False
+
+    def _register_achievement_commands(self) -> None:
+        for command in (
+            self._achievements_slash_command,
+            self._achievements_user_context_menu,
+            self._grant_achievements_context_menu,
+        ):
+            self.bot.tree.add_command(command, override=True)
+        self._achievement_commands_registered = True
+
+    def _unregister_achievement_commands(self) -> None:
+        if not self._achievement_commands_registered:
+            return
+        self.bot.tree.remove_command(
+            self._achievements_slash_command.name,
+            type=discord.AppCommandType.chat_input,
+        )
+        self.bot.tree.remove_command(
+            self._achievements_user_context_menu.name,
+            type=discord.AppCommandType.user,
+        )
+        self.bot.tree.remove_command(
+            self._grant_achievements_context_menu.name,
+            type=discord.AppCommandType.message,
+        )
+        self._achievement_commands_registered = False
 
     async def configured_sticky_role_ids(self, guild_id: int) -> frozenset[int]:
         return frozenset(await self._sticky_roles.get_sticky_roles(guild_id))
+
+    async def _bootstrap_achievements_for_guild(
+        self, guild: discord.Guild
+    ) -> bool:
+        if await self._achievement_store.is_bootstrapped(guild.id):
+            return True
+        users_by_role = await self._role_analytics_users_with_roles(
+            guild.id,
+            (*GATE_TIER_ROLE_IDS, SINGLEPLAYER_GATE_COMPLETED_ROLE_ID),
+        )
+        if users_by_role is None:
+            return False
+        users_by_gate_role = users_by_role[:-1]
+        solo_users = users_by_role[-1]
+        gate_tiers: dict[int, int] = {}
+        for tier, user_ids in enumerate(users_by_gate_role, start=1):
+            for user_id in user_ids:
+                gate_tiers[user_id] = tier
+        created = await self._achievement_store.bootstrap_guild(
+            guild.id,
+            gate_tiers=gate_tiers,
+            boolean_users={SOLO_GATER_KEY: solo_users},
+        )
+        if created:
+            await self._send_guild_alert(
+                guild,
+                "Achievement database initialized from current roles. "
+                f"Gate holders: {len(gate_tiers)}; "
+                f"Solo Gater holders: {len(solo_users)}",
+            )
+        return True
+
+    async def _role_analytics_users_with_roles(
+        self,
+        guild_id: int,
+        role_ids_to_query: tuple[int, ...],
+    ) -> tuple[tuple[int, ...], ...] | None:
+        predicate_sql = """
+            EXISTS (
+                SELECT 1
+                FROM role_analytics_memberships AS membership
+                WHERE membership.guild_id = member.guild_id
+                    AND membership.generation = member.generation
+                    AND membership.user_id = member.user_id
+                    AND membership.role_id = ?
+            )
+        """
+        try:
+            users_by_role = tuple(
+                await self._role_analytics_store.matching_user_ids(
+                    guild_id,
+                    predicate_sql,
+                    (role_id,),
+                )
+                for role_id in role_ids_to_query
+            )
+        except AnalyticsUnavailableError:
+            return None
+        return users_by_role
+
+    async def _reconcile_achievement_roles_for_guild(
+        self, guild: discord.Guild
+    ) -> None:
+        users_by_role = await self._role_analytics_users_with_roles(
+            guild.id,
+            (*GATE_TIER_ROLE_IDS, SINGLEPLAYER_GATE_COMPLETED_ROLE_ID),
+        )
+        if users_by_role is None:
+            return
+        actual_gate_roles: dict[int, set[int]] = {}
+        for role_id, user_ids in zip(
+            GATE_TIER_ROLE_IDS,
+            users_by_role[:-1],
+            strict=True,
+        ):
+            for user_id in user_ids:
+                actual_gate_roles.setdefault(user_id, set()).add(role_id)
+        projections = await self._achievement_store.list_gate_projections(guild.id)
+        for user_id in set(actual_gate_roles) | set(projections):
+            completed_count = projections.get(user_id, 0)
+            expected = (
+                {GATE_TIER_ROLE_IDS[completed_count - 1]}
+                if 0 < completed_count <= len(GATE_TIER_ROLE_IDS)
+                else set()
+            )
+            if actual_gate_roles.get(user_id, set()) == expected:
+                continue
+            try:
+                member = await guild.fetch_member(user_id)
+                await self._restore_gate_projection(
+                    guild,
+                    member,
+                    completed_count,
+                    reason="Achievement startup reconciliation",
+                )
+            except (
+                commands.UserFeedbackCheckFailure,
+                discord.NotFound,
+                discord.Forbidden,
+                discord.HTTPException,
+            ):
+                log.exception(
+                    "Failed to reconcile Gate projection for guild %s member %s",
+                    guild.id,
+                    user_id,
+                )
+
+        actual_solo_users = set(users_by_role[-1])
+        stored_solo_users = set(
+            await self._achievement_store.active_users_for_boolean(
+                guild.id,
+                SOLO_GATER_KEY,
+            )
+        )
+        for user_id in actual_solo_users - stored_solo_users:
+            await self._achievement_store.grant_boolean(
+                guild.id,
+                user_id,
+                SOLO_GATER_KEY,
+            )
+        await self._achievement_store.revoke_booleans(
+            guild.id,
+            tuple(stored_solo_users - actual_solo_users),
+            (SOLO_GATER_KEY,),
+        )
+
+    @staticmethod
+    async def _restore_gate_projection(
+        guild: discord.Guild,
+        member: discord.Member,
+        completed_count: int,
+        *,
+        reason: str,
+    ) -> bool:
+        if not 0 <= completed_count <= len(GATE_TIER_ROLE_IDS):
+            log.error(
+                "Gate projection exceeds configured tiers for guild %s member %s",
+                guild.id,
+                member.id,
+            )
+            return False
+        _validate_gate_increment_configuration(guild)
+        if member.top_role.position >= guild.me.top_role.position:
+            log.warning(
+                "Cannot restore Gate projection for guild %s member %s due to hierarchy",
+                guild.id,
+                member.id,
+            )
+            return False
+        current_role_ids = tuple(role.id for role in member.roles)
+        non_gate_role_ids = tuple(
+            role_id
+            for role_id in current_role_ids
+            if role_id not in GATE_TIER_ROLE_IDS
+            and role_id != guild.default_role.id
+        )
+        desired_role_ids = non_gate_role_ids
+        if completed_count:
+            desired_role_ids = (
+                *desired_role_ids,
+                GATE_TIER_ROLE_IDS[completed_count - 1],
+            )
+        current_assignable = {
+            role_id
+            for role_id in current_role_ids
+            if role_id != guild.default_role.id
+        }
+        if set(desired_role_ids) == current_assignable:
+            return False
+        desired_roles = [guild.get_role(role_id) for role_id in desired_role_ids]
+        if any(role is None for role in desired_roles):
+            raise commands.UserFeedbackCheckFailure(
+                "Gate roles are configured incorrectly"
+            )
+        await member.edit(roles=desired_roles, reason=reason)
+        return True
 
     async def _role_analytics_startup_reconcile(self) -> None:
         await self.bot.wait_until_ready()
         try:
             await self._role_analytics.reconcile_enabled_guilds(tuple(self.bot.guilds))
+            for guild in self.bot.guilds:
+                if await self._bootstrap_achievements_for_guild(guild):
+                    await self._reconcile_achievement_roles_for_guild(guild)
         except Exception:
             log.exception("Failed to reconcile role analytics on startup")
 
@@ -229,7 +611,482 @@ class NHMisc(commands.Cog):
                 log.exception("Failed to run daily role analytics reconciliation")
 
     async def red_delete_data_for_user(self, *, requester, user_id: int) -> None:
+        await self._activity_store.delete_user_everywhere(user_id)
+        await self._sticky_roles.delete_user_everywhere(user_id)
         await self._role_analytics_store.delete_user_everywhere(user_id)
+        await self._achievement_store.delete_user_everywhere(user_id)
+        await self._gate_increment_store.redact_user_data(user_id)
+
+    async def _achievements_slash(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member | None = None,
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "This command can only be used in a server",
+                ephemeral=True,
+            )
+            return
+        if not await self._achievement_store.is_bootstrapped(interaction.guild.id):
+            await interaction.response.send_message(
+                "Achievement data is still initializing",
+                ephemeral=True,
+            )
+            return
+        target = user or interaction.user
+        profile = await self._achievement_store.get_profile(
+            interaction.guild.id,
+            target.id,
+        )
+        await interaction.response.send_message(
+            embed=self._build_achievements_embed(
+                interaction.guild.id,
+                target,
+                profile,
+            ),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _achievements_user_context_action(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "This action can only be used in a server",
+                ephemeral=True,
+            )
+            return
+        if not await self._achievement_store.is_bootstrapped(interaction.guild.id):
+            await interaction.response.send_message(
+                "Achievement data is still initializing",
+                ephemeral=True,
+            )
+            return
+        profile = await self._achievement_store.get_profile(
+            interaction.guild.id,
+            user.id,
+        )
+        await interaction.response.send_message(
+            embed=self._build_achievements_embed(
+                interaction.guild.id,
+                user,
+                profile,
+            ),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @staticmethod
+    def _build_achievements_embed(
+        guild_id: int,
+        user: discord.User | discord.Member,
+        profile: AchievementProfile,
+    ) -> discord.Embed:
+        embed = discord.Embed(title=f"Achievements — {user.display_name}")
+        embed.add_field(
+            name="Stargates completed",
+            value=str(profile.stargate_count),
+            inline=False,
+        )
+        if profile.stargate_proofs:
+            proof_lines = [
+                (
+                    f"Stargate {proof.ordinal} — "
+                    f"[View message](https://discord.com/channels/"
+                    f"{guild_id}/"
+                    f"{proof.source_channel_id}/{proof.source_message_id})"
+                )
+                for proof in profile.stargate_proofs
+            ]
+            embed.add_field(
+                name="Proofs",
+                value="\n".join(proof_lines),
+                inline=False,
+            )
+        active_boolean_keys = set(profile.boolean_keys)
+        boolean_lines = [
+            definition.display_name
+            for definition in ACHIEVEMENT_DEFINITIONS
+            if definition.key in active_boolean_keys
+            and definition.key != "stargate_completed"
+        ]
+        if boolean_lines:
+            embed.add_field(
+                name="Achievements",
+                value="\n".join(boolean_lines),
+                inline=False,
+            )
+        if profile.stargate_count == 0 and not boolean_lines:
+            embed.description = "No achievements recorded"
+        return embed
+
+    async def _grant_achievements_context_action(
+        self,
+        interaction: discord.Interaction,
+        source_message: discord.Message,
+    ) -> None:
+        permissions = interaction.permissions
+        if (
+            interaction.guild is None
+            or permissions is None
+            or not permissions.manage_messages
+        ):
+            await interaction.response.send_message(
+                "You need Manage Messages permission",
+                ephemeral=True,
+            )
+            return
+        if not await self._achievement_store.is_bootstrapped(
+            interaction.guild.id
+        ):
+            await interaction.response.send_message(
+                "Achievement data is still initializing. Run rolesync first",
+                ephemeral=True,
+            )
+            return
+        candidates = _build_achievement_candidates(source_message)
+        if not candidates:
+            await interaction.response.send_message(
+                "This message has no eligible recipients",
+                ephemeral=True,
+            )
+            return
+        if len(candidates) > MAX_ACHIEVEMENT_RECIPIENTS:
+            await interaction.response.send_message(
+                f"This action supports at most {MAX_ACHIEVEMENT_RECIPIENTS} users",
+                ephemeral=True,
+            )
+            return
+        if not GRANTABLE_BOOLEAN_ACHIEVEMENTS:
+            await interaction.response.send_message(
+                "No achievements are available for manual grants",
+                ephemeral=True,
+            )
+            return
+        from .achievement_views import AchievementGrantView
+
+        view = AchievementGrantView(
+            self,
+            source_message,
+            interaction.user.id,
+            candidates,
+            GRANTABLE_BOOLEAN_ACHIEVEMENTS,
+        )
+        await interaction.response.send_message(
+            embed=view.render_embed(),
+            view=view,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        view.message = await interaction.original_response()
+
+    async def _confirm_achievement_grant(self, interaction, view) -> None:
+        await interaction.response.defer()
+        if not view.selected_user_ids or not view.selected_keys:
+            await interaction.edit_original_response(
+                embed=view.render_embed(
+                    notice="Select at least one recipient and achievement"
+                ),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        try:
+            source_message = await self._fetch_gate_increment_source(
+                self._gate_increment_key(view.source_message)
+            )
+        except commands.UserFeedbackCheckFailure as error:
+            await interaction.edit_original_response(
+                embed=view.render_embed(notice=str(error)),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        candidates = _build_achievement_candidates(source_message)
+        if tuple(member.id for member in candidates) != view.candidate_ids:
+            view.source_message = source_message
+            view.replace_candidates(candidates)
+            await interaction.edit_original_response(
+                embed=view.render_embed(
+                    notice="The source message changed. Review the recipients again"
+                ),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        selected_members = tuple(
+            member for member in candidates if member.id in view.selected_user_ids
+        )
+        selected_definitions = tuple(
+            definition
+            for definition in GRANTABLE_BOOLEAN_ACHIEVEMENTS
+            if definition.key in view.selected_keys
+        )
+        try:
+            projected_roles = self._validate_achievement_role_projection(
+                source_message.guild,
+                selected_members,
+                selected_definitions,
+            )
+        except commands.UserFeedbackCheckFailure as error:
+            await interaction.edit_original_response(
+                embed=view.render_embed(notice=str(error)),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        created_count = 0
+        already_count = 0
+        failed_members = 0
+        for member in selected_members:
+            created_keys = []
+            for definition in selected_definitions:
+                result = await self._achievement_store.grant_boolean(
+                    source_message.guild.id,
+                    member.id,
+                    definition.key,
+                    source_channel_id=source_message.channel.id,
+                    source_message_id=source_message.id,
+                )
+                created_count += int(result.created)
+                if result.created:
+                    created_keys.append(definition.key)
+                else:
+                    already_count += 1
+            if projected_roles:
+                try:
+                    await self._edit_achievement_roles(
+                        source_message.guild,
+                        member,
+                        add_role_ids=tuple(role.id for role in projected_roles),
+                        reason=f"Achievement grant from message {source_message.id}",
+                    )
+                except (discord.Forbidden, discord.HTTPException):
+                    failed_members += 1
+                    created_count -= len(created_keys)
+                    await self._achievement_store.revoke_booleans(
+                        source_message.guild.id,
+                        (member.id,),
+                        tuple(created_keys),
+                    )
+        view.stop()
+        status = f"Granted {created_count} achievements"
+        if already_count:
+            status += f"; {already_count} were already assigned"
+        if failed_members:
+            status += f"; {failed_members} users could not be updated"
+        await interaction.edit_original_response(
+            content=status,
+            embed=None,
+            view=None,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @commands.group(name="achievement", invoke_without_command=True)
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def achievement(self, ctx: commands.Context) -> None:
+        """Manage member achievements."""
+        embed = discord.Embed(
+            title="Achievements",
+            description=(
+                "View profiles with `/achievements` or Apps → View achievements. "
+                "Grant achievements from Apps → Grant achievements."
+            ),
+        )
+        embed.add_field(
+            name="Commands",
+            value=self._format_direct_commands(ctx),
+            inline=False,
+        )
+        await ctx.send(embed=embed)
+
+    @achievement.command(name="revoke")
+    async def achievement_revoke(
+        self,
+        ctx: commands.Context,
+        *members: discord.Member,
+    ) -> None:
+        """Review and revoke achievements shared by all selected members."""
+        unique_members = tuple({member.id: member for member in members}.values())
+        if not unique_members:
+            raise commands.UserFeedbackCheckFailure("Mention at least one user")
+        if len(unique_members) > MAX_ACHIEVEMENT_RECIPIENTS:
+            raise commands.UserFeedbackCheckFailure(
+                f"Select at most {MAX_ACHIEVEMENT_RECIPIENTS} users"
+            )
+        if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
+            raise commands.UserFeedbackCheckFailure(
+                "Achievement data is still initializing. Run rolesync first"
+            )
+        shared_keys = set(
+            await self._achievement_store.shared_boolean_keys(
+                ctx.guild.id,
+                tuple(member.id for member in unique_members),
+            )
+        )
+        definitions = tuple(
+            definition
+            for definition in REVOCABLE_BOOLEAN_ACHIEVEMENTS
+            if definition.key in shared_keys
+        )
+        if not definitions:
+            raise commands.UserFeedbackCheckFailure(
+                "The selected users have no shared revocable achievements"
+            )
+        from .achievement_views import AchievementRevokeView
+
+        view = AchievementRevokeView(
+            self,
+            ctx.author.id,
+            unique_members,
+            definitions,
+        )
+        view.message = await ctx.send(
+            embed=view.render_embed(),
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _confirm_achievement_revoke(self, interaction, view) -> None:
+        await interaction.response.defer()
+        shared_keys = set(
+            await self._achievement_store.shared_boolean_keys(
+                interaction.guild.id,
+                tuple(member.id for member in view.members),
+            )
+        )
+        if not view.selected_keys or not view.selected_keys <= shared_keys:
+            await interaction.edit_original_response(
+                embed=view.render_embed(
+                    notice="Achievement ownership changed. Start the command again"
+                ),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        selected_definitions = tuple(
+            definition
+            for definition in REVOCABLE_BOOLEAN_ACHIEVEMENTS
+            if definition.key in view.selected_keys
+        )
+        try:
+            projected_roles = self._validate_achievement_role_projection(
+                interaction.guild,
+                view.members,
+                selected_definitions,
+            )
+        except commands.UserFeedbackCheckFailure as error:
+            await interaction.edit_original_response(
+                embed=view.render_embed(notice=str(error)),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        role_ids = tuple(role.id for role in projected_roles)
+        achievement_keys = tuple(
+            definition.key for definition in selected_definitions
+        )
+        revoked_count = 0
+        failed_members = 0
+        for member in view.members:
+            try:
+                if role_ids:
+                    await self._edit_achievement_roles(
+                        interaction.guild,
+                        member,
+                        remove_role_ids=role_ids,
+                        reason=f"Achievement revocation by {interaction.user.id}",
+                    )
+            except (discord.Forbidden, discord.HTTPException):
+                failed_members += 1
+                continue
+            await self._achievement_store.revoke_booleans(
+                interaction.guild.id,
+                (member.id,),
+                achievement_keys,
+            )
+            revoked_count += len(achievement_keys)
+        view.stop()
+        await interaction.edit_original_response(
+            content=(
+                f"Revoked {revoked_count} achievements"
+                + (
+                    f"; {failed_members} users could not be updated"
+                    if failed_members
+                    else ""
+                )
+            ),
+            embed=None,
+            view=None,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @staticmethod
+    def _validate_achievement_role_projection(
+        guild: discord.Guild,
+        members: tuple,
+        definitions: tuple,
+    ) -> tuple:
+        role_ids = tuple(
+            definition.role_id
+            for definition in definitions
+            if definition.role_id is not None
+        )
+        if not role_ids:
+            return ()
+        bot_member = guild.me
+        permissions = getattr(bot_member, "guild_permissions", None)
+        if bot_member is None or not permissions or not permissions.manage_roles:
+            raise commands.UserFeedbackCheckFailure("I need Manage Roles permission")
+        roles = tuple(guild.get_role(role_id) for role_id in role_ids)
+        if any(
+            role is None
+            or role.managed
+            or role.position >= bot_member.top_role.position
+            for role in roles
+        ):
+            raise commands.UserFeedbackCheckFailure(
+                "Achievement roles are configured incorrectly"
+            )
+        if any(member.top_role.position >= bot_member.top_role.position for member in members):
+            raise commands.UserFeedbackCheckFailure(
+                "One or more selected users are above my role"
+            )
+        return roles
+
+    @staticmethod
+    async def _edit_achievement_roles(
+        guild: discord.Guild,
+        member: discord.Member,
+        *,
+        add_role_ids: tuple[int, ...] = (),
+        remove_role_ids: tuple[int, ...] = (),
+        reason: str,
+    ) -> None:
+        add_ids = set(add_role_ids)
+        remove_ids = set(remove_role_ids)
+        current_ids = {
+            role.id
+            for role in member.roles
+            if role.id != guild.default_role.id
+        }
+        desired_ids = (current_ids | add_ids) - remove_ids
+        desired_roles = [
+            guild.get_role(role_id)
+            for role_id in desired_ids
+        ]
+        if any(role is None for role in desired_roles):
+            raise commands.UserFeedbackCheckFailure(
+                "Achievement roles are configured incorrectly"
+            )
+        if desired_ids == current_ids:
+            return
+        await member.edit(roles=desired_roles, reason=reason)
 
     @commands.command(name="rolesync")
     @commands.guild_only()
@@ -257,6 +1114,9 @@ class NHMisc(commands.Cog):
             raise commands.UserFeedbackCheckFailure(
                 "Role synchronization failed"
             ) from error
+
+        if await self._bootstrap_achievements_for_guild(ctx.guild):
+            await self._reconcile_achievement_roles_for_guild(ctx.guild)
 
         await ctx.send(
             f"Role synchronization complete: {result.member_count} members, "
@@ -711,6 +1571,657 @@ class NHMisc(commands.Cog):
             embed=embed,
             allowed_mentions=discord.AllowedMentions.none(),
         )
+
+    async def _gate_increment_context_action(
+        self,
+        interaction: discord.Interaction,
+        source_message: discord.Message,
+    ) -> None:
+        permissions = interaction.permissions
+        if (
+            interaction.guild is None
+            or permissions is None
+            or not permissions.manage_messages
+        ):
+            await interaction.response.send_message(
+                "You need Manage Messages permission",
+                ephemeral=True,
+            )
+            return
+        if not await self._achievement_store.is_bootstrapped(
+            interaction.guild.id
+        ):
+            await interaction.response.send_message(
+                "Achievement data is still initializing. Run rolesync first",
+                ephemeral=True,
+            )
+            return
+        existing = await self._gate_increment_store.get_operation(
+            self._gate_increment_key(source_message)
+        )
+        if existing is not None:
+            existing = await self._retry_gate_increment_publication(
+                source_message, existing
+            )
+            if existing.operation.state is OperationState.COMPLETED:
+                await interaction.response.send_message(
+                    self._format_gate_increment_operation(existing),
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            else:
+                view = self._create_existing_gate_increment_view(
+                    source_message,
+                    interaction.user.id,
+                    existing,
+                    ephemeral=True,
+                )
+                await interaction.response.send_message(
+                    embed=view.render_embed(),
+                    view=view,
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                view.message = await interaction.original_response()
+            return
+
+        try:
+            view = self._create_gate_increment_review(
+                source_message,
+                interaction.user.id,
+                ephemeral=True,
+            )
+        except commands.UserFeedbackCheckFailure as error:
+            await interaction.response.send_message(str(error), ephemeral=True)
+            return
+        await interaction.response.send_message(
+            embed=view.render_embed(),
+            view=view,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        view.message = await interaction.original_response()
+
+    def _create_gate_increment_review(
+        self,
+        source_message: discord.Message,
+        opener_id: int,
+        *,
+        ephemeral: bool,
+    ):
+        _validate_gate_increment_configuration(source_message.guild)
+        candidates = _build_gate_increment_candidates(source_message)
+        if not candidates:
+            raise commands.UserFeedbackCheckFailure(
+                "This message has no eligible users to increment"
+            )
+        if len(candidates) > MAX_GATE_INCREMENT_CANDIDATES:
+            raise commands.UserFeedbackCheckFailure(
+                f"This message contains {len(candidates)} users. Gate increment "
+                f"supports at most {MAX_GATE_INCREMENT_CANDIDATES} at a time"
+            )
+        from .gate_increment_views import GateIncrementReviewView
+
+        return GateIncrementReviewView(
+            self,
+            source_message,
+            opener_id,
+            candidates,
+            ephemeral=ephemeral,
+        )
+
+    def _create_existing_gate_increment_view(
+        self,
+        source_message: discord.Message,
+        opener_id: int,
+        snapshot: GateIncrementSnapshot,
+        *,
+        ephemeral: bool,
+    ):
+        from .gate_increment_views import GateIncrementExistingView
+
+        return GateIncrementExistingView(
+            self,
+            source_message,
+            opener_id,
+            snapshot,
+            ephemeral=ephemeral,
+        )
+
+    @staticmethod
+    def _gate_increment_key(source_message: discord.Message) -> SourceMessageKey:
+        return SourceMessageKey(
+            source_message.guild.id,
+            source_message.channel.id,
+            source_message.id,
+        )
+
+    @staticmethod
+    def _format_gate_increment_operation(snapshot: GateIncrementSnapshot) -> str:
+        operation = snapshot.operation
+        if operation.state is OperationState.APPLYING:
+            return (
+                "⏳ **GATE INCREMENT IN PROGRESS**\n"
+                "This message is already being processed"
+            )
+        if operation.state is OperationState.COMPLETED:
+            return (
+                "⚠️ **GATE INCREMENT BLOCKED**\n"
+                "This message was already processed\n"
+                f"{operation.completed_count} users were updated successfully"
+            )
+        return (
+            "⚠️ **GATE INCREMENT PARTIALLY COMPLETED**\n"
+            f"{operation.completed_count} users were updated and "
+            f"{operation.failed_count + operation.conflict_count} changes require "
+            "attention\nThis message cannot start another increment"
+        )
+
+    async def _retry_gate_increment_publication(
+        self,
+        source_message: discord.Message,
+        snapshot: GateIncrementSnapshot,
+    ) -> GateIncrementSnapshot:
+        operation = snapshot.operation
+        if operation.completed_count and operation.result_message_id is None:
+            await self._publish_gate_increment_result(source_message, snapshot)
+            refreshed = await self._gate_increment_store.get_operation(operation.key)
+            if refreshed is not None:
+                return refreshed
+        return snapshot
+
+    async def _resume_gate_increment_review(self, interaction, view) -> None:
+        await interaction.response.defer()
+        try:
+            source_message = await self._fetch_gate_increment_source(
+                view.snapshot.operation.key
+            )
+            snapshot = await self._execute_gate_increment_operation(
+                source_message,
+                interaction.user.id,
+            )
+            if snapshot.operation.state is OperationState.APPLYING:
+                await self._finish_gate_increment_review(
+                    interaction,
+                    view,
+                    self._format_gate_increment_operation(snapshot),
+                )
+                return
+            published = await self._publish_gate_increment_result(
+                source_message,
+                snapshot,
+            )
+        except commands.UserFeedbackCheckFailure as error:
+            await interaction.edit_original_response(
+                content=str(error),
+                embed=view.render_embed(),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        await self._finish_gate_increment_review(
+            interaction,
+            view,
+            self._format_gate_increment_completion(snapshot, published),
+        )
+
+    async def _refresh_gate_increment_review(self, interaction, view) -> None:
+        await interaction.response.defer()
+        try:
+            source_message = await self._fetch_gate_increment_source(
+                self._gate_increment_key(view.source_message)
+            )
+            _validate_gate_increment_configuration(source_message.guild)
+            candidates = await self._fetch_gate_increment_candidates(source_message)
+            self._validate_gate_increment_candidate_count(candidates)
+        except commands.UserFeedbackCheckFailure as error:
+            await interaction.edit_original_response(
+                content=None,
+                embed=view.render_embed(notice=str(error)),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        view.source_message = source_message
+        view.replace_candidates(candidates)
+        await interaction.edit_original_response(
+            content=None,
+            embed=view.render_embed(),
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _confirm_gate_increment_review(self, interaction, view) -> None:
+        await interaction.response.defer()
+        if not await self._achievement_store.is_bootstrapped(
+            view.source_message.guild.id
+        ):
+            await interaction.edit_original_response(
+                content=None,
+                embed=view.render_embed(
+                    notice="Achievement data is still initializing. Run rolesync first"
+                ),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        if not view.selected_user_ids:
+            await interaction.edit_original_response(
+                embed=view.render_embed(notice="Select at least one user"),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        try:
+            source_message = await self._fetch_gate_increment_source(
+                self._gate_increment_key(view.source_message)
+            )
+            _validate_gate_increment_configuration(source_message.guild)
+            live_candidates = await self._fetch_gate_increment_candidates(
+                source_message
+            )
+            self._validate_gate_increment_candidate_count(live_candidates)
+        except commands.UserFeedbackCheckFailure as error:
+            await interaction.edit_original_response(
+                content=None,
+                embed=view.render_embed(notice=str(error)),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        if self._gate_increment_review_is_stale(view, live_candidates):
+            view.source_message = source_message
+            view.replace_candidates(live_candidates)
+            await interaction.edit_original_response(
+                content=None,
+                embed=view.render_embed(
+                    notice=(
+                        "The source message or member roles changed. Review the "
+                        "updated increment plan before confirming"
+                    )
+                ),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        selected_candidates = tuple(
+            candidate
+            for candidate in live_candidates
+            if candidate.user_id in view.selected_user_ids
+            and candidate.target_role_id is not None
+        )
+        plans = tuple(
+            GateIncrementMemberPlan(
+                candidate.user_id,
+                candidate.current_gate_role_ids,
+                candidate.target_role_id,
+                target_ordinal=(candidate.current_tier or 0) + 1,
+                grant_solo=(
+                    view.solo_gater_enabled and len(selected_candidates) == 1
+                ),
+            )
+            for candidate in selected_candidates
+        )
+        key = self._gate_increment_key(source_message)
+        try:
+            claim = await self._gate_increment_store.claim(
+                key,
+                interaction.user.id,
+                plans,
+            )
+        except GateProgressConflict:
+            await interaction.edit_original_response(
+                content=None,
+                embed=view.render_embed(
+                    notice=(
+                        "A selected user's Gate progress changed. Refresh and "
+                        "review the plan again"
+                    )
+                ),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        if not claim.created:
+            existing = await self._gate_increment_store.get_operation(key)
+            await self._finish_gate_increment_review(
+                interaction,
+                view,
+                self._format_gate_increment_operation(existing),
+            )
+            return
+
+        snapshot = await self._execute_gate_increment_operation(
+            source_message,
+            interaction.user.id,
+        )
+        published = await self._publish_gate_increment_result(
+            source_message,
+            snapshot,
+        )
+        status = self._format_gate_increment_completion(snapshot, published)
+        await self._finish_gate_increment_review(interaction, view, status)
+
+    async def _fetch_gate_increment_candidates(
+        self, source_message: discord.Message
+    ) -> tuple[GateIncrementCandidate, ...]:
+        candidates = []
+        for user_id in _gate_increment_candidate_ids(source_message):
+            try:
+                member = await source_message.guild.fetch_member(user_id)
+            except discord.NotFound:
+                continue
+            except discord.HTTPException as error:
+                raise commands.UserFeedbackCheckFailure(
+                    "Could not refresh the users in this message"
+                ) from error
+            if member.bot:
+                continue
+            candidates.append(_build_gate_increment_candidate(member))
+            if len(candidates) > MAX_GATE_INCREMENT_CANDIDATES:
+                break
+        return tuple(candidates)
+
+    @staticmethod
+    def _validate_gate_increment_candidate_count(
+        candidates: tuple[GateIncrementCandidate, ...],
+    ) -> None:
+        if not candidates:
+            raise commands.UserFeedbackCheckFailure(
+                "This message has no eligible users to increment"
+            )
+        if len(candidates) > MAX_GATE_INCREMENT_CANDIDATES:
+            raise commands.UserFeedbackCheckFailure(
+                f"This message contains more than {MAX_GATE_INCREMENT_CANDIDATES} "
+                "users. Gate increment supports at most "
+                f"{MAX_GATE_INCREMENT_CANDIDATES} at a time"
+            )
+
+    @staticmethod
+    def _gate_increment_review_is_stale(view, live_candidates) -> bool:
+        if tuple(candidate.user_id for candidate in live_candidates) != view.candidate_ids:
+            return True
+        preview_by_user_id = {
+            candidate.user_id: candidate for candidate in view.candidates
+        }
+        return any(
+            (
+                candidate.current_gate_role_ids
+                != preview_by_user_id[candidate.user_id].current_gate_role_ids
+                or candidate.target_role_id
+                != preview_by_user_id[candidate.user_id].target_role_id
+            )
+            for candidate in live_candidates
+            if candidate.user_id in view.selected_user_ids
+        )
+
+    async def _execute_gate_increment_operation(
+        self,
+        source_message: discord.Message,
+        moderator_id: int,
+    ) -> GateIncrementSnapshot:
+        key = self._gate_increment_key(source_message)
+        token = uuid4().hex
+        if not await self._gate_increment_store.acquire_execution_lease(key, token):
+            snapshot = await self._gate_increment_store.get_operation(key)
+            if snapshot is None:
+                raise RuntimeError("Gate increment operation disappeared")
+            return snapshot
+
+        try:
+            _validate_gate_increment_configuration(source_message.guild)
+            snapshot = await self._gate_increment_store.get_operation(key)
+            if snapshot is None:
+                raise RuntimeError("Gate increment operation disappeared")
+            for member_plan in snapshot.members:
+                if member_plan.state is MemberState.COMPLETED:
+                    continue
+                await self._recover_gate_increment_member(
+                    source_message.guild,
+                    key,
+                    member_plan,
+                    moderator_id,
+                )
+            return await self._gate_increment_store.finalize_operation(key)
+        except Exception:
+            await self._gate_increment_store.release_execution_lease(key, token)
+            raise
+
+    async def _recover_gate_increment_member(
+        self,
+        guild: discord.Guild,
+        key: SourceMessageKey,
+        member_plan,
+        moderator_id: int,
+    ) -> None:
+        await self._gate_increment_store.mark_member_in_progress(
+            key, member_plan.position
+        )
+        if member_plan.user_id is None or member_plan.target_role_id is None:
+            await self._gate_increment_store.mark_member_conflict(
+                key, member_plan.position, "redacted"
+            )
+            return
+        completed = False
+        conflict_code = None
+        failure_code = None
+        try:
+            member = await guild.fetch_member(member_plan.user_id)
+            transition = plan_gate_transition(role.id for role in member.roles)
+            recovery = classify_member_recovery(
+                member_plan,
+                transition.current_role_ids,
+            )
+            if recovery is RecoveryAction.COMPLETE:
+                completed = True
+            elif recovery is RecoveryAction.CONFLICT:
+                conflict_code = "roles_changed"
+            else:
+                failure_code = await self._apply_fixed_gate_target(
+                    guild,
+                    member,
+                    member_plan.target_role_id,
+                    key,
+                    moderator_id,
+                    grant_solo=member_plan.grant_solo,
+                )
+                completed = failure_code is None
+        except discord.NotFound:
+            failure_code = "member_missing"
+        except discord.Forbidden:
+            failure_code = "forbidden"
+        except discord.HTTPException:
+            failure_code = "discord_error"
+
+        if completed:
+            await self._gate_increment_store.mark_member_completed(
+                key, member_plan.position
+            )
+        elif conflict_code is not None:
+            await self._gate_increment_store.mark_member_conflict(
+                key, member_plan.position, conflict_code
+            )
+        else:
+            await self._gate_increment_store.mark_member_failed(
+                key, member_plan.position, failure_code or "unknown"
+            )
+
+    @staticmethod
+    async def _apply_fixed_gate_target(
+        guild: discord.Guild,
+        member: discord.Member,
+        target_role_id: int,
+        key: SourceMessageKey,
+        moderator_id: int,
+        *,
+        grant_solo: bool = False,
+    ) -> str | None:
+        if member.top_role.position >= guild.me.top_role.position:
+            return "hierarchy"
+        desired_role_ids = build_role_ids_for_target(
+            (role.id for role in member.roles),
+            target_role_id,
+        )
+        if grant_solo and SINGLEPLAYER_GATE_COMPLETED_ROLE_ID not in desired_role_ids:
+            desired_role_ids = (*desired_role_ids, SINGLEPLAYER_GATE_COMPLETED_ROLE_ID)
+        desired_roles = [
+            guild.get_role(role_id)
+            for role_id in desired_role_ids
+            if role_id != guild.default_role.id
+        ]
+        if any(role is None for role in desired_roles):
+            return "role_missing"
+        await member.edit(
+            roles=desired_roles,
+            reason=(
+                f"Gate increment for message {key.message_id}; "
+                f"moderator {moderator_id}"
+            ),
+        )
+        return None
+
+    async def _publish_gate_increment_result(
+        self,
+        source_message: discord.Message,
+        snapshot: GateIncrementSnapshot,
+    ) -> bool:
+        if snapshot.operation.result_message_id is not None:
+            return True
+        publication_token = uuid4().hex
+        if not await self._gate_increment_store.acquire_publication_lease(
+            snapshot.operation.key,
+            publication_token,
+        ):
+            return True
+        lines = [
+            f"<@{member.user_id}> <@&{member.target_role_id}>"
+            for member in snapshot.members
+            if member.state is MemberState.COMPLETED
+            and member.user_id is not None
+            and member.target_role_id is not None
+        ]
+        if not lines:
+            await self._gate_increment_store.release_publication_lease(
+                snapshot.operation.key,
+                publication_token,
+            )
+            return True
+        try:
+            result_message = await source_message.reply(
+                "🎉 **Congratulations!**\n" + "\n".join(lines),
+                allowed_mentions=discord.AllowedMentions(
+                    users=True,
+                    roles=False,
+                    everyone=False,
+                    replied_user=False,
+                ),
+            )
+        except discord.HTTPException:
+            await self._gate_increment_store.release_publication_lease(
+                snapshot.operation.key,
+                publication_token,
+            )
+            log.exception(
+                "Failed to publish Gate increment result for message %s",
+                source_message.id,
+            )
+            return False
+        await self._gate_increment_store.record_result_message(
+            snapshot.operation.key,
+            publication_token,
+            result_message.channel.id,
+            result_message.id,
+        )
+        return True
+
+    @staticmethod
+    def _format_gate_increment_completion(
+        snapshot: GateIncrementSnapshot,
+        published: bool,
+    ) -> str:
+        operation = snapshot.operation
+        if operation.state is OperationState.COMPLETED:
+            status = f"Updated {operation.completed_count} users"
+        else:
+            status = (
+                f"Updated {operation.completed_count} users; "
+                f"{operation.failed_count + operation.conflict_count} changes "
+                "require attention"
+            )
+        if operation.completed_count and not published:
+            status += "\nRoles changed, but congratulations could not be sent"
+        return status
+
+    async def _finish_gate_increment_review(
+        self,
+        interaction,
+        view,
+        status: str,
+    ) -> None:
+        view.stop()
+        if view.ephemeral:
+            await interaction.edit_original_response(
+                content=status,
+                embed=None,
+                view=None,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        if view.message is not None:
+            try:
+                await view.message.delete()
+            except discord.HTTPException:
+                pass
+        await interaction.followup.send(
+            status,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _fetch_gate_increment_source(
+        self, key: SourceMessageKey
+    ) -> discord.Message:
+        guild = self.bot.get_guild(key.guild_id)
+        if guild is None:
+            raise commands.UserFeedbackCheckFailure(
+                "The source server is unavailable"
+            )
+        channel = guild.get_channel(key.channel_id) or self.bot.get_channel(
+            key.channel_id
+        )
+        if channel is None:
+            raise commands.UserFeedbackCheckFailure(
+                "The source channel is unavailable"
+            )
+        try:
+            return await channel.fetch_message(key.message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as error:
+            raise commands.UserFeedbackCheckFailure(
+                "The source message is unavailable"
+            ) from error
+
+    async def _recover_interrupted_gate_increments(self) -> None:
+        interrupted = await self._gate_increment_store.list_interrupted_operations()
+        for snapshot in interrupted:
+            try:
+                source_message = await self._fetch_gate_increment_source(
+                    snapshot.operation.key
+                )
+                recovered = await self._execute_gate_increment_operation(
+                    source_message,
+                    snapshot.operation.moderator_id or self.bot.user.id,
+                )
+                await self._publish_gate_increment_result(
+                    source_message,
+                    recovered,
+                )
+            except Exception:
+                log.exception(
+                    "Failed to recover Gate increment for message %s",
+                    snapshot.operation.key.message_id,
+                )
 
     @commands.command(name="tierdistribution")
     @commands.guild_only()
@@ -1435,6 +2946,113 @@ class NHMisc(commands.Cog):
             after,
             after.guild.default_role.id,
         )
+
+    @commands.Cog.listener("on_member_update")
+    async def on_achievement_member_update(
+        self, before: discord.Member, after: discord.Member
+    ) -> None:
+        if after.bot or not await self._achievement_store.is_bootstrapped(
+            after.guild.id
+        ):
+            return
+        before_role_ids = {role.id for role in before.roles}
+        after_role_ids = {role.id for role in after.roles}
+
+        before_solo = SINGLEPLAYER_GATE_COMPLETED_ROLE_ID in before_role_ids
+        after_solo = SINGLEPLAYER_GATE_COMPLETED_ROLE_ID in after_role_ids
+        if before_solo != after_solo:
+            if after_solo:
+                await self._achievement_store.grant_boolean(
+                    after.guild.id,
+                    after.id,
+                    SOLO_GATER_KEY,
+                )
+            else:
+                await self._achievement_store.revoke_booleans(
+                    after.guild.id,
+                    (after.id,),
+                    (SOLO_GATER_KEY,),
+                )
+
+        before_gate_roles = before_role_ids & set(GATE_TIER_ROLE_IDS)
+        after_gate_roles = after_role_ids & set(GATE_TIER_ROLE_IDS)
+        if before_gate_roles == after_gate_roles:
+            return
+        completed_count = await self._achievement_store.get_gate_projection(
+            after.guild.id,
+            after.id,
+        )
+        expected_gate_roles = (
+            {GATE_TIER_ROLE_IDS[completed_count - 1]}
+            if 0 < completed_count <= len(GATE_TIER_ROLE_IDS)
+            else set()
+        )
+        if after_gate_roles == expected_gate_roles:
+            return
+        try:
+            restored = await self._restore_gate_projection(
+                after.guild,
+                after,
+                completed_count,
+                reason="Revert unauthorized Gate role change",
+            )
+        except (
+            commands.UserFeedbackCheckFailure,
+            discord.Forbidden,
+            discord.HTTPException,
+        ):
+            log.exception(
+                "Failed to revert Gate role change for guild %s member %s",
+                after.guild.id,
+                after.id,
+            )
+            return
+        if restored:
+            task = asyncio.create_task(
+                self._notify_unauthorized_gate_actor(after.guild, after.id)
+            )
+            self._audit_log_tasks.add(task)
+            task.add_done_callback(self._audit_log_tasks.discard)
+
+    async def _notify_unauthorized_gate_actor(
+        self, guild: discord.Guild, member_id: int
+    ) -> None:
+        permissions = getattr(guild.me, "guild_permissions", None)
+        if permissions is None or not permissions.view_audit_log:
+            log.warning(
+                "Cannot attribute unauthorized Gate change in guild %s: "
+                "View Audit Log is missing",
+                guild.id,
+            )
+            return
+        await asyncio.sleep(2)
+        try:
+            async for entry in guild.audit_logs(
+                limit=8,
+                action=discord.AuditLogAction.member_role_update,
+            ):
+                target = getattr(entry, "target", None)
+                if target is None or target.id != member_id:
+                    continue
+                created_at = getattr(entry, "created_at", None)
+                if created_at is None or (
+                    datetime.now(timezone.utc) - created_at
+                ).total_seconds() > 30:
+                    continue
+                actor = getattr(entry, "user", None)
+                if actor is None or actor.bot:
+                    continue
+                await actor.send(
+                    "Gate roles must be changed through the bot. "
+                    "Your manual role change was automatically reverted"
+                )
+                return
+        except (discord.Forbidden, discord.HTTPException):
+            log.warning(
+                "Could not notify the moderator about a reverted Gate change "
+                "in guild %s",
+                guild.id,
+            )
 
     @commands.Cog.listener("on_member_remove")
     async def on_role_analytics_member_remove(self, member: discord.Member) -> None:

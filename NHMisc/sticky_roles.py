@@ -16,6 +16,10 @@ class StickyRoleStore:
         async with self._lock:
             await asyncio.to_thread(self._initialize_sync)
 
+    async def delete_user_everywhere(self, user_id: int) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._delete_user_everywhere_sync, user_id)
+
     async def add_sticky_role(self, guild_id: int, role_id: int) -> bool:
         async with self._lock:
             return await asyncio.to_thread(self._add_sticky_role_sync, guild_id, role_id)
@@ -100,6 +104,13 @@ class StickyRoleStore:
                 CREATE INDEX IF NOT EXISTS idx_sticky_member_roles_role
                     ON sticky_member_roles (guild_id, role_id);
                 """
+            )
+
+    def _delete_user_everywhere_sync(self, user_id: int) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM sticky_member_roles WHERE user_id = ?",
+                (user_id,),
             )
 
     def _add_sticky_role_sync(self, guild_id: int, role_id: int) -> bool:

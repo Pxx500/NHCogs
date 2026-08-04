@@ -21,9 +21,10 @@ class _Embed:
         self.title = title
         self.description = description
         self.color = color
+        self.fields = []
 
     def add_field(self, *, name, value, inline=True):
-        pass
+        self.fields.append(SimpleNamespace(name=name, value=value, inline=inline))
 
 
 class _AllowedMentions:
@@ -76,7 +77,9 @@ def _load_nhmisc():
     commands.mod_or_permissions = lambda **kwargs: _permission_decorator(
         "mod_or_permissions", kwargs
     )
-    commands.has_permissions = lambda **kwargs: (lambda function: function)
+    commands.has_permissions = lambda **kwargs: _permission_decorator(
+        "has_permissions", kwargs
+    )
     commands.cooldown = _decorator
     commands.BucketType = SimpleNamespace(user="user", guild="guild")
 

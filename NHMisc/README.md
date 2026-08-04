@@ -112,10 +112,46 @@ Defaults:
 ```
 
 Shows how many members completed Singleplayer and the member count for every linear
-Gate tier from 1 through 10 using the role analytics database. Each member is counted
+Gate tier from 1 through 6 using the role analytics database. Each member is counted
 only in their highest Gate tier, and tiers with no members are still displayed. Each
 count is labeled with a non-pinging role mention. This command can be used by any
 server member.
+
+## Gate Increment
+
+```ini
+Apps → Increment Gate roles
+```
+
+Use the completion message's Apps menu to review a one-tier Gate increment for its
+author and explicitly mentioned members. The review supports up to 25 eligible users
+and lets the moderator remove accidental mentions before confirming. When exactly one
+user remains selected, the moderator can grant `Solo Gater` in the same role update.
+Gate 6 users remain visible but cannot be selected.
+
+The action requires Manage Messages and uses a durable one-use source lock. A second
+message cannot reserve the same member's next Gate while an earlier increment is still
+pending. Successful users are publicly pinged beside a non-pinging mention of their
+new Gate role. Manual Gate role changes are reverted; Gate progress must be changed
+through the bot.
+
+## Achievements
+
+```ini
+/achievements [user]
+Apps → View achievements
+Apps → Grant achievements
+[p]achievement revoke <users...>
+```
+
+`/achievements` publicly shows a member's recorded achievements and available proof
+links; the user Apps action shows the same profile ephemerally. Both are available to
+every server member.
+
+The message Apps grant action uses the message author and mentions as its candidate
+list, then lets a moderator select up to 25 recipients and one or more achievements.
+The revoke command finds only revocable achievements shared by every selected user and
+opens a confirmation review. Grant and revoke actions require Manage Messages.
 
 ## Tier Distribution
 
