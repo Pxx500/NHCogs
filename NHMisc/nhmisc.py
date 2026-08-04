@@ -324,11 +324,70 @@ class NHMisc(commands.Cog):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
+    @staticmethod
+    def _configuration_embed(
+        *,
+        title: str,
+        current: tuple[str, ...],
+        actions: tuple[str, ...],
+        action_heading: str = "Commands",
+    ) -> discord.Embed:
+        embed = discord.Embed(title=title)
+        embed.add_field(
+            name="Current configuration",
+            value="\n".join(current),
+            inline=False,
+        )
+        embed.add_field(
+            name=action_heading,
+            value="\n".join(f"`{action}`" for action in actions),
+            inline=False,
+        )
+        return embed
+
+    @staticmethod
+    def _configured_channel_label(channel_id: int | None) -> str:
+        return f"<#{channel_id}>" if channel_id is not None else "Not configured"
+
     @commands.group(name="nhmisc", invoke_without_command=True)
     @commands.guild_only()
     async def nhmisc(self, ctx: commands.Context) -> None:
         """Configure NHMisc."""
-        await ctx.send_help()
+        prefix = ctx.clean_prefix
+        embed = discord.Embed(
+            title="NHMisc",
+            description="Configuration, activity, and moderation tools.",
+        )
+        embed.add_field(
+            name="Configuration",
+            value="\n".join(
+                f"`{command}`"
+                for command in (
+                    f"{prefix}nhmisc channel #voice-log-channel",
+                    f"{prefix}nhmisc alert",
+                    f"{prefix}nhmisc vcjumping",
+                    f"{prefix}nhmisc forumautopin",
+                    f"{prefix}nhmisc stickyroles",
+                    f"{prefix}nhmisc roleanalytics",
+                    f"{prefix}nhmisc activity",
+                )
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Activity and moderation",
+            value="\n".join(
+                f"`{command}`"
+                for command in (
+                    f"{prefix}nhmisc usermodstats @user <days>",
+                    f"{prefix}nhmisc chatchart",
+                    f"{prefix}nhmisc topyapper <days> <amount>",
+                    f"{prefix}nhmisc cleanup",
+                )
+            ),
+            inline=False,
+        )
+        await ctx.send(embed=embed)
 
     def _loaded_honeypot(self):
         honeypot = self.bot.get_cog("Honeypot")
@@ -396,7 +455,26 @@ class NHMisc(commands.Cog):
     @commands.admin_or_permissions(administrator=True)
     async def nhmisc_roleanalytics(self, ctx: commands.Context) -> None:
         """Configure role analytics."""
-        await ctx.send_help()
+        state = await self._role_analytics_store.get_state(ctx.guild.id)
+        member_count = (
+            f"{state.source_member_count:,}"
+            if state.source_member_count is not None
+            else "Not available"
+        )
+        prefix = ctx.clean_prefix
+        embed = self._configuration_embed(
+            title="Role analytics",
+            current=(
+                f"Enabled: {'Yes' if state.enabled else 'No'}",
+                f"Status: {state.status.value.replace('_', ' ').title()}",
+                f"Members in snapshot: {member_count}",
+            ),
+            actions=(
+                f"{prefix}rolesync",
+                f"{prefix}nhmisc roleanalytics disable",
+            ),
+        )
+        await ctx.send(embed=embed)
 
     @nhmisc_roleanalytics.command(name="disable")
     async def nhmisc_roleanalytics_disable(self, ctx: commands.Context) -> None:
@@ -419,7 +497,18 @@ class NHMisc(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)
     async def nhmisc_alert(self, ctx: commands.Context) -> None:
         """Configure alert logging."""
-        await ctx.send_help()
+        channel_id = await self.config.guild(ctx.guild).alert_channel()
+        embed = self._configuration_embed(
+            title="Alert logging",
+            current=(
+                f"Channel: {self._configured_channel_label(channel_id)}",
+            ),
+            actions=(
+                f"{ctx.clean_prefix}nhmisc alert channel #new-channel",
+            ),
+            action_heading="Change it",
+        )
+        await ctx.send(embed=embed)
 
     @nhmisc_alert.command(name="channel")
     async def nhmisc_alert_channel(
@@ -437,7 +526,21 @@ class NHMisc(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)
     async def nhmisc_vcjumping(self, ctx: commands.Context) -> None:
         """Configure voice channel jumping detection."""
-        await ctx.send_help()
+        config = await self.config.guild(ctx.guild).all()
+        prefix = ctx.clean_prefix
+        embed = self._configuration_embed(
+            title="VC jumping detection",
+            current=(
+                f"Channel entries: {config['vcjumping_visit_count']}",
+                f"Time window: {config['vcjumping_window_seconds']} seconds",
+            ),
+            actions=(
+                f"{prefix}nhmisc vcjumping visits <count>",
+                f"{prefix}nhmisc vcjumping seconds <seconds>",
+            ),
+            action_heading="Change it",
+        )
+        await ctx.send(embed=embed)
 
     @nhmisc_vcjumping.command(name="visits")
     async def nhmisc_vcjumping_visits(self, ctx: commands.Context, count: int) -> None:
@@ -481,7 +584,23 @@ class NHMisc(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)
     async def nhmisc_forumautopin(self, ctx: commands.Context) -> None:
         """Configure automatic pinning for new forum post starter messages."""
-        await ctx.send_help()
+        configured = await self._forum_autopin.get_forum_ids(ctx.guild)
+        forum_lines = [f"Configured forums: {len(configured)}"]
+        forum_lines.extend(self._format_channel(channel_id) for channel_id in configured[:10])
+        if len(configured) > 10:
+            forum_lines.append(f"...and {len(configured) - 10} more")
+
+        prefix = ctx.clean_prefix
+        embed = self._configuration_embed(
+            title="Forum autopin",
+            current=tuple(forum_lines),
+            actions=(
+                f"{prefix}nhmisc forumautopin add #forum",
+                f"{prefix}nhmisc forumautopin remove #forum",
+                f"{prefix}nhmisc forumautopin list",
+            ),
+        )
+        await ctx.send(embed=embed)
 
     @nhmisc_forumautopin.command(name="add")
     async def nhmisc_forumautopin_add(
@@ -650,7 +769,27 @@ class NHMisc(commands.Cog):
     async def nhmisc_stickyroles(self, ctx: commands.Context) -> None:
         """Configure sticky role persistence."""
         await self._require_manage_guild(ctx)
-        await ctx.send_help()
+        role_ids = sorted(await self._sticky_roles.get_sticky_roles(ctx.guild.id))
+        role_lines = [f"Configured roles: {len(role_ids)}"]
+        role_lines.extend(
+            self._format_role_reference(ctx.guild, role_id) for role_id in role_ids[:10]
+        )
+        if len(role_ids) > 10:
+            role_lines.append(f"...and {len(role_ids) - 10} more")
+
+        prefix = ctx.clean_prefix
+        embed = self._configuration_embed(
+            title="Sticky roles",
+            current=tuple(role_lines),
+            actions=(
+                f"{prefix}nhmisc stickyroles add @role",
+                f"{prefix}nhmisc stickyroles remove @role",
+                f"{prefix}nhmisc stickyroles list",
+                f"{prefix}nhmisc stickyroles scan",
+                f"{prefix}nhmisc stickyroles debuglogging",
+            ),
+        )
+        await ctx.send(embed=embed)
 
     @nhmisc_stickyroles.command(name="add")
     async def nhmisc_stickyroles_add(self, ctx: commands.Context, role: str) -> None:
@@ -749,7 +888,25 @@ class NHMisc(commands.Cog):
     async def nhmisc_stickyroles_debuglogging(self, ctx: commands.Context) -> None:
         """Configure sticky role debug logging."""
         await self._require_manage_guild(ctx)
-        await ctx.send_help()
+        config = await self.config.guild(ctx.guild).all()
+        prefix = ctx.clean_prefix
+        embed = self._configuration_embed(
+            title="Sticky role debug logging",
+            current=(
+                "Enabled: "
+                + ("Yes" if config["sticky_debug_logging_enabled"] else "No"),
+                "Channel: "
+                + self._configured_channel_label(
+                    config["sticky_debug_logging_channel"]
+                ),
+            ),
+            actions=(
+                f"{prefix}nhmisc stickyroles debuglogging toggle",
+                f"{prefix}nhmisc stickyroles debuglogging channel #new-channel",
+            ),
+            action_heading="Change it",
+        )
+        await ctx.send(embed=embed)
 
     @nhmisc_stickyroles_debuglogging.command(name="toggle")
     async def nhmisc_stickyroles_debuglogging_toggle(
@@ -777,7 +934,38 @@ class NHMisc(commands.Cog):
     @nhmisc.group(name="activity", invoke_without_command=True)
     async def nhmisc_activity(self, ctx: commands.Context) -> None:
         """Configure and inspect passive message activity summaries."""
-        await ctx.send_help()
+        await self._require_activity_staff(ctx)
+        config = await self.config.guild(ctx.guild).all()
+        history_days = config["activity_history_retention_days"]
+        if history_days < 0:
+            history_label = "Unlimited"
+        elif history_days == 0:
+            history_label = "Disabled"
+        else:
+            history_label = f"{history_days} days"
+
+        prefix = ctx.clean_prefix
+        embed = self._configuration_embed(
+            title="Activity tracking",
+            current=(
+                "Summary channel: "
+                f"{self._configured_channel_label(config['activity_channel'])}",
+                f"Detail retention: {config['activity_detail_retention_days']} days",
+                f"History retention: {history_label}",
+            ),
+            actions=(
+                f"{prefix}nhmisc activity channel #new-channel",
+                f"{prefix}nhmisc activity current",
+                f"{prefix}nhmisc activity latest",
+                f"{prefix}nhmisc activity timeline <days>",
+                f"{prefix}nhmisc activity channelstats #channel <days>",
+                f"{prefix}nhmisc activity verify",
+                f"{prefix}nhmisc activity dbsize",
+                f"{prefix}nhmisc activity retention <days>",
+                f"{prefix}nhmisc activity historyretention <days>",
+            ),
+        )
+        await ctx.send(embed=embed)
 
     @nhmisc_activity.command(name="channel")
     async def nhmisc_activity_channel(
