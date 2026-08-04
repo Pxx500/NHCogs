@@ -1,5 +1,8 @@
+import gzip
 import importlib.util
+import json
 import sys
+import unittest
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "NHMisc" / "achievement_sync.py"
@@ -60,3 +63,51 @@ def test_discord_priority_plan_counts_grants_revocations_and_gate_changes():
     assert plan.boolean_grants == 1
     assert plan.boolean_revocations == 1
     assert plan.affected_users == (10, 11, 12, 13)
+
+
+class AchievementSyncTests(unittest.TestCase):
+    def test_discord_role_backup_contains_metadata_and_role_holders(self):
+        backup = achievement_sync.build_discord_role_backup(
+            guild_id=123,
+            snapshot_at="2026-08-04T12:00:00+00:00",
+            cached_member_count=2,
+            reported_member_count=2,
+            role_holders={100: (10,), 200: (10, 11)},
+            user_names={
+                10: ("alice", "Alice"),
+                11: ("bob", "Bob"),
+            },
+        )
+
+        rows = [json.loads(line) for line in gzip.decompress(backup).decode("utf-8").splitlines()]
+
+        self.assertEqual(
+            rows[0],
+            {
+                "type": "metadata",
+                "guild_id": 123,
+                "snapshot_at": "2026-08-04T12:00:00+00:00",
+                "cached_member_count": 2,
+                "reported_member_count": 2,
+                "tracked_role_ids": [100, 200],
+            },
+        )
+        self.assertEqual(
+            rows[1:],
+            [
+                {
+                    "type": "member",
+                    "user_id": 10,
+                    "username": "alice",
+                    "display_name": "Alice",
+                    "role_ids": [100, 200],
+                },
+                {
+                    "type": "member",
+                    "user_id": 11,
+                    "username": "bob",
+                    "display_name": "Bob",
+                    "role_ids": [200],
+                },
+            ],
+        )

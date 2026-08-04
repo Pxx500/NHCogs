@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import logging
 import time
@@ -21,6 +22,7 @@ from .achievement_store import AchievementProfile, AchievementStore
 from .achievement_sync import (
     DiscordRoleSnapshot,
     build_discord_priority_plan,
+    build_discord_role_backup,
     build_discord_role_snapshot,
 )
 from .activity_storage import (
@@ -417,11 +419,36 @@ class NHMisc(commands.Cog):
         return frozenset(await self._sticky_roles.get_sticky_roles(guild_id))
 
     async def _achievement_discord_snapshot(
-        self, guild_id: int
+        self, guild: discord.Guild
     ) -> DiscordRoleSnapshot | None:
+        cached_member_count = len(guild.members)
+        reported_member_count = guild.member_count
+        if (
+            not guild.chunked
+            or reported_member_count is None
+            or cached_member_count != reported_member_count
+        ):
+            raise commands.UserFeedbackCheckFailure(
+                "Discord member cache is incomplete. Run `!rolesync` first"
+            )
+
+        guild_id = guild.id
         state = await self._role_analytics_store.get_state(guild_id)
         if state.status is not SyncStatus.READY or state.last_completed_at is None:
             return None
+        cached_non_bot_members = tuple(member for member in guild.members if not member.bot)
+        try:
+            analytics_member_count = await self._role_analytics_store.count_matching(
+                guild_id,
+                "1 = 1",
+                (),
+            )
+        except AnalyticsUnavailableError:
+            return None
+        if analytics_member_count != len(cached_non_bot_members):
+            raise commands.UserFeedbackCheckFailure(
+                "Role analytics member count does not match Discord. Run `!rolesync` first"
+            )
         if await self._achievement_store.is_bootstrapped(guild_id):
             definitions = await self._achievement_store.list_definitions(guild_id)
         else:
@@ -433,12 +460,31 @@ class NHMisc(commands.Cog):
             *GATE_TIER_ROLE_IDS,
             *(definition.role_id for definition in bound_definitions),
         )
+        if any(guild.get_role(role_id) is None for role_id in role_ids):
+            raise commands.UserFeedbackCheckFailure("Achievement roles are configured incorrectly")
         users_by_role = await self._role_analytics_users_with_roles(
             guild_id,
             role_ids,
         )
         if users_by_role is None:
             return None
+        cached_role_ids_by_user = {
+            member.id: {role.id for role in member.roles} for member in cached_non_bot_members
+        }
+        cached_users_by_role = tuple(
+            tuple(
+                sorted(
+                    user_id
+                    for user_id, member_role_ids in cached_role_ids_by_user.items()
+                    if role_id in member_role_ids
+                )
+            )
+            for role_id in role_ids
+        )
+        if users_by_role != cached_users_by_role:
+            raise commands.UserFeedbackCheckFailure(
+                "Role analytics role holders do not match Discord. Run `!rolesync` first"
+            )
         gate_role_count = len(GATE_TIER_ROLE_IDS)
         return build_discord_role_snapshot(
             snapshot_at=state.last_completed_at,
@@ -451,6 +497,9 @@ class NHMisc(commands.Cog):
                     strict=True,
                 )
             },
+            role_holders=dict(zip(role_ids, cached_users_by_role, strict=True)),
+            cached_member_count=cached_member_count,
+            reported_member_count=reported_member_count,
         )
 
     async def _role_analytics_users_with_roles(
@@ -469,17 +518,18 @@ class NHMisc(commands.Cog):
             )
         """
         try:
-            users_by_role = tuple(
-                await self._role_analytics_store.matching_user_ids(
-                    guild_id,
-                    predicate_sql,
-                    (role_id,),
+            users_by_role = []
+            for role_id in role_ids_to_query:
+                users_by_role.append(
+                    await self._role_analytics_store.matching_user_ids(
+                        guild_id,
+                        predicate_sql,
+                        (role_id,),
+                    )
                 )
-                for role_id in role_ids_to_query
-            )
         except AnalyticsUnavailableError:
             return None
-        return users_by_role
+        return tuple(users_by_role)
 
     async def _reconcile_achievement_roles_for_guild(
         self, guild: discord.Guild
@@ -1544,6 +1594,71 @@ class NHMisc(commands.Cog):
             f"{result.membership_count} role memberships in {result.elapsed_seconds:.1f}s"
         )
 
+    async def _upload_achievement_sync_backup(
+        self,
+        guild: discord.Guild,
+        alert_channel: discord.TextChannel,
+        snapshot: DiscordRoleSnapshot,
+    ) -> None:
+        database_bytes = await self._achievement_store.backup_database()
+        holder_ids = {
+            user_id for user_ids in snapshot.role_holders.values() for user_id in user_ids
+        }
+        members_by_id = {member.id: member for member in guild.members}
+        if not holder_ids.issubset(members_by_id):
+            raise commands.UserFeedbackCheckFailure(
+                "Discord member cache changed. Run `!rolesync discord` again"
+            )
+        discord_roles_bytes = build_discord_role_backup(
+            guild_id=guild.id,
+            snapshot_at=snapshot.snapshot_at,
+            cached_member_count=snapshot.cached_member_count,
+            reported_member_count=snapshot.reported_member_count,
+            role_holders=snapshot.role_holders,
+            user_names={
+                user_id: (
+                    members_by_id[user_id].name,
+                    members_by_id[user_id].display_name,
+                )
+                for user_id in holder_ids
+            },
+        )
+        artifacts = (
+            ("database.sqlite3", database_bytes),
+            ("discord-roles.jsonl.gz", discord_roles_bytes),
+        )
+        if any(len(data) > guild.filesize_limit for _name, data in artifacts):
+            raise commands.UserFeedbackCheckFailure(
+                "Achievement synchronization backup is too large to upload"
+            )
+
+        backup_id = uuid4().hex
+        database_hash = hashlib.sha256(database_bytes).hexdigest()
+        discord_roles_hash = hashlib.sha256(discord_roles_bytes).hexdigest()
+        files = [
+            discord.File(
+                io.BytesIO(data),
+                filename=f"achievement-sync-{backup_id}-{name}",
+            )
+            for name, data in artifacts
+        ]
+        try:
+            await alert_channel.send(
+                "Achievement synchronization backup\n"
+                f"Database SHA-256: {database_hash}\n"
+                f"Discord roles SHA-256: {discord_roles_hash}",
+                files=files,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except (discord.Forbidden, discord.HTTPException) as error:
+            log.exception(
+                "Failed to upload achievement synchronization backup for guild %s",
+                guild.id,
+            )
+            raise commands.UserFeedbackCheckFailure(
+                "Could not upload the achievement synchronization backup"
+            ) from error
+
     async def _achievement_discord_sync_summary(
         self,
         guild_id: int,
@@ -1647,7 +1762,7 @@ class NHMisc(commands.Cog):
             )
         self._achievement_syncing_guilds.add(guild_id)
         try:
-            snapshot = await self._achievement_discord_snapshot(guild_id)
+            snapshot = await self._achievement_discord_snapshot(ctx.guild)
             if snapshot is None:
                 await ctx.send(
                     "Role analytics is not ready. Run `!rolesync` first, then run "
@@ -1662,12 +1777,21 @@ class NHMisc(commands.Cog):
                 raise commands.UserFeedbackCheckFailure(
                     "Configure the NHMisc alert channel first"
                 )
+            if self._channel_allows_everyone(alert_channel, ctx.guild):
+                raise commands.UserFeedbackCheckFailure(
+                    "Configure a private NHMisc alert channel first"
+                )
 
             bootstrapped = await self._achievement_store.is_bootstrapped(guild_id)
             summary = await self._achievement_discord_sync_summary(
                 guild_id,
                 snapshot,
                 bootstrapped=bootstrapped,
+            )
+            await self._upload_achievement_sync_backup(
+                ctx.guild,
+                alert_channel,
+                snapshot,
             )
 
             plan_message = await self._send_voice_log(alert_channel, summary)
@@ -1688,11 +1812,24 @@ class NHMisc(commands.Cog):
             if not confirmed:
                 return
 
-            fresh_snapshot = await self._achievement_discord_snapshot(guild_id)
+            fresh_snapshot = await self._achievement_discord_snapshot(ctx.guild)
             if fresh_snapshot != snapshot:
                 await self._send_voice_log(
                     alert_channel,
                     "Role analytics changed. Run `!rolesync discord` again.",
+                )
+                return
+
+            fresh_bootstrapped = await self._achievement_store.is_bootstrapped(guild_id)
+            fresh_summary = await self._achievement_discord_sync_summary(
+                guild_id,
+                fresh_snapshot,
+                bootstrapped=fresh_bootstrapped,
+            )
+            if fresh_bootstrapped != bootstrapped or fresh_summary != summary:
+                await self._send_voice_log(
+                    alert_channel,
+                    "Achievement data changed. Run `!rolesync discord` again.",
                 )
                 return
 
@@ -1813,9 +1950,16 @@ class NHMisc(commands.Cog):
         return embed
 
     @staticmethod
-    def _channel_is_public(ctx: commands.Context) -> bool:
-        permissions = ctx.channel.permissions_for(ctx.guild.default_role)
+    def _channel_allows_everyone(
+        channel: discord.abc.GuildChannel,
+        guild: discord.Guild,
+    ) -> bool:
+        permissions = channel.permissions_for(guild.default_role)
         return bool(permissions.view_channel)
+
+    @staticmethod
+    def _channel_is_public(ctx: commands.Context) -> bool:
+        return NHMisc._channel_allows_everyone(ctx.channel, ctx.guild)
 
     @staticmethod
     def _format_direct_commands(ctx: commands.Context) -> str:

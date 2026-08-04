@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import sys
 import types
@@ -175,6 +176,7 @@ class FakeMember:
 class FakeChannel:
     def __init__(self, guild, *, public=False, bot_permissions=None):
         self.id = 321
+        self.mention = "#alerts"
         self.guild = guild
         self.public = public
         self.bot_permissions = bot_permissions or types.SimpleNamespace(
@@ -235,6 +237,7 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
         cog._achievement_store = mock.AsyncMock()
         cog._achievement_store.is_bootstrapped.return_value = True
         cog._reconcile_achievement_roles_for_guild = mock.AsyncMock()
+        cog._upload_achievement_sync_backup = mock.AsyncMock()
         cog._gate_increment_store = mock.AsyncMock()
         cog._achievement_syncing_guilds = set()
         return cog
@@ -320,6 +323,171 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
             ctx.guild
         )
 
+    async def test_multi_role_lookup_returns_each_holder_set(self):
+        cog = self.make_cog()
+        cog._role_analytics_store.matching_user_ids.side_effect = (
+            (10,),
+            (20, 21),
+        )
+
+        users_by_role = await cog._role_analytics_users_with_roles(
+            123,
+            (100, 200),
+        )
+
+        self.assertEqual(users_by_role, ((10,), (20, 21)))
+        self.assertEqual(
+            [call.args[-1] for call in cog._role_analytics_store.matching_user_ids.await_args_list],
+            [(100,), (200,)],
+        )
+
+    async def test_discord_snapshot_rejects_an_incomplete_member_cache(self):
+        cog = self.make_cog()
+        guild = FakeGuild(public=True)
+        guild.members = [FakeMember(10)]
+        guild.member_count = 2
+
+        with self.assertRaisesRegex(
+            UserFeedbackCheckFailure,
+            "member cache is incomplete",
+        ):
+            await cog._achievement_discord_snapshot(guild)
+
+        cog._role_analytics_store.matching_user_ids.assert_not_awaited()
+
+    async def test_discord_snapshot_rejects_an_incomplete_analytics_generation(self):
+        cog = self.make_cog()
+        guild = FakeGuild(public=True)
+        guild.members = [FakeMember(10)]
+        guild.member_count = 1
+        cog._role_analytics_store.get_state.return_value = types.SimpleNamespace(
+            status=nhmisc.SyncStatus.READY,
+            last_completed_at="2026-08-04T12:00:00+00:00",
+        )
+        cog._achievement_store.is_bootstrapped.return_value = False
+        cog._role_analytics_store.count_matching.return_value = 0
+
+        with self.assertRaisesRegex(
+            UserFeedbackCheckFailure,
+            "member count does not match Discord",
+        ):
+            await cog._achievement_discord_snapshot(guild)
+
+    async def test_discord_snapshot_rejects_role_holders_that_differ_from_discord(self):
+        cog = self.make_cog()
+        guild = FakeGuild(public=True)
+        tracked_role_ids = (
+            *nhmisc.GATE_TIER_ROLE_IDS,
+            nhmisc.SINGLEPLAYER_GATE_COMPLETED_ROLE_ID,
+        )
+        guild.roles.update({role_id: FakeRole(role_id) for role_id in tracked_role_ids})
+        guild.members = [FakeMember(10, (nhmisc.GATE_TIER_ROLE_IDS[0],))]
+        guild.member_count = 1
+        cog._role_analytics_store.get_state.return_value = types.SimpleNamespace(
+            status=nhmisc.SyncStatus.READY,
+            last_completed_at="2026-08-04T12:00:00+00:00",
+        )
+        cog._role_analytics_store.count_matching.return_value = 1
+        cog._achievement_store.is_bootstrapped.return_value = False
+        cog._role_analytics_users_with_roles = mock.AsyncMock(
+            return_value=tuple(() for _role_id in tracked_role_ids)
+        )
+
+        with self.assertRaisesRegex(
+            UserFeedbackCheckFailure,
+            "role holders do not match Discord",
+        ):
+            await cog._achievement_discord_snapshot(guild)
+
+    async def test_discord_snapshot_keeps_validated_raw_role_holders_for_backup(self):
+        cog = self.make_cog()
+        guild = FakeGuild(public=True)
+        tracked_role_ids = (
+            *nhmisc.GATE_TIER_ROLE_IDS,
+            nhmisc.SINGLEPLAYER_GATE_COMPLETED_ROLE_ID,
+        )
+        guild.roles.update({role_id: FakeRole(role_id) for role_id in tracked_role_ids})
+        guild.members = [
+            FakeMember(
+                10,
+                (
+                    nhmisc.GATE_TIER_ROLE_IDS[0],
+                    nhmisc.SINGLEPLAYER_GATE_COMPLETED_ROLE_ID,
+                ),
+            )
+        ]
+        guild.member_count = 1
+        cog._role_analytics_store.get_state.return_value = types.SimpleNamespace(
+            status=nhmisc.SyncStatus.READY,
+            last_completed_at="2026-08-04T12:00:00+00:00",
+        )
+        cog._role_analytics_store.count_matching.return_value = 1
+        cog._achievement_store.is_bootstrapped.return_value = False
+        users_by_role = tuple(
+            (10,)
+            if role_id
+            in (
+                nhmisc.GATE_TIER_ROLE_IDS[0],
+                nhmisc.SINGLEPLAYER_GATE_COMPLETED_ROLE_ID,
+            )
+            else ()
+            for role_id in tracked_role_ids
+        )
+        cog._role_analytics_users_with_roles = mock.AsyncMock(return_value=users_by_role)
+
+        snapshot = await cog._achievement_discord_snapshot(guild)
+
+        self.assertEqual(snapshot.gate_tiers, {10: 1})
+        self.assertEqual(snapshot.boolean_users, {"solo_gater": (10,)})
+        self.assertEqual(
+            snapshot.role_holders,
+            dict(zip(tracked_role_ids, users_by_role, strict=True)),
+        )
+        self.assertEqual(snapshot.cached_member_count, 1)
+        self.assertEqual(snapshot.reported_member_count, 1)
+
+    async def test_sync_backup_uploads_database_and_discord_role_artifacts(self):
+        cog = self.make_cog()
+        guild = FakeGuild(public=True)
+        guild.members = [FakeMember(10, (100,), name="alice", display_name="Alice")]
+        guild.member_count = 1
+        alert_channel = types.SimpleNamespace(send=mock.AsyncMock())
+        database_bytes = b"SQLite format 3\x00backup"
+        cog._achievement_store.backup_database.return_value = database_bytes
+        snapshot = types.SimpleNamespace(
+            snapshot_at="2026-08-04T12:00:00+00:00",
+            role_holders={100: (10,)},
+            cached_member_count=1,
+            reported_member_count=1,
+        )
+
+        await nhmisc.NHMisc._upload_achievement_sync_backup(
+            cog,
+            guild,
+            alert_channel,
+            snapshot,
+        )
+
+        send_call = alert_channel.send.await_args
+        files = send_call.kwargs["files"]
+        files_by_suffix = {Path(file.filename).suffixes[-1]: file for file in files}
+        sqlite_file = files_by_suffix[".sqlite3"]
+        jsonl_file = files_by_suffix[".gz"]
+        self.assertEqual(sqlite_file.data, database_bytes)
+        self.assertEqual(
+            hashlib.sha256(sqlite_file.data).hexdigest(),
+            hashlib.sha256(database_bytes).hexdigest(),
+        )
+        self.assertTrue(jsonl_file.data.startswith(b"\x1f\x8b"))
+        self.assertIn(
+            hashlib.sha256(sqlite_file.data).hexdigest(),
+            send_call.args[0],
+        )
+        self.assertIn(
+            hashlib.sha256(jsonl_file.data).hexdigest(),
+            send_call.args[0],
+        )
+
     async def test_rolesync_discord_requires_existing_analytics_snapshot(self):
         cog = self.make_cog()
         guild = FakeGuild(public=True)
@@ -343,7 +511,7 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
         cog = self.make_cog()
         guild = FakeGuild(public=True)
         ctx = make_context(guild)
-        alert_channel = types.SimpleNamespace(id=321, mention="#alerts")
+        alert_channel = FakeChannel(guild)
         snapshot = nhmisc.build_discord_role_snapshot(
             snapshot_at="2026-08-04T12:00:00+00:00",
             users_by_gate_role=((10,), (), (), (), (), ()),
@@ -372,6 +540,11 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
 
         await nhmisc.NHMisc.rolesync_discord.callback(cog, ctx)
 
+        cog._upload_achievement_sync_backup.assert_awaited_once_with(
+            guild,
+            alert_channel,
+            snapshot,
+        )
         cog._achievement_store.bootstrap_guild.assert_awaited_once_with(
             guild.id,
             gate_tiers={10: 1},
@@ -400,6 +573,107 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertNotIn(guild.id, cog._achievement_syncing_guilds)
+
+    async def test_rolesync_discord_stops_before_plan_when_backup_upload_fails(self):
+        cog = self.make_cog()
+        guild = FakeGuild(public=True)
+        ctx = make_context(guild)
+        alert_channel = FakeChannel(guild)
+        snapshot = nhmisc.build_discord_role_snapshot(
+            snapshot_at="2026-08-04T12:00:00+00:00",
+            users_by_gate_role=((10,), (), (), (), (), ()),
+            boolean_users={"solo_gater": (11,)},
+        )
+        cog._achievement_discord_snapshot = mock.AsyncMock(return_value=snapshot)
+        cog.config = types.SimpleNamespace(
+            guild=lambda _guild: types.SimpleNamespace(
+                alert_channel=mock.AsyncMock(return_value=321)
+            )
+        )
+        cog._get_log_channel = mock.Mock(return_value=alert_channel)
+        cog._send_voice_log = mock.AsyncMock(return_value=types.SimpleNamespace())
+        cog._upload_achievement_sync_backup.side_effect = UserFeedbackCheckFailure("backup failed")
+
+        with self.assertRaisesRegex(UserFeedbackCheckFailure, "backup failed"):
+            await nhmisc.NHMisc.rolesync_discord.callback(cog, ctx)
+
+        cog._send_voice_log.assert_not_awaited()
+        cog._achievement_store.bootstrap_guild.assert_not_awaited()
+
+    async def test_rolesync_discord_rejects_a_public_alert_channel(self):
+        cog = self.make_cog()
+        guild = FakeGuild()
+        ctx = make_context(guild)
+        alert_channel = FakeChannel(guild, public=True)
+        snapshot = nhmisc.build_discord_role_snapshot(
+            snapshot_at="2026-08-04T12:00:00+00:00",
+            users_by_gate_role=((10,), (), (), (), (), ()),
+            boolean_users={"solo_gater": (11,)},
+        )
+        cog._achievement_discord_snapshot = mock.AsyncMock(return_value=snapshot)
+        cog.config = types.SimpleNamespace(
+            guild=lambda _guild: types.SimpleNamespace(
+                alert_channel=mock.AsyncMock(return_value=321)
+            )
+        )
+        cog._get_log_channel = mock.Mock(return_value=alert_channel)
+
+        with self.assertRaisesRegex(
+            UserFeedbackCheckFailure,
+            "Configure a private NHMisc alert channel first",
+        ):
+            await nhmisc.NHMisc.rolesync_discord.callback(cog, ctx)
+
+        cog._upload_achievement_sync_backup.assert_not_awaited()
+        cog._achievement_store.is_bootstrapped.assert_not_awaited()
+        cog._achievement_store.bootstrap_guild.assert_not_awaited()
+
+    async def test_rolesync_discord_aborts_when_database_plan_changes(self):
+        cog = self.make_cog()
+        guild = FakeGuild(public=True)
+        ctx = make_context(guild)
+        alert_channel = FakeChannel(guild)
+        snapshot = nhmisc.build_discord_role_snapshot(
+            snapshot_at="2026-08-04T12:00:00+00:00",
+            users_by_gate_role=((10,), (), (), (), (), ()),
+            boolean_users={"solo_gater": (11,)},
+        )
+        cog._achievement_discord_snapshot = mock.AsyncMock(side_effect=(snapshot, snapshot))
+        cog._achievement_discord_sync_summary = mock.AsyncMock(
+            side_effect=("original plan", "changed plan")
+        )
+        cog.config = types.SimpleNamespace(
+            guild=lambda _guild: types.SimpleNamespace(
+                alert_channel=mock.AsyncMock(return_value=321)
+            )
+        )
+        cog._get_log_channel = mock.Mock(return_value=alert_channel)
+        cog._send_voice_log = mock.AsyncMock(return_value=types.SimpleNamespace())
+        cog.bot.wait_for = mock.AsyncMock(
+            return_value=types.SimpleNamespace(
+                guild=guild,
+                channel=alert_channel,
+                author=ctx.author,
+                content="confirm",
+            )
+        )
+
+        await nhmisc.NHMisc.rolesync_discord.callback(cog, ctx)
+
+        cog._upload_achievement_sync_backup.assert_awaited_once_with(
+            guild,
+            alert_channel,
+            snapshot,
+        )
+        self.assertEqual(
+            cog._send_voice_log.await_args_list[-1].args,
+            (
+                alert_channel,
+                "Achievement data changed. Run `!rolesync discord` again.",
+            ),
+        )
+        cog._achievement_store.apply_discord_snapshot.assert_not_awaited()
+        cog._achievement_store.bootstrap_guild.assert_not_awaited()
 
     async def test_rolesync_discord_rejects_a_second_pending_plan(self):
         cog = self.make_cog()
