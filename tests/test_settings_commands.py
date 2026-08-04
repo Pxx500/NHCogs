@@ -15,6 +15,24 @@ from unittest import mock
 from tests.harness import _Bot, _isolated_honeypot_modules
 
 
+class _OverviewEmbed:
+    def __init__(self, *, title=None, description=None):
+        self.title = title
+        self.description = description
+        self.fields = []
+
+    def add_field(self, *, name, value, inline):
+        self.fields.append(SimpleNamespace(name=name, value=value, inline=inline))
+
+
+class _OverviewAllowedMentions:
+    marker = object()
+
+    @classmethod
+    def none(cls):
+        return cls.marker
+
+
 class ImageScanSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_threshold_defaults_in_public_threshold_query(self):
         with TemporaryDirectory() as directory:
@@ -228,3 +246,178 @@ class JoinwatchCommandTests(unittest.IsolatedAsyncioTestCase):
                 ctx.send.assert_awaited_once_with(
                     "Hours must be between 1 and 1000000."
                 )
+
+
+class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
+    OVERVIEW_GROUPS = (
+        "honeypot",
+        "debug",
+        "debug_imagescan",
+        "honeypot_settings",
+        "channels",
+        "punishment",
+        "purge",
+        "spam",
+        "imagescan",
+        "imagescan_detector",
+        "firstpost",
+        "review",
+        "roles",
+        "keywords",
+        "keyword_attachments",
+        "joinwatch",
+        "joinwatch_alert",
+        "joinwatch_autorole",
+        "joinwatch_autorole_randomize",
+        "bait_role",
+        "config_dump",
+    )
+
+    async def test_public_group_shows_runtime_syntax_without_reading_config(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = object.__new__(honeypot.Honeypot)
+                configure = mock.AsyncMock()
+                honeypot.detection.config_spam = configure
+                direct_command = SimpleNamespace(
+                    qualified_name="honeypot spam window",
+                    signature="[seconds]",
+                    short_doc="Inspect or change the detection window.",
+                )
+                nested_group = SimpleNamespace(
+                    qualified_name="honeypot spam advanced",
+                    signature="",
+                    short_doc="Advanced settings.",
+                    commands=[
+                        SimpleNamespace(
+                            qualified_name="honeypot spam advanced hidden",
+                            signature="",
+                            short_doc="Grandchild command.",
+                        )
+                    ],
+                )
+                ctx = SimpleNamespace(
+                    clean_prefix="??",
+                    command=SimpleNamespace(
+                        name="spam",
+                        short_doc="Configure duplicate-message spam detection.",
+                        commands=[direct_command, nested_group],
+                    ),
+                    guild=SimpleNamespace(default_role=object()),
+                    channel=SimpleNamespace(
+                        permissions_for=lambda role: SimpleNamespace(view_channel=True)
+                    ),
+                    send=mock.AsyncMock(),
+                )
+
+                with (
+                    mock.patch.object(honeypot.discord, "Embed", _OverviewEmbed),
+                    mock.patch.object(
+                        honeypot.discord,
+                        "AllowedMentions",
+                        _OverviewAllowedMentions,
+                    ),
+                ):
+                    await honeypot.Honeypot.spam.callback(cog, ctx)
+
+                configure.assert_not_awaited()
+                ctx.send.assert_awaited_once()
+                kwargs = ctx.send.await_args.kwargs
+                embed = kwargs["embed"]
+                rendered = "\n".join(field.value for field in embed.fields)
+                self.assertIn("??honeypot spam window [seconds]", rendered)
+                self.assertIn("??honeypot spam advanced", rendered)
+                self.assertNotIn("honeypot spam advanced hidden", rendered)
+                self.assertIs(
+                    kwargs["allowed_mentions"],
+                    _OverviewAllowedMentions.marker,
+                )
+
+    async def test_private_nested_group_reuses_parent_configuration(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = object.__new__(honeypot.Honeypot)
+                configure = mock.AsyncMock()
+                honeypot.joinwatch.config_joinwatch = configure
+                ctx = SimpleNamespace(
+                    clean_prefix="!",
+                    command=SimpleNamespace(
+                        name="autorole",
+                        short_doc="Configure automatic young-account role assignment.",
+                        commands=[
+                            SimpleNamespace(
+                                qualified_name="honeypot joinwatch autorole timer",
+                                signature="[minutes]",
+                                short_doc="Inspect or change the timer.",
+                            )
+                        ],
+                    ),
+                    guild=SimpleNamespace(default_role=object()),
+                    channel=SimpleNamespace(
+                        permissions_for=lambda role: SimpleNamespace(view_channel=False)
+                    ),
+                    send=mock.AsyncMock(),
+                )
+
+                with (
+                    mock.patch.object(honeypot.discord, "Embed", _OverviewEmbed),
+                    mock.patch.object(
+                        honeypot.discord,
+                        "AllowedMentions",
+                        _OverviewAllowedMentions,
+                    ),
+                ):
+                    await honeypot.Honeypot.joinwatch_autorole.callback(cog, ctx)
+
+                configure.assert_awaited_once_with(cog, ctx)
+                embed = ctx.send.await_args.kwargs["embed"]
+                rendered = "\n".join(field.value for field in embed.fields)
+                self.assertIn(
+                    "!honeypot joinwatch autorole timer [minutes]",
+                    rendered,
+                )
+                self.assertNotIn("Current values are hidden", rendered)
+
+    async def test_every_applicable_bare_group_sends_an_overview(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = object.__new__(honeypot.Honeypot)
+                with (
+                    mock.patch.object(honeypot.discord, "Embed", _OverviewEmbed),
+                    mock.patch.object(
+                        honeypot.discord,
+                        "AllowedMentions",
+                        _OverviewAllowedMentions,
+                    ),
+                ):
+                    for attribute in self.OVERVIEW_GROUPS:
+                        with self.subTest(group=attribute):
+                            ctx = SimpleNamespace(
+                                clean_prefix="!",
+                                command=SimpleNamespace(
+                                    name=attribute,
+                                    short_doc="Group purpose.",
+                                    commands=[
+                                        SimpleNamespace(
+                                            qualified_name=f"honeypot {attribute} child",
+                                            signature="",
+                                            short_doc="Child purpose.",
+                                        )
+                                    ],
+                                ),
+                                guild=SimpleNamespace(default_role=object()),
+                                channel=SimpleNamespace(
+                                    permissions_for=lambda role: SimpleNamespace(
+                                        view_channel=True
+                                    )
+                                ),
+                                send=mock.AsyncMock(),
+                            )
+
+                            await getattr(
+                                honeypot.Honeypot,
+                                attribute,
+                            ).callback(cog, ctx)
+
+                            ctx.send.assert_awaited_once()
+                            self.assertIn("embed", ctx.send.await_args.kwargs)
