@@ -228,8 +228,14 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
     def make_cog(self):
         cog = object.__new__(nhmisc.NHMisc)
         cog.bot = types.SimpleNamespace(guilds=[], wait_for=mock.AsyncMock())
+        cog._activity_store = mock.AsyncMock()
+        cog._sticky_roles = mock.AsyncMock()
         cog._role_analytics_store = mock.AsyncMock()
         cog._role_analytics = mock.Mock()
+        cog._achievement_store = mock.AsyncMock()
+        cog._achievement_store.is_bootstrapped.return_value = True
+        cog._reconcile_achievement_roles_for_guild = mock.AsyncMock()
+        cog._gate_increment_store = mock.AsyncMock()
         return cog
 
     def test_commands_require_manage_messages_and_expected_cooldowns(self):
@@ -411,7 +417,11 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
 
         await cog.red_delete_data_for_user(requester="discord_deleted_user", user_id=42)
 
+        cog._activity_store.delete_user_everywhere.assert_awaited_once_with(42)
+        cog._sticky_roles.delete_user_everywhere.assert_awaited_once_with(42)
         cog._role_analytics_store.delete_user_everywhere.assert_awaited_once_with(42)
+        cog._achievement_store.delete_user_everywhere.assert_awaited_once_with(42)
+        cog._gate_increment_store.redact_user_data.assert_awaited_once_with(42)
 
 
 if __name__ == "__main__":

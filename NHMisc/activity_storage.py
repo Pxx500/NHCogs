@@ -128,6 +128,10 @@ class ActivityStore:
         async with self._lock:
             await asyncio.to_thread(self._initialize_sync)
 
+    async def delete_user_everywhere(self, user_id: int) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._delete_user_everywhere_sync, user_id)
+
     async def record_message(
         self,
         guild_id: int,
@@ -353,6 +357,17 @@ class ActivityStore:
                 yield conn
         finally:
             conn.close()
+
+    def _delete_user_everywhere_sync(self, user_id: int) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM activity_user_channel_day WHERE user_id = ?",
+                (user_id,),
+            )
+            conn.execute(
+                "DELETE FROM activity_user_day WHERE user_id = ?",
+                (user_id,),
+            )
 
     def _initialize_sync(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)

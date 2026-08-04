@@ -135,6 +135,52 @@ class ActivityStoreLeaderboardTests(unittest.IsolatedAsyncioTestCase):
             [(10, 100), (20, 5)],
         )
 
+    async def test_delete_user_everywhere_removes_personal_activity_details(self):
+        with TemporaryDirectory() as directory:
+            store = activity_storage.ActivityStore(Path(directory) / "activity.sqlite3")
+            await store.initialize()
+            day = date(2026, 8, 4)
+            now = datetime(2026, 8, 4, 12, tzinfo=timezone.utc)
+            for user_id in (42, 42, 99):
+                await store.record_message(
+                    guild_id=1,
+                    date_utc=day,
+                    hour_utc=12,
+                    user_id=user_id,
+                    channel_id=100,
+                    thread_id=None,
+                    now_utc=now,
+                )
+
+            await store.delete_user_everywhere(42)
+
+            rows = await store.get_guild_user_counts(
+                guild_id=1,
+                end_date_utc=day,
+                days=1,
+                limit=20,
+            )
+            deleted_distribution = await store.get_user_channel_distribution(
+                guild_id=1,
+                user_id=42,
+                end_date_utc=day,
+                days=1,
+            )
+            remaining_distribution = await store.get_user_channel_distribution(
+                guild_id=1,
+                user_id=99,
+                end_date_utc=day,
+                days=1,
+            )
+
+        self.assertEqual(
+            [(row.user_id, row.message_count) for row in rows],
+            [(99, 1)],
+        )
+        self.assertEqual(deleted_distribution.total_messages, 0)
+        self.assertEqual(deleted_distribution.top_locations, [])
+        self.assertEqual(remaining_distribution.total_messages, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
