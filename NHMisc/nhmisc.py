@@ -783,7 +783,7 @@ class NHMisc(commands.Cog):
         *,
         public_defer: bool,
     ) -> None:
-        if isinstance(error, TimeoutError):
+        if isinstance(error, asyncio.TimeoutError):
             log.error(
                 "Achievement interaction timed out: action=%s guild=%s user=%s",
                 action,
