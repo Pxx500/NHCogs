@@ -58,10 +58,10 @@ NHMisc does not scan old posts or backfill posts created while offline. Removing
 does not unpin starter messages that were pinned earlier.
 
 If one of these permissions is revoked later, autopinning stops silently on Discord's
-side. NHMisc reports it once per forum in the alert channel configured with
-`[p]nhmisc alert channel`, and reports it again only after a later pin succeeds and the
-problem reappears. Deleting a configured forum removes it from the configuration and is
-also reported in the alert channel.
+side. NHMisc reports it once per forum in the maintenance channel configured with
+`[p]nhmisc maintenance channel`, and reports it again only after a later pin succeeds
+and the problem reappears. Deleting a configured forum removes it from the configuration
+and is also reported in the maintenance channel.
 
 ## Voice Logging
 
@@ -82,6 +82,21 @@ Sets the text channel used for voice join, leave, and move logs.
 Sets the alert channel used by higher-priority alerts, such as voice-channel jumping.
 
 ```ini
+[p]nhmisc maintenance channel #bot-maintenance
+```
+
+Sets the private channel used for operational messages, including achievement syncs and
+backups, sticky-role maintenance, and forum-autopin failures. The bot needs View Channel,
+Send Messages, and Attach Files in this channel.
+
+```ini
+[p]nhmisc moderationlog channel #moderator-actions
+```
+
+Sets the private channel used for non-pinging audit logs of moderator achievement and
+Gate actions.
+
+```ini
 [p]nhmisc vcjumping visits 3
 ```
 
@@ -98,12 +113,18 @@ Sets the VC jumping detection window in seconds.
 [p]nhmisc status
 ```
 
-Shows the current voice log channel, alert channel, and VC jumping configuration.
+Shows the current voice log, alert, maintenance, and moderation-log channels, plus the VC
+jumping configuration.
 
 Defaults:
 
 - VC jumping entries: `3`
 - VC jumping window: `30` seconds
+- Maintenance channel: not configured
+- Moderator action channel: not configured
+
+The maintenance and moderator action channels do not inherit the alert channel. Configure
+each one explicitly after installing or updating NHMisc.
 
 ## Gatecount
 
@@ -147,12 +168,30 @@ Gate. Both entry points require Manage Messages and open the same ephemeral revi
 showing the current count, the one-tier transition, and the latest stored proof before
 anything changes. Confirmation permanently removes that latest Gate record and updates
 the Discord role; `Solo Gater` and unrelated roles are left unchanged. Completion is
-not posted publicly, and a non-pinging audit is sent to the configured private alert
-channel.
+not posted publicly, and a non-pinging audit is sent to the configured private moderator
+action channel.
 
 The original completion message remains marked as already processed. If a Gate was
 revoked by mistake, restore it from a new correction message through the normal Gate
 increment action.
+
+## Add Gate Proof
+
+```ini
+Apps → Add Gate Proof
+```
+
+Use a historical completion message's Apps menu to attach it as proof for Gate records
+that were imported without one. The action requires Manage Messages and opens an
+ephemeral review for the message author and mentioned members. Each user defaults to
+`Don't add proof` and can independently select one of their completed Gate ordinals that
+still has no proof. Four users are shown per page, with no total candidate limit imposed
+by the action.
+
+Confirmation changes only the selected proof-message references. It does not increment
+Gate progress or change any roles. Existing proofs cannot be overwritten, and the same
+source message may be attached to any number of users even when it was previously used
+for a normal Gate increment.
 
 ## Achievements
 
@@ -184,7 +223,9 @@ Achievement creation and role commands also require Manage Messages. Achievement
 not need Discord roles. `role bind` uses the mentioned role ID, then lets the moderator
 choose an unbound achievement from a dropdown. Binding imports current role holders
 without proof. Unbinding stops role tracking without removing the role or achievement
-history. Replacing a binding keeps existing history and imports holders of the new role.
+history. Replacing a binding opens a review with two choices: move current holders from
+the old role to the new role, or keep the old role and add the new role. Both choices keep
+existing achievement history and import current holders of the new role.
 Deleting a bound Discord role automatically stops tracking it without deleting awards.
 `achievement rename` changes only the display name; the key and existing awards stay
 unchanged. `achievement delete` (or `achievement del`) requires an unbound, non-system
@@ -192,6 +233,11 @@ achievement and opens a destructive confirmation. Confirming permanently deletes
 achievement definition and every stored award for it. `achievement list` shows the
 stable keys required by these commands. Because keys are internal identifiers, `list`,
 `rename`, and `delete` are unavailable in channels visible to `@everyone`.
+
+Gate increments, proof attachments and revokes, achievement grants and revokes,
+achievement definition changes, and role binding changes are recorded in the configured
+moderator action channel. Operational failures and partial results are sent to the
+maintenance channel.
 
 ## Tier Distribution
 
@@ -249,8 +295,8 @@ saved user-role rows that are no longer configured as sticky. Choices are `remov
 
 Enables or disables sticky-role debug logs. When enabled, the bot logs sticky-role
 snapshot writes on member leave and snapshot reads/restores on member join. Debug logs
-use the configured NHMisc alert channel. Deleted-role prompts always use that same alert
-channel, even when debug logging is disabled.
+use the configured NHMisc maintenance channel. Deleted-role prompts always use that same
+maintenance channel, even when debug logging is disabled.
 
 ## Activity Analytics
 
@@ -459,17 +505,19 @@ initial synchronization, member and role events keep the database current. The b
 reconciles enabled guilds after startup, after a resumed gateway session, and once every
 24 hours. A manual `rolesync` forces an immediate reconciliation.
 
-After installing the achievement system, configure the NHMisc alert channel and run:
+After installing the achievement system, configure the NHMisc maintenance channel and
+run:
 
 ```ini
 [p]rolesync discord
 ```
 
-The command prepares an import plan from the role-analytics snapshot and posts it in the
-alert channel. The invoking moderator must type `confirm` there before anything changes.
-This initializes achievement data from current Discord roles. Later uses deliberately
-replace achievement progress with Discord's current role state. In every normal sync,
-the achievement database has priority and Discord roles are restored from it.
+The command prepares an import plan from the role-analytics snapshot, uploads a backup,
+and posts both in the maintenance channel. The invoking moderator must type `confirm`
+there before anything changes. This initializes achievement data from current Discord
+roles. Later uses deliberately replace achievement progress with Discord's current role
+state. In every normal sync, the achievement database has priority and Discord roles are
+restored from it.
 
 A reconciliation builds the replacement snapshot in a separate generation and swaps it in
 atomically, so `rolestats` and `roleusers` keep answering from the previous snapshot for
