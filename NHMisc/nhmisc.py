@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import io
 import logging
+import re
 import time
 from collections.abc import Awaitable
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from .achievement_store import (
     AchievementProfile,
     AchievementStore,
     GateProofConflict,
+    StargateProof,
 )
 from .achievement_sync import (
     DiscordRoleSnapshot,
@@ -191,6 +193,62 @@ class GateIncrementCandidate:
 class GateProofCandidate:
     member: discord.Member
     missing_ordinals: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GateProofBatchEntry:
+    ordinal: int
+    source_guild_id: int
+    source_channel_id: int
+    source_message_id: int
+
+    @property
+    def jump_url(self) -> str:
+        return (
+            "https://discord.com/channels/"
+            f"{self.source_guild_id}/{self.source_channel_id}/"
+            f"{self.source_message_id}"
+        )
+
+
+_GATE_PROOF_BATCH_LINE = re.compile(
+    r"([1-9]\d*) (https://discord\.com/channels/(\d+)/(\d+)/(\d+))"
+)
+
+
+def _parse_gate_proof_batch(
+    content: str,
+    *,
+    expected_guild_id: int,
+) -> tuple[GateProofBatchEntry, ...] | None:
+    lines = content.splitlines()
+    if not lines or re.match(r"\d+ ", lines[0]) is None:
+        return None
+
+    entries = []
+    ordinals = set()
+    for line_number, line in enumerate(lines, start=1):
+        match = _GATE_PROOF_BATCH_LINE.fullmatch(line)
+        if match is None:
+            raise ValueError(
+                f"Gate proof batch line {line_number} must use: number space link"
+            )
+        ordinal = int(match.group(1))
+        source_guild_id = int(match.group(3))
+        if source_guild_id != expected_guild_id:
+            raise ValueError("Gate proof links must point to the current server")
+        if ordinal in ordinals:
+            raise ValueError(f"Gate {ordinal} appears more than once")
+        ordinals.add(ordinal)
+        entries.append(
+            GateProofBatchEntry(
+                ordinal=ordinal,
+                source_guild_id=source_guild_id,
+                source_channel_id=int(match.group(4)),
+                source_message_id=int(match.group(5)),
+            )
+        )
+    return tuple(entries)
 
 
 def _gate_increment_candidate_ids(source_message) -> tuple[int, ...]:
@@ -1413,6 +1471,11 @@ class NHMisc(commands.Cog):
                     )
                 )
                 return
+            if await self._maybe_open_gate_proof_batch(
+                interaction,
+                source_message,
+            ):
+                return
             members = _build_achievement_candidates(source_message)
             if not members:
                 await interaction.edit_original_response(
@@ -1450,6 +1513,70 @@ class NHMisc(commands.Cog):
                 error,
                 public_defer=False,
             )
+
+    async def _maybe_open_gate_proof_batch(
+        self,
+        interaction: discord.Interaction,
+        source_message: discord.Message,
+    ) -> bool:
+        try:
+            entries = _parse_gate_proof_batch(
+                source_message.content,
+                expected_guild_id=interaction.guild.id,
+            )
+        except ValueError as error:
+            await interaction.edit_original_response(content=str(error))
+            return True
+        if entries is None:
+            return False
+
+        member = None
+        error_message = None
+        if source_message.webhook_id is not None:
+            error_message = "A Gate proof batch must be posted by a server member"
+        else:
+            member = interaction.guild.get_member(source_message.author.id)
+            if member is None or member.bot:
+                error_message = "This message has no eligible recipient"
+        if error_message is None:
+            profile = await self._await_achievement_interaction_data(
+                self._achievement_store.get_profile(
+                    interaction.guild.id,
+                    member.id,
+                )
+            )
+            existing_proofs = {proof.ordinal for proof in profile.stargate_proofs}
+            for entry in entries:
+                if entry.ordinal > profile.stargate_count:
+                    error_message = (
+                        f"Gate {entry.ordinal} does not exist for <@{member.id}>"
+                    )
+                    break
+                if entry.ordinal in existing_proofs:
+                    error_message = (
+                        f"Gate {entry.ordinal} already has a proof for <@{member.id}>"
+                    )
+                    break
+        if error_message is not None:
+            await interaction.edit_original_response(content=error_message)
+            return True
+
+        from .achievement_views import GateProofBatchView
+
+        view = GateProofBatchView(
+            self,
+            source_message,
+            interaction.user.id,
+            member,
+            entries,
+        )
+        await interaction.edit_original_response(
+            embed=view.render_embed(),
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        view.message = await interaction.original_response()
+        return True
 
     async def _confirm_gate_proofs(self, interaction, view) -> None:
         await interaction.response.defer()
@@ -1521,6 +1648,85 @@ class NHMisc(commands.Cog):
         )
         view.stop()
         count = len(assignments)
+        await interaction.edit_original_response(
+            content=f"Attached {count} Gate proof{'s' if count != 1 else ''}",
+            embed=None,
+            view=None,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _confirm_gate_proof_batch(self, interaction, view) -> None:
+        await interaction.response.defer()
+        try:
+            source_message = await self._fetch_gate_increment_source(
+                self._gate_increment_key(view.source_message)
+            )
+            await self._require_private_moderation_log_channel(
+                source_message.guild
+            )
+        except commands.UserFeedbackCheckFailure as error:
+            await interaction.edit_original_response(
+                embed=view.render_embed(notice=str(error)),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        try:
+            current_entries = _parse_gate_proof_batch(
+                source_message.content,
+                expected_guild_id=source_message.guild.id,
+            )
+        except ValueError:
+            current_entries = None
+        if (
+            source_message.webhook_id is not None
+            or source_message.author.id != view.member.id
+            or current_entries != view.entries
+        ):
+            view.stop()
+            await interaction.edit_original_response(
+                content="The source message changed. Start again",
+                embed=None,
+                view=None,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        proofs = tuple(
+            StargateProof(
+                entry.ordinal,
+                entry.source_channel_id,
+                entry.source_message_id,
+            )
+            for entry in view.entries
+        )
+        try:
+            await self._achievement_store.attach_stargate_proof_links(
+                source_message.guild.id,
+                view.member.id,
+                proofs,
+            )
+        except GateProofConflict:
+            view.stop()
+            await interaction.edit_original_response(
+                content="Gate proof data changed. Start again",
+                embed=None,
+                view=None,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        proof_lines = "\n".join(
+            f"Gate {entry.ordinal}: {entry.jump_url}" for entry in view.entries
+        )
+        await self._send_moderation_log(
+            source_message.guild,
+            "Batch Gate proofs attached\n"
+            f"Moderator: <@{interaction.user.id}>\n"
+            f"Player: <@{view.member.id}>\n"
+            f"{proof_lines}\n"
+            f"Request: {source_message.jump_url}",
+        )
+        view.stop()
+        count = len(proofs)
         await interaction.edit_original_response(
             content=f"Attached {count} Gate proof{'s' if count != 1 else ''}",
             embed=None,
