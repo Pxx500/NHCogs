@@ -116,7 +116,7 @@ class GateRevokeEntryPointTests(unittest.IsolatedAsyncioTestCase):
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._achievement_store = store
-        cog._require_private_alert_channel = mock.AsyncMock(
+        cog._require_private_moderation_log_channel = mock.AsyncMock(
             return_value=SimpleNamespace(id=88)
         )
 
@@ -189,7 +189,7 @@ class GateRevokeEntryPointTests(unittest.IsolatedAsyncioTestCase):
             content="This user has no Gate to revoke"
         )
 
-    async def test_public_alert_channel_is_rejected(self):
+    async def test_public_moderation_log_channel_is_rejected(self):
         channel = SimpleNamespace(
             permissions_for=mock.Mock(
                 return_value=SimpleNamespace(
@@ -199,7 +199,9 @@ class GateRevokeEntryPointTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         guild = SimpleNamespace(id=10, default_role=object())
-        config = SimpleNamespace(alert_channel=mock.AsyncMock(return_value=88))
+        config = SimpleNamespace(
+            moderation_log_channel=mock.AsyncMock(return_value=88)
+        )
         cog = object.__new__(nhmisc.NHMisc)
         cog.config = SimpleNamespace(guild=mock.Mock(return_value=config))
         cog._get_log_channel = mock.Mock(return_value=channel)
@@ -208,7 +210,7 @@ class GateRevokeEntryPointTests(unittest.IsolatedAsyncioTestCase):
             nhmisc.commands.UserFeedbackCheckFailure,
             "hidden from @everyone",
         ):
-            await cog._require_private_alert_channel(guild)
+            await cog._require_private_moderation_log_channel(guild)
 
 
 class _AchievementCommandTree:
@@ -239,6 +241,7 @@ class GateRevokeRegistrationTests(unittest.TestCase):
         cog._grant_achievements_context_menu = SimpleNamespace(
             name="Grant achievements"
         )
+        cog._add_gate_proof_context_menu = SimpleNamespace(name="Add Gate Proof")
         cog._achievement_commands_registered = False
 
         command_types = SimpleNamespace(
@@ -263,6 +266,7 @@ class GateRevokeRegistrationTests(unittest.TestCase):
                 ("achievements", True),
                 ("View achievements", True),
                 ("Grant achievements", True),
+                ("Add Gate Proof", True),
             ],
         )
         self.assertEqual(
@@ -273,6 +277,7 @@ class GateRevokeRegistrationTests(unittest.TestCase):
                 ("achievements", "chat_input"),
                 ("View achievements", "user"),
                 ("Grant achievements", "message"),
+                ("Add Gate Proof", "message"),
             ],
         )
 
@@ -379,10 +384,10 @@ class GateRevokeExecutionTests(unittest.IsolatedAsyncioTestCase):
         cog._achievement_store = store
         cog._gate_revoke_locks = {}
         cog._authorized_gate_role_edits = {}
-        cog._require_private_alert_channel = mock.AsyncMock(
+        cog._require_private_moderation_log_channel = mock.AsyncMock(
             return_value=SimpleNamespace(id=88)
         )
-        cog._send_voice_log = mock.AsyncMock(return_value=SimpleNamespace(id=90))
+        cog._send_moderation_log = mock.AsyncMock(return_value=True)
         return cog, interaction, member, guild, store, award
 
     async def test_confirm_removes_only_latest_gate_and_preserves_other_roles(self):
@@ -403,8 +408,8 @@ class GateRevokeExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.delete_calls, [(10, 42, 7)])
         self.assertIsNone(store.award)
         self.assertTrue(view.stopped)
-        cog._send_voice_log.assert_awaited_once()
-        self.assertEqual(cog._send_voice_log.await_args.args[0].id, 88)
+        cog._send_moderation_log.assert_awaited_once()
+        self.assertIs(cog._send_moderation_log.await_args.args[0], interaction.guild)
         self.assertNotIn((10, 42), cog._authorized_gate_role_edits)
 
     async def test_confirming_gate_one_removes_the_gate_role(self):

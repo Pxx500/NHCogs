@@ -99,6 +99,69 @@ class AchievementStoreTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(profile.stargate_proofs[0].source_message_id, 6)
 
+    async def test_historical_proof_can_fill_different_ordinals_from_one_message(self):
+        await self.store.import_gate_progress(1, 2, 3)
+        await self.store.import_gate_progress(1, 3, 2)
+
+        attached = await self.store.attach_stargate_proofs(
+            1,
+            {2: 3, 3: 1},
+            source_channel_id=50,
+            source_message_id=60,
+        )
+
+        first_profile = await self.store.get_profile(1, 2)
+        second_profile = await self.store.get_profile(1, 3)
+        self.assertEqual(
+            tuple((proof.ordinal, proof.source_message_id) for proof in attached),
+            ((3, 60), (1, 60)),
+        )
+        self.assertEqual(first_profile.stargate_count, 3)
+        self.assertEqual(first_profile.stargate_proofs, (attached[0],))
+        self.assertEqual(second_profile.stargate_count, 2)
+        self.assertEqual(second_profile.stargate_proofs, (attached[1],))
+
+    async def test_historical_proof_conflict_rolls_back_every_assignment(self):
+        await self.store.grant_stargate(
+            1,
+            2,
+            source_channel_id=10,
+            source_message_id=20,
+        )
+        await self.store.import_gate_progress(1, 3, 1)
+
+        with self.assertRaises(achievement_store.GateProofConflict):
+            await self.store.attach_stargate_proofs(
+                1,
+                {3: 1, 2: 1},
+                source_channel_id=50,
+                source_message_id=60,
+            )
+
+        self.assertEqual(
+            (await self.store.get_profile(1, 3)).stargate_proofs,
+            (),
+        )
+
+    async def test_missing_historical_proofs_are_loaded_for_all_requested_users(self):
+        await self.store.import_gate_progress(1, 2, 3)
+        await self.store.attach_stargate_proofs(
+            1,
+            {2: 2},
+            source_channel_id=50,
+            source_message_id=60,
+        )
+        await self.store.grant_stargate(
+            1,
+            3,
+            source_channel_id=70,
+            source_message_id=80,
+        )
+
+        missing = await self.store.missing_stargate_proofs(1, (2, 3, 4))
+
+        self.assertEqual(missing, {2: (1, 3), 3: (), 4: ()})
+
     async def test_boolean_revocation_is_historical_and_allows_regrant(self):
         original = await self.store.grant_boolean(1, 2, "solo_gater")
 
@@ -247,10 +310,31 @@ class AchievementStoreTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "already bound"):
             await self.store.replace_role(
                 50,
+                achievement_key=first.key,
                 old_role_id=123,
                 new_role_id=456,
                 user_ids=(),
             )
+
+    async def test_role_replacement_rejects_a_rebound_source_role(self):
+        first = await self.store.create_boolean_definition(50, "First")
+        second = await self.store.create_boolean_definition(50, "Second")
+        await self.store.bind_role(50, first.key, role_id=123, user_ids=())
+        await self.store.unbind_role(50, 123)
+        await self.store.bind_role(50, second.key, role_id=123, user_ids=())
+
+        with self.assertRaisesRegex(LookupError, "not bound"):
+            await self.store.replace_role(
+                50,
+                achievement_key=first.key,
+                old_role_id=123,
+                new_role_id=456,
+                user_ids=(),
+            )
+
+        definitions = await self.store.list_definitions(50)
+        rebound = next(item for item in definitions if item.key == second.key)
+        self.assertEqual(rebound.role_id, 123)
 
     async def test_replacing_role_preserves_owners_and_imports_new_holders(self):
         await self.store.mark_bootstrapped(50)
@@ -264,6 +348,7 @@ class AchievementStoreTests(unittest.IsolatedAsyncioTestCase):
 
         result = await self.store.replace_role(
             50,
+            achievement_key=definition.key,
             old_role_id=123,
             new_role_id=456,
             user_ids=(11,),

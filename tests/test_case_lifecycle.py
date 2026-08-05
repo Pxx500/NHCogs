@@ -569,21 +569,37 @@ class CaseLifecycleTests(CaseExpiryTestCase):
                 )
                 started = asyncio.Event()
                 release = asyncio.Event()
+                renewed = asyncio.Event()
+                renewal_times = []
+                event_loop = asyncio.get_running_loop()
+
+                renew_operation_claim = cog._case_store.renew_operation_claim
+
+                def record_renewal(operation_id, token, now):
+                    did_renew = renew_operation_claim(operation_id, token, now)
+                    if did_renew:
+                        renewal_times.append(now)
+                        event_loop.call_soon_threadsafe(renewed.set)
+                    return did_renew
 
                 async def blocked_review(case_id):
                     started.set()
                     await release.wait()
 
+                cog._case_store.renew_operation_claim = record_renewal
                 cog._case_review_rerender = blocked_review
                 worker = asyncio.create_task(
                     cog._execute_detection_case_operation(claimed, datetime.now(timezone.utc))
                 )
                 await started.wait()
                 try:
-                    await asyncio.sleep(0.15)
+                    await asyncio.wait_for(renewed.wait(), timeout=1)
+                    stale_before = claimed.claimed_at + (
+                        renewal_times[0] - claimed.claimed_at
+                    ) / 2
                     contenders = cog._case_store.claim_due_operations(
                         datetime.now(timezone.utc),
-                        stale_before=datetime.now(timezone.utc) - timedelta(milliseconds=75),
+                        stale_before=stale_before,
                     )
                     self.assertEqual(contenders, ())
                 finally:

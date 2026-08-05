@@ -64,6 +64,37 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             edit_original_response=mock.AsyncMock(),
         )
 
+    async def test_successful_achievement_create_emits_one_moderation_log(self):
+        guild = SimpleNamespace(id=1)
+        ctx = SimpleNamespace(
+            guild=guild,
+            author=SimpleNamespace(id=99),
+            send=mock.AsyncMock(),
+        )
+        definition = SimpleNamespace(
+            key="all_quests",
+            display_name="All Quests",
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(return_value=True),
+            create_boolean_definition=mock.AsyncMock(return_value=definition),
+        )
+        cog._send_moderation_log = mock.AsyncMock(return_value=True)
+
+        await nhmisc.NHMisc.achievement_create(
+            cog,
+            ctx,
+            display_name="All Quests",
+        )
+
+        cog._send_moderation_log.assert_awaited_once()
+        logged_guild, content = cog._send_moderation_log.await_args.args
+        self.assertIs(logged_guild, guild)
+        self.assertIn("Achievement created", content)
+        self.assertIn("Moderator: <@99>", content)
+        self.assertIn("Key: `all_quests`", content)
+
     async def _assert_deferred_before_store_wait(
         self,
         callback,
@@ -216,12 +247,12 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             reconcile_enabled_guilds=mock.AsyncMock()
         )
         cog._achievement_store = store
-        cog._send_guild_alert = mock.AsyncMock(return_value=True)
+        cog._send_maintenance_log = mock.AsyncMock(return_value=True)
 
         await cog._role_analytics_startup_reconcile()
 
         store.bootstrap_guild.assert_not_awaited()
-        cog._send_guild_alert.assert_awaited_once_with(
+        cog._send_maintenance_log.assert_awaited_once_with(
             guild,
             "Achievement initialization is required\n\n"
             "The achievement database has not been initialized from the current "
@@ -378,8 +409,10 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         cog = object.__new__(nhmisc.NHMisc)
         cog._achievement_store = store
         cog._require_private_achievement_channel = mock.Mock()
+        cog._send_moderation_log = mock.AsyncMock(return_value=True)
         ctx = SimpleNamespace(
             guild=SimpleNamespace(id=1),
+            author=SimpleNamespace(id=99),
             send=mock.AsyncMock(),
         )
 
@@ -397,6 +430,11 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("achievement_123", ctx.send.await_args.args[0])
         self.assertIn("All Quests", ctx.send.await_args.args[0])
+        cog._send_moderation_log.assert_awaited_once()
+        self.assertIn(
+            "Achievement renamed",
+            cog._send_moderation_log.await_args.args[1],
+        )
 
     async def test_list_exposes_stable_keys_only_in_a_private_channel(self):
         unbound = type(nhmisc.SOLO_GATER_DEFINITION)(
@@ -511,6 +549,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._achievement_store = store
+        cog._send_moderation_log = mock.AsyncMock(return_value=True)
         view = SimpleNamespace(preview=preview, stop=mock.Mock())
         interaction = self._interaction(SimpleNamespace(id=1))
 
@@ -527,6 +566,12 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             "7 stored awards",
             interaction.edit_original_response.await_args.kwargs["content"],
         )
+        cog._send_moderation_log.assert_awaited_once()
+        self.assertIn(
+            "Achievement deleted",
+            cog._send_moderation_log.await_args.args[1],
+        )
+        self.assertIn("Awards deleted: 7", cog._send_moderation_log.await_args.args[1])
 
     async def test_delete_confirmation_keeps_a_stale_review_open(self):
         definition = type(nhmisc.SOLO_GATER_DEFINITION)(
@@ -596,6 +641,39 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             view.render_embed.call_args.kwargs["notice"],
         )
 
+    async def test_successful_role_bind_emits_one_moderation_log(self):
+        definition = type(nhmisc.SOLO_GATER_DEFINITION)(
+            key="all_quests",
+            display_name="All Quests",
+            kind=nhmisc.SOLO_GATER_DEFINITION.kind,
+        )
+        result = SimpleNamespace(definition=definition, imported_count=2)
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = SimpleNamespace(
+            list_definitions=mock.AsyncMock(return_value=(definition,)),
+            bind_role=mock.AsyncMock(return_value=result),
+        )
+        cog._role_analytics_users_with_roles = mock.AsyncMock(
+            return_value=((10, 11),)
+        )
+        cog._reconcile_achievement_roles_for_guild = mock.AsyncMock()
+        cog._send_moderation_log = mock.AsyncMock(return_value=True)
+        guild = SimpleNamespace(id=1)
+        interaction = self._interaction(guild)
+        view = SimpleNamespace(
+            selected_key="all_quests",
+            role=SimpleNamespace(id=123, mention="<@&123>"),
+            holder_ids=(10, 11),
+            stop=mock.Mock(),
+        )
+
+        await cog._confirm_achievement_role_bind(interaction, view)
+
+        cog._send_moderation_log.assert_awaited_once()
+        audit = cog._send_moderation_log.await_args.args[1]
+        self.assertIn("Achievement role bound", audit)
+        self.assertIn("Imported awards: 2", audit)
+
     async def test_role_bind_rejects_a_role_bound_during_review(self):
         definition_type = type(nhmisc.SOLO_GATER_DEFINITION)
         selected = definition_type(
@@ -635,7 +713,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_role_unbind_keeps_the_discord_role_untouched(self):
-        definition = SimpleNamespace(display_name="All Quests")
+        definition = SimpleNamespace(key="all_quests", display_name="All Quests")
         store = SimpleNamespace(
             is_bootstrapped=mock.AsyncMock(return_value=True),
             unbind_role=mock.AsyncMock(return_value=definition),
@@ -643,9 +721,11 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         cog = object.__new__(nhmisc.NHMisc)
         cog._achievement_store = store
         cog._reconcile_achievement_roles_for_guild = mock.AsyncMock()
+        cog._send_moderation_log = mock.AsyncMock(return_value=True)
         role = SimpleNamespace(id=123, mention="<@&123>")
         ctx = SimpleNamespace(
             guild=SimpleNamespace(id=1),
+            author=SimpleNamespace(id=99),
             send=mock.AsyncMock(),
         )
 
@@ -654,61 +734,382 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         store.unbind_role.assert_awaited_once_with(1, 123)
         cog._reconcile_achievement_roles_for_guild.assert_not_awaited()
         ctx.send.assert_awaited_once()
+        cog._send_moderation_log.assert_awaited_once()
+        self.assertIn(
+            "Achievement role unbound",
+            cog._send_moderation_log.await_args.args[1],
+        )
 
-    async def test_role_replace_imports_new_holders_after_confirmation(self):
+    async def test_role_replace_opens_a_two_mode_review_without_text_confirmation(self):
         definition = type(nhmisc.SOLO_GATER_DEFINITION)(
             key="all_quests",
             display_name="All Quests",
             kind=nhmisc.SOLO_GATER_DEFINITION.kind,
             role_id=123,
         )
-        result = SimpleNamespace(
-            definition=type(definition)(
-                key=definition.key,
-                display_name=definition.display_name,
-                kind=definition.kind,
-                role_id=456,
-            ),
-            imported_count=2,
-        )
         store = SimpleNamespace(
             is_bootstrapped=mock.AsyncMock(return_value=True),
             list_definitions=mock.AsyncMock(return_value=(definition,)),
-            replace_role=mock.AsyncMock(return_value=result),
+            projected_users_for_boolean=mock.AsyncMock(return_value=(20, 21)),
+            replace_role=mock.AsyncMock(),
         )
         guild = SimpleNamespace(id=1)
-        channel = SimpleNamespace(id=2)
         author = SimpleNamespace(id=3)
         cog = object.__new__(nhmisc.NHMisc)
         cog._achievement_store = store
         cog._role_analytics_users_with_roles = mock.AsyncMock(
-            side_effect=(((10, 11),), ((10, 11),))
+            return_value=((10, 20), (20, 30))
         )
-        cog._reconcile_achievement_roles_for_guild = mock.AsyncMock()
-        cog.bot = SimpleNamespace(wait_for=mock.AsyncMock())
+        message = SimpleNamespace()
         ctx = SimpleNamespace(
             guild=guild,
-            channel=channel,
             author=author,
-            send=mock.AsyncMock(),
+            send=mock.AsyncMock(return_value=message),
         )
         old_role = SimpleNamespace(id=123, mention="<@&123>")
         new_role = SimpleNamespace(id=456, mention="<@&456>")
 
-        await nhmisc.NHMisc.achievement_role_replace(
-            cog,
-            ctx,
-            old_role,
-            new_role,
+        class FakeAchievementRoleReplaceView:
+            def __init__(
+                self,
+                cog,
+                opener_id,
+                definition,
+                old_role,
+                new_role,
+                *,
+                stored_holder_ids,
+                old_holder_ids,
+                new_holder_ids,
+            ):
+                self.cog = cog
+                self.opener_id = opener_id
+                self.definition = definition
+                self.old_role = old_role
+                self.new_role = new_role
+                self.stored_holder_ids = stored_holder_ids
+                self.old_holder_ids = old_holder_ids
+                self.new_holder_ids = new_holder_ids
+                self.message = None
+
+            def render_embed(self):
+                return SimpleNamespace()
+
+        package = ModuleType("_gatecount_nhmisc")
+        package.__path__ = []
+        views = ModuleType("_gatecount_nhmisc.achievement_views")
+        views.AchievementRoleReplaceView = FakeAchievementRoleReplaceView
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "_gatecount_nhmisc": package,
+                "_gatecount_nhmisc.achievement_views": views,
+            },
+        ):
+            await nhmisc.NHMisc.achievement_role_replace(
+                cog,
+                ctx,
+                old_role,
+                new_role,
+            )
+
+        store.replace_role.assert_not_awaited()
+        view = ctx.send.await_args.kwargs["view"]
+        self.assertEqual(view.stored_holder_ids, (20, 21))
+        self.assertEqual(view.old_holder_ids, (10, 20))
+        self.assertEqual(view.new_holder_ids, (20, 30))
+        self.assertIs(view.message, message)
+
+    async def test_role_replace_applies_move_and_keep_modes(self):
+        for remove_old in (True, False):
+            with self.subTest(remove_old=remove_old):
+                definition = type(nhmisc.SOLO_GATER_DEFINITION)(
+                    key="all_quests",
+                    display_name="All Quests",
+                    kind=nhmisc.SOLO_GATER_DEFINITION.kind,
+                    role_id=123,
+                )
+                replacement = type(definition)(
+                    key=definition.key,
+                    display_name=definition.display_name,
+                    kind=definition.kind,
+                    role_id=456,
+                )
+                result = SimpleNamespace(
+                    definition=replacement,
+                    imported_count=2,
+                )
+                members = {
+                    10: SimpleNamespace(id=10),
+                    11: SimpleNamespace(id=11),
+                    12: SimpleNamespace(id=12),
+                }
+                roles = {
+                    123: SimpleNamespace(id=123, mention="<@&123>"),
+                    456: SimpleNamespace(id=456, mention="<@&456>"),
+                }
+                guild = SimpleNamespace(
+                    id=1,
+                    get_member=members.get,
+                    get_role=roles.get,
+                    fetch_member=mock.AsyncMock(),
+                )
+                store = SimpleNamespace(
+                    list_definitions=mock.AsyncMock(return_value=(definition,)),
+                    replace_role=mock.AsyncMock(return_value=result),
+                    projected_users_for_boolean=mock.AsyncMock(
+                        return_value=(10, 11, 12)
+                    ),
+                )
+                cog = object.__new__(nhmisc.NHMisc)
+                cog._achievement_store = store
+                cog._role_analytics_users_with_roles = mock.AsyncMock(
+                    return_value=((10, 12), (11,))
+                )
+                cog._edit_achievement_roles = mock.AsyncMock()
+                cog._send_moderation_log = mock.AsyncMock(return_value=True)
+                cog._send_maintenance_log = mock.AsyncMock(return_value=True)
+                interaction = self._interaction(guild)
+                view = SimpleNamespace(
+                    definition=definition,
+                    old_role=roles[123],
+                    new_role=roles[456],
+                    stored_holder_ids=(10,),
+                    old_holder_ids=(10, 12),
+                    new_holder_ids=(11,),
+                    stop=mock.Mock(),
+                    render_embed=mock.Mock(return_value=SimpleNamespace()),
+                )
+
+                await cog._confirm_achievement_role_replace(
+                    interaction,
+                    view,
+                    remove_old=remove_old,
+                )
+
+                store.replace_role.assert_awaited_once_with(
+                    1,
+                    achievement_key="all_quests",
+                    old_role_id=123,
+                    new_role_id=456,
+                    user_ids=(10, 11, 12),
+                )
+                self.assertEqual(
+                    cog._edit_achievement_roles.await_args_list,
+                    [
+                        mock.call(
+                            guild,
+                            members[user_id],
+                            add_role_ids=(456,),
+                            remove_role_ids=(123,) if remove_old else (),
+                            reason="Replace achievement role by 99",
+                        )
+                        for user_id in (10, 12)
+                    ],
+                )
+                cog._send_maintenance_log.assert_not_awaited()
+                cog._send_moderation_log.assert_awaited_once()
+                audit = cog._send_moderation_log.await_args.args[1]
+                self.assertIn(
+                    "Mode: move members" if remove_old else "Mode: keep old role",
+                    audit,
+                )
+                self.assertIn("Members changed: 2", audit)
+                view.stop.assert_called_once_with()
+
+    async def test_role_replace_rejects_changed_old_or_new_role_holders(self):
+        definition = type(nhmisc.SOLO_GATER_DEFINITION)(
+            key="all_quests",
+            display_name="All Quests",
+            kind=nhmisc.SOLO_GATER_DEFINITION.kind,
+            role_id=123,
+        )
+        store = SimpleNamespace(
+            list_definitions=mock.AsyncMock(return_value=(definition,)),
+            replace_role=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = store
+        cog._role_analytics_users_with_roles = mock.AsyncMock(
+            return_value=((10,), (11, 12))
+        )
+        roles = {
+            123: SimpleNamespace(id=123),
+            456: SimpleNamespace(id=456),
+        }
+        guild = SimpleNamespace(id=1, get_role=roles.get)
+        interaction = self._interaction(guild)
+        view = SimpleNamespace(
+            definition=definition,
+            old_role=SimpleNamespace(id=123),
+            new_role=SimpleNamespace(id=456),
+            old_holder_ids=(10,),
+            new_holder_ids=(11,),
+            render_embed=mock.Mock(return_value=SimpleNamespace()),
         )
 
-        store.replace_role.assert_awaited_once_with(
-            1,
-            old_role_id=123,
-            new_role_id=456,
-            user_ids=(10, 11),
+        await cog._confirm_achievement_role_replace(
+            interaction,
+            view,
+            remove_old=True,
         )
-        cog._reconcile_achievement_roles_for_guild.assert_awaited_once_with(guild)
+
+        store.replace_role.assert_not_awaited()
+        self.assertEqual(view.old_holder_ids, (10,))
+        self.assertEqual(view.new_holder_ids, (11, 12))
+        self.assertIn(
+            "Role holders changed",
+            view.render_embed.call_args.kwargs["notice"],
+        )
+
+    async def test_role_replace_rejects_a_deleted_new_role(self):
+        definition = type(nhmisc.SOLO_GATER_DEFINITION)(
+            key="all_quests",
+            display_name="All Quests",
+            kind=nhmisc.SOLO_GATER_DEFINITION.kind,
+            role_id=123,
+        )
+        store = SimpleNamespace(
+            list_definitions=mock.AsyncMock(return_value=(definition,)),
+            replace_role=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = store
+        cog._role_analytics_users_with_roles = mock.AsyncMock(
+            return_value=((10,), ())
+        )
+        guild = SimpleNamespace(
+            id=1,
+            get_role=lambda role_id: SimpleNamespace(id=123) if role_id == 123 else None,
+        )
+        interaction = self._interaction(guild)
+        view = SimpleNamespace(
+            definition=definition,
+            old_role=SimpleNamespace(id=123),
+            new_role=SimpleNamespace(id=456),
+            old_holder_ids=(10,),
+            new_holder_ids=(),
+            render_embed=mock.Mock(return_value=SimpleNamespace()),
+        )
+
+        await cog._confirm_achievement_role_replace(
+            interaction,
+            view,
+            remove_old=True,
+        )
+
+        store.replace_role.assert_not_awaited()
+        self.assertIn(
+            "no longer exists",
+            view.render_embed.call_args.kwargs["notice"],
+        )
+
+    async def test_role_replace_reports_an_atomic_configuration_conflict(self):
+        definition = type(nhmisc.SOLO_GATER_DEFINITION)(
+            key="all_quests",
+            display_name="All Quests",
+            kind=nhmisc.SOLO_GATER_DEFINITION.kind,
+            role_id=123,
+        )
+        roles = {
+            123: SimpleNamespace(id=123),
+            456: SimpleNamespace(id=456),
+        }
+        store = SimpleNamespace(
+            list_definitions=mock.AsyncMock(return_value=(definition,)),
+            replace_role=mock.AsyncMock(side_effect=LookupError("not bound")),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = store
+        cog._role_analytics_users_with_roles = mock.AsyncMock(
+            return_value=((10,), ())
+        )
+        guild = SimpleNamespace(id=1, get_role=roles.get)
+        interaction = self._interaction(guild)
+        view = SimpleNamespace(
+            definition=definition,
+            old_role=roles[123],
+            new_role=roles[456],
+            old_holder_ids=(10,),
+            new_holder_ids=(),
+            render_embed=mock.Mock(return_value=SimpleNamespace()),
+        )
+
+        await cog._confirm_achievement_role_replace(
+            interaction,
+            view,
+            remove_old=True,
+        )
+
+        self.assertIn(
+            "configuration changed",
+            view.render_embed.call_args.kwargs["notice"].lower(),
+        )
+
+    async def test_role_replace_reports_member_edit_failures_after_rebinding(self):
+        definition = type(nhmisc.SOLO_GATER_DEFINITION)(
+            key="all_quests",
+            display_name="All Quests",
+            kind=nhmisc.SOLO_GATER_DEFINITION.kind,
+            role_id=123,
+        )
+        replacement = type(definition)(
+            key=definition.key,
+            display_name=definition.display_name,
+            kind=definition.kind,
+            role_id=456,
+        )
+        member = SimpleNamespace(id=10)
+        guild = SimpleNamespace(
+            id=1,
+            get_member=lambda user_id: member if user_id == 10 else None,
+            get_role=lambda role_id: SimpleNamespace(id=role_id),
+            fetch_member=mock.AsyncMock(),
+        )
+        store = SimpleNamespace(
+            list_definitions=mock.AsyncMock(return_value=(definition,)),
+            replace_role=mock.AsyncMock(
+                return_value=SimpleNamespace(
+                    definition=replacement,
+                    imported_count=0,
+                )
+            ),
+            projected_users_for_boolean=mock.AsyncMock(return_value=(10,)),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = store
+        cog._role_analytics_users_with_roles = mock.AsyncMock(
+            return_value=((10,), ())
+        )
+        cog._edit_achievement_roles = mock.AsyncMock(
+            side_effect=nhmisc.commands.UserFeedbackCheckFailure("role hierarchy")
+        )
+        cog._send_moderation_log = mock.AsyncMock(return_value=True)
+        cog._send_maintenance_log = mock.AsyncMock(return_value=True)
+        interaction = self._interaction(guild)
+        view = SimpleNamespace(
+            definition=definition,
+            old_role=SimpleNamespace(id=123, mention="<@&123>"),
+            new_role=SimpleNamespace(id=456, mention="<@&456>"),
+            old_holder_ids=(10,),
+            new_holder_ids=(),
+            stop=mock.Mock(),
+            render_embed=mock.Mock(return_value=SimpleNamespace()),
+        )
+
+        await cog._confirm_achievement_role_replace(
+            interaction,
+            view,
+            remove_old=True,
+        )
+
+        store.replace_role.assert_awaited_once()
+        cog._send_maintenance_log.assert_awaited_once()
+        self.assertIn(
+            "Members skipped: 1",
+            cog._send_moderation_log.await_args.args[1],
+        )
 
     async def test_role_list_uses_non_pinging_role_mentions(self):
         definition = type(nhmisc.SOLO_GATER_DEFINITION)(
@@ -786,6 +1187,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         cog = object.__new__(nhmisc.NHMisc)
         cog._achievement_store = store
         cog._fetch_gate_increment_source = mock.AsyncMock(return_value=source)
+        cog._send_moderation_log = mock.AsyncMock(return_value=True)
         interaction = self._interaction(guild)
 
         await cog._confirm_achievement_grant(interaction, view)
@@ -805,6 +1207,11 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             "Granted 1 achievements",
             interaction.edit_original_response.await_args.kwargs["content"],
         )
+        cog._send_moderation_log.assert_awaited_once()
+        audit = cog._send_moderation_log.await_args.args[1]
+        self.assertIn("Achievements granted", audit)
+        self.assertIn("Recipients: <@10>", audit)
+        self.assertIn("https://discord.com/channels/1/20/30", audit)
 
     async def test_grant_rejects_a_role_binding_changed_during_review(self):
         member = SimpleNamespace(id=10, display_name="Player", bot=False)
@@ -899,6 +1306,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._achievement_store = store
+        cog._send_moderation_log = mock.AsyncMock(return_value=True)
         interaction = self._interaction(guild)
 
         await cog._confirm_achievement_revoke(interaction, view)
@@ -914,6 +1322,10 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             "Revoked 1 achievements",
             interaction.edit_original_response.await_args.kwargs["content"],
         )
+        cog._send_moderation_log.assert_awaited_once()
+        audit = cog._send_moderation_log.await_args.args[1]
+        self.assertIn("Achievements revoked", audit)
+        self.assertIn("Members: <@10>", audit)
 
     async def test_revoke_rejects_a_role_binding_changed_during_review(self):
         guild = SimpleNamespace(id=1)
@@ -1136,12 +1548,12 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         cog._sticky_roles = SimpleNamespace(
             get_role_state=mock.AsyncMock(return_value=(False, 0))
         )
-        cog._send_guild_alert = mock.AsyncMock(return_value=True)
+        cog._send_maintenance_log = mock.AsyncMock(return_value=True)
 
         await cog.on_guild_role_delete(role)
 
         store.unbind_role.assert_awaited_once_with(guild.id, role.id)
-        cog._send_guild_alert.assert_awaited_once_with(
+        cog._send_maintenance_log.assert_awaited_once_with(
             guild,
             "Stopped tracking deleted role All Quests for All Quests",
         )

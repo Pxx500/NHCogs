@@ -45,13 +45,19 @@ class FakeCog:
 
 
 class FakeTextChannel:
-    def __init__(self, channel_id=555):
+    def __init__(self, channel_id=555, *, public=False):
         self.id = channel_id
         self.mention = f"<#{channel_id}>"
+        self.public = public
         self.sent = []
+        self.allowed_mentions = []
+
+    def permissions_for(self, _target):
+        return types.SimpleNamespace(view_channel=self.public)
 
     async def send(self, content, allowed_mentions=None):
         self.sent.append(content)
+        self.allowed_mentions.append(allowed_mentions)
         return types.SimpleNamespace(id=1)
 
 
@@ -223,6 +229,7 @@ class FakeGuild:
     def __init__(self, guild_id=123):
         self.id = guild_id
         self.me = object()
+        self.default_role = object()
         self.channels = {}
 
     def get_channel(self, channel_id):
@@ -366,6 +373,23 @@ class ForumAutopinCommandTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(await cog._send_guild_alert(guild, "delivered"))
         self.assertEqual(alert_channel.sent, ["delivered"])
+
+    async def test_moderation_log_disables_all_mentions(self):
+        cog = self.make_cog()
+        guild = FakeGuild()
+        channel = FakeTextChannel()
+        guild.channels[channel.id] = channel
+        cog.config.store_for(guild)["moderation_log_channel"] = channel.id
+
+        self.assertTrue(
+            await cog._send_moderation_log(
+                guild,
+                "Moderator: <@42>; Role: <@&123>",
+            )
+        )
+
+        allowed_mentions = channel.allowed_mentions[-1]
+        self.assertIs(allowed_mentions, ALLOWED_MENTIONS_NONE)
 
 
 class ForumAutopinServiceTests(unittest.IsolatedAsyncioTestCase):

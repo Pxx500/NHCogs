@@ -76,6 +76,10 @@ class StargateProof:
     source_message_id: int
 
 
+class GateProofConflict(RuntimeError):
+    """A selected Gate can no longer accept the requested proof."""
+
+
 @dataclass(frozen=True, slots=True)
 class AchievementProfile:
     stargate_count: int
@@ -132,6 +136,35 @@ class AchievementStore:
                 user_id,
                 source_channel_id,
                 source_message_id,
+            )
+
+    async def attach_stargate_proofs(
+        self,
+        guild_id: int,
+        assignments: Mapping[int, int],
+        *,
+        source_channel_id: int,
+        source_message_id: int,
+    ) -> tuple[StargateProof, ...]:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._attach_stargate_proofs_sync,
+                guild_id,
+                tuple(assignments.items()),
+                source_channel_id,
+                source_message_id,
+            )
+
+    async def missing_stargate_proofs(
+        self,
+        guild_id: int,
+        user_ids: tuple[int, ...],
+    ) -> dict[int, tuple[int, ...]]:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._missing_stargate_proofs_sync,
+                guild_id,
+                tuple(dict.fromkeys(user_ids)),
             )
 
     async def get_latest_stargate(
@@ -321,6 +354,7 @@ class AchievementStore:
         self,
         guild_id: int,
         *,
+        achievement_key: str,
         old_role_id: int,
         new_role_id: int,
         user_ids: tuple[int, ...],
@@ -329,6 +363,7 @@ class AchievementStore:
             return await asyncio.to_thread(
                 self._replace_role_sync,
                 guild_id,
+                achievement_key,
                 old_role_id,
                 new_role_id,
                 user_ids,
@@ -569,6 +604,84 @@ class AchievementStore:
             ).fetchone()
             connection.commit()
         return AwardResult(True, self._award_from_row(row))
+
+    def _attach_stargate_proofs_sync(
+        self,
+        guild_id: int,
+        assignments: tuple[tuple[int, int], ...],
+        source_channel_id: int,
+        source_message_id: int,
+    ) -> tuple[StargateProof, ...]:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows: list[sqlite3.Row] = []
+            for user_id, ordinal in assignments:
+                row = connection.execute(
+                    """
+                    SELECT award_id, ordinal, source_channel_id, source_message_id
+                    FROM achievement_awards
+                    WHERE guild_id = ? AND user_id = ?
+                        AND achievement_key = ? AND ordinal = ?
+                        AND state = 'active'
+                    """,
+                    (guild_id, user_id, STARGATE_COMPLETED_KEY, ordinal),
+                ).fetchone()
+                if (
+                    row is None
+                    or row["source_channel_id"] is not None
+                    or row["source_message_id"] is not None
+                ):
+                    raise GateProofConflict(
+                        f"Gate {ordinal} for user {user_id} cannot accept a proof"
+                    )
+                rows.append(row)
+            for row in rows:
+                connection.execute(
+                    """
+                    UPDATE achievement_awards
+                    SET source_channel_id = ?, source_message_id = ?
+                    WHERE award_id = ?
+                    """,
+                    (source_channel_id, source_message_id, row["award_id"]),
+                )
+            connection.commit()
+        return tuple(
+            StargateProof(
+                ordinal=int(row["ordinal"]),
+                source_channel_id=source_channel_id,
+                source_message_id=source_message_id,
+            )
+            for row in rows
+        )
+
+    def _missing_stargate_proofs_sync(
+        self,
+        guild_id: int,
+        user_ids: tuple[int, ...],
+    ) -> dict[int, tuple[int, ...]]:
+        missing: dict[int, list[int]] = {user_id: [] for user_id in user_ids}
+        if not user_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in user_ids)
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT user_id, ordinal
+                FROM achievement_awards
+                WHERE guild_id = ? AND achievement_key = ?
+                    AND user_id IN ({placeholders})
+                    AND ordinal IS NOT NULL AND state = 'active'
+                    AND source_channel_id IS NULL
+                    AND source_message_id IS NULL
+                ORDER BY user_id, ordinal
+                """,  # noqa: S608 - placeholders are generated, never user-provided
+                (guild_id, STARGATE_COMPLETED_KEY, *user_ids),
+            ).fetchall()
+        for row in rows:
+            missing[int(row["user_id"])].append(int(row["ordinal"]))
+        return {
+            user_id: tuple(ordinals) for user_id, ordinals in missing.items()
+        }
 
     def _get_latest_stargate_sync(
         self, guild_id: int, user_id: int
@@ -1137,6 +1250,7 @@ class AchievementStore:
     def _replace_role_sync(
         self,
         guild_id: int,
+        achievement_key: str,
         old_role_id: int,
         new_role_id: int,
         user_ids: tuple[int, ...],
@@ -1149,9 +1263,9 @@ class AchievementStore:
                 SELECT achievement_key, display_name, kind, role_id,
                        grantable, revocable, display_order
                 FROM achievement_definitions
-                WHERE guild_id = ? AND role_id = ?
+                WHERE guild_id = ? AND achievement_key = ? AND role_id = ?
                 """,
-                (guild_id, old_role_id),
+                (guild_id, achievement_key, old_role_id),
             ).fetchone()
             if row is None:
                 connection.rollback()

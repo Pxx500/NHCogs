@@ -574,6 +574,64 @@ class GateIncrementReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
             rendered,
         )
 
+    async def test_successful_confirm_emits_one_moderation_log(self):
+        interaction = self._interaction()
+        guild = SimpleNamespace(id=1)
+        source = SimpleNamespace(
+            guild=guild,
+            channel=SimpleNamespace(id=2),
+            id=3,
+        )
+        candidate = nhmisc.GateIncrementCandidate(
+            10,
+            "Player",
+            (),
+            None,
+            nhmisc.GATE_TIER_ROLE_IDS[0],
+        )
+        view = SimpleNamespace(
+            source_message=source,
+            selected_user_ids={10},
+            solo_gater_enabled=False,
+        )
+        snapshot = SimpleNamespace(
+            members=(
+                SimpleNamespace(
+                    user_id=10,
+                    target_ordinal=1,
+                    state=nhmisc.MemberState.COMPLETED,
+                    grant_solo=False,
+                ),
+            )
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(return_value=True)
+        )
+        cog._fetch_gate_increment_source = mock.AsyncMock(return_value=source)
+        cog._fetch_gate_increment_candidates = mock.AsyncMock(
+            return_value=(candidate,)
+        )
+        cog._validate_gate_increment_candidate_count = mock.Mock()
+        cog._gate_increment_review_is_stale = mock.Mock(return_value=False)
+        cog._gate_increment_store = SimpleNamespace(
+            claim=mock.AsyncMock(return_value=SimpleNamespace(created=True))
+        )
+        cog._execute_gate_increment_operation = mock.AsyncMock(return_value=snapshot)
+        cog._publish_gate_increment_result = mock.AsyncMock(return_value=True)
+        cog._format_gate_increment_completion = mock.Mock(return_value="done")
+        cog._finish_gate_increment_review = mock.AsyncMock()
+        cog._send_moderation_log = mock.AsyncMock(return_value=True)
+
+        with mock.patch.object(nhmisc, "_validate_gate_increment_configuration"):
+            await cog._confirm_gate_increment_review(interaction, view)
+
+        cog._send_moderation_log.assert_awaited_once()
+        audit = cog._send_moderation_log.await_args.args[1]
+        self.assertIn("Gate incremented", audit)
+        self.assertIn("<@10> Gate 1", audit)
+        self.assertIn("https://discord.com/channels/1/2/3", audit)
+
 
 class GateIncrementPrivacyTests(unittest.IsolatedAsyncioTestCase):
     async def test_red_user_deletion_reaches_gate_increment_storage(self):
