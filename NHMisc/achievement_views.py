@@ -10,6 +10,65 @@ if TYPE_CHECKING:
     from .nhmisc import NHMisc
 
 
+class AchievementProfileView(discord.ui.View):
+    def __init__(
+        self,
+        embed: discord.Embed,
+        requester_id: int,
+        command_mention: str,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.embed = embed
+        self.requester_id = requester_id
+        self.command_mention = command_mention
+        self.publishing = False
+
+    @discord.ui.button(
+        label="Send publicly",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def send_publicly(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if self.publishing:
+            await interaction.response.send_message(
+                "This profile is already being published",
+                ephemeral=True,
+            )
+            return
+        if interaction.channel is None:
+            await interaction.response.send_message(
+                "This profile cannot be published here",
+                ephemeral=True,
+            )
+            return
+
+        self.publishing = True
+        button.disabled = True
+        await interaction.response.edit_message(view=self)
+        try:
+            await interaction.channel.send(
+                content=(
+                    f"-# <@{self.requester_id}> used {self.command_mention}"
+                ),
+                embed=self.embed,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException:
+            self.publishing = False
+            button.disabled = False
+            await interaction.edit_original_response(
+                content="I couldn't send this profile in the current channel",
+                view=self,
+            )
+            return
+
+        self.stop()
+        await interaction.delete_original_response()
+
+
 class AchievementGrantView(discord.ui.View):
     def __init__(
         self,
