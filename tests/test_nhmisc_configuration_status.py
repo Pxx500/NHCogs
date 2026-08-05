@@ -93,6 +93,54 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         self.cog = object.__new__(nhmisc.NHMisc)
         self.cog.bot = types.SimpleNamespace(is_admin=mock.AsyncMock(return_value=False))
 
+    async def test_private_logs_stop_if_configured_channel_becomes_public(self):
+        for config_key, sender_name in (
+            ("maintenance_channel", "_send_maintenance_log"),
+            ("moderation_log_channel", "_send_moderation_log"),
+        ):
+            with self.subTest(config_key=config_key):
+                channel = types.SimpleNamespace(
+                    permissions_for=lambda _target: types.SimpleNamespace(
+                        view_channel=True
+                    ),
+                    send=mock.AsyncMock(),
+                )
+                self.cog.config = FakeConfig({config_key: 42})
+                self.cog._get_log_channel = mock.Mock(return_value=channel)
+
+                delivered = await getattr(self.cog, sender_name)(
+                    self.guild,
+                    "private log data",
+                )
+
+                self.assertFalse(delivered)
+                channel.send.assert_not_awaited()
+
+    async def test_maintenance_channel_requires_attach_files(self):
+        self.guild.me = object()
+        channel = types.SimpleNamespace(
+            id=42,
+            mention="<#42>",
+            permissions_for=lambda target: types.SimpleNamespace(
+                view_channel=target is self.guild.me,
+                send_messages=True,
+                attach_files=False,
+            ),
+        )
+        self.cog.config = FakeConfig({"maintenance_channel": None})
+
+        with self.assertRaisesRegex(
+            nhmisc.commands.UserFeedbackCheckFailure,
+            "attach files",
+        ):
+            await nhmisc.NHMisc.nhmisc_maintenance_channel.callback(
+                self.cog,
+                self.ctx,
+                channel,
+            )
+
+        self.assertIsNone(await self.cog.config.guild(self.guild).maintenance_channel())
+
     async def test_group_commands_use_metadata_prefix_signature_and_direct_children(self):
         nested = command_metadata("nhmisc alert channel nested", "<value>")
         direct = command_metadata(
@@ -127,6 +175,29 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embed.title, "Alert logging")
         self.assertIn("<#42>", fields["Current configuration"])
         self.ctx.send_help.assert_not_awaited()
+
+    async def test_new_log_groups_start_unconfigured_without_using_alert_channel(self):
+        self.channels[42] = types.SimpleNamespace(mention="<#42>")
+        self.cog.config = FakeConfig(
+            {
+                "alert_channel": 42,
+                "maintenance_channel": None,
+                "moderation_log_channel": None,
+            }
+        )
+
+        await nhmisc.NHMisc.nhmisc_maintenance.callback(self.cog, self.ctx)
+        await nhmisc.NHMisc.nhmisc_moderationlog.callback(self.cog, self.ctx)
+
+        embeds = [call.kwargs["embed"] for call in self.ctx.send.await_args_list]
+        self.assertEqual(
+            [embed.title for embed in embeds],
+            ["Maintenance logging", "Moderator action logging"],
+        )
+        for embed in embeds:
+            fields = {field.name: field.value for field in embed.fields}
+            self.assertIn("Not configured", fields["Current configuration"])
+            self.assertNotIn("<#42>", fields["Current configuration"])
 
     async def test_public_channel_hides_configuration_but_keeps_commands(self):
         self.ctx.channel = FakeInvocationChannel(public=True)
@@ -298,13 +369,13 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Configured role is missing", current)
         self.assertNotIn("606", current)
 
-    async def test_sticky_debuglogging_group_uses_global_alert_channel(self):
+    async def test_sticky_debuglogging_group_uses_maintenance_channel(self):
         self.ctx.author.guild_permissions.manage_guild = True
         self.channels[321] = types.SimpleNamespace(mention="<#321>")
         self.cog.config = FakeConfig(
             {
                 "sticky_debug_logging_enabled": True,
-                "alert_channel": 321,
+                "maintenance_channel": 321,
             }
         )
 
@@ -318,19 +389,23 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         current = fields["Current configuration"]
         self.assertEqual(embed.title, "Sticky role debug logging")
         self.assertIn("Enabled: Yes", current)
-        self.assertIn("Alert channel: <#321>", current)
+        self.assertIn("Maintenance channel: <#321>", current)
         self.assertFalse(
             hasattr(nhmisc.NHMisc, "nhmisc_stickyroles_debuglogging_channel")
         )
         self.ctx.send_help.assert_not_awaited()
 
-    async def test_sticky_debug_output_uses_global_alert_channel(self):
-        channel = types.SimpleNamespace(send=mock.AsyncMock())
+    async def test_sticky_debug_output_uses_maintenance_channel(self):
+        channel = types.SimpleNamespace(
+            permissions_for=lambda _target: types.SimpleNamespace(view_channel=False),
+            send=mock.AsyncMock(),
+        )
         self.channels[321] = channel
         self.cog.config = FakeConfig(
             {
                 "sticky_debug_logging_enabled": True,
-                "alert_channel": 321,
+                "alert_channel": 999,
+                "maintenance_channel": 321,
             }
         )
         self.cog._get_log_channel = mock.Mock(return_value=channel)
@@ -341,15 +416,36 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         channel.send.assert_awaited_once()
         self.assertEqual(channel.send.await_args.args, ("Sticky role restored",))
 
-    async def test_deleted_sticky_role_prompt_uses_alert_channel_even_if_debug_is_off(
+    async def test_sticky_debug_output_stops_if_maintenance_channel_becomes_public(self):
+        channel = types.SimpleNamespace(
+            permissions_for=lambda _target: types.SimpleNamespace(view_channel=True),
+            send=mock.AsyncMock(),
+        )
+        self.cog.config = FakeConfig(
+            {
+                "sticky_debug_logging_enabled": True,
+                "maintenance_channel": 321,
+            }
+        )
+        self.cog._get_log_channel = mock.Mock(return_value=channel)
+
+        await self.cog._send_sticky_debug_log(self.guild, "private sticky data")
+
+        channel.send.assert_not_awaited()
+
+    async def test_deleted_sticky_role_prompt_uses_maintenance_channel_even_if_debug_is_off(
         self,
     ):
-        channel = types.SimpleNamespace(send=mock.AsyncMock())
+        channel = types.SimpleNamespace(
+            permissions_for=lambda _target: types.SimpleNamespace(view_channel=False),
+            send=mock.AsyncMock(),
+        )
         self.channels[321] = channel
         self.cog.config = FakeConfig(
             {
                 "sticky_debug_logging_enabled": False,
-                "alert_channel": 321,
+                "alert_channel": 999,
+                "maintenance_channel": 321,
             }
         )
         self.cog._sticky_roles = types.SimpleNamespace(
@@ -374,6 +470,25 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
             self.cog._prompt_sticky_role_db_action.await_args.kwargs["channel"],
             channel,
         )
+
+    async def test_deleted_sticky_role_prompt_stops_if_channel_becomes_public(self):
+        channel = types.SimpleNamespace(
+            permissions_for=lambda _target: types.SimpleNamespace(view_channel=True),
+        )
+        self.cog.config = FakeConfig({"maintenance_channel": 321})
+        self.cog._sticky_roles = types.SimpleNamespace(
+            get_role_state=mock.AsyncMock(return_value=(True, 2))
+        )
+        self.cog._achievement_store = types.SimpleNamespace(
+            list_definitions=mock.AsyncMock(return_value=())
+        )
+        self.cog._get_log_channel = mock.Mock(return_value=channel)
+        self.cog._prompt_sticky_role_db_action = mock.AsyncMock()
+        role = types.SimpleNamespace(id=456, name="Sticky", guild=self.guild)
+
+        await self.cog.on_guild_role_delete(role)
+
+        self.cog._prompt_sticky_role_db_action.assert_not_awaited()
 
     async def test_roleanalytics_group_shows_database_state(self):
         state = types.SimpleNamespace(
