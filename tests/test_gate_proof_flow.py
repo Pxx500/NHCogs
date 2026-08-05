@@ -301,7 +301,10 @@ class GateProofViewTests(unittest.IsolatedAsyncioTestCase):
         views, _fake_select = _load_achievement_views()
         view = views.GateProofBatchView(
             SimpleNamespace(),
-            SimpleNamespace(jump_url="https://discord.example/request"),
+            SimpleNamespace(
+                jump_url="https://discord.example/request",
+                guild=SimpleNamespace(id=1),
+            ),
             99,
             SimpleNamespace(id=10),
             (
@@ -314,6 +317,7 @@ class GateProofViewTests(unittest.IsolatedAsyncioTestCase):
                     jump_url="https://discord.example/proof-two",
                 ),
             ),
+            existing_proofs={},
         )
 
         embed = view.render_embed()
@@ -325,6 +329,66 @@ class GateProofViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<@10>", embed.description)
         self.assertIn("Gate 1: [Open proof]", embed.description)
         self.assertIn("Gate 2: [Open proof]", embed.description)
+
+    def test_batch_review_offers_replace_or_missing_only_for_existing_proofs(self):
+        views, _fake_select = _load_achievement_views()
+        old_proof = nhmisc.StargateProof(1, 20, 30)
+        view = views.GateProofBatchView(
+            SimpleNamespace(),
+            SimpleNamespace(
+                jump_url="https://discord.example/request",
+                guild=SimpleNamespace(id=1),
+            ),
+            99,
+            SimpleNamespace(id=10),
+            (
+                SimpleNamespace(
+                    ordinal=1,
+                    jump_url="https://discord.example/new-proof",
+                ),
+                SimpleNamespace(
+                    ordinal=2,
+                    jump_url="https://discord.example/missing-proof",
+                ),
+            ),
+            existing_proofs={1: old_proof},
+        )
+
+        embed = view.render_embed()
+        labels = {child.label for child in view.children}
+        self.assertIn("Proofs to replace:", embed.description)
+        self.assertIn("Proofs to attach:", embed.description)
+        self.assertEqual(
+            labels,
+            {"Replace and add all", "Add missing only", "Cancel"},
+        )
+
+    async def test_batch_replacement_buttons_select_the_requested_write_mode(self):
+        views, _fake_select = _load_achievement_views()
+        cog = SimpleNamespace(_confirm_gate_proof_batch=mock.AsyncMock())
+        view = views.GateProofBatchView(
+            cog,
+            SimpleNamespace(
+                jump_url="https://discord.example/request",
+                guild=SimpleNamespace(id=1),
+            ),
+            99,
+            SimpleNamespace(id=10),
+            (SimpleNamespace(ordinal=1, jump_url="https://discord.example/new"),),
+            existing_proofs={1: nhmisc.StargateProof(1, 20, 30)},
+        )
+        interaction = SimpleNamespace()
+
+        await view.attach.callback(interaction)
+        await view.add_missing.callback(interaction)
+
+        self.assertEqual(
+            cog._confirm_gate_proof_batch.await_args_list,
+            [
+                mock.call(interaction, view, replace_existing=True),
+                mock.call(interaction, view, replace_existing=False),
+            ],
+        )
 
 
 class GateProofEntryPointTests(unittest.IsolatedAsyncioTestCase):
@@ -435,7 +499,7 @@ class GateProofEntryPointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["allowed_mentions"], "no-mentions")
         self.assertIs(kwargs["view"].message, response_message)
 
-    async def test_action_detects_batch_for_author_and_ignores_mentions(self):
+    async def test_action_detects_batch_for_author_and_includes_existing_proofs(self):
         author = SimpleNamespace(id=10, display_name="Author", bot=False)
         mentioned = SimpleNamespace(id=11, display_name="Mentioned", bot=False)
         members = {10: author, 11: mentioned}
@@ -466,7 +530,8 @@ class GateProofEntryPointTests(unittest.IsolatedAsyncioTestCase):
             edit_original_response=mock.AsyncMock(),
             original_response=mock.AsyncMock(return_value=response_message),
         )
-        profile = SimpleNamespace(stargate_count=2, stargate_proofs=())
+        old_proof = nhmisc.StargateProof(1, 70, 80)
+        profile = SimpleNamespace(stargate_count=2, stargate_proofs=(old_proof,))
         store = SimpleNamespace(
             is_bootstrapped=mock.AsyncMock(return_value=True),
             get_profile=mock.AsyncMock(return_value=profile),
@@ -477,12 +542,22 @@ class GateProofEntryPointTests(unittest.IsolatedAsyncioTestCase):
         cog._log_achievement_interaction_start = mock.Mock()
 
         class FakeGateProofBatchView:
-            def __init__(self, cog, source_message, opener_id, member, entries):
+            def __init__(
+                self,
+                cog,
+                source_message,
+                opener_id,
+                member,
+                entries,
+                *,
+                existing_proofs,
+            ):
                 self.cog = cog
                 self.source_message = source_message
                 self.opener_id = opener_id
                 self.member = member
                 self.entries = entries
+                self.existing_proofs = existing_proofs
                 self.message = None
 
             def render_embed(self):
@@ -513,6 +588,7 @@ class GateProofEntryPointTests(unittest.IsolatedAsyncioTestCase):
             tuple(entry.ordinal for entry in kwargs["view"].entries),
             (1, 2),
         )
+        self.assertEqual(kwargs["view"].existing_proofs, {1: old_proof})
         self.assertIs(kwargs["view"].message, response_message)
 
     async def test_batch_rejects_gate_that_author_does_not_have(self):
@@ -740,6 +816,7 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
             source_message=source_message,
             member=author,
             entries=entries,
+            existing_proofs={},
             stop=mock.Mock(),
             render_embed=mock.Mock(),
         )
@@ -761,7 +838,11 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
         )
         cog._send_moderation_log = mock.AsyncMock(return_value=True)
 
-        await cog._confirm_gate_proof_batch(interaction, view)
+        await cog._confirm_gate_proof_batch(
+            interaction,
+            view,
+            replace_existing=False,
+        )
 
         store.attach_stargate_proof_links.assert_awaited_once_with(
             1,
@@ -777,6 +858,134 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Gate 2: https://discord.com/channels/1/51/61", log_message)
         interaction.edit_original_response.assert_awaited_once_with(
             content="Attached 2 Gate proofs",
+            embed=None,
+            view=None,
+            allowed_mentions="no-mentions",
+        )
+
+    async def test_batch_confirmation_adds_only_missing_proofs_when_requested(self):
+        author = SimpleNamespace(id=10, bot=False)
+        guild = SimpleNamespace(id=1)
+        content = "\n".join(
+            (
+                "1 https://discord.com/channels/1/50/60",
+                "2 https://discord.com/channels/1/51/61",
+            )
+        )
+        source_message = SimpleNamespace(
+            id=30,
+            channel=SimpleNamespace(id=20),
+            guild=guild,
+            content=content,
+            webhook_id=None,
+            author=author,
+            jump_url="https://discord.com/channels/1/20/30",
+        )
+        entries = nhmisc._parse_gate_proof_batch(content, expected_guild_id=1)
+        old_proof = nhmisc.StargateProof(1, 70, 80)
+        view = SimpleNamespace(
+            source_message=source_message,
+            member=author,
+            entries=entries,
+            existing_proofs={1: old_proof},
+            stop=mock.Mock(),
+            render_embed=mock.Mock(),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=99),
+            response=SimpleNamespace(defer=mock.AsyncMock()),
+            edit_original_response=mock.AsyncMock(),
+        )
+        store = SimpleNamespace(
+            attach_stargate_proof_links=mock.AsyncMock(return_value=(object(),)),
+            replace_stargate_proof_links=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = store
+        cog._fetch_gate_increment_source = mock.AsyncMock(
+            return_value=source_message
+        )
+        cog._require_private_moderation_log_channel = mock.AsyncMock(
+            return_value=SimpleNamespace(id=40)
+        )
+        cog._send_moderation_log = mock.AsyncMock(return_value=True)
+
+        await cog._confirm_gate_proof_batch(
+            interaction,
+            view,
+            replace_existing=False,
+        )
+
+        store.attach_stargate_proof_links.assert_awaited_once_with(
+            1,
+            10,
+            (nhmisc.StargateProof(2, 51, 61),),
+        )
+        store.replace_stargate_proof_links.assert_not_awaited()
+        interaction.edit_original_response.assert_awaited_once_with(
+            content="Attached 1 missing Gate proof",
+            embed=None,
+            view=None,
+            allowed_mentions="no-mentions",
+        )
+
+    async def test_batch_confirmation_replaces_reviewed_proofs_when_requested(self):
+        author = SimpleNamespace(id=10, bot=False)
+        guild = SimpleNamespace(id=1)
+        content = "1 https://discord.com/channels/1/50/60"
+        source_message = SimpleNamespace(
+            id=30,
+            channel=SimpleNamespace(id=20),
+            guild=guild,
+            content=content,
+            webhook_id=None,
+            author=author,
+            jump_url="https://discord.com/channels/1/20/30",
+        )
+        entries = nhmisc._parse_gate_proof_batch(content, expected_guild_id=1)
+        old_proof = nhmisc.StargateProof(1, 70, 80)
+        view = SimpleNamespace(
+            source_message=source_message,
+            member=author,
+            entries=entries,
+            existing_proofs={1: old_proof},
+            stop=mock.Mock(),
+            render_embed=mock.Mock(),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=99),
+            response=SimpleNamespace(defer=mock.AsyncMock()),
+            edit_original_response=mock.AsyncMock(),
+        )
+        store = SimpleNamespace(
+            attach_stargate_proof_links=mock.AsyncMock(),
+            replace_stargate_proof_links=mock.AsyncMock(return_value=(object(),)),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = store
+        cog._fetch_gate_increment_source = mock.AsyncMock(
+            return_value=source_message
+        )
+        cog._require_private_moderation_log_channel = mock.AsyncMock(
+            return_value=SimpleNamespace(id=40)
+        )
+        cog._send_moderation_log = mock.AsyncMock(return_value=True)
+
+        await cog._confirm_gate_proof_batch(
+            interaction,
+            view,
+            replace_existing=True,
+        )
+
+        store.replace_stargate_proof_links.assert_awaited_once_with(
+            1,
+            10,
+            (nhmisc.StargateProof(1, 50, 60),),
+            expected_proofs={1: old_proof},
+        )
+        store.attach_stargate_proof_links.assert_not_awaited()
+        interaction.edit_original_response.assert_awaited_once_with(
+            content="Updated 1 Gate proof",
             embed=None,
             view=None,
             allowed_mentions="no-mentions",

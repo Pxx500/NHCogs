@@ -962,6 +962,8 @@ class GateProofBatchView(discord.ui.View):
         opener_id: int,
         member: discord.Member,
         entries: tuple[Any, ...],
+        *,
+        existing_proofs: dict[int, Any],
     ) -> None:
         super().__init__(timeout=300)
         self.cog = cog
@@ -969,23 +971,57 @@ class GateProofBatchView(discord.ui.View):
         self.opener_id = opener_id
         self.member = member
         self.entries = entries
+        self.existing_proofs = existing_proofs
         self.message: discord.Message | None = None
+        if existing_proofs:
+            self.attach.label = "Replace and add all"
+            self.add_missing.disabled = all(
+                entry.ordinal in existing_proofs for entry in entries
+            )
+        else:
+            self.remove_item(self.add_missing)
 
     def render_embed(self, *, notice: str | None = None) -> discord.Embed:
         proof_lines = [
             f"Gate {entry.ordinal}: [Open proof]({entry.jump_url})"
             for entry in self.entries
+            if entry.ordinal not in self.existing_proofs
         ]
+        replacement_lines = []
+        if self.existing_proofs:
+            guild_id = self.source_message.guild.id
+            for entry in self.entries:
+                existing = self.existing_proofs.get(entry.ordinal)
+                if existing is None:
+                    continue
+                current_url = (
+                    "https://discord.com/channels/"
+                    f"{guild_id}/{existing.source_channel_id}/"
+                    f"{existing.source_message_id}"
+                )
+                replacement_lines.append(
+                    f"Gate {entry.ordinal}: [Current proof]({current_url}) → "
+                    f"[New proof]({entry.jump_url})"
+                )
         description = [
             "This only attaches proofs to existing Gates. It does not add or "
             "increment any Gate",
             "",
             f"Player: <@{self.member.id}>",
             f"Request: [Open message]({self.source_message.jump_url})",
-            "",
-            "Proofs to attach:",
-            *proof_lines,
         ]
+        if replacement_lines:
+            description.extend(
+                (
+                    "",
+                    "Choose whether to replace existing proofs and add every "
+                    "missing proof, or add only missing proofs",
+                )
+            )
+        if replacement_lines:
+            description.extend(("", "Proofs to replace:", *replacement_lines))
+        if proof_lines:
+            description.extend(("", "Proofs to attach:", *proof_lines))
         if notice:
             description.extend(("", notice))
         return discord.Embed(
@@ -1021,7 +1057,26 @@ class GateProofBatchView(discord.ui.View):
         interaction: discord.Interaction,
         _button: discord.ui.Button,
     ) -> None:
-        await self.cog._confirm_gate_proof_batch(interaction, self)
+        await self.cog._confirm_gate_proof_batch(
+            interaction,
+            self,
+            replace_existing=bool(self.existing_proofs),
+        )
+
+    @discord.ui.button(
+        label="Add missing only",
+        style=discord.ButtonStyle.primary,
+    )
+    async def add_missing(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        await self.cog._confirm_gate_proof_batch(
+            interaction,
+            self,
+            replace_existing=False,
+        )
 
     @discord.ui.button(
         label="Cancel",

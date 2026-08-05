@@ -1545,16 +1545,10 @@ class NHMisc(commands.Cog):
                     member.id,
                 )
             )
-            existing_proofs = {proof.ordinal for proof in profile.stargate_proofs}
             for entry in entries:
                 if entry.ordinal > profile.stargate_count:
                     error_message = (
                         f"Gate {entry.ordinal} does not exist for <@{member.id}>"
-                    )
-                    break
-                if entry.ordinal in existing_proofs:
-                    error_message = (
-                        f"Gate {entry.ordinal} already has a proof for <@{member.id}>"
                     )
                     break
         if error_message is not None:
@@ -1563,12 +1557,18 @@ class NHMisc(commands.Cog):
 
         from .achievement_views import GateProofBatchView
 
+        requested_ordinals = {entry.ordinal for entry in entries}
         view = GateProofBatchView(
             self,
             source_message,
             interaction.user.id,
             member,
             entries,
+            existing_proofs={
+                proof.ordinal: proof
+                for proof in profile.stargate_proofs
+                if proof.ordinal in requested_ordinals
+            },
         )
         await interaction.edit_original_response(
             embed=view.render_embed(),
@@ -1655,7 +1655,13 @@ class NHMisc(commands.Cog):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    async def _confirm_gate_proof_batch(self, interaction, view) -> None:
+    async def _confirm_gate_proof_batch(
+        self,
+        interaction,
+        view,
+        *,
+        replace_existing: bool,
+    ) -> None:
         await interaction.response.defer()
         try:
             source_message = await self._fetch_gate_increment_source(
@@ -1691,20 +1697,36 @@ class NHMisc(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
+        selected_entries = tuple(
+            entry
+            for entry in view.entries
+            if replace_existing or entry.ordinal not in view.existing_proofs
+        )
         proofs = tuple(
             StargateProof(
                 entry.ordinal,
                 entry.source_channel_id,
                 entry.source_message_id,
             )
-            for entry in view.entries
+            for entry in selected_entries
         )
         try:
-            await self._achievement_store.attach_stargate_proof_links(
-                source_message.guild.id,
-                view.member.id,
-                proofs,
-            )
+            if replace_existing:
+                await self._achievement_store.replace_stargate_proof_links(
+                    source_message.guild.id,
+                    view.member.id,
+                    proofs,
+                    expected_proofs={
+                        proof.ordinal: view.existing_proofs.get(proof.ordinal)
+                        for proof in proofs
+                    },
+                )
+            else:
+                await self._achievement_store.attach_stargate_proof_links(
+                    source_message.guild.id,
+                    view.member.id,
+                    proofs,
+                )
         except GateProofConflict:
             view.stop()
             await interaction.edit_original_response(
@@ -1715,11 +1737,16 @@ class NHMisc(commands.Cog):
             )
             return
         proof_lines = "\n".join(
-            f"Gate {entry.ordinal}: {entry.jump_url}" for entry in view.entries
+            f"Gate {entry.ordinal}: {entry.jump_url}" for entry in selected_entries
+        )
+        log_action = (
+            "Batch Gate proofs updated"
+            if replace_existing
+            else "Batch Gate proofs attached"
         )
         await self._send_moderation_log(
             source_message.guild,
-            "Batch Gate proofs attached\n"
+            f"{log_action}\n"
             f"Moderator: <@{interaction.user.id}>\n"
             f"Player: <@{view.member.id}>\n"
             f"{proof_lines}\n"
@@ -1727,8 +1754,15 @@ class NHMisc(commands.Cog):
         )
         view.stop()
         count = len(proofs)
+        action = "Updated" if replace_existing else "Attached"
+        qualifier = (
+            " missing" if view.existing_proofs and not replace_existing else ""
+        )
         await interaction.edit_original_response(
-            content=f"Attached {count} Gate proof{'s' if count != 1 else ''}",
+            content=(
+                f"{action} {count}{qualifier} Gate "
+                f"proof{'s' if count != 1 else ''}"
+            ),
             embed=None,
             view=None,
             allowed_mentions=discord.AllowedMentions.none(),

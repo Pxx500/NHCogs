@@ -189,9 +189,9 @@ still has no proof. Four users are shown per page, with no total candidate limit
 by the action.
 
 Confirmation changes only the selected proof-message references. It does not increment
-Gate progress or change any roles. Existing proofs cannot be overwritten, and the same
-source message may be attached to any number of users even when it was previously used
-for a normal Gate increment.
+Gate progress or change any roles. The interactive picker only offers Gates without a
+proof, and the same source message may be attached to any number of users even when it
+was previously used for a normal Gate increment.
 
 The same action detects a strict batch list posted by the message author:
 
@@ -202,8 +202,9 @@ The same action detects a strict batch list posted by the message author:
 
 Every line must contain an existing Gate number, one space, and a message link from the
 current server. Batch mode ignores mentions, targets only the author, and clearly marks
-the review as proof-only: it never adds or increments a Gate. Confirmation attaches all
-listed links atomically, so an invalid Gate or existing proof prevents every change.
+the review as proof-only: it never adds or increments a Gate. When a listed Gate already
+has a proof, the moderator can replace every listed proof, attach only missing proofs, or
+cancel. Each selected operation is atomic, and a stale review prevents every change.
 
 ## Achievements
 

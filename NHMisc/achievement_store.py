@@ -151,7 +151,14 @@ class AchievementStore:
                 self._attach_stargate_proofs_sync,
                 guild_id,
                 tuple(
-                    (user_id, ordinal, source_channel_id, source_message_id)
+                    (
+                        user_id,
+                        ordinal,
+                        source_channel_id,
+                        source_message_id,
+                        None,
+                        None,
+                    )
                     for user_id, ordinal in assignments.items()
                 ),
             )
@@ -172,6 +179,43 @@ class AchievementStore:
                         proof.ordinal,
                         proof.source_channel_id,
                         proof.source_message_id,
+                        None,
+                        None,
+                    )
+                    for proof in proofs
+                ),
+            )
+
+    async def replace_stargate_proof_links(
+        self,
+        guild_id: int,
+        user_id: int,
+        proofs: tuple[StargateProof, ...],
+        *,
+        expected_proofs: Mapping[int, StargateProof | None],
+    ) -> tuple[StargateProof, ...]:
+        if set(expected_proofs) != {proof.ordinal for proof in proofs}:
+            raise GateProofConflict("Reviewed Gate proofs do not match the replacement")
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._attach_stargate_proofs_sync,
+                guild_id,
+                tuple(
+                    (
+                        user_id,
+                        proof.ordinal,
+                        proof.source_channel_id,
+                        proof.source_message_id,
+                        (
+                            expected_proofs[proof.ordinal].source_channel_id
+                            if expected_proofs[proof.ordinal] is not None
+                            else None
+                        ),
+                        (
+                            expected_proofs[proof.ordinal].source_message_id
+                            if expected_proofs[proof.ordinal] is not None
+                            else None
+                        ),
                     )
                     for proof in proofs
                 ),
@@ -630,12 +674,21 @@ class AchievementStore:
     def _attach_stargate_proofs_sync(
         self,
         guild_id: int,
-        assignments: tuple[tuple[int, int, int, int], ...],
+        assignments: tuple[
+            tuple[int, int, int, int, int | None, int | None], ...
+        ],
     ) -> tuple[StargateProof, ...]:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows: list[tuple[sqlite3.Row, int, int]] = []
-            for user_id, ordinal, source_channel_id, source_message_id in assignments:
+            for (
+                user_id,
+                ordinal,
+                source_channel_id,
+                source_message_id,
+                expected_channel_id,
+                expected_message_id,
+            ) in assignments:
                 row = connection.execute(
                     """
                     SELECT award_id, ordinal, source_channel_id, source_message_id
@@ -648,8 +701,8 @@ class AchievementStore:
                 ).fetchone()
                 if (
                     row is None
-                    or row["source_channel_id"] is not None
-                    or row["source_message_id"] is not None
+                    or row["source_channel_id"] != expected_channel_id
+                    or row["source_message_id"] != expected_message_id
                 ):
                     raise GateProofConflict(
                         f"Gate {ordinal} for user {user_id} cannot accept a proof"
