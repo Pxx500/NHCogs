@@ -6,6 +6,7 @@ import discord
 
 if TYPE_CHECKING:
     from .achievement_definitions import AchievementDefinition
+    from .achievement_store import AchievementDeletionPreview
     from .nhmisc import NHMisc
 
 
@@ -305,6 +306,75 @@ class AchievementRevokeView(discord.ui.View):
                 pass
 
 
+class GateRevokeView(discord.ui.View):
+    def __init__(
+        self,
+        cog: NHMisc,
+        opener_id: int,
+        member: discord.Member,
+        award: Any,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.opener_id = opener_id
+        self.member = member
+        self.award = award
+        self.message: discord.Message | None = None
+
+    def render_embed(self, *, notice: str | None = None) -> discord.Embed:
+        return self.cog._build_gate_revoke_embed(
+            self.award.guild_id,
+            self.member,
+            self.award,
+            notice=notice,
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.opener_id:
+            return True
+        await interaction.response.send_message(
+            "Only the moderator who opened this review can control it",
+            ephemeral=True,
+        )
+        return False
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    @discord.ui.button(
+        label="Revoke Gate",
+        style=discord.ButtonStyle.danger,
+    )
+    async def confirm(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        await self.cog._confirm_gate_revoke(interaction, self)
+
+    @discord.ui.button(
+        label="Cancel",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        self.stop()
+        await interaction.response.edit_message(
+            content="Gate revoke cancelled",
+            embed=None,
+            view=None,
+        )
+
+
 class AchievementRoleBindView(discord.ui.View):
     def __init__(
         self,
@@ -375,7 +445,6 @@ class AchievementRoleBindView(discord.ui.View):
                 await self.message.edit(view=self)
             except discord.HTTPException:
                 pass
-
     @discord.ui.select(placeholder="Select achievement", min_values=1, max_values=1)
     async def achievement_select(
         self,
@@ -407,3 +476,89 @@ class AchievementRoleBindView(discord.ui.View):
                 await self.message.delete()
             except discord.HTTPException:
                 pass
+
+
+class AchievementDeleteView(discord.ui.View):
+    def __init__(
+        self,
+        cog: NHMisc,
+        opener_id: int,
+        preview: AchievementDeletionPreview,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.opener_id = opener_id
+        self.preview = preview
+        self.message: discord.Message | None = None
+
+    def render_embed(self, *, notice: str | None = None) -> discord.Embed:
+        embed = discord.Embed(
+            title="Delete achievement",
+            description=(
+                "This permanently deletes the achievement and every stored award for it"
+            ),
+            color=discord.Color.red(),
+        )
+        embed.add_field(
+            name="Achievement",
+            value=self.preview.definition.display_name,
+            inline=False,
+        )
+        embed.add_field(
+            name="Key",
+            value=f"`{self.preview.definition.key}`",
+            inline=False,
+        )
+        embed.add_field(
+            name="Stored awards",
+            value=str(self.preview.award_count),
+            inline=False,
+        )
+        if notice:
+            embed.add_field(name="Cannot delete", value=notice, inline=False)
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.opener_id:
+            return True
+        await interaction.response.send_message(
+            "Only the moderator who opened this review can control it",
+            ephemeral=True,
+        )
+        return False
+
+    async def on_timeout(self) -> None:
+        self.confirm.disabled = True
+        self.cancel.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    @discord.ui.button(
+        label="Delete achievement",
+        style=discord.ButtonStyle.danger,
+    )
+    async def confirm(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        await self.cog._confirm_achievement_delete(interaction, self)
+
+    @discord.ui.button(
+        label="Cancel",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        self.stop()
+        await interaction.response.edit_message(
+            content="Achievement deletion cancelled",
+            embed=None,
+            view=None,
+        )

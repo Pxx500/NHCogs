@@ -365,6 +365,202 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
         ctx.send.assert_not_awaited()
 
+    async def test_rename_changes_the_display_name_for_the_requested_key(self):
+        renamed = type(nhmisc.SOLO_GATER_DEFINITION)(
+            key="achievement_123",
+            display_name="All Quests",
+            kind=nhmisc.SOLO_GATER_DEFINITION.kind,
+        )
+        store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(return_value=True),
+            rename_definition=mock.AsyncMock(return_value=renamed),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = store
+        cog._require_private_achievement_channel = mock.Mock()
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=1),
+            send=mock.AsyncMock(),
+        )
+
+        await nhmisc.NHMisc.achievement_rename(
+            cog,
+            ctx,
+            "achievement_123",
+            display_name="All Quests",
+        )
+
+        store.rename_definition.assert_awaited_once_with(
+            1,
+            "achievement_123",
+            "All Quests",
+        )
+        self.assertIn("achievement_123", ctx.send.await_args.args[0])
+        self.assertIn("All Quests", ctx.send.await_args.args[0])
+
+    async def test_list_exposes_stable_keys_only_in_a_private_channel(self):
+        unbound = type(nhmisc.SOLO_GATER_DEFINITION)(
+            key="achievement_123",
+            display_name="All Quests",
+            kind=nhmisc.SOLO_GATER_DEFINITION.kind,
+        )
+        bound = type(unbound)(
+            key="achievement_456",
+            display_name="Challenge Run",
+            kind=unbound.kind,
+            role_id=789,
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(return_value=True),
+            list_definitions=mock.AsyncMock(return_value=(unbound, bound)),
+        )
+        cog._require_private_achievement_channel = mock.Mock()
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=1),
+            send=mock.AsyncMock(),
+        )
+
+        await nhmisc.NHMisc.achievement_list(cog, ctx)
+
+        cog._require_private_achievement_channel.assert_called_once_with(ctx)
+        embed = ctx.send.await_args.kwargs["embed"]
+        self.assertEqual(
+            tuple(field.name for field in embed.fields),
+            ("All Quests", "Challenge Run"),
+        )
+        self.assertIn("achievement_123", embed.fields[0].value)
+        self.assertIn("No Discord role", embed.fields[0].value)
+        self.assertIn("<@&789>", embed.fields[1].value)
+        self.assertEqual(ctx.send.await_args.kwargs["allowed_mentions"], "no-mentions")
+
+    def test_achievement_keys_are_refused_in_public_channels(self):
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._channel_is_public = mock.Mock(return_value=True)
+        ctx = SimpleNamespace()
+
+        with self.assertRaisesRegex(
+            nhmisc.commands.UserFeedbackCheckFailure,
+            "unavailable in this channel",
+        ):
+            cog._require_private_achievement_channel(ctx)
+
+    async def test_delete_prepares_a_destructive_review_with_every_award(self):
+        definition = type(nhmisc.SOLO_GATER_DEFINITION)(
+            key="achievement_123",
+            display_name="Obsolete",
+            kind=nhmisc.SOLO_GATER_DEFINITION.kind,
+        )
+        preview = SimpleNamespace(definition=definition, award_count=7)
+        store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(return_value=True),
+            prepare_definition_deletion=mock.AsyncMock(return_value=preview),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = store
+        cog._require_private_achievement_channel = mock.Mock()
+        message = object()
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=1),
+            author=SimpleNamespace(id=42),
+            send=mock.AsyncMock(return_value=message),
+        )
+
+        class FakeAchievementDeleteView:
+            def __init__(self, cog, opener_id, preview):
+                self.cog = cog
+                self.opener_id = opener_id
+                self.preview = preview
+                self.message = None
+
+            def render_embed(self):
+                return SimpleNamespace()
+
+        package = ModuleType("_gatecount_nhmisc")
+        package.__path__ = []
+        views = ModuleType("_gatecount_nhmisc.achievement_views")
+        views.AchievementDeleteView = FakeAchievementDeleteView
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "_gatecount_nhmisc": package,
+                "_gatecount_nhmisc.achievement_views": views,
+            },
+        ):
+            await nhmisc.NHMisc.achievement_delete(cog, ctx, "achievement_123")
+
+        store.prepare_definition_deletion.assert_awaited_once_with(
+            1,
+            "achievement_123",
+        )
+        view = ctx.send.await_args.kwargs["view"]
+        self.assertIs(view.message, message)
+        self.assertEqual(view.preview, preview)
+        self.assertEqual(ctx.send.await_args.kwargs["allowed_mentions"], "no-mentions")
+
+    async def test_delete_confirmation_removes_the_reviewed_achievement(self):
+        definition = type(nhmisc.SOLO_GATER_DEFINITION)(
+            key="achievement_123",
+            display_name="Obsolete",
+            kind=nhmisc.SOLO_GATER_DEFINITION.kind,
+        )
+        preview = SimpleNamespace(definition=definition, award_count=7)
+        store = SimpleNamespace(
+            delete_definition=mock.AsyncMock(return_value=preview),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = store
+        view = SimpleNamespace(preview=preview, stop=mock.Mock())
+        interaction = self._interaction(SimpleNamespace(id=1))
+
+        await cog._confirm_achievement_delete(interaction, view)
+
+        interaction.response.defer.assert_awaited_once_with()
+        store.delete_definition.assert_awaited_once_with(
+            1,
+            "achievement_123",
+            expected_award_count=7,
+        )
+        view.stop.assert_called_once_with()
+        self.assertIn(
+            "7 stored awards",
+            interaction.edit_original_response.await_args.kwargs["content"],
+        )
+
+    async def test_delete_confirmation_keeps_a_stale_review_open(self):
+        definition = type(nhmisc.SOLO_GATER_DEFINITION)(
+            key="achievement_123",
+            display_name="Obsolete",
+            kind=nhmisc.SOLO_GATER_DEFINITION.kind,
+        )
+        preview = SimpleNamespace(definition=definition, award_count=7)
+        store = SimpleNamespace(
+            delete_definition=mock.AsyncMock(
+                side_effect=RuntimeError("Achievement changed during deletion review")
+            ),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = store
+        view = SimpleNamespace(
+            preview=preview,
+            render_embed=mock.Mock(return_value=object()),
+            stop=mock.Mock(),
+        )
+        interaction = self._interaction(SimpleNamespace(id=1))
+
+        await cog._confirm_achievement_delete(interaction, view)
+
+        view.stop.assert_not_called()
+        self.assertIn(
+            "changed",
+            view.render_embed.call_args.kwargs["notice"],
+        )
+        self.assertIs(
+            interaction.edit_original_response.await_args.kwargs["view"],
+            view,
+        )
+
     async def test_role_bind_rechecks_holders_before_importing(self):
         definition = type(nhmisc.SOLO_GATER_DEFINITION)(
             key="all_quests",
@@ -875,6 +1071,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._achievement_store = store
+        cog._authorized_gate_role_edits = {}
         cog._edit_achievement_roles = mock.AsyncMock()
         cog._send_guild_alert = mock.AsyncMock(return_value=True)
 
@@ -913,6 +1110,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._achievement_store = store
+        cog._authorized_gate_role_edits = {}
         cog._edit_achievement_roles = mock.AsyncMock()
         cog._send_guild_alert = mock.AsyncMock(return_value=True)
 
