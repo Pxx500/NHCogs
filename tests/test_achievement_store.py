@@ -143,6 +143,51 @@ class AchievementStoreTests(unittest.IsolatedAsyncioTestCase):
             (),
         )
 
+    async def test_batch_proofs_attach_distinct_messages_without_adding_gates(self):
+        await self.store.import_gate_progress(1, 2, 3)
+
+        attached = await self.store.attach_stargate_proof_links(
+            1,
+            2,
+            (
+                achievement_store.StargateProof(1, 50, 60),
+                achievement_store.StargateProof(3, 51, 61),
+            ),
+        )
+
+        profile = await self.store.get_profile(1, 2)
+        self.assertEqual(profile.stargate_count, 3)
+        self.assertEqual(attached, profile.stargate_proofs)
+        self.assertEqual(
+            tuple(
+                (
+                    proof.ordinal,
+                    proof.source_channel_id,
+                    proof.source_message_id,
+                )
+                for proof in profile.stargate_proofs
+            ),
+            ((1, 50, 60), (3, 51, 61)),
+        )
+
+    async def test_batch_proof_missing_gate_rolls_back_every_link(self):
+        await self.store.import_gate_progress(1, 2, 2)
+
+        with self.assertRaises(achievement_store.GateProofConflict):
+            await self.store.attach_stargate_proof_links(
+                1,
+                2,
+                (
+                    achievement_store.StargateProof(1, 50, 60),
+                    achievement_store.StargateProof(3, 51, 61),
+                ),
+            )
+
+        self.assertEqual(
+            (await self.store.get_profile(1, 2)).stargate_proofs,
+            (),
+        )
+
     async def test_missing_historical_proofs_are_loaded_for_all_requested_users(self):
         await self.store.import_gate_progress(1, 2, 3)
         await self.store.attach_stargate_proofs(
