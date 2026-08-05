@@ -952,3 +952,89 @@ class GateProofView(discord.ui.View):
             else discord.ButtonStyle.primary
         )
         self.review.disabled = not self.selected_assignments
+
+
+class GateProofBatchView(discord.ui.View):
+    def __init__(
+        self,
+        cog: NHMisc,
+        source_message: discord.Message,
+        opener_id: int,
+        member: discord.Member,
+        entries: tuple[Any, ...],
+    ) -> None:
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.source_message = source_message
+        self.opener_id = opener_id
+        self.member = member
+        self.entries = entries
+        self.message: discord.Message | None = None
+
+    def render_embed(self, *, notice: str | None = None) -> discord.Embed:
+        proof_lines = [
+            f"Gate {entry.ordinal}: [Open proof]({entry.jump_url})"
+            for entry in self.entries
+        ]
+        description = [
+            "This only attaches proofs to existing Gates. It does not add or "
+            "increment any Gate",
+            "",
+            f"Player: <@{self.member.id}>",
+            f"Request: [Open message]({self.source_message.jump_url})",
+            "",
+            "Proofs to attach:",
+            *proof_lines,
+        ]
+        if notice:
+            description.extend(("", notice))
+        return discord.Embed(
+            title="Batch Gate proof import detected",
+            description="\n".join(description),
+            color=discord.Color.blue(),
+        )
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.opener_id:
+            return True
+        await interaction.response.send_message(
+            "Only the moderator who opened this review can control it",
+            ephemeral=True,
+        )
+        return False
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    @discord.ui.button(
+        label="Attach proofs",
+        style=discord.ButtonStyle.green,
+    )
+    async def attach(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        await self.cog._confirm_gate_proof_batch(interaction, self)
+
+    @discord.ui.button(
+        label="Cancel",
+        style=discord.ButtonStyle.danger,
+    )
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        self.stop()
+        await interaction.response.edit_message(
+            content="Gate proof batch cancelled",
+            embed=None,
+            view=None,
+        )

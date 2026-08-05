@@ -150,9 +150,31 @@ class AchievementStore:
             return await asyncio.to_thread(
                 self._attach_stargate_proofs_sync,
                 guild_id,
-                tuple(assignments.items()),
-                source_channel_id,
-                source_message_id,
+                tuple(
+                    (user_id, ordinal, source_channel_id, source_message_id)
+                    for user_id, ordinal in assignments.items()
+                ),
+            )
+
+    async def attach_stargate_proof_links(
+        self,
+        guild_id: int,
+        user_id: int,
+        proofs: tuple[StargateProof, ...],
+    ) -> tuple[StargateProof, ...]:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._attach_stargate_proofs_sync,
+                guild_id,
+                tuple(
+                    (
+                        user_id,
+                        proof.ordinal,
+                        proof.source_channel_id,
+                        proof.source_message_id,
+                    )
+                    for proof in proofs
+                ),
             )
 
     async def missing_stargate_proofs(
@@ -608,14 +630,12 @@ class AchievementStore:
     def _attach_stargate_proofs_sync(
         self,
         guild_id: int,
-        assignments: tuple[tuple[int, int], ...],
-        source_channel_id: int,
-        source_message_id: int,
+        assignments: tuple[tuple[int, int, int, int], ...],
     ) -> tuple[StargateProof, ...]:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            rows: list[sqlite3.Row] = []
-            for user_id, ordinal in assignments:
+            rows: list[tuple[sqlite3.Row, int, int]] = []
+            for user_id, ordinal, source_channel_id, source_message_id in assignments:
                 row = connection.execute(
                     """
                     SELECT award_id, ordinal, source_channel_id, source_message_id
@@ -634,8 +654,8 @@ class AchievementStore:
                     raise GateProofConflict(
                         f"Gate {ordinal} for user {user_id} cannot accept a proof"
                     )
-                rows.append(row)
-            for row in rows:
+                rows.append((row, source_channel_id, source_message_id))
+            for row, source_channel_id, source_message_id in rows:
                 connection.execute(
                     """
                     UPDATE achievement_awards
@@ -651,7 +671,7 @@ class AchievementStore:
                 source_channel_id=source_channel_id,
                 source_message_id=source_message_id,
             )
-            for row in rows
+            for row, source_channel_id, source_message_id in rows
         )
 
     def _missing_stargate_proofs_sync(
