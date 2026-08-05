@@ -135,6 +135,25 @@ pending. Successful users are publicly pinged beside a non-pinging mention of th
 new Gate role. Manual Gate role changes are reverted; Gate progress must be changed
 through the bot.
 
+## Gate Revoke
+
+```ini
+/gaterevoke user:<member>
+Apps → Revoke latest Gate
+```
+
+Use the slash command or a member's Apps menu to remove only that member's latest
+Gate. Both entry points require Manage Messages and open the same ephemeral review,
+showing the current count, the one-tier transition, and the latest stored proof before
+anything changes. Confirmation permanently removes that latest Gate record and updates
+the Discord role; `Solo Gater` and unrelated roles are left unchanged. Completion is
+not posted publicly, and a non-pinging audit is sent to the configured private alert
+channel.
+
+The original completion message remains marked as already processed. If a Gate was
+revoked by mistake, restore it from a new correction message through the normal Gate
+increment action.
+
 ## Achievements
 
 ```ini
@@ -142,6 +161,9 @@ through the bot.
 Apps → View achievements
 Apps → Grant achievements
 [p]achievement create <display name>
+[p]achievement list
+[p]achievement rename <key> <new display name>
+[p]achievement delete <key>
 [p]achievement role bind @Role
 [p]achievement role unbind @Role
 [p]achievement role replace @OldRole @NewRole
@@ -164,6 +186,12 @@ choose an unbound achievement from a dropdown. Binding imports current role hold
 without proof. Unbinding stops role tracking without removing the role or achievement
 history. Replacing a binding keeps existing history and imports holders of the new role.
 Deleting a bound Discord role automatically stops tracking it without deleting awards.
+`achievement rename` changes only the display name; the key and existing awards stay
+unchanged. `achievement delete` (or `achievement del`) requires an unbound, non-system
+achievement and opens a destructive confirmation. Confirming permanently deletes the
+achievement definition and every stored award for it. `achievement list` shows the
+stable keys required by these commands. Because keys are internal identifiers, `list`,
+`rename`, and `delete` are unavailable in channels visible to `@everyone`.
 
 ## Tier Distribution
 
@@ -533,7 +561,8 @@ the current-state index. Disabling role analytics deletes the guild's analytics 
 Achievements store guild and user IDs, achievement keys, display names, optional bound
 role IDs, timestamps, state, and optional proof-message IDs. Role synchronization uses
 this data to keep bound achievement roles and Gate progression consistent. It does not
-store message content or usernames.
+store message content or usernames. Deleting an achievement permanently removes its
+definition and all associated award records.
 
 The cleanup commands do not add an NHMisc database. They delegate to Honeypot,
 which owns its 14-day Gateway-observed message registry and its privacy deletion.
