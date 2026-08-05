@@ -12,6 +12,7 @@ from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 STARGATE_COMPLETED_KEY = "stargate_completed"
+SYSTEM_ACHIEVEMENT_KEYS = frozenset((STARGATE_COMPLETED_KEY, "solo_gater"))
 
 
 class AchievementKind(str, Enum):
@@ -28,6 +29,12 @@ class AchievementDefinition:
     grantable: bool = True
     revocable: bool = True
     display_order: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class AchievementDeletionPreview:
+    definition: AchievementDefinition
+    award_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +132,31 @@ class AchievementStore:
                 user_id,
                 source_channel_id,
                 source_message_id,
+            )
+
+    async def get_latest_stargate(
+        self, guild_id: int, user_id: int
+    ) -> AchievementAward | None:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._get_latest_stargate_sync,
+                guild_id,
+                user_id,
+            )
+
+    async def delete_latest_stargate(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        expected_award_id: int,
+    ) -> AchievementAward | None:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._delete_latest_stargate_sync,
+                guild_id,
+                user_id,
+                expected_award_id,
             )
 
     async def import_gate_progress(
@@ -225,6 +257,47 @@ class AchievementStore:
                 self._create_boolean_definition_sync,
                 guild_id,
                 display_name,
+            )
+
+    async def rename_definition(
+        self,
+        guild_id: int,
+        achievement_key: str,
+        display_name: str,
+    ) -> AchievementDefinition:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._rename_definition_sync,
+                guild_id,
+                achievement_key,
+                display_name,
+            )
+
+    async def prepare_definition_deletion(
+        self,
+        guild_id: int,
+        achievement_key: str,
+    ) -> AchievementDeletionPreview:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._prepare_definition_deletion_sync,
+                guild_id,
+                achievement_key,
+            )
+
+    async def delete_definition(
+        self,
+        guild_id: int,
+        achievement_key: str,
+        *,
+        expected_award_count: int,
+    ) -> AchievementDeletionPreview:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._delete_definition_sync,
+                guild_id,
+                achievement_key,
+                expected_award_count,
             )
 
     async def bind_role(
@@ -401,6 +474,23 @@ class AchievementStore:
         now = datetime.now(timezone.utc).isoformat()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            definition = connection.execute(
+                """
+                SELECT kind, grantable
+                FROM achievement_definitions
+                WHERE guild_id = ? AND achievement_key = ?
+                """,
+                (guild_id, achievement_key),
+            ).fetchone()
+            if definition is None:
+                connection.rollback()
+                raise LookupError("Achievement does not exist")
+            if definition["kind"] != AchievementKind.BOOLEAN.value:
+                connection.rollback()
+                raise ValueError("Only boolean achievements can be granted")
+            if not bool(definition["grantable"]):
+                connection.rollback()
+                raise ValueError("Achievement cannot be granted directly")
             row = connection.execute(
                 """
                 SELECT * FROM achievement_awards
@@ -479,6 +569,74 @@ class AchievementStore:
             ).fetchone()
             connection.commit()
         return AwardResult(True, self._award_from_row(row))
+
+    def _get_latest_stargate_sync(
+        self, guild_id: int, user_id: int
+    ) -> AchievementAward | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM achievement_awards
+                WHERE guild_id = ? AND user_id = ?
+                    AND achievement_key = ?
+                    AND ordinal IS NOT NULL
+                    AND state = 'active'
+                ORDER BY ordinal DESC, award_id DESC
+                LIMIT 1
+                """,
+                (guild_id, user_id, STARGATE_COMPLETED_KEY),
+            ).fetchone()
+        return self._award_from_row(row) if row is not None else None
+
+    def _delete_latest_stargate_sync(
+        self,
+        guild_id: int,
+        user_id: int,
+        expected_award_id: int,
+    ) -> AchievementAward | None:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            pending_increment = connection.execute(
+                """
+                SELECT 1
+                FROM achievement_awards
+                WHERE guild_id = ? AND user_id = ?
+                    AND achievement_key = ?
+                    AND ordinal IS NOT NULL
+                    AND state = 'pending'
+                LIMIT 1
+                """,
+                (guild_id, user_id, STARGATE_COMPLETED_KEY),
+            ).fetchone()
+            if pending_increment is not None:
+                connection.rollback()
+                return None
+            row = connection.execute(
+                """
+                SELECT *
+                FROM achievement_awards
+                WHERE guild_id = ? AND user_id = ?
+                    AND achievement_key = ?
+                    AND ordinal IS NOT NULL
+                    AND state = 'active'
+                ORDER BY ordinal DESC, award_id DESC
+                LIMIT 1
+                """,
+                (guild_id, user_id, STARGATE_COMPLETED_KEY),
+            ).fetchone()
+            if row is None or int(row["award_id"]) != expected_award_id:
+                connection.rollback()
+                return None
+            cursor = connection.execute(
+                "DELETE FROM achievement_awards WHERE award_id = ? AND state = 'active'",
+                (expected_award_id,),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                return None
+            connection.commit()
+        return self._award_from_row(row)
 
     def _import_gate_progress_sync(
         self, guild_id: int, user_id: int, completed_count: int
@@ -778,6 +936,129 @@ class AchievementStore:
             )
             connection.commit()
         return definition
+
+    def _rename_definition_sync(
+        self,
+        guild_id: int,
+        achievement_key: str,
+        display_name: str,
+    ) -> AchievementDefinition:
+        normalized_name = display_name.strip()
+        if not normalized_name:
+            raise ValueError("Achievement name cannot be empty")
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT achievement_key, display_name, kind, role_id,
+                       grantable, revocable, display_order
+                FROM achievement_definitions
+                WHERE guild_id = ? AND achievement_key = ?
+                """,
+                (guild_id, achievement_key),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise LookupError("Achievement does not exist")
+            connection.execute(
+                """
+                UPDATE achievement_definitions
+                SET display_name = ?
+                WHERE guild_id = ? AND achievement_key = ?
+                """,
+                (normalized_name, guild_id, achievement_key),
+            )
+            connection.commit()
+        return AchievementDefinition(
+            key=str(row["achievement_key"]),
+            display_name=normalized_name,
+            kind=AchievementKind(str(row["kind"])),
+            role_id=int(row["role_id"]) if row["role_id"] is not None else None,
+            grantable=bool(row["grantable"]),
+            revocable=bool(row["revocable"]),
+            display_order=int(row["display_order"]),
+        )
+
+    @staticmethod
+    def _deletion_preview(
+        connection: sqlite3.Connection,
+        guild_id: int,
+        achievement_key: str,
+    ) -> AchievementDeletionPreview:
+        row = connection.execute(
+            """
+            SELECT achievement_key, display_name, kind, role_id,
+                   grantable, revocable, display_order
+            FROM achievement_definitions
+            WHERE guild_id = ? AND achievement_key = ?
+            """,
+            (guild_id, achievement_key),
+        ).fetchone()
+        if row is None:
+            raise LookupError("Achievement does not exist")
+        if achievement_key in SYSTEM_ACHIEVEMENT_KEYS:
+            raise ValueError("System achievements cannot be deleted")
+        if row["role_id"] is not None:
+            raise ValueError("Unbind the Discord role before deleting this achievement")
+        award_count = int(
+            connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM achievement_awards
+                WHERE guild_id = ? AND achievement_key = ?
+                """,
+                (guild_id, achievement_key),
+            ).fetchone()[0]
+        )
+        return AchievementDeletionPreview(
+            definition=AchievementDefinition(
+                key=str(row["achievement_key"]),
+                display_name=str(row["display_name"]),
+                kind=AchievementKind(str(row["kind"])),
+                role_id=None,
+                grantable=bool(row["grantable"]),
+                revocable=bool(row["revocable"]),
+                display_order=int(row["display_order"]),
+            ),
+            award_count=award_count,
+        )
+
+    def _prepare_definition_deletion_sync(
+        self,
+        guild_id: int,
+        achievement_key: str,
+    ) -> AchievementDeletionPreview:
+        with self._connection() as connection:
+            return self._deletion_preview(connection, guild_id, achievement_key)
+
+    def _delete_definition_sync(
+        self,
+        guild_id: int,
+        achievement_key: str,
+        expected_award_count: int,
+    ) -> AchievementDeletionPreview:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            preview = self._deletion_preview(connection, guild_id, achievement_key)
+            if preview.award_count != expected_award_count:
+                connection.rollback()
+                raise RuntimeError("Achievement changed during deletion review")
+            connection.execute(
+                """
+                DELETE FROM achievement_awards
+                WHERE guild_id = ? AND achievement_key = ?
+                """,
+                (guild_id, achievement_key),
+            )
+            connection.execute(
+                """
+                DELETE FROM achievement_definitions
+                WHERE guild_id = ? AND achievement_key = ?
+                """,
+                (guild_id, achievement_key),
+            )
+            connection.commit()
+        return preview
 
     def _bind_role_sync(
         self,

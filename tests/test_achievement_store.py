@@ -24,6 +24,25 @@ class AchievementStoreTests(unittest.IsolatedAsyncioTestCase):
         self.path = Path(self.temp_dir.name) / "achievements.sqlite"
         self.store = achievement_store.AchievementStore(self.path)
         await self.store.initialize()
+        await self.store.bootstrap_guild(
+            1,
+            gate_tiers={},
+            boolean_definitions=(
+                achievement_store.AchievementDefinition(
+                    key="solo_gater",
+                    display_name="Solo Gater",
+                    kind=achievement_store.AchievementKind.BOOLEAN,
+                    display_order=0,
+                ),
+                achievement_store.AchievementDefinition(
+                    key="all_quests",
+                    display_name="All Quests",
+                    kind=achievement_store.AchievementKind.BOOLEAN,
+                    display_order=1,
+                ),
+            ),
+            boolean_users={},
+        )
 
     async def test_boolean_award_is_idempotent_and_keeps_original_proof(self):
         first = await self.store.grant_boolean(
@@ -304,6 +323,80 @@ class AchievementStoreTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await self.store.get_gate_projection(1, 2), 3)
 
+    async def test_latest_gate_delete_preserves_history_and_reuses_ordinal(self):
+        first = await self.store.grant_stargate(
+            1,
+            2,
+            source_channel_id=10,
+            source_message_id=100,
+        )
+        latest = await self.store.grant_stargate(
+            1,
+            2,
+            source_channel_id=20,
+            source_message_id=200,
+        )
+
+        self.assertEqual(await self.store.get_latest_stargate(1, 2), latest.award)
+
+        deleted = await self.store.delete_latest_stargate(
+            1,
+            2,
+            expected_award_id=latest.award.award_id,
+        )
+
+        self.assertEqual(deleted, latest.award)
+        profile = await self.store.get_profile(1, 2)
+        self.assertEqual(profile.stargate_count, 1)
+        self.assertEqual(profile.stargate_proofs[0].ordinal, 1)
+        self.assertEqual(profile.stargate_proofs[0].source_message_id, 100)
+        replacement = await self.store.grant_stargate(
+            1,
+            2,
+            source_channel_id=30,
+            source_message_id=300,
+        )
+        self.assertEqual(replacement.award.ordinal, 2)
+        self.assertEqual(first.award.ordinal, 1)
+
+    async def test_latest_gate_delete_rejects_stale_award(self):
+        stale = await self.store.grant_stargate(1, 2)
+        await self.store.grant_stargate(1, 2)
+
+        deleted = await self.store.delete_latest_stargate(
+            1,
+            2,
+            expected_award_id=stale.award.award_id,
+        )
+
+        self.assertIsNone(deleted)
+        self.assertEqual(await self.store.get_gate_projection(1, 2), 2)
+
+    async def test_latest_gate_delete_rejects_pending_increment(self):
+        active = await self.store.grant_stargate(1, 2)
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute(
+                """
+                INSERT INTO achievement_awards (
+                    guild_id, user_id, achievement_key, ordinal,
+                    awarded_at, state
+                ) VALUES (1, 2, 'stargate_completed', 2, 'now', 'pending')
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        deleted = await self.store.delete_latest_stargate(
+            1,
+            2,
+            expected_award_id=active.award.award_id,
+        )
+
+        self.assertIsNone(deleted)
+        self.assertEqual(await self.store.get_latest_stargate(1, 2), active.award)
+
     async def test_boolean_projection_counts_pending_reserved_awards(self):
         connection = sqlite3.connect(self.path)
         try:
@@ -322,6 +415,136 @@ class AchievementStoreTests(unittest.IsolatedAsyncioTestCase):
             await self.store.projected_users_for_boolean(1, "solo_gater"),
             (2,),
         )
+
+    async def test_rename_changes_only_the_display_name(self):
+        original = await self.store.create_boolean_definition(50, "All Quest")
+        await self.store.grant_boolean(
+            50,
+            10,
+            original.key,
+            source_channel_id=20,
+            source_message_id=30,
+        )
+
+        renamed = await self.store.rename_definition(
+            50,
+            original.key,
+            "All Quests",
+        )
+
+        self.assertEqual(renamed.key, original.key)
+        self.assertEqual(renamed.display_name, "All Quests")
+        self.assertEqual(
+            (await self.store.get_profile(50, 10)).boolean_keys,
+            (original.key,),
+        )
+
+    async def test_delete_removes_definition_and_every_award_state_atomically(self):
+        definition = await self.store.create_boolean_definition(50, "Obsolete")
+        await self.store.grant_boolean(50, 10, definition.key)
+        await self.store.revoke_booleans(50, (10,), (definition.key,))
+        await self.store.grant_boolean(50, 11, definition.key)
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute(
+                """
+                INSERT INTO achievement_awards (
+                    guild_id, user_id, achievement_key, awarded_at, state
+                ) VALUES (50, 12, ?, 'now', 'pending')
+                """,
+                (definition.key,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        preview = await self.store.prepare_definition_deletion(50, definition.key)
+        deleted = await self.store.delete_definition(
+            50,
+            definition.key,
+            expected_award_count=preview.award_count,
+        )
+
+        self.assertEqual(deleted, preview)
+        self.assertNotIn(definition, await self.store.list_definitions(50))
+        connection = sqlite3.connect(self.path)
+        try:
+            remaining = connection.execute(
+                """
+                SELECT COUNT(*) FROM achievement_awards
+                WHERE guild_id = 50 AND achievement_key = ?
+                """,
+                (definition.key,),
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(remaining, 0)
+
+    async def test_delete_requires_role_unbinding_first(self):
+        definition = await self.store.create_boolean_definition(50, "All Quests")
+        await self.store.bind_role(50, definition.key, role_id=123, user_ids=())
+
+        with self.assertRaisesRegex(ValueError, "Unbind"):
+            await self.store.prepare_definition_deletion(50, definition.key)
+
+        self.assertEqual(len(await self.store.list_definitions(50)), 1)
+
+    async def test_delete_rejects_a_review_when_awards_changed(self):
+        definition = await self.store.create_boolean_definition(50, "Obsolete")
+        preview = await self.store.prepare_definition_deletion(50, definition.key)
+        await self.store.grant_boolean(50, 10, definition.key)
+
+        with self.assertRaisesRegex(RuntimeError, "changed"):
+            await self.store.delete_definition(
+                50,
+                definition.key,
+                expected_award_count=preview.award_count,
+            )
+
+        self.assertIn(definition, await self.store.list_definitions(50))
+        self.assertEqual(
+            (await self.store.get_profile(50, 10)).boolean_keys,
+            (definition.key,),
+        )
+
+    async def test_system_achievement_cannot_be_deleted_after_unbinding(self):
+        solo = achievement_store.AchievementDefinition(
+            key="solo_gater",
+            display_name="Solo Gater",
+            kind=achievement_store.AchievementKind.BOOLEAN,
+            role_id=None,
+        )
+        await self.store.bootstrap_guild(
+            50,
+            gate_tiers={},
+            boolean_definitions=(solo,),
+            boolean_users={},
+        )
+
+        with self.assertRaisesRegex(ValueError, "System"):
+            await self.store.prepare_definition_deletion(50, solo.key)
+
+    async def test_deleted_achievement_cannot_be_restored_by_a_stale_grant(self):
+        definition = await self.store.create_boolean_definition(50, "Obsolete")
+        preview = await self.store.prepare_definition_deletion(50, definition.key)
+        await self.store.delete_definition(
+            50,
+            definition.key,
+            expected_award_count=preview.award_count,
+        )
+
+        with self.assertRaisesRegex(LookupError, "does not exist"):
+            await self.store.grant_boolean(50, 10, definition.key)
+
+        self.assertEqual((await self.store.get_profile(50, 10)).boolean_keys, ())
+
+    async def test_rename_rejects_an_empty_display_name(self):
+        definition = await self.store.create_boolean_definition(50, "Keep Me")
+
+        with self.assertRaisesRegex(ValueError, "cannot be empty"):
+            await self.store.rename_definition(50, definition.key, "   ")
+
+        self.assertIn(definition, await self.store.list_definitions(50))
 
 
 if __name__ == "__main__":

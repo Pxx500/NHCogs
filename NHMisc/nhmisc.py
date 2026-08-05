@@ -255,6 +255,42 @@ def _validate_gate_increment_configuration(guild) -> tuple:
     return tuple(roles)
 
 
+def _plan_gate_revoke_roles(guild, member, ordinal: int | None) -> tuple:
+    if ordinal is None or not 1 <= ordinal <= len(GATE_TIER_ROLE_IDS):
+        raise commands.UserFeedbackCheckFailure("Stored Gate progress is invalid")
+    _validate_gate_increment_configuration(guild)
+    if member.top_role.position >= guild.me.top_role.position:
+        raise commands.UserFeedbackCheckFailure(
+            "I cannot manage this user's Gate role"
+        )
+    current_role_ids = tuple(role.id for role in member.roles)
+    current_gate_role_ids = {
+        role_id for role_id in current_role_ids if role_id in GATE_TIER_ROLE_IDS
+    }
+    if current_gate_role_ids != {GATE_TIER_ROLE_IDS[ordinal - 1]}:
+        raise commands.UserFeedbackCheckFailure(
+            "This user's Gate role is out of sync"
+        )
+    original_roles = tuple(
+        role for role in member.roles if role.id != guild.default_role.id
+    )
+    target_count = ordinal - 1
+    desired_role_ids = [
+        role_id
+        for role_id in current_role_ids
+        if role_id not in GATE_TIER_ROLE_IDS
+        and role_id != guild.default_role.id
+    ]
+    if target_count:
+        desired_role_ids.append(GATE_TIER_ROLE_IDS[target_count - 1])
+    desired_roles = tuple(guild.get_role(role_id) for role_id in desired_role_ids)
+    if any(role is None for role in desired_roles):
+        raise commands.UserFeedbackCheckFailure(
+            "Gate roles are configured incorrectly"
+        )
+    return target_count, original_roles, desired_roles
+
+
 class NHMisc(commands.Cog):
     """Miscellaneous small utilities for Red-DiscordBot."""
 
@@ -309,6 +345,27 @@ class NHMisc(commands.Cog):
         )
         self._gate_increment_context_menu.guild_only = True
         self._gate_increment_context_registered = False
+        self._gate_revoke_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self._authorized_gate_role_edits: dict[
+            tuple[int, int], frozenset[int]
+        ] = {}
+        self._gate_revoke_slash_command = discord.app_commands.Command(
+            name="gaterevoke",
+            description="Revoke a member's latest Gate",
+            callback=self._gate_revoke_slash,
+        )
+        self._gate_revoke_slash_command.default_permissions = discord.Permissions(
+            manage_messages=True
+        )
+        self._gate_revoke_slash_command.guild_only = True
+        self._gate_revoke_user_context_menu = discord.app_commands.ContextMenu(
+            name="Revoke latest Gate",
+            callback=self._gate_revoke_user_context_action,
+        )
+        self._gate_revoke_user_context_menu.default_permissions = (
+            discord.Permissions(manage_messages=True)
+        )
+        self._gate_revoke_user_context_menu.guild_only = True
         self._achievements_slash_command = discord.app_commands.Command(
             name="achievements",
             description="Show a member's achievements",
@@ -396,6 +453,8 @@ class NHMisc(commands.Cog):
 
     def _register_achievement_commands(self) -> None:
         for command in (
+            self._gate_revoke_slash_command,
+            self._gate_revoke_user_context_menu,
             self._achievements_slash_command,
             self._achievements_user_context_menu,
             self._grant_achievements_context_menu,
@@ -406,6 +465,14 @@ class NHMisc(commands.Cog):
     def _unregister_achievement_commands(self) -> None:
         if not self._achievement_commands_registered:
             return
+        self.bot.tree.remove_command(
+            self._gate_revoke_slash_command.name,
+            type=discord.AppCommandType.chat_input,
+        )
+        self.bot.tree.remove_command(
+            self._gate_revoke_user_context_menu.name,
+            type=discord.AppCommandType.user,
+        )
         self.bot.tree.remove_command(
             self._achievements_slash_command.name,
             type=discord.AppCommandType.chat_input,
@@ -952,6 +1019,258 @@ class NHMisc(commands.Cog):
             embed.description = "No achievements recorded"
         return embed
 
+    @staticmethod
+    def _build_gate_revoke_embed(
+        guild_id: int,
+        member: discord.Member,
+        award,
+        *,
+        notice: str | None = None,
+    ) -> discord.Embed:
+        proof = "No proof stored"
+        if award.source_channel_id is not None and award.source_message_id is not None:
+            proof = (
+                "[Open message](https://discord.com/channels/"
+                f"{guild_id}/{award.source_channel_id}/{award.source_message_id})"
+            )
+        embed = discord.Embed(title="Revoke latest Gate", description=notice)
+        embed.add_field(name="Target", value=f"<@{member.id}>", inline=False)
+        embed.add_field(
+            name="Current Gate count",
+            value=str(award.ordinal),
+            inline=False,
+        )
+        embed.add_field(
+            name="Role transition",
+            value=f"{award.ordinal} → {award.ordinal - 1}",
+            inline=False,
+        )
+        embed.add_field(
+            name="Removing",
+            value=f"Stargate {award.ordinal}",
+            inline=False,
+        )
+        embed.add_field(name="Proof", value=proof, inline=False)
+        return embed
+
+    async def _gate_revoke_slash(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+    ) -> None:
+        await self._start_gate_revoke(interaction, user)
+
+    async def _gate_revoke_user_context_action(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+    ) -> None:
+        await self._start_gate_revoke(interaction, user)
+
+    async def _start_gate_revoke(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+    ) -> None:
+        action = "revoke latest Gate"
+        self._log_achievement_interaction_start(action, interaction)
+        permissions = interaction.permissions
+        if (
+            interaction.guild is None
+            or permissions is None
+            or not permissions.manage_messages
+        ):
+            await interaction.response.send_message(
+                "You need Manage Messages permission",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            guild = interaction.guild
+            is_bootstrapped = await self._await_achievement_interaction_data(
+                self._achievement_store.is_bootstrapped(guild.id)
+            )
+            if not is_bootstrapped:
+                await interaction.edit_original_response(
+                    content="Achievement data is still initializing. Run rolesync first"
+                )
+                return
+            award = await self._await_achievement_interaction_data(
+                self._achievement_store.get_latest_stargate(guild.id, member.id)
+            )
+            if award is None:
+                await interaction.edit_original_response(
+                    content="This user has no Gate to revoke"
+                )
+                return
+            _plan_gate_revoke_roles(guild, member, award.ordinal)
+            await self._require_private_alert_channel(guild)
+
+            from .achievement_views import GateRevokeView
+
+            view = GateRevokeView(
+                self,
+                interaction.user.id,
+                member,
+                award,
+            )
+            await interaction.edit_original_response(
+                embed=view.render_embed(),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            view.message = await interaction.original_response()
+        except commands.UserFeedbackCheckFailure as error:
+            await interaction.edit_original_response(content=str(error))
+        except Exception as error:
+            await self._handle_achievement_interaction_failure(
+                interaction,
+                action,
+                error,
+                public_defer=False,
+            )
+
+    async def _confirm_gate_revoke(self, interaction, view) -> None:
+        await interaction.response.defer()
+        guild = interaction.guild
+        member = view.member
+        reviewed_award = view.award
+        key = (guild.id, member.id)
+        lock = self._gate_revoke_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            latest_award = await self._achievement_store.get_latest_stargate(
+                guild.id,
+                member.id,
+            )
+            if (
+                latest_award is None
+                or latest_award.award_id != reviewed_award.award_id
+                or latest_award.ordinal != reviewed_award.ordinal
+            ):
+                await interaction.edit_original_response(
+                    embed=view.render_embed(
+                        notice="Gate progress changed. Start the action again"
+                    ),
+                    view=view,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return
+
+            try:
+                alert_channel = await self._require_private_alert_channel(guild)
+                target_count, original_roles, desired_roles = (
+                    _plan_gate_revoke_roles(
+                        guild,
+                        member,
+                        latest_award.ordinal,
+                    )
+                )
+            except commands.UserFeedbackCheckFailure as error:
+                await interaction.edit_original_response(
+                    embed=view.render_embed(notice=str(error)),
+                    view=view,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                return
+
+            self._authorized_gate_role_edits[key] = frozenset(
+                {GATE_TIER_ROLE_IDS[target_count - 1]} if target_count else set()
+            )
+            try:
+                try:
+                    await member.edit(
+                        roles=desired_roles,
+                        reason=(
+                            "Revoke latest Gate through NHMisc "
+                            f"by moderator {interaction.user.id}"
+                        ),
+                    )
+                except Exception:
+                    log.exception(
+                        "Failed to change Gate role for guild %s member %s",
+                        guild.id,
+                        member.id,
+                    )
+                    await interaction.edit_original_response(
+                        embed=view.render_embed(
+                            notice="The Gate role could not be changed"
+                        ),
+                        view=view,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                    return
+
+                deleted_award = (
+                    await self._achievement_store.delete_latest_stargate(
+                        guild.id,
+                        member.id,
+                        expected_award_id=reviewed_award.award_id,
+                    )
+                )
+                if deleted_award is None:
+                    try:
+                        await member.edit(
+                            roles=original_roles,
+                            reason="Restore Gate role after stale revoke",
+                        )
+                    except Exception:
+                        log.exception(
+                            "Failed to restore Gate role after rejected revoke for "
+                            "guild %s member %s",
+                            guild.id,
+                            member.id,
+                        )
+                    await interaction.edit_original_response(
+                        embed=view.render_embed(
+                            notice="Gate progress changed. The revoke was cancelled"
+                        ),
+                        view=view,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                    return
+            finally:
+                self._authorized_gate_role_edits.pop(key, None)
+
+            view.stop()
+            await interaction.edit_original_response(
+                content=(
+                    f"Revoked Stargate {reviewed_award.ordinal} from <@{member.id}>"
+                ),
+                embed=None,
+                view=None,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            proof = "No proof stored"
+            if (
+                reviewed_award.source_channel_id is not None
+                and reviewed_award.source_message_id is not None
+            ):
+                proof = (
+                    "https://discord.com/channels/"
+                    f"{guild.id}/{reviewed_award.source_channel_id}/"
+                    f"{reviewed_award.source_message_id}"
+                )
+            delivered = (
+                await self._send_voice_log(
+                    alert_channel,
+                    "Gate revoked\n"
+                    f"Moderator: <@{interaction.user.id}>\n"
+                    f"Member: <@{member.id}>\n"
+                    f"Transition: {reviewed_award.ordinal} → "
+                    f"{reviewed_award.ordinal - 1}\n"
+                    f"Removed: Stargate {reviewed_award.ordinal}\n"
+                    f"Proof: {proof}",
+                )
+                is not None
+            )
+            if not delivered:
+                log.error(
+                    "Gate revoke audit could not be delivered for guild %s member %s",
+                    guild.id,
+                    member.id,
+                )
+
     async def _grant_achievements_context_action(
         self,
         interaction: discord.Interaction,
@@ -1170,6 +1489,131 @@ class NHMisc(commands.Cog):
         except ValueError as error:
             raise commands.UserFeedbackCheckFailure(str(error)) from error
         await ctx.send(f"Created achievement: {definition.display_name}")
+
+    def _require_private_achievement_channel(self, ctx: commands.Context) -> None:
+        if self._channel_is_public(ctx):
+            raise commands.UserFeedbackCheckFailure(
+                "Achievement administration is unavailable in this channel"
+            )
+
+    @achievement.command(name="list")
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def achievement_list(self, ctx: commands.Context) -> None:
+        """List achievement names, stable keys, and optional role bindings."""
+        self._require_private_achievement_channel(ctx)
+        if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
+            raise commands.UserFeedbackCheckFailure(
+                "Achievement data is still initializing. Run `!rolesync discord` first"
+            )
+        definitions = await self._achievement_store.list_definitions(ctx.guild.id)
+        if not definitions:
+            await ctx.send("No achievements are configured")
+            return
+        embed = discord.Embed(title="Achievements")
+        for definition in definitions:
+            role = (
+                f"<@&{definition.role_id}>"
+                if definition.role_id is not None
+                else "No Discord role"
+            )
+            embed.add_field(
+                name=definition.display_name,
+                value=f"Key: `{definition.key}`\nRole: {role}",
+                inline=False,
+            )
+        await ctx.send(
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @achievement.command(name="rename")
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def achievement_rename(
+        self,
+        ctx: commands.Context,
+        achievement_key: str,
+        *,
+        display_name: str,
+    ) -> None:
+        """Change an achievement's display name without changing its key."""
+        self._require_private_achievement_channel(ctx)
+        if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
+            raise commands.UserFeedbackCheckFailure(
+                "Achievement data is still initializing. Run `!rolesync discord` first"
+            )
+        try:
+            definition = await self._achievement_store.rename_definition(
+                ctx.guild.id,
+                achievement_key,
+                display_name,
+            )
+        except (LookupError, ValueError) as error:
+            raise commands.UserFeedbackCheckFailure(str(error)) from error
+        await ctx.send(
+            f"Renamed achievement `{definition.key}` to {definition.display_name}"
+        )
+
+    @achievement.command(name="delete", aliases=("del",))
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def achievement_delete(
+        self,
+        ctx: commands.Context,
+        achievement_key: str,
+    ) -> None:
+        """Permanently delete an unbound achievement and all of its awards."""
+        self._require_private_achievement_channel(ctx)
+        if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
+            raise commands.UserFeedbackCheckFailure(
+                "Achievement data is still initializing. Run `!rolesync discord` first"
+            )
+        try:
+            preview = await self._achievement_store.prepare_definition_deletion(
+                ctx.guild.id,
+                achievement_key,
+            )
+        except (LookupError, ValueError) as error:
+            raise commands.UserFeedbackCheckFailure(str(error)) from error
+        from .achievement_views import AchievementDeleteView
+
+        view = AchievementDeleteView(self, ctx.author.id, preview)
+        view.message = await ctx.send(
+            embed=view.render_embed(),
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _confirm_achievement_delete(
+        self,
+        interaction: discord.Interaction,
+        view,
+    ) -> None:
+        await interaction.response.defer()
+        try:
+            deleted = await self._achievement_store.delete_definition(
+                interaction.guild.id,
+                view.preview.definition.key,
+                expected_award_count=view.preview.award_count,
+            )
+        except (LookupError, RuntimeError, ValueError) as error:
+            await interaction.edit_original_response(
+                embed=view.render_embed(notice=str(error)),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        view.stop()
+        await interaction.edit_original_response(
+            content=(
+                f"Deleted achievement `{deleted.definition.key}` and "
+                f"{deleted.award_count} stored awards"
+            ),
+            embed=None,
+            view=None,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @achievement.group(name="role", invoke_without_command=True)
     @commands.guild_only()
@@ -3847,8 +4291,15 @@ class NHMisc(commands.Cog):
         corrected_roles: list[int] = []
         before_gate_roles = before_role_ids & set(GATE_TIER_ROLE_IDS)
         after_gate_roles = after_role_ids & set(GATE_TIER_ROLE_IDS)
+        authorized_gate_roles = self._authorized_gate_role_edits.get(
+            (after.guild.id, after.id)
+        )
+        authorized_gate_change = (
+            before_gate_roles != after_gate_roles
+            and authorized_gate_roles == frozenset(after_gate_roles)
+        )
         restored_gate = False
-        if before_gate_roles != after_gate_roles:
+        if before_gate_roles != after_gate_roles and not authorized_gate_change:
             completed_count = await self._achievement_store.get_gate_projection(
                 after.guild.id,
                 after.id,
@@ -4119,6 +4570,28 @@ class NHMisc(commands.Cog):
         if not permissions.send_messages:
             return f"I need permission to send messages in {channel.mention}."
         return None
+
+    async def _require_private_alert_channel(
+        self,
+        guild: discord.Guild,
+    ) -> discord.TextChannel:
+        channel = self._get_log_channel(
+            guild,
+            await self.config.guild(guild).alert_channel(),
+        )
+        if channel is None:
+            raise commands.UserFeedbackCheckFailure(
+                "The private alert channel is not configured"
+            )
+        if channel.permissions_for(guild.default_role).view_channel:
+            raise commands.UserFeedbackCheckFailure(
+                "The alert channel must be hidden from @everyone"
+            )
+        if self._missing_log_permissions(guild, channel) is not None:
+            raise commands.UserFeedbackCheckFailure(
+                "I cannot send messages in the alert channel"
+            )
+        return channel
 
     async def _send_guild_alert(
         self,
