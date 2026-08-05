@@ -902,16 +902,21 @@ class NHMisc(commands.Cog):
         await self._gate_increment_store.redact_user_data(user_id)
 
     @staticmethod
-    def _log_achievement_interaction_start(
-        action: str,
+    async def _defer_achievement_interaction(
         interaction: discord.Interaction,
-    ) -> None:
-        log.info(
-            "Achievement interaction started: action=%s guild=%s user=%s",
-            action,
-            getattr(interaction.guild, "id", None),
-            getattr(interaction.user, "id", None),
-        )
+        *,
+        ephemeral: bool,
+    ) -> bool:
+        try:
+            await interaction.response.defer(
+                ephemeral=ephemeral,
+                thinking=True,
+            )
+        except discord.NotFound as error:
+            if error.code != 10062:
+                raise
+            return False
+        return True
 
     @staticmethod
     async def _await_achievement_interaction_data(
@@ -972,14 +977,17 @@ class NHMisc(commands.Cog):
         user: discord.Member | None = None,
     ) -> None:
         action = "achievements slash"
-        self._log_achievement_interaction_start(action, interaction)
         if interaction.guild is None:
             await interaction.response.send_message(
                 "This command can only be used in a server",
                 ephemeral=True,
             )
             return
-        await interaction.response.defer(ephemeral=False, thinking=True)
+        if not await self._defer_achievement_interaction(
+            interaction,
+            ephemeral=True,
+        ):
+            return
         try:
             is_bootstrapped = await self._await_achievement_interaction_data(
                 self._achievement_store.is_bootstrapped(interaction.guild.id)
@@ -988,7 +996,7 @@ class NHMisc(commands.Cog):
                 await self._send_achievement_interaction_error(
                     interaction,
                     "Achievement data is still initializing",
-                    public_defer=True,
+                    public_defer=False,
                 )
                 return
             target = user or interaction.user
@@ -1001,12 +1009,27 @@ class NHMisc(commands.Cog):
             definitions = await self._await_achievement_interaction_data(
                 self._achievement_store.list_definitions(interaction.guild.id)
             )
+            embed = self._build_achievements_embed(
+                interaction.guild.id,
+                target,
+                profile,
+                definitions,
+            )
+            from .achievement_views import AchievementProfileView
+
+            interaction_data = getattr(interaction, "data", None) or {}
+            command_id = interaction_data.get("id")
+            command_mention = (
+                f"</achievements:{command_id}>"
+                if command_id is not None
+                else "`/achievements`"
+            )
             await interaction.edit_original_response(
-                embed=self._build_achievements_embed(
-                    interaction.guild.id,
-                    target,
-                    profile,
-                    definitions,
+                embed=embed,
+                view=AchievementProfileView(
+                    embed,
+                    requester_id=interaction.user.id,
+                    command_mention=command_mention,
                 ),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -1015,7 +1038,7 @@ class NHMisc(commands.Cog):
                 interaction,
                 action,
                 error,
-                public_defer=True,
+                public_defer=False,
             )
 
     async def _achievements_user_context_action(
@@ -1024,14 +1047,17 @@ class NHMisc(commands.Cog):
         user: discord.Member,
     ) -> None:
         action = "view achievements context action"
-        self._log_achievement_interaction_start(action, interaction)
         if interaction.guild is None:
             await interaction.response.send_message(
                 "This action can only be used in a server",
                 ephemeral=True,
             )
             return
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not await self._defer_achievement_interaction(
+            interaction,
+            ephemeral=True,
+        ):
+            return
         try:
             is_bootstrapped = await self._await_achievement_interaction_data(
                 self._achievement_store.is_bootstrapped(interaction.guild.id)
@@ -1075,26 +1101,18 @@ class NHMisc(commands.Cog):
         definitions,
     ) -> discord.Embed:
         embed = discord.Embed(title=f"Achievements — {user.display_name}")
-        embed.add_field(
-            name="Stargates completed",
-            value=str(profile.stargate_count),
-            inline=False,
-        )
+        stargate_lines = [f"Stargates: {profile.stargate_count}"]
         if profile.stargate_proofs:
-            proof_lines = [
+            proof_links = [
                 (
-                    f"Stargate {proof.ordinal} — "
-                    f"[View message](https://discord.com/channels/"
+                    f"[Stargate {proof.ordinal}](https://discord.com/channels/"
                     f"{guild_id}/"
                     f"{proof.source_channel_id}/{proof.source_message_id})"
                 )
                 for proof in profile.stargate_proofs
             ]
-            embed.add_field(
-                name="Proofs",
-                value="\n".join(proof_lines),
-                inline=False,
-            )
+            stargate_lines.append(" · ".join(proof_links))
+        embed.description = "\n".join(stargate_lines)
         active_boolean_keys = set(profile.boolean_keys)
         boolean_lines = [
             definition.display_name
@@ -1166,7 +1184,6 @@ class NHMisc(commands.Cog):
         member: discord.Member,
     ) -> None:
         action = "revoke latest Gate"
-        self._log_achievement_interaction_start(action, interaction)
         permissions = interaction.permissions
         if (
             interaction.guild is None
@@ -1178,7 +1195,11 @@ class NHMisc(commands.Cog):
                 ephemeral=True,
             )
             return
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not await self._defer_achievement_interaction(
+            interaction,
+            ephemeral=True,
+        ):
+            return
         try:
             guild = interaction.guild
             is_bootstrapped = await self._await_achievement_interaction_data(
@@ -1367,7 +1388,6 @@ class NHMisc(commands.Cog):
         source_message: discord.Message,
     ) -> None:
         action = "grant achievements context action"
-        self._log_achievement_interaction_start(action, interaction)
         permissions = interaction.permissions
         if (
             interaction.guild is None
@@ -1379,7 +1399,11 @@ class NHMisc(commands.Cog):
                 ephemeral=True,
             )
             return
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not await self._defer_achievement_interaction(
+            interaction,
+            ephemeral=True,
+        ):
+            return
         try:
             is_bootstrapped = await self._await_achievement_interaction_data(
                 self._achievement_store.is_bootstrapped(interaction.guild.id)
@@ -1447,7 +1471,6 @@ class NHMisc(commands.Cog):
         source_message: discord.Message,
     ) -> None:
         action = "add gate proof context action"
-        self._log_achievement_interaction_start(action, interaction)
         permissions = interaction.permissions
         if (
             interaction.guild is None
@@ -1459,7 +1482,11 @@ class NHMisc(commands.Cog):
                 ephemeral=True,
             )
             return
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not await self._defer_achievement_interaction(
+            interaction,
+            ephemeral=True,
+        ):
+            return
         try:
             is_bootstrapped = await self._await_achievement_interaction_data(
                 self._achievement_store.is_bootstrapped(interaction.guild.id)
@@ -3616,7 +3643,6 @@ class NHMisc(commands.Cog):
         source_message: discord.Message,
     ) -> None:
         action = "increment gate roles context action"
-        self._log_achievement_interaction_start(action, interaction)
         permissions = interaction.permissions
         if (
             interaction.guild is None
@@ -3628,7 +3654,11 @@ class NHMisc(commands.Cog):
                 ephemeral=True,
             )
             return
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        if not await self._defer_achievement_interaction(
+            interaction,
+            ephemeral=True,
+        ):
+            return
         try:
             is_bootstrapped = await self._await_achievement_interaction_data(
                 self._achievement_store.is_bootstrapped(interaction.guild.id)
