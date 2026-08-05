@@ -190,6 +190,58 @@ def _load_achievement_views():
     return module, FakeSelect
 
 
+class AchievementProfileViewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_publish_sends_compact_attribution_then_removes_ephemeral(self):
+        views, _fake_select = _load_achievement_views()
+        embed = object()
+        view = views.AchievementProfileView(
+            embed,
+            requester_id=99,
+            command_mention="</achievements:123>",
+        )
+        interaction = SimpleNamespace(
+            channel=SimpleNamespace(send=mock.AsyncMock()),
+            response=SimpleNamespace(edit_message=mock.AsyncMock()),
+            delete_original_response=mock.AsyncMock(),
+        )
+
+        await view.send_publicly.callback(interaction)
+
+        interaction.response.edit_message.assert_awaited_once_with(view=view)
+        interaction.channel.send.assert_awaited_once_with(
+            content="-# <@99> used </achievements:123>",
+            embed=embed,
+            allowed_mentions="no-mentions",
+        )
+        interaction.delete_original_response.assert_awaited_once_with()
+
+    async def test_publish_failure_keeps_ephemeral_and_reenables_button(self):
+        views, _fake_select = _load_achievement_views()
+        view = views.AchievementProfileView(
+            object(),
+            requester_id=99,
+            command_mention="</achievements:123>",
+        )
+        interaction = SimpleNamespace(
+            channel=SimpleNamespace(
+                send=mock.AsyncMock(side_effect=RuntimeError("forbidden"))
+            ),
+            response=SimpleNamespace(edit_message=mock.AsyncMock()),
+            edit_original_response=mock.AsyncMock(),
+            delete_original_response=mock.AsyncMock(),
+        )
+
+        await view.send_publicly.callback(interaction)
+
+        interaction.edit_original_response.assert_awaited_once_with(
+            content="I couldn't send this profile in the current channel",
+            view=view,
+        )
+        interaction.delete_original_response.assert_not_awaited()
+        self.assertFalse(view.publishing)
+        self.assertFalse(view.send_publicly.disabled)
+
+
 class GateProofCandidateTests(unittest.TestCase):
     def test_author_and_mentions_keep_individual_missing_gate_ordinals(self):
         members = {

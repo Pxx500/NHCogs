@@ -14,6 +14,11 @@ class AchievementProfileRenderingTests(unittest.TestCase):
             stargate_count=4,
             stargate_proofs=(
                 SimpleNamespace(
+                    ordinal=1,
+                    source_channel_id=20,
+                    source_message_id=21,
+                ),
+                SimpleNamespace(
                     ordinal=4,
                     source_channel_id=20,
                     source_message_id=30,
@@ -30,16 +35,17 @@ class AchievementProfileRenderingTests(unittest.TestCase):
         )
 
         self.assertEqual(
+            embed.description,
+            "Stargates: 4\n"
+            "[Stargate 1](https://discord.com/channels/10/20/21) · "
+            "[Stargate 4](https://discord.com/channels/10/20/30)",
+        )
+        self.assertEqual(
             tuple(field.name for field in embed.fields),
-            ("Stargates completed", "Proofs", "Achievements"),
+            ("Achievements",),
         )
-        self.assertEqual(embed.fields[0].value, "4")
-        self.assertIn("Stargate 4", embed.fields[1].value)
-        self.assertIn(
-            "https://discord.com/channels/10/20/30",
-            embed.fields[1].value,
-        )
-        self.assertEqual(embed.fields[2].value, "Solo Gater")
+        self.assertEqual(embed.fields[0].value, "Solo Gater")
+        self.assertNotIn("Proof", embed.description)
 
     def test_empty_profile_is_explicit(self):
         profile = nhmisc.AchievementProfile(0, (), ())
@@ -142,8 +148,79 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_achievements_slash_defers_before_waiting_for_store(self):
         await self._assert_deferred_before_store_wait(
             lambda cog, interaction: cog._achievements_slash(interaction),
-            ephemeral=False,
+            ephemeral=True,
         )
+
+    async def test_achievements_slash_ignores_an_expired_initial_interaction(self):
+        class UnknownInteraction(Exception):
+            code = 10062
+
+        store = SimpleNamespace(is_bootstrapped=mock.AsyncMock())
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=1),
+            user=SimpleNamespace(id=99),
+            response=SimpleNamespace(
+                defer=mock.AsyncMock(side_effect=UnknownInteraction())
+            ),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = store
+
+        with mock.patch.object(
+            nhmisc.discord,
+            "NotFound",
+            UnknownInteraction,
+            create=True,
+        ):
+            await cog._achievements_slash(interaction)
+
+        store.is_bootstrapped.assert_not_awaited()
+
+    async def test_achievements_slash_does_not_hide_other_not_found_errors(self):
+        class MissingResource(Exception):
+            code = 10003
+
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=1),
+            user=SimpleNamespace(id=99),
+            response=SimpleNamespace(
+                defer=mock.AsyncMock(side_effect=MissingResource())
+            ),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+
+        with (
+            mock.patch.object(
+                nhmisc.discord,
+                "NotFound",
+                MissingResource,
+                create=True,
+            ),
+            self.assertRaises(MissingResource),
+        ):
+            await cog._achievements_slash(interaction)
+
+    async def test_achievement_interactions_do_not_emit_routine_info_logs(self):
+        guild = SimpleNamespace(id=1)
+        target = SimpleNamespace(id=123)
+        interaction = SimpleNamespace(
+            guild=guild,
+            user=SimpleNamespace(id=99),
+            response=SimpleNamespace(defer=mock.AsyncMock()),
+            edit_original_response=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(return_value=True),
+            get_profile=mock.AsyncMock(return_value=object()),
+            list_definitions=mock.AsyncMock(return_value=()),
+        )
+        cog._build_achievements_embed = mock.Mock(return_value=object())
+
+        with mock.patch.object(nhmisc.log, "info") as info:
+            await cog._achievements_slash(interaction, target)
+
+        info.assert_not_called()
 
     async def test_achievements_user_action_defers_before_waiting_for_store(self):
         target = SimpleNamespace(id=123)
@@ -165,7 +242,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             ephemeral=True,
         )
 
-    async def test_achievements_slash_edits_public_deferred_response(self):
+    async def test_achievements_slash_edits_private_response_with_publish_view(self):
         guild = SimpleNamespace(id=1)
         target = SimpleNamespace(id=123)
         profile = object()
@@ -174,6 +251,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         interaction = SimpleNamespace(
             guild=guild,
             user=SimpleNamespace(id=99),
+            data={"id": "456"},
             response=SimpleNamespace(defer=mock.AsyncMock()),
             edit_original_response=mock.AsyncMock(),
         )
@@ -185,10 +263,28 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         )
         cog._build_achievements_embed = mock.Mock(return_value=embed)
 
-        await cog._achievements_slash(interaction, target)
+        class FakeAchievementProfileView:
+            def __init__(self, embed, requester_id, command_mention):
+                self.embed = embed
+                self.requester_id = requester_id
+                self.command_mention = command_mention
+
+        package = ModuleType("_gatecount_nhmisc")
+        package.__path__ = []
+        views = ModuleType("_gatecount_nhmisc.achievement_views")
+        views.AchievementProfileView = FakeAchievementProfileView
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "_gatecount_nhmisc": package,
+                "_gatecount_nhmisc.achievement_views": views,
+            },
+        ):
+            await cog._achievements_slash(interaction, target)
 
         interaction.response.defer.assert_awaited_once_with(
-            ephemeral=False,
+            ephemeral=True,
             thinking=True,
         )
         interaction.edit_original_response.assert_awaited_once()
@@ -196,6 +292,10 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             interaction.edit_original_response.await_args.kwargs["embed"],
             embed,
         )
+        view = interaction.edit_original_response.await_args.kwargs["view"]
+        self.assertIs(view.embed, embed)
+        self.assertEqual(view.requester_id, 99)
+        self.assertEqual(view.command_mention, "</achievements:456>")
         cog._achievement_store.get_profile.assert_awaited_once_with(1, 123)
         cog._achievement_store.list_definitions.assert_awaited_once_with(1)
 
@@ -207,8 +307,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             guild=SimpleNamespace(id=1),
             user=SimpleNamespace(id=99),
             response=SimpleNamespace(defer=mock.AsyncMock()),
-            delete_original_response=mock.AsyncMock(),
-            followup=SimpleNamespace(send=mock.AsyncMock()),
+            edit_original_response=mock.AsyncMock(),
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._achievement_store = SimpleNamespace(
@@ -225,10 +324,8 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         ):
             await cog._achievements_slash(interaction)
 
-        interaction.delete_original_response.assert_awaited_once_with()
-        interaction.followup.send.assert_awaited_once_with(
-            "Achievement data is busy. Try again in a moment",
-            ephemeral=True,
+        interaction.edit_original_response.assert_awaited_once_with(
+            content="Achievement data is busy. Try again in a moment"
         )
         self.assertIn("Achievement interaction timed out", logs.output[0])
 
