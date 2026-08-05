@@ -188,6 +188,74 @@ class AchievementStoreTests(unittest.IsolatedAsyncioTestCase):
             (),
         )
 
+    async def test_batch_proofs_replace_reviewed_links_atomically(self):
+        original = await self.store.grant_stargate(
+            1,
+            2,
+            source_channel_id=10,
+            source_message_id=20,
+        )
+        await self.store.import_gate_progress(1, 2, 2)
+
+        updated = await self.store.replace_stargate_proof_links(
+            1,
+            2,
+            (
+                achievement_store.StargateProof(1, 50, 60),
+                achievement_store.StargateProof(2, 51, 61),
+            ),
+            expected_proofs={
+                1: achievement_store.StargateProof(
+                    1,
+                    original.award.source_channel_id,
+                    original.award.source_message_id,
+                ),
+                2: None,
+            },
+        )
+
+        profile = await self.store.get_profile(1, 2)
+        self.assertEqual(updated, profile.stargate_proofs)
+        self.assertEqual(
+            tuple(
+                (proof.ordinal, proof.source_channel_id, proof.source_message_id)
+                for proof in profile.stargate_proofs
+            ),
+            ((1, 50, 60), (2, 51, 61)),
+        )
+
+    async def test_batch_replacement_rejects_stale_review_without_partial_update(self):
+        await self.store.grant_stargate(
+            1,
+            2,
+            source_channel_id=10,
+            source_message_id=20,
+        )
+        await self.store.import_gate_progress(1, 2, 2)
+
+        with self.assertRaises(achievement_store.GateProofConflict):
+            await self.store.replace_stargate_proof_links(
+                1,
+                2,
+                (
+                    achievement_store.StargateProof(1, 50, 60),
+                    achievement_store.StargateProof(2, 51, 61),
+                ),
+                expected_proofs={
+                    1: achievement_store.StargateProof(1, 99, 100),
+                    2: None,
+                },
+            )
+
+        profile = await self.store.get_profile(1, 2)
+        self.assertEqual(
+            tuple(
+                (proof.ordinal, proof.source_channel_id, proof.source_message_id)
+                for proof in profile.stargate_proofs
+            ),
+            ((1, 10, 20),),
+        )
+
     async def test_missing_historical_proofs_are_loaded_for_all_requested_users(self):
         await self.store.import_gate_progress(1, 2, 3)
         await self.store.attach_stargate_proofs(
