@@ -2683,6 +2683,10 @@ async def config_all(cog, ctx: commands.Context) -> None:
                 ),
             ),
             (
+                _("GIF detector"),
+                cog._format_bool_setting(guild_settings.gif_detector_enabled),
+            ),
+            (
                 _("Joinwatch"),
                 cog._format_bool_setting(guild_settings.joinwatch_enabled),
             ),
