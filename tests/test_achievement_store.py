@@ -521,7 +521,7 @@ class AchievementStoreTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await self.store.get_gate_projection(1, 2), 3)
 
-    async def test_latest_gate_delete_preserves_history_and_reuses_ordinal(self):
+    async def test_latest_gate_revoke_preserves_history_and_reuses_ordinal(self):
         first = await self.store.grant_stargate(
             1,
             2,
@@ -535,15 +535,16 @@ class AchievementStoreTests(unittest.IsolatedAsyncioTestCase):
             source_message_id=200,
         )
 
-        self.assertEqual(await self.store.get_latest_stargate(1, 2), latest.award)
-
-        deleted = await self.store.delete_latest_stargate(
+        reviewed = await self.store.get_active_stargates(1, 2)
+        result = await self.store.revoke_stargate(
             1,
             2,
-            expected_award_id=latest.award.award_id,
+            expected_awards=reviewed,
+            selected_award_id=latest.award.award_id,
+            compact=True,
         )
 
-        self.assertEqual(deleted, latest.award)
+        self.assertEqual(result.removed, latest.award)
         profile = await self.store.get_profile(1, 2)
         self.assertEqual(profile.stargate_count, 1)
         self.assertEqual(profile.stargate_proofs[0].ordinal, 1)
@@ -557,21 +558,25 @@ class AchievementStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replacement.award.ordinal, 2)
         self.assertEqual(first.award.ordinal, 1)
 
-    async def test_latest_gate_delete_rejects_stale_award(self):
+    async def test_gate_revoke_rejects_stale_awards(self):
         stale = await self.store.grant_stargate(1, 2)
+        reviewed = await self.store.get_active_stargates(1, 2)
         await self.store.grant_stargate(1, 2)
 
-        deleted = await self.store.delete_latest_stargate(
+        result = await self.store.revoke_stargate(
             1,
             2,
-            expected_award_id=stale.award.award_id,
+            expected_awards=reviewed,
+            selected_award_id=stale.award.award_id,
+            compact=True,
         )
 
-        self.assertIsNone(deleted)
+        self.assertIsNone(result)
         self.assertEqual(await self.store.get_gate_projection(1, 2), 2)
 
-    async def test_latest_gate_delete_rejects_pending_increment(self):
+    async def test_gate_revoke_rejects_pending_increment(self):
         active = await self.store.grant_stargate(1, 2)
+        reviewed = await self.store.get_active_stargates(1, 2)
         connection = sqlite3.connect(self.path)
         try:
             connection.execute(
@@ -586,14 +591,164 @@ class AchievementStoreTests(unittest.IsolatedAsyncioTestCase):
         finally:
             connection.close()
 
-        deleted = await self.store.delete_latest_stargate(
+        result = await self.store.revoke_stargate(
             1,
             2,
-            expected_award_id=active.award.award_id,
+            expected_awards=reviewed,
+            selected_award_id=active.award.award_id,
+            compact=True,
         )
 
-        self.assertIsNone(deleted)
-        self.assertEqual(await self.store.get_latest_stargate(1, 2), active.award)
+        self.assertIsNone(result)
+        self.assertEqual(await self.store.get_active_stargates(1, 2), (active.award,))
+
+    async def test_gate_revoke_can_leave_an_ordinal_gap(self):
+        first = await self.store.grant_stargate(
+            1, 2, source_channel_id=10, source_message_id=100
+        )
+        middle = await self.store.grant_stargate(
+            1, 2, source_channel_id=20, source_message_id=200
+        )
+        last = await self.store.grant_stargate(
+            1, 2, source_channel_id=30, source_message_id=300
+        )
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute(
+                "UPDATE achievement_awards SET ordinal = 5 WHERE award_id = ?",
+                (last.award.award_id,),
+            )
+            connection.execute(
+                "UPDATE achievement_awards SET ordinal = 3 WHERE award_id = ?",
+                (middle.award.award_id,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        reviewed = await self.store.get_active_stargates(1, 2)
+
+        result = await self.store.revoke_stargate(
+            1,
+            2,
+            expected_awards=reviewed,
+            selected_award_id=middle.award.award_id,
+            compact=False,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.removed.award_id, middle.award.award_id)
+        self.assertEqual(result.ordinal_changes, ())
+        remaining = await self.store.get_active_stargates(1, 2)
+        self.assertEqual(tuple(award.ordinal for award in remaining), (1, 5))
+        self.assertEqual(remaining[1].source_message_id, 300)
+        self.assertEqual(first.award.award_id, remaining[0].award_id)
+        self.assertEqual(await self.store.get_gate_projection(1, 2), 2)
+
+    async def test_gate_revoke_compacts_every_surviving_award_and_proof(self):
+        first = await self.store.grant_stargate(
+            1, 2, source_channel_id=10, source_message_id=100
+        )
+        middle = await self.store.grant_stargate(
+            1, 2, source_channel_id=20, source_message_id=200
+        )
+        last = await self.store.grant_stargate(
+            1, 2, source_channel_id=30, source_message_id=300
+        )
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute(
+                "UPDATE achievement_awards SET ordinal = 5 WHERE award_id = ?",
+                (last.award.award_id,),
+            )
+            connection.execute(
+                "UPDATE achievement_awards SET ordinal = 3 WHERE award_id = ?",
+                (middle.award.award_id,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        reviewed = await self.store.get_active_stargates(1, 2)
+
+        result = await self.store.revoke_stargate(
+            1,
+            2,
+            expected_awards=reviewed,
+            selected_award_id=middle.award.award_id,
+            compact=True,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.removed.award_id, middle.award.award_id)
+        self.assertEqual(result.ordinal_changes, ((last.award.award_id, 5, 2),))
+        remaining = await self.store.get_active_stargates(1, 2)
+        self.assertEqual(tuple(award.ordinal for award in remaining), (1, 2))
+        self.assertEqual(remaining[1].source_message_id, 300)
+        self.assertEqual(first.award.award_id, remaining[0].award_id)
+
+    async def test_gate_revoke_rejects_a_changed_complete_review_snapshot(self):
+        first = await self.store.grant_stargate(1, 2)
+        second = await self.store.grant_stargate(1, 2)
+        reviewed = await self.store.get_active_stargates(1, 2)
+        await self.store.attach_stargate_proofs(
+            1,
+            {2: 1},
+            source_channel_id=30,
+            source_message_id=40,
+        )
+
+        result = await self.store.revoke_stargate(
+            1,
+            2,
+            expected_awards=reviewed,
+            selected_award_id=first.award.award_id,
+            compact=True,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            tuple(award.award_id for award in await self.store.get_active_stargates(1, 2)),
+            (first.award.award_id, second.award.award_id),
+        )
+
+    async def test_revoked_history_does_not_block_reusing_an_active_ordinal(self):
+        first = await self.store.grant_stargate(1, 2)
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute(
+                """
+                INSERT INTO achievement_awards (
+                    guild_id, user_id, achievement_key, ordinal,
+                    awarded_at, revoked_at, state
+                ) VALUES (1, 2, 'stargate_completed', 2, 'old', 'later', 'revoked')
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        await self.store.initialize()
+        replacement = await self.store.grant_stargate(1, 2)
+
+        self.assertEqual(first.award.ordinal, 1)
+        self.assertEqual(replacement.award.ordinal, 2)
+
+    async def test_discord_snapshot_reactivates_only_one_historical_gate_per_ordinal(self):
+        await self.store.import_gate_progress(1, 2, 2)
+        await self.store.apply_discord_snapshot(1, gate_tiers={2: 1}, boolean_users={})
+        await self.store.grant_stargate(1, 2)
+        await self.store.apply_discord_snapshot(1, gate_tiers={2: 1}, boolean_users={})
+
+        result = await self.store.apply_discord_snapshot(
+            1,
+            gate_tiers={2: 2},
+            boolean_users={},
+        )
+
+        self.assertEqual(result.gate_users_changed, 1)
+        self.assertEqual(
+            tuple(award.ordinal for award in await self.store.get_active_stargates(1, 2)),
+            (1, 2),
+        )
 
     async def test_boolean_projection_counts_pending_reserved_awards(self):
         connection = sqlite3.connect(self.path)

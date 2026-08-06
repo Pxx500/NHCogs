@@ -186,6 +186,8 @@ class GateIncrementCandidate:
     current_gate_role_ids: tuple[int, ...]
     current_tier: int | None
     target_role_id: int | None
+    target_ordinal: int | None = None
+    highest_ordinal: int = 0
     has_solo_gater: bool = False
 
 
@@ -308,8 +310,32 @@ def _build_gate_increment_candidate(member) -> GateIncrementCandidate:
         current_gate_role_ids=transition.current_role_ids,
         current_tier=transition.current_tier,
         target_role_id=target_role_id,
+        target_ordinal=(transition.current_tier or 0) + 1,
+        highest_ordinal=transition.current_tier or 0,
         has_solo_gater=SINGLEPLAYER_GATE_COMPLETED_ROLE_ID in member_role_ids,
     )
+
+
+def _build_gate_increment_member_plans(
+    candidates: tuple[GateIncrementCandidate, ...],
+    *,
+    grant_solo: bool,
+) -> tuple[GateIncrementMemberPlan, ...]:
+    plans = []
+    for candidate in candidates:
+        target_role_id = candidate.target_role_id
+        if target_role_id is None:
+            raise RuntimeError("Selected Gate increment candidate has no target role")
+        plans.append(
+            GateIncrementMemberPlan(
+                candidate.user_id,
+                candidate.current_gate_role_ids,
+                target_role_id,
+                target_ordinal=candidate.target_ordinal,
+                grant_solo=grant_solo,
+            )
+        )
+    return tuple(plans)
 
 
 def _validate_gate_increment_configuration(guild) -> tuple:
@@ -333,8 +359,8 @@ def _validate_gate_increment_configuration(guild) -> tuple:
     return tuple(roles)
 
 
-def _plan_gate_revoke_roles(guild, member, ordinal: int | None) -> tuple:
-    if ordinal is None or not 1 <= ordinal <= len(GATE_TIER_ROLE_IDS):
+def _plan_gate_revoke_roles(guild, member, current_count: int) -> tuple:
+    if not 1 <= current_count <= len(GATE_TIER_ROLE_IDS):
         raise commands.UserFeedbackCheckFailure("Stored Gate progress is invalid")
     _validate_gate_increment_configuration(guild)
     if member.top_role.position >= guild.me.top_role.position:
@@ -345,14 +371,14 @@ def _plan_gate_revoke_roles(guild, member, ordinal: int | None) -> tuple:
     current_gate_role_ids = {
         role_id for role_id in current_role_ids if role_id in GATE_TIER_ROLE_IDS
     }
-    if current_gate_role_ids != {GATE_TIER_ROLE_IDS[ordinal - 1]}:
+    if current_gate_role_ids != {GATE_TIER_ROLE_IDS[current_count - 1]}:
         raise commands.UserFeedbackCheckFailure(
             "This user's Gate role is out of sync"
         )
     original_roles = tuple(
         role for role in member.roles if role.id != guild.default_role.id
     )
-    target_count = ordinal - 1
+    target_count = current_count - 1
     desired_role_ids = [
         role_id
         for role_id in current_role_ids
@@ -431,7 +457,7 @@ class NHMisc(commands.Cog):
         ] = {}
         self._gate_revoke_slash_command = discord.app_commands.Command(
             name="gaterevoke",
-            description="Revoke a member's latest Gate",
+            description="Revoke one of a member's Gates",
             callback=self._gate_revoke_slash,
         )
         self._gate_revoke_slash_command.default_permissions = discord.Permissions(
@@ -439,7 +465,7 @@ class NHMisc(commands.Cog):
         )
         self._gate_revoke_slash_command.guild_only = True
         self._gate_revoke_user_context_menu = discord.app_commands.ContextMenu(
-            name="Revoke latest Gate",
+            name="Revoke Gate",
             callback=self._gate_revoke_user_context_action,
         )
         self._gate_revoke_user_context_menu.default_permissions = (
@@ -949,26 +975,37 @@ class NHMisc(commands.Cog):
         public_defer: bool,
     ) -> None:
         if isinstance(error, asyncio.TimeoutError):
-            log.error(
-                "Achievement interaction timed out: action=%s guild=%s user=%s",
-                action,
-                getattr(interaction.guild, "id", None),
-                getattr(interaction.user, "id", None),
-            )
             message = "Achievement data is busy. Try again in a moment"
         else:
-            log.error(
-                "Achievement interaction failed: action=%s guild=%s user=%s",
+            message = "Achievement data could not be loaded. Try again later"
+        try:
+            await self._send_achievement_interaction_error(
+                interaction,
+                message,
+                public_defer=public_defer,
+            )
+        except Exception:
+            log.exception(
+                "Achievement interaction failed and its Discord error could not be "
+                "sent: action=%s guild=%s user=%s original_error=%r",
                 action,
                 getattr(interaction.guild, "id", None),
                 getattr(interaction.user, "id", None),
-                exc_info=error,
+                error,
             )
-            message = "Achievement data could not be loaded. Try again later"
-        await self._send_achievement_interaction_error(
-            interaction,
-            message,
-            public_defer=public_defer,
+
+    @staticmethod
+    async def _finish_action_interaction(interaction, view, *failures: str) -> None:
+        view.stop()
+        visible_failures = tuple(failure for failure in failures if failure)
+        if not visible_failures:
+            await interaction.delete_original_response()
+            return
+        await interaction.edit_original_response(
+            content="; ".join(visible_failures),
+            embed=None,
+            view=None,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
     async def _achievements_slash(
@@ -1134,35 +1171,48 @@ class NHMisc(commands.Cog):
     def _build_gate_revoke_embed(
         guild_id: int,
         member: discord.Member,
-        award,
+        awards,
+        selected_award,
         *,
         notice: str | None = None,
     ) -> discord.Embed:
-        proof = "No proof stored"
-        if award.source_channel_id is not None and award.source_message_id is not None:
-            proof = (
-                "[Open message](https://discord.com/channels/"
-                f"{guild_id}/{award.source_channel_id}/{award.source_message_id})"
+        lines = [
+            f"Target: <@{member.id}>",
+            f"Gate role: {len(awards)} → {len(awards) - 1}",
+            "",
+        ]
+        for award in awards:
+            proof = "No proof stored"
+            if (
+                award.source_channel_id is not None
+                and award.source_message_id is not None
+            ):
+                proof = (
+                    "[Open proof](https://discord.com/channels/"
+                    f"{guild_id}/{award.source_channel_id}/{award.source_message_id})"
+                )
+            marker = "▶ " if award is selected_award else ""
+            lines.append(f"{marker}Stargate {award.ordinal}: {proof}")
+        if selected_award is None:
+            lines.extend(("", "Choose a Stargate to revoke"))
+        elif selected_award is awards[-1]:
+            lines.extend(("", f"Stargate {selected_award.ordinal} will be removed"))
+        else:
+            lines.extend(
+                (
+                    "",
+                    f"Selected: Stargate {selected_award.ordinal}",
+                    "Choose whether to compact the remaining Stargate numbers "
+                    "or leave the gap",
+                )
             )
-        embed = discord.Embed(title="Revoke latest Gate", description=notice)
-        embed.add_field(name="Target", value=f"<@{member.id}>", inline=False)
-        embed.add_field(
-            name="Current Gate count",
-            value=str(award.ordinal),
-            inline=False,
+        if notice:
+            lines.extend(("", notice))
+        return discord.Embed(
+            title="Revoke Gate",
+            description="\n".join(lines),
+            color=discord.Color.blue(),
         )
-        embed.add_field(
-            name="Role transition",
-            value=f"{award.ordinal} → {award.ordinal - 1}",
-            inline=False,
-        )
-        embed.add_field(
-            name="Removing",
-            value=f"Stargate {award.ordinal}",
-            inline=False,
-        )
-        embed.add_field(name="Proof", value=proof, inline=False)
-        return embed
 
     async def _gate_revoke_slash(
         self,
@@ -1183,7 +1233,7 @@ class NHMisc(commands.Cog):
         interaction: discord.Interaction,
         member: discord.Member,
     ) -> None:
-        action = "revoke latest Gate"
+        action = "revoke Gate"
         permissions = interaction.permissions
         if (
             interaction.guild is None
@@ -1210,15 +1260,15 @@ class NHMisc(commands.Cog):
                     content="Achievement data is still initializing. Run rolesync first"
                 )
                 return
-            award = await self._await_achievement_interaction_data(
-                self._achievement_store.get_latest_stargate(guild.id, member.id)
+            awards = await self._await_achievement_interaction_data(
+                self._achievement_store.get_active_stargates(guild.id, member.id)
             )
-            if award is None:
+            if not awards:
                 await interaction.edit_original_response(
                     content="This user has no Gate to revoke"
                 )
                 return
-            _plan_gate_revoke_roles(guild, member, award.ordinal)
+            _plan_gate_revoke_roles(guild, member, len(awards))
             await self._require_private_moderation_log_channel(guild)
 
             from .achievement_views import GateRevokeView
@@ -1227,7 +1277,7 @@ class NHMisc(commands.Cog):
                 self,
                 interaction.user.id,
                 member,
-                award,
+                awards,
             )
             await interaction.edit_original_response(
                 embed=view.render_embed(),
@@ -1245,23 +1295,27 @@ class NHMisc(commands.Cog):
                 public_defer=False,
             )
 
-    async def _confirm_gate_revoke(self, interaction, view) -> None:
+    async def _confirm_gate_revoke(self, interaction, view, *, compact: bool) -> None:
         await interaction.response.defer()
         guild = interaction.guild
         member = view.member
-        reviewed_award = view.award
+        reviewed_awards = view.awards
+        reviewed_award = view.selected_award
+        if reviewed_award is None:
+            await interaction.edit_original_response(
+                embed=view.render_embed(notice="Choose a Stargate to revoke"),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
         key = (guild.id, member.id)
         lock = self._gate_revoke_locks.setdefault(key, asyncio.Lock())
         async with lock:
-            latest_award = await self._achievement_store.get_latest_stargate(
+            live_awards = await self._achievement_store.get_active_stargates(
                 guild.id,
                 member.id,
             )
-            if (
-                latest_award is None
-                or latest_award.award_id != reviewed_award.award_id
-                or latest_award.ordinal != reviewed_award.ordinal
-            ):
+            if live_awards != reviewed_awards:
                 await interaction.edit_original_response(
                     embed=view.render_embed(
                         notice="Gate progress changed. Start the action again"
@@ -1277,7 +1331,7 @@ class NHMisc(commands.Cog):
                     _plan_gate_revoke_roles(
                         guild,
                         member,
-                        latest_award.ordinal,
+                        len(live_awards),
                     )
                 )
             except commands.UserFeedbackCheckFailure as error:
@@ -1296,16 +1350,11 @@ class NHMisc(commands.Cog):
                     await member.edit(
                         roles=desired_roles,
                         reason=(
-                            "Revoke latest Gate through NHMisc "
+                            f"Revoke Stargate {reviewed_award.ordinal} through NHMisc "
                             f"by moderator {interaction.user.id}"
                         ),
                     )
                 except Exception:
-                    log.exception(
-                        "Failed to change Gate role for guild %s member %s",
-                        guild.id,
-                        member.id,
-                    )
                     await interaction.edit_original_response(
                         embed=view.render_embed(
                             notice="The Gate role could not be changed"
@@ -1315,29 +1364,32 @@ class NHMisc(commands.Cog):
                     )
                     return
 
-                deleted_award = (
-                    await self._achievement_store.delete_latest_stargate(
-                        guild.id,
-                        member.id,
-                        expected_award_id=reviewed_award.award_id,
-                    )
+                result = await self._achievement_store.revoke_stargate(
+                    guild.id,
+                    member.id,
+                    expected_awards=reviewed_awards,
+                    selected_award_id=reviewed_award.award_id,
+                    compact=compact,
                 )
-                if deleted_award is None:
+                if result is None:
+                    role_restored = True
                     try:
                         await member.edit(
                             roles=original_roles,
                             reason="Restore Gate role after stale revoke",
                         )
                     except Exception:
-                        log.exception(
-                            "Failed to restore Gate role after rejected revoke for "
-                            "guild %s member %s",
-                            guild.id,
-                            member.id,
-                        )
+                        role_restored = False
                     await interaction.edit_original_response(
                         embed=view.render_embed(
-                            notice="Gate progress changed. The revoke was cancelled"
+                            notice=(
+                                "Gate progress changed. The revoke was cancelled"
+                                if role_restored
+                                else (
+                                    "Gate progress changed and the original Gate role "
+                                    "could not be restored"
+                                )
+                            )
                         ),
                         view=view,
                         allowed_mentions=discord.AllowedMentions.none(),
@@ -1346,41 +1398,83 @@ class NHMisc(commands.Cog):
             finally:
                 self._authorized_gate_role_edits.pop(key, None)
 
-            view.stop()
-            await interaction.edit_original_response(
-                content=(
-                    f"Revoked Stargate {reviewed_award.ordinal} from <@{member.id}>"
-                ),
-                embed=None,
-                view=None,
-                allowed_mentions=discord.AllowedMentions.none(),
+            await self._finish_gate_revoke(
+                interaction,
+                view,
+                member,
+                reviewed_awards,
+                reviewed_award,
+                result,
+                compact=compact,
             )
-            proof = "No proof stored"
-            if (
-                reviewed_award.source_channel_id is not None
-                and reviewed_award.source_message_id is not None
-            ):
-                proof = (
-                    "https://discord.com/channels/"
-                    f"{guild.id}/{reviewed_award.source_channel_id}/"
-                    f"{reviewed_award.source_message_id}"
-                )
+
+    async def _finish_gate_revoke(
+        self,
+        interaction,
+        view,
+        member,
+        reviewed_awards,
+        reviewed_award,
+        result,
+        *,
+        compact: bool,
+    ) -> None:
+        view.stop()
+        guild = interaction.guild
+        proof = "No proof stored"
+        if (
+            reviewed_award.source_channel_id is not None
+            and reviewed_award.source_message_id is not None
+        ):
+            proof = (
+                "https://discord.com/channels/"
+                f"{guild.id}/{reviewed_award.source_channel_id}/"
+                f"{reviewed_award.source_message_id}"
+            )
+        mode = "shift to fill gap" if compact else "leave gap"
+        ordinal_changes = ", ".join(
+            f"Stargate {old} → Stargate {new}"
+            for _award_id, old, new in result.ordinal_changes
+        ) or "none"
+        try:
             delivered = await self._send_moderation_log(
                 guild,
                 "Gate revoked\n"
                 f"Moderator: <@{interaction.user.id}>\n"
                 f"Member: <@{member.id}>\n"
-                f"Transition: {reviewed_award.ordinal} → "
-                f"{reviewed_award.ordinal - 1}\n"
+                f"Gate role: {len(reviewed_awards)} → {len(result.remaining)}\n"
                 f"Removed: Stargate {reviewed_award.ordinal}\n"
-                f"Proof: {proof}",
+                f"Proof: {proof}\n"
+                f"Mode: {mode}\n"
+                f"Ordinal changes: {ordinal_changes}",
+                log_failure=False,
             )
-            if not delivered:
-                log.error(
-                    "Gate revoke audit could not be delivered for guild %s member %s",
+        except Exception:
+            delivered = False
+        if not delivered:
+            try:
+                await interaction.edit_original_response(
+                    content="The Gate was revoked, but the moderation log could not be sent",
+                    embed=None,
+                    view=None,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException:
+                log.exception(
+                    "Gate revoke audit and Discord error could not be delivered "
+                    "for guild %s member %s",
                     guild.id,
                     member.id,
                 )
+            return
+        try:
+            await interaction.delete_original_response()
+        except discord.HTTPException:
+            log.exception(
+                "Gate revoke review could not be removed for guild %s member %s",
+                guild.id,
+                member.id,
+            )
 
     async def _grant_achievements_context_action(
         self,
@@ -1666,20 +1760,20 @@ class NHMisc(commands.Cog):
             f"{source_message.guild.id}/{source_message.channel.id}/"
             f"{source_message.id}"
         )
-        await self._send_moderation_log(
+        log_delivered = await self._send_moderation_log(
             source_message.guild,
             "Gate proofs attached\n"
             f"Moderator: <@{interaction.user.id}>\n"
             f"{assignment_lines}\n"
             f"Source: {source_url}",
+            log_failure=False,
         )
-        view.stop()
-        count = len(assignments)
-        await interaction.edit_original_response(
-            content=f"Attached {count} Gate proof{'s' if count != 1 else ''}",
-            embed=None,
-            view=None,
-            allowed_mentions=discord.AllowedMentions.none(),
+        await self._finish_action_interaction(
+            interaction,
+            view,
+            "Gate proofs were attached, but the moderation log could not be sent"
+            if not log_delivered
+            else "",
         )
 
     async def _confirm_gate_proof_batch(
@@ -1771,28 +1865,21 @@ class NHMisc(commands.Cog):
             if replace_existing
             else "Batch Gate proofs attached"
         )
-        await self._send_moderation_log(
+        log_delivered = await self._send_moderation_log(
             source_message.guild,
             f"{log_action}\n"
             f"Moderator: <@{interaction.user.id}>\n"
             f"Player: <@{view.member.id}>\n"
             f"{proof_lines}\n"
             f"Request: {source_message.jump_url}",
+            log_failure=False,
         )
-        view.stop()
-        count = len(proofs)
-        action = "Updated" if replace_existing else "Attached"
-        qualifier = (
-            " missing" if view.existing_proofs and not replace_existing else ""
-        )
-        await interaction.edit_original_response(
-            content=(
-                f"{action} {count}{qualifier} Gate "
-                f"proof{'s' if count != 1 else ''}"
-            ),
-            embed=None,
-            view=None,
-            allowed_mentions=discord.AllowedMentions.none(),
+        await self._finish_action_interaction(
+            interaction,
+            view,
+            "Gate proofs were updated, but the moderation log could not be sent"
+            if not log_delivered
+            else "",
         )
 
     async def _confirm_achievement_grant(self, interaction, view) -> None:
@@ -1882,6 +1969,7 @@ class NHMisc(commands.Cog):
             created_count += created
             already_count += already
             failed_members += int(failed)
+        moderation_log_delivered = True
         if created_count:
             achievements = ", ".join(
                 f"{definition.display_name} (`{definition.key}`)"
@@ -1895,7 +1983,7 @@ class NHMisc(commands.Cog):
                 f"{source_message.guild.id}/{source_message.channel.id}/"
                 f"{source_message.id}"
             )
-            await self._send_moderation_log(
+            moderation_log_delivered = await self._send_moderation_log(
                 source_message.guild,
                 "Achievements granted\n"
                 f"Moderator: <@{interaction.user.id}>\n"
@@ -1903,6 +1991,7 @@ class NHMisc(commands.Cog):
                 f"Achievements: {achievements}\n"
                 f"Awards created: {created_count}\n"
                 f"Source: {source_url}",
+                log_failure=False,
             )
         if failed_members:
             await self._send_maintenance_log(
@@ -1910,18 +1999,15 @@ class NHMisc(commands.Cog):
                 "Achievement grant partially failed\n"
                 f"Moderator: <@{interaction.user.id}>\n"
                 f"Members skipped: {failed_members}",
+                log_failure=False,
             )
-        view.stop()
-        status = f"Granted {created_count} achievements"
-        if already_count:
-            status += f"; {already_count} were already assigned"
-        if failed_members:
-            status += f"; {failed_members} users could not be updated"
-        await interaction.edit_original_response(
-            content=status,
-            embed=None,
-            view=None,
-            allowed_mentions=discord.AllowedMentions.none(),
+        await self._finish_action_interaction(
+            interaction,
+            view,
+            f"{failed_members} users could not be updated" if failed_members else "",
+            "the moderation log could not be sent"
+            if not moderation_log_delivered
+            else "",
         )
 
     @commands.group(name="achievement", invoke_without_command=True)
@@ -2091,23 +2177,21 @@ class NHMisc(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
-        await self._send_moderation_log(
+        log_delivered = await self._send_moderation_log(
             interaction.guild,
             "Achievement deleted\n"
             f"Moderator: <@{interaction.user.id}>\n"
             f"Achievement: {deleted.definition.display_name}\n"
             f"Key: `{deleted.definition.key}`\n"
             f"Awards deleted: {deleted.award_count}",
+            log_failure=False,
         )
-        view.stop()
-        await interaction.edit_original_response(
-            content=(
-                f"Deleted achievement `{deleted.definition.key}` and "
-                f"{deleted.award_count} stored awards"
-            ),
-            embed=None,
-            view=None,
-            allowed_mentions=discord.AllowedMentions.none(),
+        await self._finish_action_interaction(
+            interaction,
+            view,
+            "The achievement was deleted, but the moderation log could not be sent"
+            if not log_delivered
+            else "",
         )
 
     @achievement.group(name="role", invoke_without_command=True)
@@ -2263,7 +2347,7 @@ class NHMisc(commands.Cog):
             role_id=view.role.id,
             user_ids=view.holder_ids,
         )
-        await self._send_moderation_log(
+        log_delivered = await self._send_moderation_log(
             interaction.guild,
             "Achievement role bound\n"
             f"Moderator: <@{interaction.user.id}>\n"
@@ -2271,16 +2355,14 @@ class NHMisc(commands.Cog):
             f"(`{result.definition.key}`)\n"
             f"Role: {view.role.mention}\n"
             f"Imported awards: {result.imported_count}",
+            log_failure=False,
         )
-        view.stop()
-        await interaction.edit_original_response(
-            content=(
-                f"Bound {view.role.mention} to {result.definition.display_name}; "
-                f"imported {result.imported_count} achievements"
-            ),
-            embed=None,
-            view=None,
-            allowed_mentions=discord.AllowedMentions.none(),
+        await self._finish_action_interaction(
+            interaction,
+            view,
+            "The role was bound, but the moderation log could not be sent"
+            if not log_delivered
+            else "",
         )
         await self._reconcile_achievement_roles_for_guild(interaction.guild)
 
@@ -2510,21 +2592,11 @@ class NHMisc(commands.Cog):
                 changed_members += 1
             except commands.UserFeedbackCheckFailure:
                 skipped_members += 1
-                log.exception(
-                    "Failed to replace achievement role for guild %s member %s",
-                    interaction.guild.id,
-                    user_id,
-                )
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 skipped_members += 1
-                log.exception(
-                    "Failed to replace achievement role for guild %s member %s",
-                    interaction.guild.id,
-                    user_id,
-                )
 
         mode = "move members" if remove_old else "keep old role"
-        await self._send_moderation_log(
+        moderation_log_delivered = await self._send_moderation_log(
             interaction.guild,
             "Achievement role replaced\n"
             f"Moderator: <@{interaction.user.id}>\n"
@@ -2536,6 +2608,7 @@ class NHMisc(commands.Cog):
             f"Imported awards: {result.imported_count}\n"
             f"Members changed: {changed_members}\n"
             f"Members skipped: {skipped_members}",
+            log_failure=False,
         )
         if skipped_members:
             await self._send_maintenance_log(
@@ -2543,17 +2616,17 @@ class NHMisc(commands.Cog):
                 "Achievement role replacement partially failed\n"
                 f"Achievement: `{result.definition.key}`\n"
                 f"Members skipped: {skipped_members}",
+                log_failure=False,
             )
-        view.stop()
-        await interaction.edit_original_response(
-            content=(
-                f"Bound {view.new_role.mention} to {result.definition.display_name}; "
-                f"imported {result.imported_count} achievements; "
-                f"changed {changed_members} members; skipped {skipped_members}"
-            ),
-            embed=None,
-            view=None,
-            allowed_mentions=discord.AllowedMentions.none(),
+        await self._finish_action_interaction(
+            interaction,
+            view,
+            f"{skipped_members} members could not be updated"
+            if skipped_members
+            else "",
+            "the moderation log could not be sent"
+            if not moderation_log_delivered
+            else "",
         )
 
     @achievement_role.command(name="list")
@@ -2702,19 +2775,21 @@ class NHMisc(commands.Cog):
             except (discord.Forbidden, discord.HTTPException):
                 failed_members += 1
                 continue
+        moderation_log_delivered = True
         if revoked_count:
             achievements = ", ".join(
                 f"{definition.display_name} (`{definition.key}`)"
                 for definition in selected_definitions
             )
             members = ", ".join(f"<@{member.id}>" for member in view.members)
-            await self._send_moderation_log(
+            moderation_log_delivered = await self._send_moderation_log(
                 interaction.guild,
                 "Achievements revoked\n"
                 f"Moderator: <@{interaction.user.id}>\n"
                 f"Members: {members}\n"
                 f"Achievements: {achievements}\n"
                 f"Awards revoked: {revoked_count}",
+                log_failure=False,
             )
         if failed_members:
             await self._send_maintenance_log(
@@ -2722,20 +2797,15 @@ class NHMisc(commands.Cog):
                 "Achievement revoke partially failed\n"
                 f"Moderator: <@{interaction.user.id}>\n"
                 f"Members with roles not updated: {failed_members}",
+                log_failure=False,
             )
-        view.stop()
-        await interaction.edit_original_response(
-            content=(
-                f"Revoked {revoked_count} achievements"
-                + (
-                    f"; {failed_members} users could not be updated"
-                    if failed_members
-                    else ""
-                )
-            ),
-            embed=None,
-            view=None,
-            allowed_mentions=discord.AllowedMentions.none(),
+        await self._finish_action_interaction(
+            interaction,
+            view,
+            f"{failed_members} users could not be updated" if failed_members else "",
+            "the moderation log could not be sent"
+            if not moderation_log_delivered
+            else "",
         )
 
     @staticmethod
@@ -3717,7 +3787,7 @@ class NHMisc(commands.Cog):
             return
 
         try:
-            view = self._create_gate_increment_review(
+            view = await self._create_gate_increment_review(
                 source_message,
                 interaction.user.id,
                 ephemeral=True,
@@ -3732,7 +3802,7 @@ class NHMisc(commands.Cog):
         )
         view.message = await interaction.original_response()
 
-    def _create_gate_increment_review(
+    async def _create_gate_increment_review(
         self,
         source_message: discord.Message,
         opener_id: int,
@@ -3740,16 +3810,8 @@ class NHMisc(commands.Cog):
         ephemeral: bool,
     ):
         _validate_gate_increment_configuration(source_message.guild)
-        candidates = _build_gate_increment_candidates(source_message)
-        if not candidates:
-            raise commands.UserFeedbackCheckFailure(
-                "This message has no eligible users to increment"
-            )
-        if len(candidates) > MAX_GATE_INCREMENT_CANDIDATES:
-            raise commands.UserFeedbackCheckFailure(
-                f"This message contains {len(candidates)} users. Gate increment "
-                f"supports at most {MAX_GATE_INCREMENT_CANDIDATES} at a time"
-            )
+        candidates = await self._fetch_gate_increment_candidates(source_message)
+        self._validate_gate_increment_candidate_count(candidates)
         from .gate_increment_views import GateIncrementReviewView
 
         return GateIncrementReviewView(
@@ -3911,6 +3973,7 @@ class NHMisc(commands.Cog):
                 source_message
             )
             self._validate_gate_increment_candidate_count(live_candidates)
+            await self._require_private_moderation_log_channel(source_message.guild)
         except commands.UserFeedbackCheckFailure as error:
             await interaction.edit_original_response(
                 content=None,
@@ -3942,17 +4005,11 @@ class NHMisc(commands.Cog):
             if candidate.user_id in view.selected_user_ids
             and candidate.target_role_id is not None
         )
-        plans = tuple(
-            GateIncrementMemberPlan(
-                candidate.user_id,
-                candidate.current_gate_role_ids,
-                candidate.target_role_id,
-                target_ordinal=(candidate.current_tier or 0) + 1,
-                grant_solo=(
-                    view.solo_gater_enabled and len(selected_candidates) == 1
-                ),
-            )
-            for candidate in selected_candidates
+        plans = _build_gate_increment_member_plans(
+            selected_candidates,
+            grant_solo=(
+                view.solo_gater_enabled and len(selected_candidates) == 1
+            ),
         )
         key = self._gate_increment_key(source_message)
         try:
@@ -3992,38 +4049,60 @@ class NHMisc(commands.Cog):
             for member_plan in snapshot.members
             if member_plan.state is MemberState.COMPLETED
         )
+        moderation_log_delivered = True
         if completed_members:
             increments = ", ".join(
-                f"<@{member_plan.user_id}> Gate {member_plan.target_ordinal}"
+                f"<@{member_plan.user_id}> Gate "
+                f"{GATE_TIER_ROLE_IDS.index(member_plan.target_role_id) + 1}"
                 + (" + Solo Gater" if member_plan.grant_solo else "")
                 for member_plan in completed_members
+                if member_plan.target_role_id in GATE_TIER_ROLE_IDS
             )
             source_url = (
                 "https://discord.com/channels/"
                 f"{source_message.guild.id}/{source_message.channel.id}/"
                 f"{source_message.id}"
             )
-            await self._send_moderation_log(
-                source_message.guild,
-                "Gate incremented\n"
-                f"Moderator: <@{interaction.user.id}>\n"
-                f"Members: {increments}\n"
-                f"Source: {source_url}",
-            )
+            try:
+                moderation_log_delivered = await self._send_moderation_log(
+                    source_message.guild,
+                    "Gate incremented\n"
+                    f"Moderator: <@{interaction.user.id}>\n"
+                    f"Members: {increments}\n"
+                    f"Source: {source_url}",
+                    log_failure=False,
+                )
+            except Exception:
+                moderation_log_delivered = False
         skipped_members = len(snapshot.members) - len(completed_members)
         if skipped_members:
-            await self._send_maintenance_log(
-                source_message.guild,
-                "Gate increment partially failed\n"
-                f"Moderator: <@{interaction.user.id}>\n"
-                f"Members skipped: {skipped_members}",
-            )
+            try:
+                await self._send_maintenance_log(
+                    source_message.guild,
+                    "Gate increment partially failed\n"
+                    f"Moderator: <@{interaction.user.id}>\n"
+                    f"Members skipped: {skipped_members}",
+                    log_failure=False,
+                )
+            except Exception:
+                pass
         published = await self._publish_gate_increment_result(
             source_message,
             snapshot,
         )
         status = self._format_gate_increment_completion(snapshot, published)
-        await self._finish_gate_increment_review(interaction, view, status)
+        if not moderation_log_delivered:
+            status += "\nRoles changed, but the moderation log could not be sent"
+        await self._finish_gate_increment_review(
+            interaction,
+            view,
+            status,
+            success=(
+                skipped_members == 0
+                and published
+                and moderation_log_delivered
+            ),
+        )
 
     async def _fetch_gate_increment_candidates(
         self, source_message: discord.Message
@@ -4040,7 +4119,47 @@ class NHMisc(commands.Cog):
                 ) from error
             if member.bot:
                 continue
-            candidates.append(_build_gate_increment_candidate(member))
+            member_role_ids = tuple(role.id for role in member.roles)
+            transition = plan_gate_transition(member_role_ids)
+            awards = await self._achievement_store.get_active_stargates(
+                source_message.guild.id,
+                member.id,
+            )
+            completed_count = len(awards)
+            expected_gate_role_ids = (
+                (GATE_TIER_ROLE_IDS[completed_count - 1],)
+                if completed_count
+                else ()
+            )
+            if transition.current_role_ids != expected_gate_role_ids:
+                raise commands.UserFeedbackCheckFailure(
+                    f"<@{member.id}>'s Gate role is out of sync with achievement data"
+                )
+            used_ordinals = {
+                award.ordinal for award in awards if award.ordinal is not None
+            }
+            target_ordinal = 1
+            while target_ordinal in used_ordinals:
+                target_ordinal += 1
+            target_role_id = (
+                GATE_TIER_ROLE_IDS[completed_count]
+                if completed_count < len(GATE_TIER_ROLE_IDS)
+                else None
+            )
+            candidates.append(
+                GateIncrementCandidate(
+                    user_id=member.id,
+                    display_name=member.display_name,
+                    current_gate_role_ids=transition.current_role_ids,
+                    current_tier=completed_count or None,
+                    target_role_id=target_role_id,
+                    target_ordinal=(target_ordinal if target_role_id else None),
+                    highest_ordinal=max(used_ordinals, default=0),
+                    has_solo_gater=(
+                        SINGLEPLAYER_GATE_COMPLETED_ROLE_ID in member_role_ids
+                    ),
+                )
+            )
             if len(candidates) > MAX_GATE_INCREMENT_CANDIDATES:
                 break
         return tuple(candidates)
@@ -4073,6 +4192,10 @@ class NHMisc(commands.Cog):
                 != preview_by_user_id[candidate.user_id].current_gate_role_ids
                 or candidate.target_role_id
                 != preview_by_user_id[candidate.user_id].target_role_id
+                or candidate.target_ordinal
+                != preview_by_user_id[candidate.user_id].target_ordinal
+                or candidate.highest_ordinal
+                != preview_by_user_id[candidate.user_id].highest_ordinal
             )
             for candidate in live_candidates
             if candidate.user_id in view.selected_user_ids
@@ -4280,8 +4403,13 @@ class NHMisc(commands.Cog):
         interaction,
         view,
         status: str,
+        *,
+        success: bool = False,
     ) -> None:
         view.stop()
+        if success:
+            await interaction.delete_original_response()
+            return
         if view.ephemeral:
             await interaction.edit_original_response(
                 content=status,
@@ -5446,6 +5574,7 @@ class NHMisc(commands.Cog):
         *,
         ping_user: discord.abc.Snowflake | None = None,
         require_private: bool = False,
+        log_failure: bool = True,
     ) -> bool:
         """Send to a configured guild log destination."""
         config_value = getattr(self.config.guild(guild), config_key)
@@ -5480,6 +5609,7 @@ class NHMisc(commands.Cog):
                 channel,
                 content,
                 allowed_mentions=allowed_mentions,
+                log_failure=log_failure,
             )
             is not None
         )
@@ -5503,6 +5633,8 @@ class NHMisc(commands.Cog):
         self,
         guild: discord.Guild,
         content: str,
+        *,
+        log_failure: bool = True,
     ) -> bool:
         """Send to the configured maintenance channel without mentions."""
         return await self._send_configured_log(
@@ -5510,12 +5642,15 @@ class NHMisc(commands.Cog):
             "maintenance_channel",
             content,
             require_private=True,
+            log_failure=log_failure,
         )
 
     async def _send_moderation_log(
         self,
         guild: discord.Guild,
         content: str,
+        *,
+        log_failure: bool = True,
     ) -> bool:
         """Send to the configured moderator action channel without mentions."""
         return await self._send_configured_log(
@@ -5523,6 +5658,7 @@ class NHMisc(commands.Cog):
             "moderation_log_channel",
             content,
             require_private=True,
+            log_failure=log_failure,
         )
 
     def _schedule_audit_log_edit(
@@ -5633,13 +5769,15 @@ class NHMisc(commands.Cog):
         content: str,
         *,
         allowed_mentions: discord.AllowedMentions | None = None,
+        log_failure: bool = True,
     ) -> discord.Message | None:
         if allowed_mentions is None:
             allowed_mentions = discord.AllowedMentions.none()
         try:
             return await channel.send(content, allowed_mentions=allowed_mentions)
         except discord.HTTPException:
-            log.exception("Failed to send voice log message to channel %s", channel.id)
+            if log_failure:
+                log.exception("Failed to send voice log message to channel %s", channel.id)
         return None
 
     async def _activity_midnight_loop(self) -> None:
