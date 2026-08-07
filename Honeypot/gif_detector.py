@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import discord
-from redbot.core import commands
+from redbot.core import commands, modlog
 from redbot.core.i18n import Translator
 
 from . import settings
@@ -402,20 +402,43 @@ async def _apply_gif_mute(
 
         member = await _resolve_mute_member(guild, message.author)
         until = datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)
+        reason = "GIF defense system activated, ICBM launch privileges revoked"
         response = await mutes.mute_user(
             guild,
             author,
             member,
             until=until,
-            reason="GIF defense system activated, ICBM launch privileges revoked",
+            reason=reason,
         )
         if not getattr(response, "success", False):
-            reason = getattr(response, "reason", None) or "Core Mutes rejected GIF mute"
-            await _record_mute_failure(cog, guild.id, str(reason))
+            rejection_reason = (
+                getattr(response, "reason", None) or "Core Mutes rejected GIF mute"
+            )
+            await _record_mute_failure(cog, guild.id, str(rejection_reason))
             return
 
         async with cog._gif_detector_rate_lock:
             cog._gif_detector_active_mutes[key] = time.monotonic() + duration_seconds
+
+        try:
+            await modlog.create_case(
+                cog.bot,
+                guild,
+                message.created_at,
+                "smute",
+                member,
+                author,
+                reason,
+                until=until,
+                channel=None,
+            )
+        except Exception as error:
+            await _record_mute_failure(
+                cog,
+                guild.id,
+                "GIF mute was applied, but its modlog case could not be created: "
+                f"{type(error).__name__}: {error}",
+            )
     except discord.HTTPException as error:
         await _record_mute_failure(
             cog,
