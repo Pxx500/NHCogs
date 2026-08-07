@@ -309,14 +309,18 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 cog._record_operational_failure.assert_awaited_once()
                 self.assertNotIn(key, cog._gif_detector_mutes_in_flight)
 
-    async def test_uncached_message_author_is_resolved_to_member_before_core_mute(self):
+    async def test_successful_core_mute_resolves_member_and_creates_modlog_case(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("Honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog._record_operational_failure = mock.AsyncMock()
                 user = SimpleNamespace(id=20)
-                member = SimpleNamespace(id=20, guild_permissions=object(), top_role=object())
+                member = SimpleNamespace(
+                    id=20,
+                    guild_permissions=object(),
+                    top_role=object(),
+                )
                 role = SimpleNamespace(id=99)
                 guild = SimpleNamespace(
                     id=1,
@@ -325,7 +329,12 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     get_member=mock.Mock(return_value=None),
                     fetch_member=mock.AsyncMock(return_value=member),
                 )
-                message = SimpleNamespace(guild=guild, author=user)
+                created_at = datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc)
+                message = SimpleNamespace(
+                    guild=guild,
+                    author=user,
+                    created_at=created_at,
+                )
                 mutes = SimpleNamespace(
                     config=SimpleNamespace(
                         guild=mock.Mock(
@@ -338,6 +347,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         return_value=SimpleNamespace(success=True, reason=None)
                     ),
                 )
+                gif_detector.modlog.create_case = mock.AsyncMock()
                 cog.bot.get_cog = mock.Mock(return_value=mutes)
                 key = (guild.id, user.id)
                 cog._gif_detector_mutes_in_flight.add(key)
@@ -346,6 +356,74 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
                 guild.fetch_member.assert_awaited_once_with(user.id)
                 self.assertIs(mutes.mute_user.await_args.args[2], member)
+                reason = "GIF defense system activated, ICBM launch privileges revoked"
+                until = mutes.mute_user.await_args.kwargs["until"]
+                gif_detector.modlog.create_case.assert_awaited_once_with(
+                    cog.bot,
+                    guild,
+                    created_at,
+                    "smute",
+                    member,
+                    guild.me,
+                    reason,
+                    until=until,
+                    channel=None,
+                )
+                self.assertIn(key, cog._gif_detector_active_mutes)
+                self.assertNotIn(key, cog._gif_detector_mutes_in_flight)
+
+    async def test_modlog_failure_keeps_successful_mute_tracked_and_reports_failure(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                cog._record_operational_failure = mock.AsyncMock()
+                user = SimpleNamespace(id=20)
+                member = SimpleNamespace(
+                    id=20,
+                    guild_permissions=object(),
+                    top_role=object(),
+                )
+                role = SimpleNamespace(id=99)
+                guild = SimpleNamespace(
+                    id=1,
+                    me=SimpleNamespace(id=999),
+                    get_role=mock.Mock(return_value=role),
+                    get_member=mock.Mock(return_value=member),
+                )
+                message = SimpleNamespace(
+                    guild=guild,
+                    author=user,
+                    created_at=datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc),
+                )
+                mutes = SimpleNamespace(
+                    config=SimpleNamespace(
+                        guild=mock.Mock(
+                            return_value=SimpleNamespace(
+                                mute_role=mock.AsyncMock(return_value=role.id)
+                            )
+                        )
+                    ),
+                    mute_user=mock.AsyncMock(
+                        return_value=SimpleNamespace(success=True, reason=None)
+                    ),
+                )
+                gif_detector.modlog.create_case = mock.AsyncMock(
+                    side_effect=RuntimeError("modlog unavailable")
+                )
+                cog.bot.get_cog = mock.Mock(return_value=mutes)
+                key = (guild.id, user.id)
+                cog._gif_detector_mutes_in_flight.add(key)
+
+                await gif_detector._apply_gif_mute(cog, message, key, 3600)
+
+                self.assertIn(key, cog._gif_detector_active_mutes)
+                self.assertNotIn(key, cog._gif_detector_mutes_in_flight)
+                cog._record_operational_failure.assert_awaited_once()
+                self.assertIn(
+                    "modlog case could not be created",
+                    cog._record_operational_failure.await_args.args[2],
+                )
 
     async def test_zero_retention_deletes_static_gif_and_keeps_warning_for_five_seconds(self):
         with TemporaryDirectory() as directory:
