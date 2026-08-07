@@ -76,6 +76,46 @@ class GateIncrementStoreTests(unittest.IsolatedAsyncioTestCase):
             1,
         )
 
+    async def test_claim_fills_the_lowest_missing_gate_ordinal(self):
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.executemany(
+                """
+                INSERT INTO achievement_awards (
+                    guild_id, user_id, achievement_key, ordinal,
+                    awarded_at, state
+                ) VALUES (1, 4, 'stargate_completed', ?, 'now', 'active')
+                """,
+                ((1,), (3,)),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        key = gate_increment_store.SourceMessageKey(1, 2, 32)
+        plan = gate_increment_store.GateIncrementMemberPlan(
+            4,
+            (50,),
+            60,
+            target_ordinal=2,
+        )
+
+        result = await self.first_store.claim(key, 10, (plan,))
+
+        self.assertTrue(result.created)
+        connection = sqlite3.connect(self.path)
+        try:
+            row = connection.execute(
+                """
+                SELECT ordinal
+                FROM achievement_awards
+                WHERE gate_operation_id = ?
+                """,
+                (result.operation.operation_id,),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row[0], 2)
+
     async def test_completed_member_activates_reserved_gate_and_solo_awards(self):
         key = gate_increment_store.SourceMessageKey(20, 21, 22)
         plan = gate_increment_store.GateIncrementMemberPlan(

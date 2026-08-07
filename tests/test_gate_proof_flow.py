@@ -750,6 +750,7 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
             user=SimpleNamespace(id=99),
             response=SimpleNamespace(defer=mock.AsyncMock()),
             edit_original_response=mock.AsyncMock(),
+            delete_original_response=mock.AsyncMock(),
         )
         view = SimpleNamespace(
             source_message=source_message,
@@ -787,12 +788,7 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<@11>: Gate 2", log_message)
         self.assertIn("https://discord.com/channels/1/20/30", log_message)
         view.stop.assert_called_once_with()
-        interaction.edit_original_response.assert_awaited_once_with(
-            content="Attached 2 Gate proofs",
-            embed=None,
-            view=None,
-            allowed_mentions="no-mentions",
-        )
+        interaction.delete_original_response.assert_awaited_once_with()
 
     async def test_stale_proof_selection_stops_without_a_partial_success_log(self):
         member = SimpleNamespace(id=10, bot=False)
@@ -809,6 +805,7 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
             user=SimpleNamespace(id=99),
             response=SimpleNamespace(defer=mock.AsyncMock()),
             edit_original_response=mock.AsyncMock(),
+            delete_original_response=mock.AsyncMock(),
         )
         view = SimpleNamespace(
             source_message=source_message,
@@ -876,6 +873,7 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
             user=SimpleNamespace(id=99),
             response=SimpleNamespace(defer=mock.AsyncMock()),
             edit_original_response=mock.AsyncMock(),
+            delete_original_response=mock.AsyncMock(),
         )
         store = SimpleNamespace(
             attach_stargate_proof_links=mock.AsyncMock(return_value=(object(), object()))
@@ -908,12 +906,7 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Batch Gate proofs attached", log_message)
         self.assertIn("Gate 1: https://discord.com/channels/1/50/60", log_message)
         self.assertIn("Gate 2: https://discord.com/channels/1/51/61", log_message)
-        interaction.edit_original_response.assert_awaited_once_with(
-            content="Attached 2 Gate proofs",
-            embed=None,
-            view=None,
-            allowed_mentions="no-mentions",
-        )
+        interaction.delete_original_response.assert_awaited_once_with()
 
     async def test_batch_confirmation_adds_only_missing_proofs_when_requested(self):
         author = SimpleNamespace(id=10, bot=False)
@@ -947,6 +940,7 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
             user=SimpleNamespace(id=99),
             response=SimpleNamespace(defer=mock.AsyncMock()),
             edit_original_response=mock.AsyncMock(),
+            delete_original_response=mock.AsyncMock(),
         )
         store = SimpleNamespace(
             attach_stargate_proof_links=mock.AsyncMock(return_value=(object(),)),
@@ -974,12 +968,7 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
             (nhmisc.StargateProof(2, 51, 61),),
         )
         store.replace_stargate_proof_links.assert_not_awaited()
-        interaction.edit_original_response.assert_awaited_once_with(
-            content="Attached 1 missing Gate proof",
-            embed=None,
-            view=None,
-            allowed_mentions="no-mentions",
-        )
+        interaction.delete_original_response.assert_awaited_once_with()
 
     async def test_batch_confirmation_replaces_reviewed_proofs_when_requested(self):
         author = SimpleNamespace(id=10, bot=False)
@@ -1008,6 +997,7 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
             user=SimpleNamespace(id=99),
             response=SimpleNamespace(defer=mock.AsyncMock()),
             edit_original_response=mock.AsyncMock(),
+            delete_original_response=mock.AsyncMock(),
         )
         store = SimpleNamespace(
             attach_stargate_proof_links=mock.AsyncMock(),
@@ -1036,12 +1026,7 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
             expected_proofs={1: old_proof},
         )
         store.attach_stargate_proof_links.assert_not_awaited()
-        interaction.edit_original_response.assert_awaited_once_with(
-            content="Updated 1 Gate proof",
-            embed=None,
-            view=None,
-            allowed_mentions="no-mentions",
-        )
+        interaction.delete_original_response.assert_awaited_once_with()
 
 
 if __name__ == "__main__":

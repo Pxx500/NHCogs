@@ -68,6 +68,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             user=SimpleNamespace(id=99),
             response=SimpleNamespace(defer=mock.AsyncMock()),
             edit_original_response=mock.AsyncMock(),
+            delete_original_response=mock.AsyncMock(),
         )
 
     async def test_successful_achievement_create_emits_one_moderation_log(self):
@@ -320,14 +321,34 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 "ACHIEVEMENT_INTERACTION_DB_TIMEOUT_SECONDS",
                 0.01,
             ),
-            self.assertLogs("red.NHMisc", level="ERROR") as logs,
+            mock.patch.object(nhmisc.log, "error") as log_error,
         ):
             await cog._achievements_slash(interaction)
 
         interaction.edit_original_response.assert_awaited_once_with(
             content="Achievement data is busy. Try again in a moment"
         )
-        self.assertIn("Achievement interaction timed out", logs.output[0])
+        log_error.assert_not_called()
+
+    async def test_interaction_failure_logs_only_when_discord_error_cannot_be_sent(self):
+        interaction = SimpleNamespace(
+            guild=SimpleNamespace(id=1),
+            user=SimpleNamespace(id=99),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._send_achievement_interaction_error = mock.AsyncMock(
+            side_effect=RuntimeError("Discord unavailable")
+        )
+
+        with mock.patch.object(nhmisc.log, "error") as log_error:
+            await cog._handle_achievement_interaction_failure(
+                interaction,
+                "test action",
+                RuntimeError("database failed"),
+                public_defer=False,
+            )
+
+        log_error.assert_called_once()
 
     async def test_startup_requests_initialization_without_importing_roles(self):
         guild = SimpleNamespace(id=1)
@@ -659,10 +680,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             expected_award_count=7,
         )
         view.stop.assert_called_once_with()
-        self.assertIn(
-            "7 stored awards",
-            interaction.edit_original_response.await_args.kwargs["content"],
-        )
+        interaction.delete_original_response.assert_awaited_once_with()
         cog._send_moderation_log.assert_awaited_once()
         self.assertIn(
             "Achievement deleted",
@@ -1300,10 +1318,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             {role.id for role in member.edit.await_args.kwargs["roles"]},
             {solo_role.id},
         )
-        self.assertIn(
-            "Granted 1 achievements",
-            interaction.edit_original_response.await_args.kwargs["content"],
-        )
+        interaction.delete_original_response.assert_awaited_once_with()
         cog._send_moderation_log.assert_awaited_once()
         audit = cog._send_moderation_log.await_args.args[1]
         self.assertIn("Achievements granted", audit)
@@ -1415,10 +1430,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             (member.id,),
             ("solo_gater",),
         )
-        self.assertIn(
-            "Revoked 1 achievements",
-            interaction.edit_original_response.await_args.kwargs["content"],
-        )
+        interaction.delete_original_response.assert_awaited_once_with()
         cog._send_moderation_log.assert_awaited_once()
         audit = cog._send_moderation_log.await_args.args[1]
         self.assertIn("Achievements revoked", audit)

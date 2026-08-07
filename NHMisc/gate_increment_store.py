@@ -316,11 +316,14 @@ class GateIncrementStore:
                 ON achievement_awards (guild_id, user_id, achievement_key)
                 WHERE ordinal IS NULL AND state IN ('pending', 'active');
 
-                CREATE UNIQUE INDEX IF NOT EXISTS achievement_ordinal_unique
+                CREATE UNIQUE INDEX IF NOT EXISTS achievement_ordinal_active
                 ON achievement_awards (
                     guild_id, user_id, achievement_key, ordinal
                 )
-                WHERE ordinal IS NOT NULL;
+                WHERE ordinal IS NOT NULL
+                    AND state IN ('pending', 'active');
+
+                DROP INDEX IF EXISTS achievement_ordinal_unique;
                 """
             )
             connection.execute(
@@ -379,18 +382,25 @@ class GateIncrementStore:
                     )
                     operation_id = int(cursor.lastrowid)
                     for plan in member_plans:
-                        next_ordinal = int(
-                            connection.execute(
-                                """
-                                SELECT COALESCE(MAX(ordinal), 0) + 1
-                                FROM achievement_awards
-                                WHERE guild_id = ? AND user_id = ?
-                                    AND achievement_key = 'stargate_completed'
-                                    AND state IN ('pending', 'active')
-                                """,
-                                (key.guild_id, plan.user_id),
-                            ).fetchone()[0]
-                        )
+                        ordinal_rows = connection.execute(
+                            """
+                            SELECT ordinal
+                            FROM achievement_awards
+                            WHERE guild_id = ? AND user_id = ?
+                                AND achievement_key = 'stargate_completed'
+                                AND state IN ('pending', 'active')
+                            """,
+                            (key.guild_id, plan.user_id),
+                        ).fetchall()
+                        occupied_ordinals = set()
+                        for ordinal_row in ordinal_rows:
+                            ordinal = ordinal_row["ordinal"]
+                            if ordinal is None:
+                                raise RuntimeError("Stored Stargate ordinal is missing")
+                            occupied_ordinals.add(int(ordinal))
+                        next_ordinal = 1
+                        while next_ordinal in occupied_ordinals:
+                            next_ordinal += 1
                         if (
                             plan.target_ordinal is not None
                             and plan.target_ordinal != next_ordinal

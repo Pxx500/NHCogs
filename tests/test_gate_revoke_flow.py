@@ -1,48 +1,96 @@
 import asyncio
+import sqlite3
 import sys
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import ModuleType, SimpleNamespace
 from unittest import mock
 
+from tests.test_gate_proof_flow import _load_achievement_views
 from tests.test_gatecount import nhmisc
 
+AchievementAward = nhmisc.AchievementStore._award_from_row.__globals__["AchievementAward"]
+StargateProof = nhmisc.AchievementStore._award_from_row.__globals__["StargateProof"]
+STARGATE_COMPLETED_KEY = nhmisc.AchievementStore._award_from_row.__globals__[
+    "STARGATE_COMPLETED_KEY"
+]
 
-class GateRevokeReviewTests(unittest.TestCase):
-    def test_review_shows_target_transition_removed_ordinal_and_proof(self):
-        self.assertTrue(hasattr(nhmisc.NHMisc, "_build_gate_revoke_embed"))
-        member = SimpleNamespace(id=42, display_name="Gatekeeper")
-        award = SimpleNamespace(
-            ordinal=3,
-            source_channel_id=20,
-            source_message_id=30,
+
+class GateRevokeReviewTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _award(award_id, ordinal, channel_id=None, message_id=None):
+        return AchievementAward(
+            award_id=award_id,
+            guild_id=10,
+            user_id=42,
+            achievement_key=STARGATE_COMPLETED_KEY,
+            ordinal=ordinal,
+            awarded_at=f"time-{award_id}",
+            source_channel_id=channel_id,
+            source_message_id=message_id,
         )
 
-        embed = nhmisc.NHMisc._build_gate_revoke_embed(10, member, award)
+    def test_review_lists_every_gate_and_starts_without_a_selection(self):
+        views, _fake_select = _load_achievement_views()
+        member = SimpleNamespace(id=42, display_name="Gatekeeper")
+        awards = (
+            self._award(1, 1),
+            self._award(2, 3, 20, 30),
+        )
+        cog = SimpleNamespace(_build_gate_revoke_embed=nhmisc.NHMisc._build_gate_revoke_embed)
 
-        fields = {field.name: field.value for field in embed.fields}
-        self.assertEqual(fields["Target"], "<@42>")
-        self.assertEqual(fields["Current Gate count"], "3")
-        self.assertEqual(fields["Role transition"], "3 → 2")
-        self.assertEqual(fields["Removing"], "Stargate 3")
+        view = views.GateRevokeView(cog, 99, member, awards)
+        embed = view.render_embed()
+
+        self.assertIsNone(view.selected_award_id)
         self.assertEqual(
-            fields["Proof"],
-            "[Open message](https://discord.com/channels/10/20/30)",
+            tuple(option.label for option in view.gate_select.options),
+            ("Stargate 1", "Stargate 3"),
         )
+        self.assertIn("Stargate 1: No proof stored", embed.description)
+        self.assertIn(
+            "Stargate 3: [Open proof](https://discord.com/channels/10/20/30)",
+            embed.description,
+        )
+        self.assertNotIn(view.shift, view.children)
+        self.assertNotIn(view.leave_gap, view.children)
 
-    def test_review_is_explicit_when_latest_gate_has_no_proof(self):
-        self.assertTrue(hasattr(nhmisc.NHMisc, "_build_gate_revoke_embed"))
+    async def test_selecting_a_non_latest_gate_offers_shift_and_leave(self):
+        views, _fake_select = _load_achievement_views()
         member = SimpleNamespace(id=42, display_name="Gatekeeper")
-        award = SimpleNamespace(
-            ordinal=1,
-            source_channel_id=None,
-            source_message_id=None,
+        awards = (
+            self._award(1, 1),
+            self._award(2, 2),
+            self._award(3, 4),
         )
+        cog = SimpleNamespace(_build_gate_revoke_embed=nhmisc.NHMisc._build_gate_revoke_embed)
+        view = views.GateRevokeView(cog, 99, member, awards)
+        interaction = SimpleNamespace(response=SimpleNamespace(edit_message=mock.AsyncMock()))
+        view.gate_select.values = ["2"]
 
-        embed = nhmisc.NHMisc._build_gate_revoke_embed(10, member, award)
+        await view.gate_select.callback(interaction)
 
-        fields = {field.name: field.value for field in embed.fields}
-        self.assertEqual(fields["Role transition"], "1 → 0")
-        self.assertEqual(fields["Proof"], "No proof stored")
+        self.assertEqual(view.selected_award_id, 2)
+        self.assertIn(view.shift, view.children)
+        self.assertIn(view.leave_gap, view.children)
+        self.assertEqual(view.shift.label, "Shift to fill gap")
+        self.assertEqual(view.leave_gap.label, "Leave gap")
+
+    async def test_selecting_latest_gate_uses_one_revoke_action(self):
+        views, _fake_select = _load_achievement_views()
+        member = SimpleNamespace(id=42, display_name="Gatekeeper")
+        awards = (self._award(1, 1), self._award(2, 4))
+        cog = SimpleNamespace(_build_gate_revoke_embed=nhmisc.NHMisc._build_gate_revoke_embed)
+        view = views.GateRevokeView(cog, 99, member, awards)
+        interaction = SimpleNamespace(response=SimpleNamespace(edit_message=mock.AsyncMock()))
+        view.gate_select.values = ["2"]
+
+        await view.gate_select.callback(interaction)
+
+        self.assertIn(view.shift, view.children)
+        self.assertNotIn(view.leave_gap, view.children)
+        self.assertEqual(view.shift.label, "Revoke Stargate 4")
 
 
 class GateRevokeEntryPointTests(unittest.IsolatedAsyncioTestCase):
@@ -81,15 +129,20 @@ class GateRevokeEntryPointTests(unittest.IsolatedAsyncioTestCase):
         interaction.response.defer.assert_not_awaited()
 
     async def test_review_is_private_and_bound_to_the_invoking_moderator(self):
-        award = SimpleNamespace(
+        award = AchievementAward(
             award_id=7,
+            guild_id=10,
+            user_id=42,
+            achievement_key=STARGATE_COMPLETED_KEY,
             ordinal=2,
+            awarded_at="now",
             source_channel_id=20,
             source_message_id=30,
         )
+        awards = (award,)
         store = SimpleNamespace(
             is_bootstrapped=mock.AsyncMock(return_value=True),
-            get_latest_stargate=mock.AsyncMock(return_value=award),
+            get_active_stargates=mock.AsyncMock(return_value=awards),
         )
         gate_role = SimpleNamespace(id=nhmisc.GATE_TIER_ROLE_IDS[1])
         member = SimpleNamespace(
@@ -120,25 +173,9 @@ class GateRevokeEntryPointTests(unittest.IsolatedAsyncioTestCase):
             return_value=SimpleNamespace(id=88)
         )
 
-        class FakeGateRevokeView:
-            def __init__(self, cog, opener_id, member, award):
-                self.cog = cog
-                self.opener_id = opener_id
-                self.member = member
-                self.award = award
-                self.message = None
-
-            def render_embed(self):
-                return self.cog._build_gate_revoke_embed(
-                    10,
-                    self.member,
-                    self.award,
-                )
-
+        views, _fake_select = _load_achievement_views()
         package = ModuleType("_gatecount_nhmisc")
         package.__path__ = []
-        views = ModuleType("_gatecount_nhmisc.achievement_views")
-        views.GateRevokeView = FakeGateRevokeView
         with (
             mock.patch.dict(
                 sys.modules,
@@ -161,14 +198,15 @@ class GateRevokeEntryPointTests(unittest.IsolatedAsyncioTestCase):
         )
         kwargs = interaction.edit_original_response.await_args.kwargs
         self.assertEqual(kwargs["view"].opener_id, 99)
-        self.assertEqual(kwargs["embed"].fields[2].value, "2 → 1")
+        self.assertEqual(kwargs["view"].awards, awards)
+        self.assertIn("Gate role: 1 → 0", kwargs["embed"].description)
         self.assertEqual(kwargs["allowed_mentions"], "no-mentions")
         self.assertIs(kwargs["view"].message, response_message)
 
     async def test_user_without_a_gate_is_rejected_without_a_role_change(self):
         store = SimpleNamespace(
             is_bootstrapped=mock.AsyncMock(return_value=True),
-            get_latest_stargate=mock.AsyncMock(return_value=None),
+            get_active_stargates=mock.AsyncMock(return_value=()),
         )
         interaction = SimpleNamespace(
             guild=SimpleNamespace(id=10),
@@ -232,7 +270,7 @@ class GateRevokeRegistrationTests(unittest.TestCase):
         cog.bot = SimpleNamespace(tree=tree)
         cog._gate_revoke_slash_command = SimpleNamespace(name="gaterevoke")
         cog._gate_revoke_user_context_menu = SimpleNamespace(
-            name="Revoke latest Gate"
+            name="Revoke Gate"
         )
         cog._achievements_slash_command = SimpleNamespace(name="achievements")
         cog._achievements_user_context_menu = SimpleNamespace(
@@ -262,7 +300,7 @@ class GateRevokeRegistrationTests(unittest.TestCase):
             tree.added,
             [
                 ("gaterevoke", True),
-                ("Revoke latest Gate", True),
+                ("Revoke Gate", True),
                 ("achievements", True),
                 ("View achievements", True),
                 ("Grant achievements", True),
@@ -273,7 +311,7 @@ class GateRevokeRegistrationTests(unittest.TestCase):
             tree.removed,
             [
                 ("gaterevoke", "chat_input"),
-                ("Revoke latest Gate", "user"),
+                ("Revoke Gate", "user"),
                 ("achievements", "chat_input"),
                 ("View achievements", "user"),
                 ("Grant achievements", "message"),
@@ -282,46 +320,34 @@ class GateRevokeRegistrationTests(unittest.TestCase):
         )
 
 
-class _GateRevokeStore:
-    def __init__(self, award):
-        self.award = award
-        self.delete_calls = []
-
-    async def get_latest_stargate(self, _guild_id, _user_id):
-        return self.award
-
-    async def delete_latest_stargate(
-        self,
-        guild_id,
-        user_id,
-        *,
-        expected_award_id,
-    ):
-        self.delete_calls.append((guild_id, user_id, expected_award_id))
-        await asyncio.sleep(0)
-        if self.award is None or self.award.award_id != expected_award_id:
-            return None
-        deleted = self.award
-        self.award = None
-        return deleted
-
-
-class _GateRevokeView:
-    def __init__(self, member, award):
-        self.opener_id = 99
-        self.member = member
-        self.award = award
-        self.stopped = False
-
-    def stop(self):
-        self.stopped = True
-
-    def render_embed(self, *, notice=None):
-        return SimpleNamespace(notice=notice)
-
-
 class GateRevokeExecutionTests(unittest.IsolatedAsyncioTestCase):
-    def _fixture(self, *, ordinal=2, award_id=7):
+    async def _fixture(self, *, ordinals=(1, 2), selected_ordinal=2):
+        temp_dir = TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        path = Path(temp_dir.name) / "achievements.sqlite"
+        store = nhmisc.AchievementStore(path)
+        await store.initialize()
+        connection = sqlite3.connect(path)
+        try:
+            connection.executemany(
+                """
+                INSERT INTO achievement_awards (
+                    guild_id, user_id, achievement_key, ordinal, awarded_at,
+                    source_channel_id, source_message_id, state
+                ) VALUES (10, 42, 'stargate_completed', ?, ?, 20, ?, 'active')
+                """,
+                (
+                    (ordinal, f"time-{ordinal}", 100 + ordinal)
+                    for ordinal in ordinals
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        awards = await store.get_active_stargates(10, 42)
+        selected_award = next(
+            award for award in awards if award.ordinal == selected_ordinal
+        )
         roles = {
             role_id: SimpleNamespace(
                 id=role_id,
@@ -352,7 +378,7 @@ class GateRevokeExecutionTests(unittest.IsolatedAsyncioTestCase):
                 default_role,
                 unrelated_role,
                 solo_role,
-                roles[nhmisc.GATE_TIER_ROLE_IDS[ordinal - 1]],
+                roles[nhmisc.GATE_TIER_ROLE_IDS[len(ordinals) - 1]],
             ),
             edit=mock.AsyncMock(),
         )
@@ -370,16 +396,8 @@ class GateRevokeExecutionTests(unittest.IsolatedAsyncioTestCase):
             user=SimpleNamespace(id=99, __str__=lambda _self: "Moderator"),
             response=SimpleNamespace(defer=mock.AsyncMock()),
             edit_original_response=mock.AsyncMock(),
+            delete_original_response=mock.AsyncMock(),
         )
-        award = SimpleNamespace(
-            award_id=award_id,
-            guild_id=guild.id,
-            user_id=member.id,
-            ordinal=ordinal,
-            source_channel_id=20,
-            source_message_id=30,
-        )
-        store = _GateRevokeStore(award)
         cog = object.__new__(nhmisc.NHMisc)
         cog._achievement_store = store
         cog._gate_revoke_locks = {}
@@ -388,13 +406,20 @@ class GateRevokeExecutionTests(unittest.IsolatedAsyncioTestCase):
             return_value=SimpleNamespace(id=88)
         )
         cog._send_moderation_log = mock.AsyncMock(return_value=True)
-        return cog, interaction, member, guild, store, award
+        views, _fake_select = _load_achievement_views()
+        view = views.GateRevokeView(cog, 99, member, awards)
+        view.selected_award_id = selected_award.award_id
+        view._configure_select()
+        view._configure_actions()
+        return cog, interaction, member, guild, store, awards, view
 
-    async def test_confirm_removes_only_latest_gate_and_preserves_other_roles(self):
-        cog, interaction, member, _guild, store, award = self._fixture(ordinal=2)
-        view = _GateRevokeView(member, award)
+    async def test_leave_gap_revokes_selected_gate_and_sets_role_from_active_count(self):
+        cog, interaction, member, _guild, store, _awards, view = await self._fixture(
+            ordinals=(1, 2, 3),
+            selected_ordinal=2,
+        )
 
-        await cog._confirm_gate_revoke(interaction, view)
+        await cog._confirm_gate_revoke(interaction, view, compact=False)
 
         changed_role_ids = {role.id for role in member.edit.await_args_list[0].kwargs["roles"]}
         self.assertEqual(
@@ -402,97 +427,125 @@ class GateRevokeExecutionTests(unittest.IsolatedAsyncioTestCase):
             {
                 500,
                 nhmisc.SINGLEPLAYER_GATE_COMPLETED_ROLE_ID,
-                nhmisc.GATE_TIER_ROLE_IDS[0],
+                nhmisc.GATE_TIER_ROLE_IDS[1],
             },
         )
-        self.assertEqual(store.delete_calls, [(10, 42, 7)])
-        self.assertIsNone(store.award)
-        self.assertTrue(view.stopped)
+        self.assertEqual(
+            tuple(award.ordinal for award in await store.get_active_stargates(10, 42)),
+            (1, 3),
+        )
         cog._send_moderation_log.assert_awaited_once()
         self.assertIs(cog._send_moderation_log.await_args.args[0], interaction.guild)
+        self.assertIn("Mode: leave gap", cog._send_moderation_log.await_args.args[1])
+        interaction.delete_original_response.assert_awaited_once()
+        interaction.edit_original_response.assert_not_awaited()
         self.assertNotIn((10, 42), cog._authorized_gate_role_edits)
 
-    async def test_confirming_gate_one_removes_the_gate_role(self):
-        cog, interaction, member, _guild, _store, award = self._fixture(ordinal=1)
-
-        await cog._confirm_gate_revoke(
-            interaction,
-            _GateRevokeView(member, award),
+    async def test_shift_compacts_all_remaining_ordinals_and_proofs(self):
+        cog, interaction, member, _guild, store, _awards, view = await self._fixture(
+            ordinals=(1, 3, 5),
+            selected_ordinal=3,
         )
+
+        await cog._confirm_gate_revoke(interaction, view, compact=True)
+
+        self.assertEqual(
+            tuple(
+                (award.ordinal, award.source_message_id)
+                for award in await store.get_active_stargates(10, 42)
+            ),
+            ((1, 101), (2, 105)),
+        )
+        audit = cog._send_moderation_log.await_args.args[1]
+        self.assertIn("Mode: shift to fill gap", audit)
+        self.assertIn("Stargate 5 → Stargate 2", audit)
+
+    async def test_revoking_the_only_gate_removes_the_gate_role(self):
+        cog, interaction, member, _guild, store, _awards, view = await self._fixture(
+            ordinals=(1,),
+            selected_ordinal=1,
+        )
+
+        await cog._confirm_gate_revoke(interaction, view, compact=True)
 
         changed_role_ids = {role.id for role in member.edit.await_args.kwargs["roles"]}
         self.assertEqual(
             changed_role_ids,
             {500, nhmisc.SINGLEPLAYER_GATE_COMPLETED_ROLE_ID},
         )
+        self.assertEqual(await store.get_active_stargates(10, 42), ())
 
     async def test_stale_confirmation_does_not_change_discord_or_database(self):
-        cog, interaction, member, _guild, store, reviewed_award = self._fixture()
-        store.award = SimpleNamespace(**{**reviewed_award.__dict__, "award_id": 8})
-
-        await cog._confirm_gate_revoke(
-            interaction,
-            _GateRevokeView(member, reviewed_award),
+        cog, interaction, member, _guild, store, awards, view = await self._fixture()
+        await store.replace_stargate_proof_links(
+            10,
+            42,
+            (StargateProof(1, 99, 100),),
+            expected_proofs={1: StargateProof(1, 20, 101)},
         )
+
+        await cog._confirm_gate_revoke(interaction, view, compact=True)
 
         member.edit.assert_not_awaited()
-        self.assertEqual(store.delete_calls, [])
         self.assertIn(
             "changed",
-            interaction.edit_original_response.await_args.kwargs["embed"].notice,
+            interaction.edit_original_response.await_args.kwargs["embed"].description,
         )
+        self.assertNotEqual(await store.get_active_stargates(10, 42), awards)
 
     async def test_discord_failure_leaves_database_unchanged(self):
-        cog, interaction, member, _guild, store, award = self._fixture()
+        cog, interaction, member, _guild, store, awards, view = await self._fixture()
         member.edit.side_effect = RuntimeError("Discord unavailable")
 
-        await cog._confirm_gate_revoke(
-            interaction,
-            _GateRevokeView(member, award),
-        )
+        await cog._confirm_gate_revoke(interaction, view, compact=True)
 
-        self.assertIs(store.award, award)
-        self.assertEqual(store.delete_calls, [])
+        self.assertEqual(await store.get_active_stargates(10, 42), awards)
 
-    async def test_conditional_delete_failure_restores_original_discord_roles(self):
-        cog, interaction, member, _guild, store, award = self._fixture()
+    async def test_transaction_conflict_restores_original_discord_roles(self):
+        cog, interaction, member, _guild, store, awards, view = await self._fixture()
 
-        async def reject_delete(*_args, **_kwargs):
-            return None
+        async def change_proof_after_role_edit(**_kwargs):
+            if member.edit.await_count == 1:
+                await store.replace_stargate_proof_links(
+                    10,
+                    42,
+                    (StargateProof(1, 50, 60),),
+                    expected_proofs={1: StargateProof(1, 20, 101)},
+                )
 
-        store.delete_latest_stargate = reject_delete
+        member.edit.side_effect = change_proof_after_role_edit
 
-        await cog._confirm_gate_revoke(
-            interaction,
-            _GateRevokeView(member, award),
-        )
+        await cog._confirm_gate_revoke(interaction, view, compact=True)
 
         self.assertEqual(member.edit.await_count, 2)
         restored_role_ids = {
             role.id for role in member.edit.await_args_list[1].kwargs["roles"]
         }
         self.assertEqual(restored_role_ids, {role.id for role in member.roles} - {0})
-        self.assertIs(store.award, award)
+        self.assertEqual(len(await store.get_active_stargates(10, 42)), len(awards))
 
-    async def test_two_concurrent_confirms_can_delete_only_once(self):
-        cog, interaction, member, _guild, store, award = self._fixture()
+    async def test_two_concurrent_confirms_can_revoke_only_once(self):
+        cog, interaction, member, _guild, store, _awards, view = await self._fixture()
         second_interaction = SimpleNamespace(
             guild=interaction.guild,
             user=interaction.user,
             response=SimpleNamespace(defer=mock.AsyncMock()),
             edit_original_response=mock.AsyncMock(),
+            delete_original_response=mock.AsyncMock(),
         )
+        views, _fake_select = _load_achievement_views()
+        second_view = views.GateRevokeView(cog, 99, member, view.awards)
+        second_view.selected_award_id = view.selected_award_id
+        second_view._configure_select()
+        second_view._configure_actions()
 
         await asyncio.gather(
-            cog._confirm_gate_revoke(interaction, _GateRevokeView(member, award)),
-            cog._confirm_gate_revoke(
-                second_interaction,
-                _GateRevokeView(member, award),
-            ),
+            cog._confirm_gate_revoke(interaction, view, compact=True),
+            cog._confirm_gate_revoke(second_interaction, second_view, compact=True),
         )
 
         self.assertEqual(member.edit.await_count, 1)
-        self.assertEqual(store.delete_calls, [(10, 42, 7)])
+        self.assertEqual(len(await store.get_active_stargates(10, 42)), 1)
 
 
 class GateRevokeRoleListenerTests(unittest.IsolatedAsyncioTestCase):

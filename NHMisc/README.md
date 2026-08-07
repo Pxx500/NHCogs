@@ -160,16 +160,16 @@ through the bot.
 
 ```ini
 /gaterevoke user:<member>
-Apps → Revoke latest Gate
+Apps → Revoke Gate
 ```
 
-Use the slash command or a member's Apps menu to remove only that member's latest
-Gate. Both entry points require Manage Messages and open the same ephemeral review,
-showing the current count, the one-tier transition, and the latest stored proof before
-anything changes. Confirmation permanently removes that latest Gate record and updates
-the Discord role; `Solo Gater` and unrelated roles are left unchanged. Completion is
-not posted publicly, and a non-pinging audit is sent to the configured private moderator
-action channel.
+Use the slash command or a member's Apps menu to choose any of that member's stored
+Gates. Both entry points require Manage Messages and open the same ephemeral review,
+showing every Gate and its proof before anything changes. Removing a non-latest Gate can
+either compact every remaining Gate number or leave a temporary gap. The Discord Gate
+role always follows the number of remaining Gates; `Solo Gater` and unrelated roles are
+left unchanged. Successful reviews disappear silently, while a non-pinging audit is sent
+to the configured private moderator action channel.
 
 The original completion message remains marked as already processed. If a Gate was
 revoked by mistake, restore it from a new correction message through the normal Gate
