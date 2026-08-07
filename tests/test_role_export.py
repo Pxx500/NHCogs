@@ -13,6 +13,21 @@ SPEC.loader.exec_module(role_export)
 
 
 class RoleExportTests(unittest.TestCase):
+    def test_generic_csv_export_preserves_columns_and_neutralizes_formulas(self):
+        payload = role_export.build_csv_export(
+            ("user_id", "username", "display_name", "missing_gates"),
+            ((1, "=unsafe", "Comma, Name", "1, 3"),),
+            upload_limit=10_000,
+            stem="missing-stargate-proofs",
+        )
+
+        self.assertEqual(payload.filename, "missing-stargate-proofs.csv")
+        self.assertEqual(
+            payload.data.decode("utf-8"),
+            "user_id,username,display_name,missing_gates\n"
+            "1,'=unsafe,\"Comma, Name\",\"1, 3\"\n",
+        )
+
     def test_csv_is_sent_directly_and_safe_values_remain_verbatim(self):
         members = [
             role_export.ExportMember(1, "plain", "Plain Name"),

@@ -76,7 +76,12 @@ from .role_analytics_store import (
     RoleAnalyticsStore,
     SyncStatus,
 )
-from .role_export import ExportMember, ExportTooLarge, build_role_export
+from .role_export import (
+    ExportMember,
+    ExportTooLarge,
+    build_csv_export,
+    build_role_export,
+)
 from .role_expression import (
     RoleExpressionSyntaxError,
     compile_role_expression,
@@ -2090,6 +2095,86 @@ class NHMisc(commands.Cog):
             )
         await ctx.send(
             embed=embed,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @achievement.command(name="missingproofs")
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def achievement_missingproofs(self, ctx: commands.Context) -> None:
+        """Export current Gate holders whose recorded Gates lack proof links."""
+        self._require_private_achievement_export_channel(ctx)
+        if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
+            raise commands.UserFeedbackCheckFailure(
+                "Achievement data is still initializing. Run `!rolesync discord` first"
+            )
+        if (
+            not bool(ctx.guild.chunked)
+            or ctx.guild.member_count is None
+            or len(ctx.guild.members) != ctx.guild.member_count
+        ):
+            raise commands.UserFeedbackCheckFailure(
+                "The member cache is incomplete. Run `!rolesync` first"
+            )
+
+        missing_by_user = (
+            await self._achievement_store.list_missing_stargate_proofs(ctx.guild.id)
+        )
+        affected = [
+            (member, missing_by_user[member.id])
+            for member in ctx.guild.members
+            if not member.bot and member.id in missing_by_user
+        ]
+        affected.sort(
+            key=lambda item: (
+                -len(item[1]),
+                item[0].display_name.casefold(),
+                item[0].id,
+            )
+        )
+        if not affected:
+            await ctx.send("All current Gate holders have proofs for every Gate")
+            return
+
+        try:
+            payload = build_csv_export(
+                ("user_id", "username", "display_name", "missing_gates"),
+                (
+                    (
+                        member.id,
+                        member.name,
+                        member.display_name,
+                        ", ".join(map(str, missing_gates)),
+                    )
+                    for member, missing_gates in affected
+                ),
+                ctx.guild.filesize_limit,
+                "missing-stargate-proofs",
+            )
+        except ExportTooLarge:
+            await ctx.send("Export is too large to upload")
+            return
+
+        preview = affected[:20]
+        embed = discord.Embed(
+            title="Missing Stargate proofs",
+            description="\n".join(
+                f"<@{member.id}> — Gates {', '.join(map(str, missing_gates))}"
+                for member, missing_gates in preview
+            ),
+        )
+        embed.add_field(
+            name="Summary",
+            value=(
+                f"Affected members: {len(affected)}\n"
+                f"Missing proofs: {sum(len(gates) for _, gates in affected)}"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Complete report attached")
+        await ctx.send(
+            embed=embed,
+            file=discord.File(io.BytesIO(payload.data), filename=payload.filename),
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
@@ -5926,16 +6011,38 @@ class NHMisc(commands.Cog):
         return counts
 
     def _require_private_role_export_channel(self, ctx: commands.Context) -> None:
+        self._require_private_export_channel(
+            ctx,
+            export_name="Role export",
+            feedback="Role export is unavailable in this channel",
+        )
+
+    def _require_private_achievement_export_channel(
+        self, ctx: commands.Context
+    ) -> None:
+        self._require_private_export_channel(
+            ctx,
+            export_name="Achievement proof export",
+            feedback="Achievement proof export is unavailable in this channel",
+        )
+
+    def _require_private_export_channel(
+        self,
+        ctx: commands.Context,
+        *,
+        export_name: str,
+        feedback: str,
+    ) -> None:
         if self._channel_is_public(ctx):
             log.info(
-                "Role export refused in public channel %s for guild %s",
+                "%s refused in public channel %s for guild %s",
+                export_name,
                 getattr(ctx.channel, "id", "unknown"),
                 ctx.guild.id,
             )
-            raise commands.UserFeedbackCheckFailure(
-                "Role export is unavailable in this channel"
-            )
+            raise commands.UserFeedbackCheckFailure(feedback)
 
+        missing_permissions: tuple[str, ...]
         if ctx.guild.me is None:
             missing_permissions = ("bot_member",)
         else:
@@ -5947,14 +6054,13 @@ class NHMisc(commands.Cog):
             )
         if missing_permissions:
             log.warning(
-                "Role export refused in channel %s for guild %s; missing bot permissions: %s",
+                "%s refused in channel %s for guild %s; missing bot permissions: %s",
+                export_name,
                 getattr(ctx.channel, "id", "unknown"),
                 ctx.guild.id,
                 ", ".join(missing_permissions),
             )
-            raise commands.UserFeedbackCheckFailure(
-                "Role export is unavailable in this channel"
-            )
+            raise commands.UserFeedbackCheckFailure(feedback)
 
     async def _repair_role_analytics_cache(self, guild: discord.Guild) -> None:
         await self._role_analytics_store.set_status(

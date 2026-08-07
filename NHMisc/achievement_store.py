@@ -235,6 +235,16 @@ class AchievementStore:
                 tuple(dict.fromkeys(user_ids)),
             )
 
+    async def list_missing_stargate_proofs(
+        self,
+        guild_id: int,
+    ) -> dict[int, tuple[int, ...]]:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._list_missing_stargate_proofs_sync,
+                guild_id,
+            )
+
     async def get_active_stargates(
         self, guild_id: int, user_id: int
     ) -> tuple[AchievementAward, ...]:
@@ -763,6 +773,30 @@ class AchievementStore:
             ).fetchall()
         for row in rows:
             missing[int(row["user_id"])].append(int(row["ordinal"]))
+        return {
+            user_id: tuple(ordinals) for user_id, ordinals in missing.items()
+        }
+
+    def _list_missing_stargate_proofs_sync(
+        self,
+        guild_id: int,
+    ) -> dict[int, tuple[int, ...]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT user_id, ordinal
+                FROM achievement_awards
+                WHERE guild_id = ? AND achievement_key = ?
+                    AND ordinal IS NOT NULL AND state = 'active'
+                    AND source_channel_id IS NULL
+                    AND source_message_id IS NULL
+                ORDER BY user_id, ordinal
+                """,
+                (guild_id, STARGATE_COMPLETED_KEY),
+            ).fetchall()
+        missing: dict[int, list[int]] = {}
+        for row in rows:
+            missing.setdefault(int(row["user_id"]), []).append(int(row["ordinal"]))
         return {
             user_id: tuple(ordinals) for user_id, ordinals in missing.items()
         }

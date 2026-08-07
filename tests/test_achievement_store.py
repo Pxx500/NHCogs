@@ -275,6 +275,58 @@ class AchievementStoreTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(missing, {2: (1, 3), 3: (), 4: ()})
 
+    async def test_all_missing_stargate_proofs_are_grouped_for_one_guild(self):
+        await self.store.import_gate_progress(1, 2, 3)
+        await self.store.attach_stargate_proofs(
+            1,
+            {2: 2},
+            source_channel_id=50,
+            source_message_id=60,
+        )
+        await self.store.grant_stargate(
+            1,
+            3,
+            source_channel_id=70,
+            source_message_id=80,
+        )
+        await self.store.import_gate_progress(1, 5, 2)
+        await self.store.attach_stargate_proofs(
+            1,
+            {5: 1},
+            source_channel_id=90,
+            source_message_id=100,
+        )
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.executemany(
+                """
+                INSERT INTO achievement_awards (
+                    guild_id, user_id, achievement_key, ordinal,
+                    awarded_at, revoked_at, source_channel_id,
+                    source_message_id, state
+                ) VALUES (?, ?, ?, ?, 'now', ?, ?, ?, ?)
+                """,
+                (
+                    (1, 6, "stargate_completed", 1, None, None, None, "pending"),
+                    (1, 7, "stargate_completed", 1, "later", None, None, "revoked"),
+                    (1, 8, "solo_gater", None, None, None, None, "active"),
+                    (1, 9, "stargate_completed", 1, None, 10, None, "active"),
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        await self.store.bootstrap_guild(
+            2,
+            gate_tiers={4: 1},
+            boolean_definitions=(),
+            boolean_users={},
+        )
+
+        missing = await self.store.list_missing_stargate_proofs(1)
+
+        self.assertEqual(missing, {2: (1, 3), 5: (2,)})
+
     async def test_boolean_revocation_is_historical_and_allows_regrant(self):
         original = await self.store.grant_boolean(1, 2, "solo_gater")
 

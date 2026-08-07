@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import csv
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from io import BytesIO, StringIO
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -44,27 +44,30 @@ def _neutralize_formula(value: str) -> str:
     return value
 
 
-def _build_csv(members: Sequence[ExportMember]) -> bytes:
+def _build_csv(
+    headers: Sequence[str],
+    rows: Iterable[Sequence[object]],
+) -> bytes:
     output = StringIO(newline="")
     writer = csv.writer(output, lineterminator="\n")
-    writer.writerow(("user_id", "username", "display_name"))
+    writer.writerow(headers)
     writer.writerows(
-        (
-            member.user_id,
-            _neutralize_formula(member.username),
-            _neutralize_formula(member.display_name),
+        tuple(
+            _neutralize_formula(value) if isinstance(value, str) else value
+            for value in row
         )
-        for member in members
+        for row in rows
     )
     return output.getvalue().encode("utf-8")
 
 
-def build_role_export(
-    members: Sequence[ExportMember],
+def build_csv_export(
+    headers: Sequence[str],
+    rows: Iterable[Sequence[object]],
     upload_limit: int,
-    stem: str = "roleusers",
+    stem: str,
 ) -> ExportPayload:
-    csv_data = _build_csv(members)
+    csv_data = _build_csv(headers, rows)
     if len(csv_data) <= upload_limit:
         return ExportPayload(f"{stem}.csv", csv_data)
     buffer = BytesIO()
@@ -74,3 +77,19 @@ def build_role_export(
     if len(zip_data) > upload_limit:
         raise ExportTooLarge(len(csv_data), len(zip_data), upload_limit)
     return ExportPayload(f"{stem}.zip", zip_data)
+
+
+def build_role_export(
+    members: Sequence[ExportMember],
+    upload_limit: int,
+    stem: str = "roleusers",
+) -> ExportPayload:
+    return build_csv_export(
+        ("user_id", "username", "display_name"),
+        (
+            (member.user_id, member.username, member.display_name)
+            for member in members
+        ),
+        upload_limit,
+        stem,
+    )
