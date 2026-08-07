@@ -24,6 +24,9 @@ class GifDetectorSettingsTests(unittest.TestCase):
                 self.assertTrue(configured.gif_detector_animation_enabled)
                 self.assertEqual(configured.gif_detector_channels, [])
                 self.assertEqual(configured.gif_detector_secondary_message, "No gifs!")
+                self.assertEqual(
+                    configured.gif_detector_retention_seconds, 5
+                )
                 self.assertEqual(configured.gif_detector_threshold, 3)
                 self.assertEqual(configured.gif_detector_window_seconds, 60)
                 self.assertEqual(configured.gif_detector_mute_duration_seconds, 3600)
@@ -344,7 +347,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 guild.fetch_member.assert_awaited_once_with(user.id)
                 self.assertIs(mutes.mute_user.await_args.args[2], member)
 
-    async def test_duplicate_static_delivery_deletes_once_before_warning(self):
+    async def test_zero_retention_deletes_static_gif_and_keeps_warning_for_five_seconds(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("Honeypot.gif_detector")
@@ -353,6 +356,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     gif_detector_enabled=True,
                     gif_detector_animation_enabled=False,
                     gif_detector_channels=[10],
+                    gif_detector_retention_seconds=0,
                 )
                 cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
                 cog._is_protected_member = mock.AsyncMock(return_value=False)
@@ -387,7 +391,11 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     mock.patch.object(
                         gif_detector.asyncio,
                         "sleep",
-                        new=mock.AsyncMock(side_effect=lambda _: events.append("sleep")),
+                        new=mock.AsyncMock(
+                            side_effect=lambda seconds: events.append(
+                                f"sleep:{seconds}"
+                            )
+                        ),
                     ),
                     mock.patch.object(
                         honeypot.detection,
@@ -401,7 +409,12 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(
                     events,
-                    ["source-delete", "warning-send", "sleep", "warning-delete"],
+                    [
+                        "warning-send",
+                        "source-delete",
+                        "sleep:5",
+                        "warning-delete",
+                    ],
                 )
                 channel.send.assert_awaited_once()
                 self.assertEqual(channel.send.await_args.args[0], "@User No gifs!")
@@ -419,6 +432,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     gif_detector_enabled=True,
                     gif_detector_animation_enabled=True,
                     gif_detector_channels=[10],
+                    gif_detector_retention_seconds=10,
                 )
                 cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
                 cog._is_protected_member = mock.AsyncMock(return_value=False)
@@ -489,12 +503,103 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         for position in range(2, 10, 2)
                     ],
                 )
-                self.assertEqual(sleep_seconds, [1, 1, 1, 1, 1])
+                self.assertEqual(sleep_seconds, [1, 1, 1, 1, 1, 5])
                 self.assertEqual(events[-2:], ["source-delete", "warning-delete"])
                 self.assertEqual(cog._gif_detector_animated_guilds, set())
 
+    async def test_short_animated_retention_deletes_source_before_warning_cleanup(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                events = []
+                warning = SimpleNamespace(
+                    edit=mock.AsyncMock(side_effect=lambda **kwargs: events.append("edit")),
+                    delete=mock.AsyncMock(
+                        side_effect=lambda: events.append("warning-delete")
+                    ),
+                )
+                channel = SimpleNamespace(
+                    send=mock.AsyncMock(
+                        side_effect=lambda *args, **kwargs: (
+                            events.append("warning-send") or warning
+                        )
+                    )
+                )
+                message = SimpleNamespace(
+                    guild=SimpleNamespace(id=1),
+                    channel=channel,
+                    author=SimpleNamespace(mention="@User"),
+                    delete=mock.AsyncMock(
+                        side_effect=lambda: events.append("source-delete")
+                    ),
+                )
+
+                with mock.patch.object(
+                    gif_detector.asyncio,
+                    "sleep",
+                    new=mock.AsyncMock(
+                        side_effect=lambda seconds: events.append(f"sleep:{seconds}")
+                    ),
+                ):
+                    await gif_detector._run_animated(cog, message, 2)
+
+                self.assertEqual(warning.edit.await_count, 4)
+                self.assertEqual(
+                    events,
+                    [
+                        "warning-send",
+                        "sleep:1",
+                        "edit",
+                        "sleep:1",
+                        "source-delete",
+                        "edit",
+                        "sleep:1",
+                        "edit",
+                        "sleep:1",
+                        "edit",
+                        "sleep:1",
+                        "warning-delete",
+                    ],
+                )
+
 
 class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retention_command_stores_a_bounded_source_deadline(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)):
+                gif_detector = import_module("Honeypot.gif_detector")
+                retention = mock.AsyncMock(return_value=5)
+                retention.set = mock.AsyncMock()
+                guild_config = SimpleNamespace(
+                    gif_detector_retention_seconds=retention,
+                )
+                cog = SimpleNamespace(
+                    config=SimpleNamespace(guild=lambda guild: guild_config)
+                )
+                ctx = SimpleNamespace(guild=SimpleNamespace(id=1), send=mock.AsyncMock())
+                command = getattr(gif_detector, "gif_detector_retention", None)
+
+                self.assertTrue(callable(command), "retention command is not registered")
+                await command(cog, ctx)
+                await command(cog, ctx, 12)
+                try:
+                    await command(cog, ctx, 0)
+                except gif_detector.commands.UserFeedbackCheckFailure:
+                    self.fail("zero retention should delete the GIF immediately")
+
+                self.assertIn("5", ctx.send.await_args_list[0].args[0])
+                self.assertEqual(
+                    [call.args[0] for call in retention.set.await_args_list],
+                    [12, 0],
+                )
+                for invalid in (-1, 61):
+                    with self.subTest(invalid=invalid):
+                        with self.assertRaises(
+                            gif_detector.commands.UserFeedbackCheckFailure
+                        ):
+                            await command(cog, ctx, invalid)
+
     async def test_rate_commands_store_bounded_threshold_window_and_mute_duration(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
@@ -622,6 +727,7 @@ class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
                     gif_detector_animation_enabled=False,
                     gif_detector_channels=[10],
                     gif_detector_secondary_message="Stop that.",
+                    gif_detector_retention_seconds=12,
                 )
                 cog._send_config_dump = mock.AsyncMock()
                 configured_channel = SimpleNamespace(id=10, mention="#gifs")
@@ -640,6 +746,7 @@ class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(rows["Animation"], "disabled")
                 self.assertEqual(rows["Channels"], "#gifs")
                 self.assertEqual(rows["Secondary message"], "Stop that.")
+                self.assertEqual(rows["GIF retention"], "12 seconds")
                 self.assertEqual(rows["Mute threshold"], "3")
                 self.assertEqual(rows["Rolling window"], "60 seconds")
                 self.assertEqual(rows["Mute duration"], "3600 seconds")
@@ -921,6 +1028,43 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
+
+    async def test_cancelled_static_retention_cleans_up_source_and_warning(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                started = asyncio.Event()
+
+                async def wait_until_cancelled(seconds):
+                    started.set()
+                    await asyncio.Event().wait()
+
+                warning = SimpleNamespace(delete=mock.AsyncMock())
+                message = SimpleNamespace(
+                    guild=SimpleNamespace(id=1),
+                    channel=SimpleNamespace(
+                        send=mock.AsyncMock(return_value=warning)
+                    ),
+                    author=SimpleNamespace(mention="@User"),
+                    delete=mock.AsyncMock(),
+                )
+
+                with mock.patch.object(
+                    gif_detector.asyncio,
+                    "sleep",
+                    new=mock.AsyncMock(side_effect=wait_until_cancelled),
+                ):
+                    task = asyncio.create_task(
+                        gif_detector._run_secondary(cog, message, "No gifs!", 60)
+                    )
+                    await started.wait()
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+
+                self.assertTrue(task.cancelled())
+                message.delete.assert_awaited_once()
+                warning.delete.assert_awaited_once()
 
     async def test_second_gif_uses_static_path_while_guild_animation_is_active(self):
         with TemporaryDirectory() as directory:
