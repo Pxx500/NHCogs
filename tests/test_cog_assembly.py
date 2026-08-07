@@ -195,7 +195,7 @@ class CogAssemblyContractTests(unittest.TestCase):
         expected_counts = {
             "detection": 79,
             "diagnostics": 10,
-            "gif_detector": 6,
+            "gif_detector": 9,
             "imagescan": 23,
             "joinwatch": 16,
             "review_publication": 13,
