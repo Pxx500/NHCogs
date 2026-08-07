@@ -26,6 +26,7 @@ from .achievement_store import (
     AchievementStore,
     GateProofConflict,
     StargateProof,
+    StargateProofAssignment,
 )
 from .achievement_sync import (
     DiscordRoleSnapshot,
@@ -204,6 +205,7 @@ class GateProofCandidate:
 
 @dataclass(frozen=True, slots=True)
 class GateProofBatchEntry:
+    user_id: int | None
     ordinal: int
     source_guild_id: int
     source_channel_id: int
@@ -220,7 +222,33 @@ class GateProofBatchEntry:
 
 _GATE_PROOF_BATCH_LINE = re.compile(
     r"([1-9]\d*) (https://discord\.com/channels/(\d+)/(\d+)/(\d+))"
+    r"(?:[ \t]+(.*))?"
 )
+_GATE_PROOF_BATCH_TARGET = re.compile(r"(?:<@!?([1-9]\d*)>|([1-9]\d*))")
+
+
+def _parse_gate_proof_targets(targets: str, *, line_number: int) -> tuple[int, ...]:
+    user_ids = []
+    position = 0
+    while position < len(targets):
+        while position < len(targets) and targets[position] in " \t":
+            position += 1
+        if position == len(targets):
+            break
+        match = _GATE_PROOF_BATCH_TARGET.match(targets, position)
+        if match is None:
+            raise ValueError(
+                f"Gate proof batch line {line_number} must use: "
+                "number space link optional user mentions or IDs"
+            )
+        user_ids.append(int(match.group(1) or match.group(2)))
+        position = match.end()
+    if not user_ids:
+        raise ValueError(
+            f"Gate proof batch line {line_number} must use: "
+            "number space link optional user mentions or IDs"
+        )
+    return tuple(user_ids)
 
 
 def _parse_gate_proof_batch(
@@ -233,28 +261,41 @@ def _parse_gate_proof_batch(
         return None
 
     entries = []
-    ordinals = set()
+    assignments: set[tuple[int | None, int]] = set()
     for line_number, line in enumerate(lines, start=1):
         match = _GATE_PROOF_BATCH_LINE.fullmatch(line)
         if match is None:
             raise ValueError(
-                f"Gate proof batch line {line_number} must use: number space link"
+                f"Gate proof batch line {line_number} must use: "
+                "number space link optional user mentions or IDs"
             )
         ordinal = int(match.group(1))
         source_guild_id = int(match.group(3))
         if source_guild_id != expected_guild_id:
             raise ValueError("Gate proof links must point to the current server")
-        if ordinal in ordinals:
-            raise ValueError(f"Gate {ordinal} appears more than once")
-        ordinals.add(ordinal)
-        entries.append(
-            GateProofBatchEntry(
-                ordinal=ordinal,
-                source_guild_id=source_guild_id,
-                source_channel_id=int(match.group(4)),
-                source_message_id=int(match.group(5)),
-            )
+        target_text = match.group(6)
+        user_ids: tuple[int | None, ...] = (
+            _parse_gate_proof_targets(target_text, line_number=line_number)
+            if target_text is not None
+            else (None,)
         )
+        for user_id in user_ids:
+            assignment = (user_id, ordinal)
+            if assignment in assignments:
+                target = f"<@{user_id}>" if user_id is not None else "the author"
+                raise ValueError(
+                    f"Gate {ordinal} appears more than once for {target}"
+                )
+            assignments.add(assignment)
+            entries.append(
+                GateProofBatchEntry(
+                    user_id=user_id,
+                    ordinal=ordinal,
+                    source_guild_id=source_guild_id,
+                    source_channel_id=int(match.group(4)),
+                    source_message_id=int(match.group(5)),
+                )
+            )
     return tuple(entries)
 
 
@@ -1031,34 +1072,7 @@ class NHMisc(commands.Cog):
         ):
             return
         try:
-            is_bootstrapped = await self._await_achievement_interaction_data(
-                self._achievement_store.is_bootstrapped(interaction.guild.id)
-            )
-            if not is_bootstrapped:
-                await self._send_achievement_interaction_error(
-                    interaction,
-                    "Achievement data is still initializing",
-                    public_defer=False,
-                )
-                return
             target = user or interaction.user
-            profile = await self._await_achievement_interaction_data(
-                self._achievement_store.get_profile(
-                    interaction.guild.id,
-                    target.id,
-                )
-            )
-            definitions = await self._await_achievement_interaction_data(
-                self._achievement_store.list_definitions(interaction.guild.id)
-            )
-            embed = self._build_achievements_embed(
-                interaction.guild.id,
-                target,
-                profile,
-                definitions,
-            )
-            from .achievement_views import AchievementProfileView
-
             interaction_data = getattr(interaction, "data", None) or {}
             command_id = interaction_data.get("id")
             command_mention = (
@@ -1066,14 +1080,10 @@ class NHMisc(commands.Cog):
                 if command_id is not None
                 else "`/achievements`"
             )
-            await interaction.edit_original_response(
-                embed=embed,
-                view=AchievementProfileView(
-                    embed,
-                    requester_id=interaction.user.id,
-                    command_mention=command_mention,
-                ),
-                allowed_mentions=discord.AllowedMentions.none(),
+            await self._respond_with_achievement_profile(
+                interaction,
+                target,
+                command_mention=command_mention,
             )
         except Exception as error:
             await self._handle_achievement_interaction_failure(
@@ -1101,31 +1111,10 @@ class NHMisc(commands.Cog):
         ):
             return
         try:
-            is_bootstrapped = await self._await_achievement_interaction_data(
-                self._achievement_store.is_bootstrapped(interaction.guild.id)
-            )
-            if not is_bootstrapped:
-                await interaction.edit_original_response(
-                    content="Achievement data is still initializing"
-                )
-                return
-            profile = await self._await_achievement_interaction_data(
-                self._achievement_store.get_profile(
-                    interaction.guild.id,
-                    user.id,
-                )
-            )
-            definitions = await self._await_achievement_interaction_data(
-                self._achievement_store.list_definitions(interaction.guild.id)
-            )
-            await interaction.edit_original_response(
-                embed=self._build_achievements_embed(
-                    interaction.guild.id,
-                    user,
-                    profile,
-                    definitions,
-                ),
-                allowed_mentions=discord.AllowedMentions.none(),
+            await self._respond_with_achievement_profile(
+                interaction,
+                user,
+                command_mention="`/achievements`",
             )
         except Exception as error:
             await self._handle_achievement_interaction_failure(
@@ -1134,6 +1123,50 @@ class NHMisc(commands.Cog):
                 error,
                 public_defer=False,
             )
+
+    async def _respond_with_achievement_profile(
+        self,
+        interaction: discord.Interaction,
+        target: discord.User | discord.Member,
+        *,
+        command_mention: str,
+    ) -> None:
+        is_bootstrapped = await self._await_achievement_interaction_data(
+            self._achievement_store.is_bootstrapped(interaction.guild.id)
+        )
+        if not is_bootstrapped:
+            await self._send_achievement_interaction_error(
+                interaction,
+                "Achievement data is still initializing",
+                public_defer=False,
+            )
+            return
+        profile = await self._await_achievement_interaction_data(
+            self._achievement_store.get_profile(
+                interaction.guild.id,
+                target.id,
+            )
+        )
+        definitions = await self._await_achievement_interaction_data(
+            self._achievement_store.list_definitions(interaction.guild.id)
+        )
+        embed = self._build_achievements_embed(
+            interaction.guild.id,
+            target,
+            profile,
+            definitions,
+        )
+        from .achievement_views import AchievementProfileView
+
+        await interaction.edit_original_response(
+            embed=embed,
+            view=AchievementProfileView(
+                embed,
+                requester_id=interaction.user.id,
+                command_mention=command_mention,
+            ),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @staticmethod
     def _build_achievements_embed(
@@ -1656,44 +1689,51 @@ class NHMisc(commands.Cog):
         if entries is None:
             return False
 
-        member = None
+        try:
+            entries, members = await self._resolve_gate_proof_batch_members(
+                interaction.guild,
+                source_message,
+                entries,
+            )
+        except ValueError as error:
+            await interaction.edit_original_response(content=str(error))
+            return True
+
+        profiles = {}
         error_message = None
-        if source_message.webhook_id is not None:
-            error_message = "A Gate proof batch must be posted by a server member"
-        else:
-            member = interaction.guild.get_member(source_message.author.id)
-            if member is None or member.bot:
-                error_message = "This message has no eligible recipient"
-        if error_message is None:
+        for member in members.values():
             profile = await self._await_achievement_interaction_data(
                 self._achievement_store.get_profile(
                     interaction.guild.id,
                     member.id,
                 )
             )
-            for entry in entries:
-                if entry.ordinal > profile.stargate_count:
-                    error_message = (
-                        f"Gate {entry.ordinal} does not exist for <@{member.id}>"
-                    )
-                    break
+            profiles[member.id] = profile
+        for entry in entries:
+            profile = profiles[entry.user_id]
+            if entry.ordinal > profile.stargate_count:
+                error_message = (
+                    f"Gate {entry.ordinal} does not exist for <@{entry.user_id}>"
+                )
+                break
         if error_message is not None:
             await interaction.edit_original_response(content=error_message)
             return True
 
         from .achievement_views import GateProofBatchView
 
-        requested_ordinals = {entry.ordinal for entry in entries}
+        requested_keys = {(entry.user_id, entry.ordinal) for entry in entries}
         view = GateProofBatchView(
             self,
             source_message,
             interaction.user.id,
-            member,
+            members,
             entries,
             existing_proofs={
-                proof.ordinal: proof
+                (user_id, proof.ordinal): proof
+                for user_id, profile in profiles.items()
                 for proof in profile.stargate_proofs
-                if proof.ordinal in requested_ordinals
+                if (user_id, proof.ordinal) in requested_keys
             },
         )
         await interaction.edit_original_response(
@@ -1703,6 +1743,55 @@ class NHMisc(commands.Cog):
         )
         view.message = await interaction.original_response()
         return True
+
+    async def _resolve_gate_proof_batch_members(
+        self,
+        guild: discord.Guild,
+        source_message: discord.Message,
+        entries: tuple[GateProofBatchEntry, ...],
+    ) -> tuple[tuple[GateProofBatchEntry, ...], dict[int, discord.Member]]:
+        normalized_entries = []
+        for entry in entries:
+            user_id = (
+                entry.user_id
+                if entry.user_id is not None
+                else source_message.author.id
+            )
+            normalized_entries.append(
+                GateProofBatchEntry(
+                    user_id,
+                    entry.ordinal,
+                    entry.source_guild_id,
+                    entry.source_channel_id,
+                    entry.source_message_id,
+                )
+            )
+        normalized = tuple(normalized_entries)
+        if source_message.webhook_id is not None and any(
+            entry.user_id is None for entry in entries
+        ):
+            raise ValueError(
+                "A Gate proof batch without user targets must be posted by a server member"
+            )
+
+        members = {}
+        for entry in normalized:
+            user_id = entry.user_id
+            assert user_id is not None
+            if user_id in members:
+                continue
+            member = guild.get_member(user_id)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(user_id)
+                except (discord.NotFound, discord.HTTPException):
+                    member = None
+            if member is None or member.bot:
+                raise ValueError(
+                    f"<@{user_id}> is not an eligible current server member"
+                )
+            members[user_id] = member
+        return normalized, members
 
     async def _confirm_gate_proofs(self, interaction, view) -> None:
         await interaction.response.defer()
@@ -1803,17 +1892,25 @@ class NHMisc(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
+        current_members: dict[int, discord.Member] = {}
         try:
             current_entries = _parse_gate_proof_batch(
                 source_message.content,
                 expected_guild_id=source_message.guild.id,
             )
+            if current_entries is not None:
+                current_entries, current_members = (
+                    await self._resolve_gate_proof_batch_members(
+                        source_message.guild,
+                        source_message,
+                        current_entries,
+                    )
+                )
         except ValueError:
             current_entries = None
         if (
-            source_message.webhook_id is not None
-            or source_message.author.id != view.member.id
-            or current_entries != view.entries
+            current_entries != view.entries
+            or set(current_members) != set(view.members)
         ):
             view.stop()
             await interaction.edit_original_response(
@@ -1826,33 +1923,34 @@ class NHMisc(commands.Cog):
         selected_entries = tuple(
             entry
             for entry in view.entries
-            if replace_existing or entry.ordinal not in view.existing_proofs
+            if replace_existing
+            or (entry.user_id, entry.ordinal) not in view.existing_proofs
         )
-        proofs = tuple(
-            StargateProof(
-                entry.ordinal,
-                entry.source_channel_id,
-                entry.source_message_id,
+        assignments = tuple(
+            StargateProofAssignment(
+                entry.user_id,
+                StargateProof(
+                    entry.ordinal,
+                    entry.source_channel_id,
+                    entry.source_message_id,
+                ),
             )
-            for entry in selected_entries
+            for entry in view.entries
         )
         try:
-            if replace_existing:
-                await self._achievement_store.replace_stargate_proof_links(
-                    source_message.guild.id,
-                    view.member.id,
-                    proofs,
-                    expected_proofs={
-                        proof.ordinal: view.existing_proofs.get(proof.ordinal)
-                        for proof in proofs
-                    },
-                )
-            else:
-                await self._achievement_store.attach_stargate_proof_links(
-                    source_message.guild.id,
-                    view.member.id,
-                    proofs,
-                )
+            await self._achievement_store.apply_stargate_proof_batch(
+                source_message.guild.id,
+                assignments,
+                expected_proofs={
+                    (assignment.user_id, assignment.proof.ordinal): (
+                        view.existing_proofs.get(
+                            (assignment.user_id, assignment.proof.ordinal)
+                        )
+                    )
+                    for assignment in assignments
+                },
+                replace_existing=replace_existing,
+            )
         except GateProofConflict:
             view.stop()
             await interaction.edit_original_response(
@@ -1863,7 +1961,8 @@ class NHMisc(commands.Cog):
             )
             return
         proof_lines = "\n".join(
-            f"Gate {entry.ordinal}: {entry.jump_url}" for entry in selected_entries
+            f"<@{entry.user_id}>: Gate {entry.ordinal}: {entry.jump_url}"
+            for entry in selected_entries
         )
         log_action = (
             "Batch Gate proofs updated"
@@ -1874,7 +1973,6 @@ class NHMisc(commands.Cog):
             source_message.guild,
             f"{log_action}\n"
             f"Moderator: <@{interaction.user.id}>\n"
-            f"Player: <@{view.member.id}>\n"
             f"{proof_lines}\n"
             f"Request: {source_message.jump_url}",
             log_failure=False,

@@ -9,6 +9,79 @@ from tests.test_gatecount import nhmisc
 
 
 class GateProofBatchParserTests(unittest.TestCase):
+    def test_mentions_ids_and_flexible_spacing_expand_to_user_assignments(self):
+        try:
+            parsed = nhmisc._parse_gate_proof_batch(
+                "1 https://discord.com/channels/10/20/30 "
+                "<@111><@!222>     333<@444>",
+                expected_guild_id=10,
+            )
+        except ValueError as error:
+            self.fail(f"Valid multi-user batch was rejected: {error}")
+
+        self.assertEqual(
+            tuple(
+                (
+                    getattr(proof, "user_id", None),
+                    proof.ordinal,
+                    proof.source_channel_id,
+                    proof.source_message_id,
+                )
+                for proof in parsed
+            ),
+            (
+                (111, 1, 20, 30),
+                (222, 1, 20, 30),
+                (333, 1, 20, 30),
+                (444, 1, 20, 30),
+            ),
+        )
+
+    def test_same_gate_is_allowed_for_different_users(self):
+        try:
+            parsed = nhmisc._parse_gate_proof_batch(
+                "\n".join(
+                    (
+                        "1 https://discord.com/channels/10/20/30 <@111>",
+                        "1 https://discord.com/channels/10/21/31 222",
+                    )
+                ),
+                expected_guild_id=10,
+            )
+        except ValueError as error:
+            self.fail(f"Distinct user assignments were rejected: {error}")
+
+        self.assertEqual(
+            tuple((proof.user_id, proof.ordinal) for proof in parsed),
+            ((111, 1), (222, 1)),
+        )
+
+    def test_duplicate_user_and_gate_rejects_the_whole_batch(self):
+        for content in (
+            "1 https://discord.com/channels/10/20/30 <@111><@111>",
+            "\n".join(
+                (
+                    "1 https://discord.com/channels/10/20/30 111",
+                    "1 https://discord.com/channels/10/21/31 <@!111>",
+                )
+            ),
+        ):
+            with self.subTest(content=content):
+                with self.assertRaisesRegex(ValueError, "Gate 1.*111"):
+                    nhmisc._parse_gate_proof_batch(
+                        content,
+                        expected_guild_id=10,
+                    )
+
+    def test_invalid_target_tokens_reject_the_whole_batch(self):
+        for targets in ("@name", "<@&111>", "<@111>, <@222>"):
+            with self.subTest(targets=targets):
+                with self.assertRaisesRegex(ValueError, "line 1"):
+                    nhmisc._parse_gate_proof_batch(
+                        "1 https://discord.com/channels/10/20/30 " + targets,
+                        expected_guild_id=10,
+                    )
+
     def test_exact_number_space_link_format_parses_distinct_proofs(self):
         parsed = nhmisc._parse_gate_proof_batch(
             "\n".join(
@@ -358,15 +431,22 @@ class GateProofViewTests(unittest.IsolatedAsyncioTestCase):
                 guild=SimpleNamespace(id=1),
             ),
             99,
-            SimpleNamespace(id=10),
+            {10: SimpleNamespace(id=10), 11: SimpleNamespace(id=11)},
             (
                 SimpleNamespace(
+                    user_id=10,
                     ordinal=1,
                     jump_url="https://discord.example/proof-one",
                 ),
                 SimpleNamespace(
+                    user_id=10,
                     ordinal=2,
                     jump_url="https://discord.example/proof-two",
+                ),
+                SimpleNamespace(
+                    user_id=11,
+                    ordinal=1,
+                    jump_url="https://discord.example/proof-one",
                 ),
             ),
             existing_proofs={},
@@ -379,6 +459,7 @@ class GateProofViewTests(unittest.IsolatedAsyncioTestCase):
             embed.description,
         )
         self.assertIn("<@10>", embed.description)
+        self.assertIn("<@11> Gate 1: [Open proof]", embed.description)
         self.assertIn("Gate 1: [Open proof]", embed.description)
         self.assertIn("Gate 2: [Open proof]", embed.description)
 
@@ -392,18 +473,20 @@ class GateProofViewTests(unittest.IsolatedAsyncioTestCase):
                 guild=SimpleNamespace(id=1),
             ),
             99,
-            SimpleNamespace(id=10),
+            {10: SimpleNamespace(id=10)},
             (
                 SimpleNamespace(
+                    user_id=10,
                     ordinal=1,
                     jump_url="https://discord.example/new-proof",
                 ),
                 SimpleNamespace(
+                    user_id=10,
                     ordinal=2,
                     jump_url="https://discord.example/missing-proof",
                 ),
             ),
-            existing_proofs={1: old_proof},
+            existing_proofs={(10, 1): old_proof},
         )
 
         embed = view.render_embed()
@@ -425,9 +508,15 @@ class GateProofViewTests(unittest.IsolatedAsyncioTestCase):
                 guild=SimpleNamespace(id=1),
             ),
             99,
-            SimpleNamespace(id=10),
-            (SimpleNamespace(ordinal=1, jump_url="https://discord.example/new"),),
-            existing_proofs={1: nhmisc.StargateProof(1, 20, 30)},
+            {10: SimpleNamespace(id=10)},
+            (
+                SimpleNamespace(
+                    user_id=10,
+                    ordinal=1,
+                    jump_url="https://discord.example/new",
+                ),
+            ),
+            existing_proofs={(10, 1): nhmisc.StargateProof(1, 20, 30)},
         )
         interaction = SimpleNamespace()
 
@@ -444,6 +533,33 @@ class GateProofViewTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GateProofEntryPointTests(unittest.IsolatedAsyncioTestCase):
+    async def test_batch_targets_resolve_cached_and_uncached_current_members(self):
+        cached = SimpleNamespace(id=11, bot=False)
+        fetched = SimpleNamespace(id=12, bot=False)
+        guild = SimpleNamespace(
+            get_member=lambda user_id: cached if user_id == 11 else None,
+            fetch_member=mock.AsyncMock(return_value=fetched),
+        )
+        source_message = SimpleNamespace(
+            author=SimpleNamespace(id=10),
+            webhook_id=None,
+        )
+        entries = (
+            nhmisc.GateProofBatchEntry(11, 1, 1, 20, 30),
+            nhmisc.GateProofBatchEntry(12, 1, 1, 20, 30),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+
+        normalized, members = await cog._resolve_gate_proof_batch_members(
+            guild,
+            source_message,
+            entries,
+        )
+
+        self.assertEqual(normalized, entries)
+        self.assertEqual(tuple(members), (11, 12))
+        guild.fetch_member.assert_awaited_once_with(12)
+
     async def test_action_requires_manage_messages_at_runtime(self):
         interaction = SimpleNamespace(
             guild=SimpleNamespace(id=1),
@@ -599,7 +715,7 @@ class GateProofEntryPointTests(unittest.IsolatedAsyncioTestCase):
                 cog,
                 source_message,
                 opener_id,
-                member,
+                members,
                 entries,
                 *,
                 existing_proofs,
@@ -607,7 +723,7 @@ class GateProofEntryPointTests(unittest.IsolatedAsyncioTestCase):
                 self.cog = cog
                 self.source_message = source_message
                 self.opener_id = opener_id
-                self.member = member
+                self.members = members
                 self.entries = entries
                 self.existing_proofs = existing_proofs
                 self.message = None
@@ -635,12 +751,12 @@ class GateProofEntryPointTests(unittest.IsolatedAsyncioTestCase):
         store.missing_stargate_proofs.assert_not_awaited()
         kwargs = interaction.edit_original_response.await_args.kwargs
         self.assertEqual(kwargs["embed"], "gate-proof-batch-review")
-        self.assertEqual(kwargs["view"].member.id, 10)
+        self.assertEqual(tuple(kwargs["view"].members), (10,))
         self.assertEqual(
             tuple(entry.ordinal for entry in kwargs["view"].entries),
             (1, 2),
         )
-        self.assertEqual(kwargs["view"].existing_proofs, {1: old_proof})
+        self.assertEqual(kwargs["view"].existing_proofs, {(10, 1): old_proof})
         self.assertIs(kwargs["view"].message, response_message)
 
     async def test_batch_rejects_gate_that_author_does_not_have(self):
@@ -841,11 +957,13 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_batch_confirmation_attaches_each_link_to_existing_gate(self):
         author = SimpleNamespace(id=10, bot=False)
-        guild = SimpleNamespace(id=1)
+        teammate = SimpleNamespace(id=11, bot=False)
+        members = {10: author, 11: teammate}
+        guild = SimpleNamespace(id=1, get_member=members.get)
         content = "\n".join(
             (
-                "1 https://discord.com/channels/1/50/60",
-                "2 https://discord.com/channels/1/51/61",
+                "1 https://discord.com/channels/1/50/60 <@10><@11>",
+                "2 https://discord.com/channels/1/51/61 10",
             )
         )
         source_message = SimpleNamespace(
@@ -863,7 +981,7 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
         )
         view = SimpleNamespace(
             source_message=source_message,
-            member=author,
+            members=members,
             entries=entries,
             existing_proofs={},
             stop=mock.Mock(),
@@ -876,7 +994,9 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
             delete_original_response=mock.AsyncMock(),
         )
         store = SimpleNamespace(
-            attach_stargate_proof_links=mock.AsyncMock(return_value=(object(), object()))
+            apply_stargate_proof_batch=mock.AsyncMock(
+                return_value=(object(), object())
+            )
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._achievement_store = store
@@ -894,23 +1014,32 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
             replace_existing=False,
         )
 
-        store.attach_stargate_proof_links.assert_awaited_once_with(
+        store.apply_stargate_proof_batch.assert_awaited_once_with(
             1,
-            10,
             (
-                nhmisc.StargateProof(1, 50, 60),
-                nhmisc.StargateProof(2, 51, 61),
+                nhmisc.StargateProofAssignment(
+                    10, nhmisc.StargateProof(1, 50, 60)
+                ),
+                nhmisc.StargateProofAssignment(
+                    11, nhmisc.StargateProof(1, 50, 60)
+                ),
+                nhmisc.StargateProofAssignment(
+                    10, nhmisc.StargateProof(2, 51, 61)
+                ),
             ),
+            expected_proofs={(10, 1): None, (11, 1): None, (10, 2): None},
+            replace_existing=False,
         )
         _, log_message = cog._send_moderation_log.await_args.args
         self.assertIn("Batch Gate proofs attached", log_message)
+        self.assertIn("<@11>: Gate 1", log_message)
         self.assertIn("Gate 1: https://discord.com/channels/1/50/60", log_message)
         self.assertIn("Gate 2: https://discord.com/channels/1/51/61", log_message)
         interaction.delete_original_response.assert_awaited_once_with()
 
     async def test_batch_confirmation_adds_only_missing_proofs_when_requested(self):
         author = SimpleNamespace(id=10, bot=False)
-        guild = SimpleNamespace(id=1)
+        guild = SimpleNamespace(id=1, get_member=lambda _user_id: author)
         content = "\n".join(
             (
                 "1 https://discord.com/channels/1/50/60",
@@ -927,12 +1056,22 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
             jump_url="https://discord.com/channels/1/20/30",
         )
         entries = nhmisc._parse_gate_proof_batch(content, expected_guild_id=1)
+        entries = tuple(
+            nhmisc.GateProofBatchEntry(
+                10,
+                entry.ordinal,
+                entry.source_guild_id,
+                entry.source_channel_id,
+                entry.source_message_id,
+            )
+            for entry in entries
+        )
         old_proof = nhmisc.StargateProof(1, 70, 80)
         view = SimpleNamespace(
             source_message=source_message,
-            member=author,
+            members={10: author},
             entries=entries,
-            existing_proofs={1: old_proof},
+            existing_proofs={(10, 1): old_proof},
             stop=mock.Mock(),
             render_embed=mock.Mock(),
         )
@@ -943,8 +1082,7 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
             delete_original_response=mock.AsyncMock(),
         )
         store = SimpleNamespace(
-            attach_stargate_proof_links=mock.AsyncMock(return_value=(object(),)),
-            replace_stargate_proof_links=mock.AsyncMock(),
+            apply_stargate_proof_batch=mock.AsyncMock(return_value=(object(),)),
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._achievement_store = store
@@ -962,17 +1100,24 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
             replace_existing=False,
         )
 
-        store.attach_stargate_proof_links.assert_awaited_once_with(
+        store.apply_stargate_proof_batch.assert_awaited_once_with(
             1,
-            10,
-            (nhmisc.StargateProof(2, 51, 61),),
+            (
+                nhmisc.StargateProofAssignment(
+                    10, nhmisc.StargateProof(1, 50, 60)
+                ),
+                nhmisc.StargateProofAssignment(
+                    10, nhmisc.StargateProof(2, 51, 61)
+                ),
+            ),
+            expected_proofs={(10, 1): old_proof, (10, 2): None},
+            replace_existing=False,
         )
-        store.replace_stargate_proof_links.assert_not_awaited()
         interaction.delete_original_response.assert_awaited_once_with()
 
     async def test_batch_confirmation_replaces_reviewed_proofs_when_requested(self):
         author = SimpleNamespace(id=10, bot=False)
-        guild = SimpleNamespace(id=1)
+        guild = SimpleNamespace(id=1, get_member=lambda _user_id: author)
         content = "1 https://discord.com/channels/1/50/60"
         source_message = SimpleNamespace(
             id=30,
@@ -984,12 +1129,22 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
             jump_url="https://discord.com/channels/1/20/30",
         )
         entries = nhmisc._parse_gate_proof_batch(content, expected_guild_id=1)
+        entries = tuple(
+            nhmisc.GateProofBatchEntry(
+                10,
+                entry.ordinal,
+                entry.source_guild_id,
+                entry.source_channel_id,
+                entry.source_message_id,
+            )
+            for entry in entries
+        )
         old_proof = nhmisc.StargateProof(1, 70, 80)
         view = SimpleNamespace(
             source_message=source_message,
-            member=author,
+            members={10: author},
             entries=entries,
-            existing_proofs={1: old_proof},
+            existing_proofs={(10, 1): old_proof},
             stop=mock.Mock(),
             render_embed=mock.Mock(),
         )
@@ -1000,8 +1155,7 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
             delete_original_response=mock.AsyncMock(),
         )
         store = SimpleNamespace(
-            attach_stargate_proof_links=mock.AsyncMock(),
-            replace_stargate_proof_links=mock.AsyncMock(return_value=(object(),)),
+            apply_stargate_proof_batch=mock.AsyncMock(return_value=(object(),)),
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._achievement_store = store
@@ -1019,13 +1173,16 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
             replace_existing=True,
         )
 
-        store.replace_stargate_proof_links.assert_awaited_once_with(
+        store.apply_stargate_proof_batch.assert_awaited_once_with(
             1,
-            10,
-            (nhmisc.StargateProof(1, 50, 60),),
-            expected_proofs={1: old_proof},
+            (
+                nhmisc.StargateProofAssignment(
+                    10, nhmisc.StargateProof(1, 50, 60)
+                ),
+            ),
+            expected_proofs={(10, 1): old_proof},
+            replace_existing=True,
         )
-        store.attach_stargate_proof_links.assert_not_awaited()
         interaction.delete_original_response.assert_awaited_once_with()
 
 

@@ -83,6 +83,12 @@ class StargateProof:
     source_message_id: int
 
 
+@dataclass(frozen=True, slots=True)
+class StargateProofAssignment:
+    user_id: int
+    proof: StargateProof
+
+
 class GateProofConflict(RuntimeError):
     """A selected Gate can no longer accept the requested proof."""
 
@@ -216,6 +222,52 @@ class AchievementStore:
                     expected.source_message_id if expected is not None else None,
                 )
             )
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._attach_stargate_proofs_sync,
+                guild_id,
+                tuple(replacements),
+            )
+
+    async def apply_stargate_proof_batch(
+        self,
+        guild_id: int,
+        assignments: tuple[StargateProofAssignment, ...],
+        *,
+        expected_proofs: Mapping[tuple[int, int], StargateProof | None],
+        replace_existing: bool,
+    ) -> tuple[StargateProof, ...]:
+        assignment_keys = tuple(
+            (assignment.user_id, assignment.proof.ordinal)
+            for assignment in assignments
+        )
+        if len(set(assignment_keys)) != len(assignment_keys):
+            raise GateProofConflict("A Gate proof was assigned more than once")
+        if set(expected_proofs) != set(assignment_keys):
+            raise GateProofConflict("Reviewed Gate proofs do not match the batch")
+
+        replacements = []
+        for assignment in assignments:
+            key = (assignment.user_id, assignment.proof.ordinal)
+            expected = expected_proofs[key]
+            if expected is not None and expected.ordinal != assignment.proof.ordinal:
+                raise GateProofConflict("Reviewed Gate proof ordinal does not match")
+            target = (
+                assignment.proof
+                if replace_existing or expected is None
+                else expected
+            )
+            replacements.append(
+                (
+                    assignment.user_id,
+                    target.ordinal,
+                    target.source_channel_id,
+                    target.source_message_id,
+                    expected.source_channel_id if expected is not None else None,
+                    expected.source_message_id if expected is not None else None,
+                )
+            )
+
         async with self._lock:
             return await asyncio.to_thread(
                 self._attach_stargate_proofs_sync,

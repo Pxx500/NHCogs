@@ -1097,54 +1097,56 @@ class GateProofBatchView(discord.ui.View):
         cog: NHMisc,
         source_message: discord.Message,
         opener_id: int,
-        member: discord.Member,
+        members: dict[int, discord.Member],
         entries: tuple[Any, ...],
         *,
-        existing_proofs: dict[int, Any],
+        existing_proofs: dict[tuple[int, int], Any],
     ) -> None:
         super().__init__(timeout=300)
         self.cog = cog
         self.source_message = source_message
         self.opener_id = opener_id
-        self.member = member
+        self.members = members
         self.entries = entries
         self.existing_proofs = existing_proofs
         self.message: discord.Message | None = None
         if existing_proofs:
             self.attach.label = "Replace and add all"
             self.add_missing.disabled = all(
-                entry.ordinal in existing_proofs for entry in entries
+                (entry.user_id, entry.ordinal) in existing_proofs
+                for entry in entries
             )
         else:
             self.remove_item(self.add_missing)
 
     def render_embed(self, *, notice: str | None = None) -> discord.Embed:
-        proof_lines = [
-            f"Gate {entry.ordinal}: [Open proof]({entry.jump_url})"
-            for entry in self.entries
-            if entry.ordinal not in self.existing_proofs
-        ]
-        replacement_lines = []
-        if self.existing_proofs:
+        proof_lines: list[str] = []
+        replacement_lines: list[str] = []
+        for entry in self.entries:
+            key = (entry.user_id, entry.ordinal)
+            target = (
+                replacement_lines if key in self.existing_proofs else proof_lines
+            )
+            player_prefix = f"<@{entry.user_id}> Gate {entry.ordinal}"
+            existing = self.existing_proofs.get(key)
+            if existing is None:
+                target.append(f"{player_prefix}: [Open proof]({entry.jump_url})")
+                continue
             guild_id = self.source_message.guild.id
-            for entry in self.entries:
-                existing = self.existing_proofs.get(entry.ordinal)
-                if existing is None:
-                    continue
-                current_url = (
-                    "https://discord.com/channels/"
-                    f"{guild_id}/{existing.source_channel_id}/"
-                    f"{existing.source_message_id}"
-                )
-                replacement_lines.append(
-                    f"Gate {entry.ordinal}: [Current proof]({current_url}) → "
-                    f"[New proof]({entry.jump_url})"
-                )
+            current_url = (
+                "https://discord.com/channels/"
+                f"{guild_id}/{existing.source_channel_id}/"
+                f"{existing.source_message_id}"
+            )
+            target.append(
+                f"{player_prefix}: [Current proof]({current_url}) → "
+                f"[New proof]({entry.jump_url})"
+            )
         description = [
             "This only attaches proofs to existing Gates. It does not add or "
             "increment any Gate",
             "",
-            f"Player: <@{self.member.id}>",
+            f"Players: {', '.join(f'<@{member_id}>' for member_id in self.members)}",
             f"Request: [Open message]({self.source_message.jump_url})",
         ]
         if replacement_lines:
