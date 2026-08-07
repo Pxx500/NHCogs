@@ -787,9 +787,11 @@ class Honeypot(Cog):
 
         def visible_commands(parent: commands.Group) -> typing.Iterator[typing.Any]:
             for child in getattr(parent, "commands", ()):
-                yield child
-                if include_descendants:
+                descendants = getattr(child, "commands", ())
+                if include_descendants and descendants:
                     yield from visible_commands(child)
+                else:
+                    yield child
 
         command_lines = []
         for child in visible_commands(command):

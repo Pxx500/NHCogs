@@ -219,7 +219,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
-    async def test_root_group_shows_nested_configuration_syntax(self):
+    async def test_root_group_shows_leaf_commands_without_section_rows(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = object.__new__(honeypot.Honeypot)
@@ -297,6 +297,8 @@ class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("?honeypot gifdetector channel remove [channel]", rendered)
                 self.assertIn("?honeypot gifdetector message set <text>", rendered)
                 self.assertIn("?honeypot gifdetector message reset", rendered)
+                self.assertNotIn("`?honeypot gifdetector channel` —", rendered)
+                self.assertNotIn("`?honeypot gifdetector message` —", rendered)
 
     async def test_configuration_summary_shows_current_values_and_channels(self):
         with TemporaryDirectory() as directory:
