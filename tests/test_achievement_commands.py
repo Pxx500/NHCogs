@@ -1,11 +1,19 @@
 import asyncio
 import contextlib
+import csv
+import io
 import sys
 import unittest
 from types import ModuleType, SimpleNamespace
 from unittest import mock
 
 from tests.test_gatecount import nhmisc
+
+
+class _CapturedFile:
+    def __init__(self, fp, *, filename):
+        self.data = fp.read()
+        self.filename = filename
 
 
 class AchievementProfileRenderingTests(unittest.TestCase):
@@ -589,6 +597,207 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("No Discord role", embed.fields[0].value)
         self.assertIn("<@&789>", embed.fields[1].value)
         self.assertEqual(ctx.send.await_args.kwargs["allowed_mentions"], "no-mentions")
+
+    async def test_missing_proofs_previews_twenty_members_and_exports_every_match(self):
+        members = [
+            SimpleNamespace(
+                id=user_id,
+                name=f"user{user_id}",
+                display_name=f"Member {23 - user_id:02}",
+                bot=False,
+            )
+            for user_id in range(1, 23)
+        ]
+        bot = SimpleNamespace(id=23, name="bot", display_name="Bot", bot=True)
+        default_role = object()
+        bot_member = object()
+        guild = SimpleNamespace(
+            id=1,
+            members=[*members, bot],
+            member_count=23,
+            chunked=True,
+            default_role=default_role,
+            me=bot_member,
+            filesize_limit=100_000,
+        )
+        channel = SimpleNamespace(
+            id=10,
+            permissions_for=lambda subject: SimpleNamespace(
+                view_channel=subject is not default_role,
+                send_messages=subject is bot_member,
+                attach_files=subject is bot_member,
+            ),
+        )
+        missing = {
+            member.id: tuple(range(1, member.id % 4 + 2)) for member in members
+        }
+        missing[bot.id] = (1,)
+        missing[999] = (1, 2, 3)
+        store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(return_value=True),
+            list_missing_stargate_proofs=mock.AsyncMock(return_value=missing),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = store
+        cog._send_moderation_log = mock.AsyncMock()
+        ctx = SimpleNamespace(guild=guild, channel=channel, send=mock.AsyncMock())
+
+        with mock.patch.object(nhmisc.discord, "File", _CapturedFile, create=True):
+            await nhmisc.NHMisc.achievement_missingproofs(cog, ctx)
+
+        expected = sorted(
+            ((member, missing[member.id]) for member in members),
+            key=lambda item: (
+                -len(item[1]),
+                item[0].display_name.casefold(),
+                item[0].id,
+            ),
+        )
+        ctx.send.assert_awaited_once()
+        sent = ctx.send.await_args.kwargs
+        embed = sent["embed"]
+        self.assertEqual(embed.title, "Missing Stargate proofs")
+        self.assertEqual(
+            embed.description.splitlines(),
+            [
+                f"<@{member.id}> — Gates {', '.join(map(str, gates))}"
+                for member, gates in expected[:20]
+            ],
+        )
+        self.assertEqual(
+            embed.fields[0].value,
+            "Affected members: 22\n"
+            f"Missing proofs: {sum(len(gates) for _, gates in expected)}",
+        )
+        self.assertEqual(embed.footer.text, "Complete report attached")
+        self.assertEqual(sent["allowed_mentions"], "no-mentions")
+        attachment = sent["file"]
+        self.assertEqual(attachment.filename, "missing-stargate-proofs.csv")
+        rows = list(csv.DictReader(io.StringIO(attachment.data.decode("utf-8"))))
+        self.assertEqual([int(row["user_id"]) for row in rows], [m.id for m, _ in expected])
+        self.assertEqual(
+            rows[0]["missing_gates"],
+            ", ".join(map(str, expected[0][1])),
+        )
+        cog._send_moderation_log.assert_not_awaited()
+
+    async def test_missing_proofs_reports_when_every_current_holder_has_proofs(self):
+        member = SimpleNamespace(id=1, name="user", display_name="User", bot=False)
+        guild = SimpleNamespace(
+            id=1,
+            members=[member],
+            member_count=1,
+            chunked=True,
+            default_role=object(),
+            me=object(),
+            filesize_limit=100_000,
+        )
+        channel = SimpleNamespace(
+            permissions_for=lambda subject: SimpleNamespace(
+                view_channel=subject is not guild.default_role,
+                send_messages=True,
+                attach_files=True,
+            )
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(return_value=True),
+            list_missing_stargate_proofs=mock.AsyncMock(return_value={999: (1,)}),
+        )
+        ctx = SimpleNamespace(guild=guild, channel=channel, send=mock.AsyncMock())
+
+        await nhmisc.NHMisc.achievement_missingproofs(cog, ctx)
+
+        ctx.send.assert_awaited_once_with(
+            "All current Gate holders have proofs for every Gate"
+        )
+
+    async def test_missing_proofs_requires_complete_member_cache(self):
+        guild = SimpleNamespace(
+            id=1,
+            members=[],
+            member_count=1,
+            chunked=True,
+            default_role=object(),
+            me=object(),
+        )
+        channel = SimpleNamespace(
+            permissions_for=lambda subject: SimpleNamespace(
+                view_channel=subject is not guild.default_role,
+                send_messages=True,
+                attach_files=True,
+            )
+        )
+        store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(return_value=True),
+            list_missing_stargate_proofs=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = store
+        ctx = SimpleNamespace(guild=guild, channel=channel, send=mock.AsyncMock())
+
+        with self.assertRaisesRegex(
+            nhmisc.commands.UserFeedbackCheckFailure,
+            "Run `!rolesync` first",
+        ):
+            await nhmisc.NHMisc.achievement_missingproofs(cog, ctx)
+
+        store.list_missing_stargate_proofs.assert_not_awaited()
+
+    async def test_missing_proofs_requires_bootstrapped_achievement_data(self):
+        store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(return_value=False),
+            list_missing_stargate_proofs=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = store
+        cog._require_private_achievement_export_channel = mock.Mock()
+        ctx = SimpleNamespace(guild=SimpleNamespace(id=1))
+
+        with self.assertRaisesRegex(
+            nhmisc.commands.UserFeedbackCheckFailure,
+            "Run `!rolesync discord` first",
+        ):
+            await nhmisc.NHMisc.achievement_missingproofs(cog, ctx)
+
+        store.list_missing_stargate_proofs.assert_not_awaited()
+
+    def test_missing_proof_export_is_refused_in_public_channels(self):
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._channel_is_public = mock.Mock(return_value=True)
+        ctx = SimpleNamespace(
+            channel=SimpleNamespace(id=10),
+            guild=SimpleNamespace(id=1),
+        )
+
+        with self.assertRaisesRegex(
+            nhmisc.commands.UserFeedbackCheckFailure,
+            "Achievement proof export is unavailable in this channel",
+        ):
+            cog._require_private_achievement_export_channel(ctx)
+
+    def test_missing_proof_export_requires_bot_attachment_permission(self):
+        default_role = object()
+        bot_member = object()
+        channel = SimpleNamespace(
+            id=10,
+            permissions_for=lambda subject: SimpleNamespace(
+                view_channel=subject is not default_role,
+                send_messages=subject is bot_member,
+                attach_files=False,
+            ),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        ctx = SimpleNamespace(
+            channel=channel,
+            guild=SimpleNamespace(id=1, default_role=default_role, me=bot_member),
+        )
+
+        with self.assertRaisesRegex(
+            nhmisc.commands.UserFeedbackCheckFailure,
+            "Achievement proof export is unavailable in this channel",
+        ):
+            cog._require_private_achievement_export_channel(ctx)
 
     def test_achievement_keys_are_refused_in_public_channels(self):
         cog = object.__new__(nhmisc.NHMisc)

@@ -22,9 +22,13 @@ class _Embed:
         self.description = description
         self.color = color
         self.fields = []
+        self.footer = None
 
     def add_field(self, *, name, value, inline=True):
         self.fields.append(SimpleNamespace(name=name, value=value, inline=inline))
+
+    def set_footer(self, *, text):
+        self.footer = SimpleNamespace(text=text)
 
 
 class _AllowedMentions:

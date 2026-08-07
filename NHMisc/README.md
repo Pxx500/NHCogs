@@ -214,6 +214,7 @@ Apps → View achievements
 Apps → Grant achievements
 [p]achievement create <display name>
 [p]achievement list
+[p]achievement missingproofs
 [p]achievement rename <key> <new display name>
 [p]achievement delete <key>
 [p]achievement role bind @Role
@@ -246,6 +247,11 @@ achievement and opens a destructive confirmation. Confirming permanently deletes
 achievement definition and every stored award for it. `achievement list` shows the
 stable keys required by these commands. Because keys are internal identifiers, `list`,
 `rename`, and `delete` are unavailable in channels visible to `@everyone`.
+
+`achievement missingproofs` reports current non-bot server members who have at least one
+Gate without a proof link. It previews the first 20 affected members and attaches the full
+result as CSV, or as a ZIP when needed. The command requires a complete member cache and
+is unavailable in channels visible to `@everyone`.
 
 Gate increments, proof attachments and revokes, achievement grants and revokes,
 achievement definition changes, and role binding changes are recorded in the configured
