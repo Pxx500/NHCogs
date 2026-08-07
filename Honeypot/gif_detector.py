@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import time
+from collections import deque
 from collections.abc import Iterable, Mapping
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 import discord
 from redbot.core import commands
@@ -15,16 +20,128 @@ from .settings import GuildSettings
 
 SEEN_MESSAGE_LIMIT = 4096
 MAX_SECONDARY_MESSAGE_LENGTH = 1900
+GIF_THRESHOLD_MIN = 2
+GIF_THRESHOLD_MAX = 20
+GIF_WINDOW_MIN_SECONDS = 5
+GIF_WINDOW_MAX_SECONDS = 3600
+GIF_MUTE_MIN_SECONDS = 60
+GIF_MUTE_MAX_SECONDS = 604800
+_URL_PATTERN = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
+_URL_TRAILING_PUNCTUATION = ".,!?:;'\")]}<>"
+_GIF_PROVIDER_NAMES = frozenset(("giphy", "tenor"))
+_GIF_PROVIDER_HOSTS = frozenset(
+    (
+        "giphy.com",
+        "i.giphy.com",
+        "media.giphy.com",
+        "media0.giphy.com",
+        "media1.giphy.com",
+        "media2.giphy.com",
+        "media3.giphy.com",
+        "media4.giphy.com",
+        "tenor.com",
+        "media.tenor.com",
+        "www.giphy.com",
+        "www.tenor.com",
+    )
+)
 _ = Translator("Honeypot", __file__)
 
 
-def has_gifv_embed(embeds: Iterable[Any]) -> bool:
-    """Return whether Discord classified any embed as an animated GIF."""
+def _field(value: Any, name: str, default: Any = None) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(name, default)
+    return getattr(value, name, default)
 
-    return any(
-        (embed.get("type") if isinstance(embed, Mapping) else getattr(embed, "type", None))
-        == "gifv"
-        for embed in embeds
+
+def _collection(value: Any) -> Iterable[Any]:
+    if value is None or isinstance(value, (str, bytes, bytearray, Mapping)):
+        return ()
+    try:
+        iter(value)
+    except TypeError:
+        return ()
+    return value
+
+
+def _urls_in_text(value: Any) -> Iterable[str]:
+    if not isinstance(value, str):
+        return ()
+    return (
+        match.group(0).rstrip(_URL_TRAILING_PUNCTUATION)
+        for match in _URL_PATTERN.finditer(value)
+    )
+
+
+def _is_gif_url(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return urlparse(value).path.casefold().endswith(".gif")
+    except ValueError:
+        return False
+
+
+def _hostname(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return urlparse(value).hostname
+    except ValueError:
+        return None
+
+
+def _embed_urls(embed: Any) -> Iterable[str]:
+    for field_name in ("url", "source", "image", "thumbnail", "video"):
+        field_value = _field(embed, field_name)
+        url = field_value if isinstance(field_value, str) else _field(field_value, "url")
+        if isinstance(url, str):
+            yield url
+
+
+def _has_gif_provider_provenance(embed: Any, urls: Iterable[str]) -> bool:
+    if str(_field(embed, "type", "")).casefold() != "video":
+        return False
+    provider = _field(embed, "provider")
+    provider_name = str(_field(provider, "name", "")).strip().casefold()
+    if provider_name in _GIF_PROVIDER_NAMES:
+        return True
+    provider_url = _field(provider, "url")
+    candidate_urls = (*urls, provider_url)
+    return any(_hostname(url) in _GIF_PROVIDER_HOSTS for url in candidate_urls)
+
+
+def _attachment_has_gif_evidence(attachment: Any) -> bool:
+    media_type = str(_field(attachment, "content_type", "")).casefold()
+    filename = str(_field(attachment, "filename", "")).casefold()
+    return (
+        media_type == "image/gif"
+        or filename.endswith(".gif")
+        or any(_is_gif_url(url) for url in _urls_in_text(_field(attachment, "url")))
+    )
+
+
+def _embed_has_gif_evidence(embed: Any) -> bool:
+    if str(_field(embed, "type", "")).casefold() == "gifv":
+        return True
+    urls = tuple(_embed_urls(embed))
+    return any(_is_gif_url(url) for url in urls) or _has_gif_provider_provenance(
+        embed, urls
+    )
+
+
+def has_gif_evidence(
+    *,
+    embeds: Iterable[Any] = (),
+    attachments: Iterable[Any] = (),
+    content: Any = "",
+) -> bool:
+    """Return whether message fields contain explicit GIF-media evidence."""
+
+    return (
+        any(_attachment_has_gif_evidence(item) for item in _collection(attachments))
+        or any(_is_gif_url(url) for url in _urls_in_text(content))
+        or any(_embed_has_gif_evidence(embed) for embed in _collection(embeds))
     )
 
 
@@ -34,11 +151,12 @@ def channel_scope_id(channel: Any) -> int:
     return getattr(channel, "parent_id", None) or channel.id
 
 
-def render_icbm_frame(author_mention: str, *, track_lines: int) -> str:
-    """Render one ICBM frame with all remaining track above the rocket."""
+def render_icbm_frame(author_mention: str, *, rocket_position: int) -> str:
+    """Render one frame on the fixed ten-dash horizontal track."""
 
-    header = f"ICBM detected targeting {author_mention}'s GIF!"
-    return "\n".join((header, *("│" for _ in range(track_lines)), "🚀"))
+    travelled = "─" * rocket_position
+    remaining = "─" * (10 - rocket_position)
+    return f"{travelled}🚀{remaining}🎯 {author_mention}'s GIF"
 
 
 async def _record_http_failure(cog: Any, message: Any, action: str, error: Exception) -> None:
@@ -89,7 +207,7 @@ async def _run_animated(cog: Any, message: Any) -> None:
     try:
         try:
             warning = await message.channel.send(
-                render_icbm_frame(message.author.mention, track_lines=10),
+                render_icbm_frame(message.author.mention, rocket_position=0),
                 allowed_mentions=_author_mentions(message),
             )
         except discord.HTTPException as error:
@@ -98,27 +216,29 @@ async def _run_animated(cog: Any, message: Any) -> None:
             )
 
         if warning is None:
-            await asyncio.sleep(10)
+            await asyncio.sleep(5)
         else:
-            for track_lines in range(9, 0, -1):
+            remaining_seconds = 1
+            for elapsed_seconds, rocket_position in enumerate(range(2, 10, 2), start=1):
                 await asyncio.sleep(1)
                 try:
                     await warning.edit(
                         content=render_icbm_frame(
                             message.author.mention,
-                            track_lines=track_lines,
+                            rocket_position=rocket_position,
                         ),
                         allowed_mentions=_author_mentions(message),
                     )
                 except discord.NotFound:
                     warning = None
+                    remaining_seconds = 5 - elapsed_seconds
                     break
                 except discord.HTTPException as error:
                     await _record_http_failure(
                         cog, message, "Could not edit animated GIF warning", error
                     )
             if warning is None:
-                await asyncio.sleep(track_lines)
+                await asyncio.sleep(remaining_seconds)
             else:
                 await asyncio.sleep(1)
 
@@ -150,6 +270,122 @@ def _spawn(cog: Any, coroutine: Any) -> None:
     task.add_done_callback(settled)
 
 
+async def _record_mute_failure(cog: Any, guild_id: int, summary: str) -> None:
+    await cog._record_operational_failure(guild_id, "gif_detector", summary)
+
+
+async def _resolve_mute_member(guild: Any, author: Any) -> Any:
+    get_member = getattr(guild, "get_member", None)
+    if not callable(get_member):
+        return author
+    member = get_member(author.id)
+    if member is not None:
+        return member
+    fetch_member = getattr(guild, "fetch_member", None)
+    if not callable(fetch_member):
+        return author
+    return await fetch_member(author.id)
+
+
+async def _apply_gif_mute(
+    cog: Any,
+    message: Any,
+    key: tuple[int, int],
+    duration_seconds: int,
+) -> None:
+    guild = message.guild
+    try:
+        mutes = cog.bot.get_cog("Mutes")
+        if mutes is None:
+            await _record_mute_failure(cog, guild.id, "Core Mutes cog is unavailable")
+            return
+
+        mute_config = getattr(mutes, "config", None)
+        if mute_config is None:
+            await _record_mute_failure(cog, guild.id, "Core Mutes configuration is unavailable")
+            return
+        role_id = await mute_config.guild(guild).mute_role()
+        role = guild.get_role(role_id) if role_id else None
+        if role is None:
+            await _record_mute_failure(cog, guild.id, "Core Mutes role is not configured")
+            return
+
+        author = getattr(guild, "me", None)
+        if author is None:
+            await _record_mute_failure(cog, guild.id, "Bot member is unavailable for GIF mute")
+            return
+
+        member = await _resolve_mute_member(guild, message.author)
+        until = datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)
+        response = await mutes.mute_user(
+            guild,
+            author,
+            member,
+            until=until,
+            reason="GIF defense system activated, ICBM launch privileges revoked",
+        )
+        if not getattr(response, "success", False):
+            reason = getattr(response, "reason", None) or "Core Mutes rejected GIF mute"
+            await _record_mute_failure(cog, guild.id, str(reason))
+            return
+
+        async with cog._gif_detector_rate_lock:
+            cog._gif_detector_active_mutes[key] = time.monotonic() + duration_seconds
+    except discord.HTTPException as error:
+        await _record_mute_failure(
+            cog,
+            guild.id,
+            f"Could not apply GIF mute: {type(error).__name__}: {error}",
+        )
+    except Exception as error:
+        await _record_mute_failure(
+            cog,
+            guild.id,
+            f"Core Mutes integration failed: {type(error).__name__}: {error}",
+        )
+    finally:
+        async with cog._gif_detector_rate_lock:
+            cog._gif_detector_mutes_in_flight.discard(key)
+
+
+async def _record_gif_hit(cog: Any, message: Any, configured: GuildSettings) -> None:
+    key = (message.guild.id, message.author.id)
+    now = time.monotonic()
+    async with cog._gif_detector_rate_lock:
+        cutoff = now - configured.gif_detector_window_seconds
+        for stale_key, stale_hits in tuple(cog._gif_detector_hits.items()):
+            if stale_key[0] == message.guild.id and (
+                not stale_hits or stale_hits[-1] < cutoff
+            ):
+                del cog._gif_detector_hits[stale_key]
+        for stale_key, mute_until in tuple(cog._gif_detector_active_mutes.items()):
+            if mute_until <= now:
+                del cog._gif_detector_active_mutes[stale_key]
+
+        active_until = cog._gif_detector_active_mutes.get(key)
+        if active_until is not None:
+            return
+        if key in cog._gif_detector_mutes_in_flight:
+            return
+
+        hits = cog._gif_detector_hits.setdefault(key, deque())
+        hits.append(now)
+        if len(hits) < configured.gif_detector_threshold:
+            return
+
+        del cog._gif_detector_hits[key]
+        cog._gif_detector_mutes_in_flight.add(key)
+        _spawn(
+            cog,
+            _apply_gif_mute(
+                cog,
+                message,
+                key,
+                configured.gif_detector_mute_duration_seconds,
+            ),
+        )
+
+
 async def _admit_message(cog: Any, message: Any) -> None:
     guild = message.guild
     if guild is None or message.author.bot or message.webhook_id is not None:
@@ -176,20 +412,54 @@ async def _admit_message(cog: Any, message: Any) -> None:
             cog,
             _run_secondary(cog, message, configured.gif_detector_secondary_message),
         )
+    await _record_gif_hit(cog, message, configured)
 
 
 async def on_message(cog: Any, message: Any) -> None:
-    if has_gifv_embed(getattr(message, "embeds", ())):
+    if has_gif_evidence(
+        embeds=getattr(message, "embeds", ()),
+        attachments=getattr(message, "attachments", ()),
+        content=getattr(message, "content", ""),
+    ):
         await _admit_message(cog, message)
 
 
 async def on_raw_message_edit(cog: Any, payload: Any) -> None:
-    raw_embeds = payload.data.get("embeds")
-    cached_message = getattr(payload, "cached_message", None)
-    if cached_message is None or raw_embeds is None:
+    raw_data = payload.data if isinstance(getattr(payload, "data", None), Mapping) else {}
+    if not has_gif_evidence(
+        embeds=raw_data.get("embeds", ()),
+        attachments=raw_data.get("attachments", ()),
+        content=raw_data.get("content", ""),
+    ):
         return
-    if has_gifv_embed(raw_embeds):
+
+    cached_message = getattr(payload, "cached_message", None)
+    if cached_message is not None:
         await _admit_message(cog, cached_message)
+        return
+
+    channel_id = getattr(payload, "channel_id", None)
+    message_id = getattr(payload, "message_id", None)
+    if channel_id is None or message_id is None:
+        return
+
+    try:
+        channel = cog.bot.get_channel(channel_id)
+        if channel is None:
+            channel = await cog.bot.fetch_channel(channel_id)
+        message = await channel.fetch_message(message_id)
+    except discord.NotFound:
+        return
+    except discord.HTTPException as error:
+        guild_id = getattr(payload, "guild_id", None)
+        if guild_id is not None:
+            await cog._record_operational_failure(
+                guild_id,
+                "gif_detector",
+                f"Could not fetch edited GIF message: {type(error).__name__}: {error}",
+            )
+        return
+    await _admit_message(cog, message)
 
 
 def _format_channels(cog: Any, guild: Any, channel_ids: list[int]) -> str:
@@ -221,6 +491,19 @@ async def config_gif_detector(cog: Any, ctx: commands.Context) -> None:
                 _format_channels(cog, ctx.guild, configured.gif_detector_channels),
             ),
             (_("Secondary message"), configured.gif_detector_secondary_message),
+            (_("Mute threshold"), str(configured.gif_detector_threshold)),
+            (
+                _("Rolling window"),
+                _("{seconds} seconds").format(
+                    seconds=configured.gif_detector_window_seconds
+                ),
+            ),
+            (
+                _("Mute duration"),
+                _("{seconds} seconds").format(
+                    seconds=configured.gif_detector_mute_duration_seconds
+                ),
+            ),
         ],
     )
 
@@ -233,6 +516,74 @@ async def gif_detector_toggle(cog: Any, ctx: commands.Context, value: bool) -> N
 async def gif_detector_animation(cog: Any, ctx: commands.Context, value: bool) -> None:
     await cog.config.guild(ctx.guild).gif_detector_animation_enabled.set(value)
     await ctx.send(_("✅ GIF detector animation enabled: {value}").format(value=str(value).lower()))
+
+
+async def _configure_bounded_integer(
+    cog: Any,
+    ctx: commands.Context,
+    *,
+    key: str,
+    value: int | None,
+    minimum: int,
+    maximum: int,
+    label: str,
+) -> None:
+    setting = getattr(cog.config.guild(ctx.guild), key)
+    if value is None:
+        current = await setting()
+        await ctx.send(_("{label}: {value}").format(label=label, value=current))
+        return
+    if not minimum <= value <= maximum:
+        raise commands.UserFeedbackCheckFailure(
+            _("Value must be between {minimum} and {maximum}.").format(
+                minimum=minimum,
+                maximum=maximum,
+            )
+        )
+    await setting.set(value)
+    await ctx.send(_("✅ {label} set to {value}").format(label=label, value=value))
+
+
+async def gif_detector_threshold(
+    cog: Any, ctx: commands.Context, value: int | None = None
+) -> None:
+    await _configure_bounded_integer(
+        cog,
+        ctx,
+        key="gif_detector_threshold",
+        value=value,
+        minimum=GIF_THRESHOLD_MIN,
+        maximum=GIF_THRESHOLD_MAX,
+        label=_("GIF mute threshold"),
+    )
+
+
+async def gif_detector_window(
+    cog: Any, ctx: commands.Context, seconds: int | None = None
+) -> None:
+    await _configure_bounded_integer(
+        cog,
+        ctx,
+        key="gif_detector_window_seconds",
+        value=seconds,
+        minimum=GIF_WINDOW_MIN_SECONDS,
+        maximum=GIF_WINDOW_MAX_SECONDS,
+        label=_("GIF rolling window in seconds"),
+    )
+
+
+async def gif_detector_mute_duration(
+    cog: Any, ctx: commands.Context, seconds: int | None = None
+) -> None:
+    await _configure_bounded_integer(
+        cog,
+        ctx,
+        key="gif_detector_mute_duration_seconds",
+        value=seconds,
+        minimum=GIF_MUTE_MIN_SECONDS,
+        maximum=GIF_MUTE_MAX_SECONDS,
+        label=_("GIF mute duration in seconds"),
+    )
 
 
 def _target_scope(target: Any) -> tuple[int, Any]:

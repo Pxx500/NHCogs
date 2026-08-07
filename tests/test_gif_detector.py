@@ -2,6 +2,8 @@
 
 import asyncio
 import unittest
+from collections import deque
+from datetime import datetime, timezone
 from importlib import import_module
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -22,24 +24,95 @@ class GifDetectorSettingsTests(unittest.TestCase):
                 self.assertTrue(configured.gif_detector_animation_enabled)
                 self.assertEqual(configured.gif_detector_channels, [])
                 self.assertEqual(configured.gif_detector_secondary_message, "No gifs!")
+                self.assertEqual(configured.gif_detector_threshold, 3)
+                self.assertEqual(configured.gif_detector_window_seconds, 60)
+                self.assertEqual(configured.gif_detector_mute_duration_seconds, 3600)
 
 
 class GifDetectorClassificationTests(unittest.TestCase):
-    def test_only_discord_gifv_embeds_are_detected(self):
+    def test_malformed_embed_and_attachment_collections_are_ignored(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
                 gif_detector = import_module("Honeypot.gif_detector")
 
-                self.assertTrue(
-                    gif_detector.has_gifv_embed(
-                        [SimpleNamespace(type="rich"), SimpleNamespace(type="gifv")]
-                    )
-                )
-                self.assertFalse(
-                    gif_detector.has_gifv_embed(
-                        [SimpleNamespace(type="image"), SimpleNamespace(type="video")]
-                    )
-                )
+                for field in ("embeds", "attachments"):
+                    with self.subTest(field=field):
+                        self.assertFalse(gif_detector.has_gif_evidence(**{field: 1}))
+
+    def test_supported_gif_evidence_is_detected_without_matching_ordinary_mp4(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)):
+                gif_detector = import_module("Honeypot.gif_detector")
+
+                positive_cases = {
+                    "gifv embed": {"embeds": [{"type": "gifv"}]},
+                    "GIF media type": {
+                        "attachments": [{"filename": "upload.bin", "content_type": "image/gif"}]
+                    },
+                    "original GIF filename": {
+                        "attachments": [
+                            {"filename": "REACTION.GIF", "content_type": "video/mp4"}
+                        ]
+                    },
+                    "direct GIF URL": {
+                        "content": "https://cdn.example.test/reaction.GIF?size=large#preview"
+                    },
+                    "embed image URL": {
+                        "embeds": [
+                            {"type": "image", "image": {"url": "https://cdn.example/a.gif?v=1"}}
+                        ]
+                    },
+                    "Tenor video provenance": {
+                        "embeds": [
+                            {
+                                "type": "video",
+                                "url": "https://tenor.com/view/reaction-123",
+                                "video": {
+                                    "url": "https://media.tenor.com/example/tenor.mp4"
+                                },
+                            }
+                        ]
+                    },
+                    "Giphy provider object": {
+                        "embeds": [
+                            SimpleNamespace(
+                                type="video",
+                                provider=SimpleNamespace(name="GIPHY", url="https://giphy.com"),
+                                video=SimpleNamespace(url="https://media.giphy.com/media/example/giphy.mp4"),
+                            )
+                        ]
+                    },
+                }
+                negative_cases = {
+                    "ordinary MP4 attachment": {
+                        "attachments": [
+                            {"filename": "clip.mp4", "content_type": "video/mp4"}
+                        ]
+                    },
+                    "ordinary MP4 link": {"content": "https://cdn.example.test/clip.mp4"},
+                    "generic video embed": {
+                        "embeds": [
+                            {
+                                "type": "video",
+                                "url": "https://youtube.com/watch?v=gif",
+                                "video": {"url": "https://cdn.example.test/clip.mp4"},
+                            }
+                        ]
+                    },
+                    "GIF only in query": {
+                        "content": "https://cdn.example.test/image.png?format=gif"
+                    },
+                    "GIF hostname fragment": {
+                        "content": "https://notgiphy.example.test/clip.mp4"
+                    },
+                }
+
+                for label, message in positive_cases.items():
+                    with self.subTest(label=label):
+                        self.assertTrue(gif_detector.has_gif_evidence(**message))
+                for label, message in negative_cases.items():
+                    with self.subTest(label=label):
+                        self.assertFalse(gif_detector.has_gif_evidence(**message))
 
     def test_thread_scope_uses_its_parent_channel(self):
         with TemporaryDirectory() as directory:
@@ -61,23 +134,216 @@ class GifDetectorClassificationTests(unittest.TestCase):
 
 
 class GifDetectorAnimationTests(unittest.TestCase):
-    def test_animation_removes_track_above_the_rocket_without_leaving_a_trail(self):
+    def test_animation_uses_a_fixed_horizontal_track(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
                 gif_detector = import_module("Honeypot.gif_detector")
 
-                header = "ICBM detected targeting @User's GIF!"
+                expected_frames = [
+                    "🚀──────────🎯 @User's GIF",
+                    "──🚀────────🎯 @User's GIF",
+                    "────🚀──────🎯 @User's GIF",
+                    "──────🚀────🎯 @User's GIF",
+                    "────────🚀──🎯 @User's GIF",
+                ]
+
                 self.assertEqual(
-                    gif_detector.render_icbm_frame("@User", track_lines=10),
-                    "\n".join((header, *("│" for _ in range(10)), "🚀")),
-                )
-                self.assertEqual(
-                    gif_detector.render_icbm_frame("@User", track_lines=1),
-                    f"{header}\n│\n🚀",
+                    [
+                        gif_detector.render_icbm_frame("@User", rocket_position=position)
+                        for position in range(0, 10, 2)
+                    ],
+                    expected_frames,
                 )
 
 
 class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_new_hit_prunes_expired_rate_state_for_its_guild(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                configured = honeypot.GuildSettings.from_mapping({})
+                cog._gif_detector_hits[(1, 90)] = deque([0.0])
+                cog._gif_detector_hits[(2, 91)] = deque([0.0])
+                cog._gif_detector_active_mutes[(1, 92)] = 10.0
+                message = SimpleNamespace(
+                    guild=SimpleNamespace(id=1),
+                    author=SimpleNamespace(id=20),
+                )
+
+                with mock.patch.object(gif_detector.time, "monotonic", return_value=100.0):
+                    await gif_detector._record_gif_hit(cog, message, configured)
+
+                self.assertNotIn((1, 90), cog._gif_detector_hits)
+                self.assertIn((2, 91), cog._gif_detector_hits)
+                self.assertNotIn((1, 92), cog._gif_detector_active_mutes)
+
+    async def test_third_gif_in_default_window_requests_one_hour_role_mute(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                cog.config.defaults.update(
+                    gif_detector_enabled=True,
+                    gif_detector_animation_enabled=False,
+                    gif_detector_channels=[10],
+                )
+                cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
+                cog._is_protected_member = mock.AsyncMock(return_value=False)
+                mute_role = SimpleNamespace(id=99)
+                guild = SimpleNamespace(
+                    id=1,
+                    me=SimpleNamespace(id=999),
+                    get_role=mock.Mock(return_value=mute_role),
+                )
+                author = SimpleNamespace(id=20, mention="@User", bot=False)
+                warning = SimpleNamespace(delete=mock.AsyncMock())
+                channel = SimpleNamespace(
+                    id=10,
+                    parent_id=None,
+                    send=mock.AsyncMock(return_value=warning),
+                )
+                mute_role_value = mock.AsyncMock(return_value=99)
+                mutes = SimpleNamespace(
+                    config=SimpleNamespace(
+                        guild=mock.Mock(
+                            return_value=SimpleNamespace(mute_role=mute_role_value)
+                        )
+                    ),
+                    mute_user=mock.AsyncMock(
+                        return_value=SimpleNamespace(success=True, reason=None)
+                    ),
+                )
+                cog.bot.get_cog = mock.Mock(
+                    side_effect=lambda name: mutes if name == "Mutes" else None
+                )
+
+                def source(message_id):
+                    return SimpleNamespace(
+                        id=message_id,
+                        guild=guild,
+                        channel=channel,
+                        author=author,
+                        webhook_id=None,
+                        embeds=[SimpleNamespace(type="gifv")],
+                        attachments=[],
+                        content="",
+                        delete=mock.AsyncMock(),
+                    )
+
+                with (
+                    mock.patch.object(
+                        gif_detector.asyncio,
+                        "sleep",
+                        new=mock.AsyncMock(),
+                    ),
+                    mock.patch.object(
+                        honeypot.detection,
+                        "on_message",
+                        new=mock.AsyncMock(),
+                    ),
+                ):
+                    before = datetime.now(timezone.utc)
+                    await cog.on_message(source(30))
+                    await cog.on_message(source(31))
+                    self.assertEqual(mutes.mute_user.await_count, 0)
+                    await cog.on_message(source(32))
+                    await asyncio.gather(*tuple(cog._gif_detector_tasks))
+                    for message_id in (33, 34, 35):
+                        await cog.on_message(source(message_id))
+                    await asyncio.gather(*tuple(cog._gif_detector_tasks))
+                    self.assertEqual(mutes.mute_user.await_count, 1)
+
+                    cog._gif_detector_active_mutes[(guild.id, author.id)] = 0
+                    await asyncio.gather(
+                        *(cog.on_message(source(message_id)) for message_id in (36, 37, 38))
+                    )
+                    await asyncio.gather(*tuple(cog._gif_detector_tasks))
+
+                self.assertEqual(mutes.mute_user.await_count, 2)
+                first_call = mutes.mute_user.await_args_list[0]
+                args = first_call.args
+                self.assertEqual(args[:3], (guild, guild.me, author))
+                until = first_call.kwargs["until"]
+                self.assertIsNotNone(until.tzinfo)
+                self.assertGreaterEqual((until - before).total_seconds(), 3599)
+                self.assertLessEqual((until - before).total_seconds(), 3601)
+                self.assertEqual(
+                    first_call.kwargs["reason"],
+                    "GIF defense system activated, ICBM launch privileges revoked",
+                )
+
+    async def test_missing_core_mute_role_records_failure_without_calling_mute_service(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                cog._record_operational_failure = mock.AsyncMock()
+                guild = SimpleNamespace(
+                    id=1,
+                    me=SimpleNamespace(id=999),
+                    get_role=mock.Mock(return_value=None),
+                )
+                member = SimpleNamespace(id=20)
+                message = SimpleNamespace(guild=guild, author=member)
+                mutes = SimpleNamespace(
+                    config=SimpleNamespace(
+                        guild=mock.Mock(
+                            return_value=SimpleNamespace(
+                                mute_role=mock.AsyncMock(return_value=None)
+                            )
+                        )
+                    ),
+                    mute_user=mock.AsyncMock(),
+                )
+                cog.bot.get_cog = mock.Mock(return_value=mutes)
+                key = (guild.id, member.id)
+                cog._gif_detector_mutes_in_flight.add(key)
+
+                await gif_detector._apply_gif_mute(cog, message, key, 3600)
+
+                mutes.mute_user.assert_not_awaited()
+                cog._record_operational_failure.assert_awaited_once()
+                self.assertNotIn(key, cog._gif_detector_mutes_in_flight)
+
+    async def test_uncached_message_author_is_resolved_to_member_before_core_mute(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                cog._record_operational_failure = mock.AsyncMock()
+                user = SimpleNamespace(id=20)
+                member = SimpleNamespace(id=20, guild_permissions=object(), top_role=object())
+                role = SimpleNamespace(id=99)
+                guild = SimpleNamespace(
+                    id=1,
+                    me=SimpleNamespace(id=999),
+                    get_role=mock.Mock(return_value=role),
+                    get_member=mock.Mock(return_value=None),
+                    fetch_member=mock.AsyncMock(return_value=member),
+                )
+                message = SimpleNamespace(guild=guild, author=user)
+                mutes = SimpleNamespace(
+                    config=SimpleNamespace(
+                        guild=mock.Mock(
+                            return_value=SimpleNamespace(
+                                mute_role=mock.AsyncMock(return_value=role.id)
+                            )
+                        )
+                    ),
+                    mute_user=mock.AsyncMock(
+                        return_value=SimpleNamespace(success=True, reason=None)
+                    ),
+                )
+                cog.bot.get_cog = mock.Mock(return_value=mutes)
+                key = (guild.id, user.id)
+                cog._gif_detector_mutes_in_flight.add(key)
+
+                await gif_detector._apply_gif_mute(cog, message, key, 3600)
+
+                guild.fetch_member.assert_awaited_once_with(user.id)
+                self.assertIs(mutes.mute_user.await_args.args[2], member)
+
     async def test_duplicate_static_delivery_deletes_once_before_warning(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -144,7 +410,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(allowed.everyone)
                 self.assertFalse(allowed.roles)
 
-    async def test_first_gif_uses_nine_edits_then_deletes_both_messages(self):
+    async def test_first_gif_uses_four_horizontal_edits_then_deletes_both_messages(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("Honeypot.gif_detector")
@@ -157,6 +423,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
                 cog._is_protected_member = mock.AsyncMock(return_value=False)
                 events = []
+                sleep_seconds = []
                 warning = SimpleNamespace(
                     edit=mock.AsyncMock(
                         side_effect=lambda *args, **kwargs: events.append("edit")
@@ -192,7 +459,12 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     mock.patch.object(
                         gif_detector.asyncio,
                         "sleep",
-                        new=mock.AsyncMock(side_effect=lambda _: events.append("sleep")),
+                        new=mock.AsyncMock(
+                            side_effect=lambda seconds: (
+                                events.append("sleep"),
+                                sleep_seconds.append(seconds),
+                            )
+                        ),
                     ),
                     mock.patch.object(
                         honeypot.detection,
@@ -203,22 +475,62 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     await cog.on_message(message)
                     await asyncio.gather(*tuple(cog._gif_detector_tasks))
 
-                self.assertEqual(channel.send.await_args.args[0],
-                    gif_detector.render_icbm_frame("@User", track_lines=10))
-                self.assertEqual(warning.edit.await_count, 9)
+                self.assertEqual(
+                    channel.send.await_args.args[0],
+                    gif_detector.render_icbm_frame("@User", rocket_position=0),
+                )
+                self.assertEqual(warning.edit.await_count, 4)
                 self.assertEqual(
                     [call.kwargs["content"] for call in warning.edit.await_args_list],
                     [
-                        gif_detector.render_icbm_frame("@User", track_lines=lines)
-                        for lines in range(9, 0, -1)
+                        gif_detector.render_icbm_frame(
+                            "@User", rocket_position=position
+                        )
+                        for position in range(2, 10, 2)
                     ],
                 )
-                self.assertEqual(events.count("sleep"), 10)
+                self.assertEqual(sleep_seconds, [1, 1, 1, 1, 1])
                 self.assertEqual(events[-2:], ["source-delete", "warning-delete"])
                 self.assertEqual(cog._gif_detector_animated_guilds, set())
 
 
 class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rate_commands_store_bounded_threshold_window_and_mute_duration(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)):
+                gif_detector = import_module("Honeypot.gif_detector")
+                threshold = SimpleNamespace(set=mock.AsyncMock())
+                window = SimpleNamespace(set=mock.AsyncMock())
+                duration = SimpleNamespace(set=mock.AsyncMock())
+                guild_config = SimpleNamespace(
+                    gif_detector_threshold=threshold,
+                    gif_detector_window_seconds=window,
+                    gif_detector_mute_duration_seconds=duration,
+                )
+                cog = SimpleNamespace(
+                    config=SimpleNamespace(guild=lambda guild: guild_config)
+                )
+                ctx = SimpleNamespace(guild=SimpleNamespace(id=1), send=mock.AsyncMock())
+
+                await gif_detector.gif_detector_threshold(cog, ctx, 4)
+                await gif_detector.gif_detector_window(cog, ctx, 90)
+                await gif_detector.gif_detector_mute_duration(cog, ctx, 7200)
+
+                threshold.set.assert_awaited_once_with(4)
+                window.set.assert_awaited_once_with(90)
+                duration.set.assert_awaited_once_with(7200)
+
+                for command, invalid in (
+                    (gif_detector.gif_detector_threshold, 1),
+                    (gif_detector.gif_detector_window, 4),
+                    (gif_detector.gif_detector_mute_duration, 59),
+                ):
+                    with self.subTest(command=command.__name__):
+                        with self.assertRaises(
+                            gif_detector.commands.UserFeedbackCheckFailure
+                        ):
+                            await command(cog, ctx, invalid)
+
     async def test_root_group_shows_leaf_commands_without_section_rows(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -328,6 +640,9 @@ class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(rows["Animation"], "disabled")
                 self.assertEqual(rows["Channels"], "#gifs")
                 self.assertEqual(rows["Secondary message"], "Stop that.")
+                self.assertEqual(rows["Mute threshold"], "3")
+                self.assertEqual(rows["Rolling window"], "60 seconds")
+                self.assertEqual(rows["Mute duration"], "3600 seconds")
 
                 cog.config.defaults["gif_detector_channels"] = []
                 await gif_detector.config_gif_detector(cog, ctx)
@@ -491,6 +806,91 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
                 channel.send.assert_awaited_once()
                 channel.fetch_message.assert_not_awaited()
 
+    async def test_positive_uncached_raw_update_fetches_and_handles_source_message(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                cog.config.defaults.update(
+                    gif_detector_enabled=True,
+                    gif_detector_animation_enabled=False,
+                    gif_detector_channels=[10],
+                )
+                cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
+                cog._is_protected_member = mock.AsyncMock(return_value=False)
+                warning = SimpleNamespace(delete=mock.AsyncMock())
+                channel = SimpleNamespace(
+                    id=10,
+                    parent_id=None,
+                    send=mock.AsyncMock(return_value=warning),
+                    fetch_message=mock.AsyncMock(),
+                )
+                message = SimpleNamespace(
+                    id=30,
+                    guild=SimpleNamespace(id=1),
+                    channel=channel,
+                    author=SimpleNamespace(id=20, mention="@User", bot=False),
+                    webhook_id=None,
+                    embeds=[],
+                    attachments=[],
+                    content="",
+                    delete=mock.AsyncMock(),
+                )
+                channel.fetch_message.return_value = message
+                cog.bot.get_channel = mock.Mock(return_value=channel)
+                payload = SimpleNamespace(
+                    guild_id=1,
+                    channel_id=10,
+                    message_id=30,
+                    data={
+                        "embeds": [
+                            {
+                                "type": "video",
+                                "url": "https://tenor.com/view/reaction-123",
+                                "video": {"url": "https://media.tenor.com/example/tenor.mp4"},
+                            }
+                        ]
+                    },
+                    cached_message=None,
+                )
+
+                with mock.patch.object(
+                    gif_detector.asyncio,
+                    "sleep",
+                    new=mock.AsyncMock(),
+                ):
+                    await cog.on_raw_message_edit(payload)
+                    await asyncio.gather(*tuple(cog._gif_detector_tasks))
+
+                channel.fetch_message.assert_awaited_once_with(30)
+                message.delete.assert_awaited_once()
+                channel.send.assert_awaited_once()
+
+    async def test_negative_uncached_raw_update_does_not_fetch_source_message(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog.bot.get_channel = mock.Mock()
+                payload = SimpleNamespace(
+                    guild_id=1,
+                    channel_id=10,
+                    message_id=30,
+                    data={
+                        "embeds": [
+                            {
+                                "type": "video",
+                                "url": "https://example.test/watch/gif",
+                                "video": {"url": "https://cdn.example.test/clip.mp4"},
+                            }
+                        ]
+                    },
+                    cached_message=None,
+                )
+
+                await cog.on_raw_message_edit(payload)
+
+                cog.bot.get_channel.assert_not_called()
+
     async def test_cog_unload_cancels_and_awaits_gif_tasks(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -596,7 +996,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.gather(*tuple(cog._gif_detector_tasks))
 
                 first.delete.assert_awaited_once()
-                self.assertEqual(animated_warning.edit.await_count, 9)
+                self.assertEqual(animated_warning.edit.await_count, 4)
                 self.assertEqual(cog._gif_detector_animated_guilds, set())
 
     async def test_deleted_animation_warning_does_not_shorten_source_deadline(self):
@@ -648,7 +1048,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
                     await cog.on_message(message)
                     await asyncio.gather(*tuple(cog._gif_detector_tasks))
 
-                self.assertEqual(sum(sleep_seconds), 10)
+                self.assertEqual(sum(sleep_seconds), 5)
                 message.delete.assert_awaited_once()
                 self.assertEqual(cog._gif_detector_animated_guilds, set())
 

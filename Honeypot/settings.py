@@ -180,6 +180,9 @@ DEFAULTS: Mapping[str, object] = MappingProxyType(
         "gif_detector_animation_enabled": True,
         "gif_detector_channels": [],
         "gif_detector_secondary_message": "No gifs!",
+        "gif_detector_threshold": 3,
+        "gif_detector_window_seconds": 60,
+        "gif_detector_mute_duration_seconds": 3600,
         "joinwatch_enabled": False,
         "joinwatch_alert_enabled": True,
         "joinwatch_channel": None,
@@ -345,6 +348,9 @@ class GuildSettings:
     gif_detector_animation_enabled: bool
     gif_detector_channels: list[int]
     gif_detector_secondary_message: str
+    gif_detector_threshold: int
+    gif_detector_window_seconds: int
+    gif_detector_mute_duration_seconds: int
     joinwatch_enabled: bool
     joinwatch_alert_enabled: bool
     joinwatch_channel: int | None
@@ -422,6 +428,11 @@ class GuildSettings:
             gif_detector_channels=_list(raw, "gif_detector_channels", int),
             gif_detector_secondary_message=_str(
                 raw, "gif_detector_secondary_message"
+            ),
+            gif_detector_threshold=_int(raw, "gif_detector_threshold"),
+            gif_detector_window_seconds=_int(raw, "gif_detector_window_seconds"),
+            gif_detector_mute_duration_seconds=_int(
+                raw, "gif_detector_mute_duration_seconds"
             ),
             joinwatch_enabled=_bool(raw, "joinwatch_enabled"),
             joinwatch_alert_enabled=_bool(raw, "joinwatch_alert_enabled"),

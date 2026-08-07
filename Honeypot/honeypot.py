@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import typing
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -168,6 +168,10 @@ class Honeypot(Cog):
         self._gif_detector_tasks: set[asyncio.Task] = set()
         self._gif_detector_seen_messages: dict[tuple[int, int], None] = {}
         self._gif_detector_animated_guilds: set[int] = set()
+        self._gif_detector_hits: dict[tuple[int, int], deque[float]] = {}
+        self._gif_detector_active_mutes: dict[tuple[int, int], float] = {}
+        self._gif_detector_mutes_in_flight: set[tuple[int, int]] = set()
+        self._gif_detector_rate_lock = asyncio.Lock()
         self._hot_purge_users: dict[int, dict[int, datetime]] = defaultdict(dict)
         self._message_registry = MessageRegistry(
             cog_data_path(self) / "message_registry.sqlite"
@@ -949,6 +953,9 @@ class Honeypot(Cog):
             await asyncio.gather(*pending_gif_tasks, return_exceptions=True)
         self._gif_detector_tasks.clear()
         self._gif_detector_animated_guilds.clear()
+        self._gif_detector_hits.clear()
+        self._gif_detector_active_mutes.clear()
+        self._gif_detector_mutes_in_flight.clear()
         pending_sweeps = tuple(self._post_ban_sweep_tasks)
         for task in pending_sweeps:
             task.cancel()
@@ -1453,6 +1460,27 @@ class Honeypot(Cog):
     async def gif_detector_animation(self, ctx: commands.Context, value: bool) -> None:
         """Enable or disable the animated ICBM warning."""
         return await gif_detector.gif_detector_animation(self, ctx, value)
+
+    @gif_detector.command(name="threshold", usage="[2-20]")
+    async def gif_detector_threshold(
+        self, ctx: commands.Context, value: int = None
+    ) -> None:
+        """Show or set the GIF count required for a mute."""
+        return await gif_detector.gif_detector_threshold(self, ctx, value)
+
+    @gif_detector.command(name="window", usage="[5-3600]")
+    async def gif_detector_window(
+        self, ctx: commands.Context, seconds: int = None
+    ) -> None:
+        """Show or set the rolling GIF window in seconds."""
+        return await gif_detector.gif_detector_window(self, ctx, seconds)
+
+    @gif_detector.command(name="muteduration", usage="[60-604800]")
+    async def gif_detector_mute_duration(
+        self, ctx: commands.Context, seconds: int = None
+    ) -> None:
+        """Show or set the role mute duration in seconds."""
+        return await gif_detector.gif_detector_mute_duration(self, ctx, seconds)
 
     @gif_detector.group(name="channel", invoke_without_command=True)
     async def gif_detector_channel(self, ctx: commands.Context) -> None:
