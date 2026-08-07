@@ -121,6 +121,7 @@ EXPECTED_GUILD_DEFAULTS = {
     "gif_detector_animation_enabled": True,
     "gif_detector_channels": [],
     "gif_detector_secondary_message": "No gifs!",
+    "gif_detector_retention_seconds": 5,
     "gif_detector_threshold": 3,
     "gif_detector_window_seconds": 60,
     "gif_detector_mute_duration_seconds": 3600,

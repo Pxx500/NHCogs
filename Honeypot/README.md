@@ -42,7 +42,7 @@ By default, only the server owner can use `!honeypot` and all subcommands. Red P
 
 ### gifdetector
 
-The GIF detector removes GIF uploads, direct GIF links, Discord GIF embeds, and supported Tenor/Giphy video transcodes in configured channels and their threads. Ordinary MP4 uploads and links remain allowed. It ignores bots, webhooks, and protected moderators; at most one compact five-second horizontal ICBM warning runs per server while additional GIFs use the short static warning.
+The GIF detector removes GIF uploads, direct GIF links, Discord GIF embeds, and supported Tenor/Giphy video transcodes in configured channels and their threads. Ordinary MP4 uploads and links remain allowed. It ignores bots, webhooks, and protected moderators; at most one horizontal ICBM animation runs per server while additional GIFs use the static warning. The ICBM movement completes in five seconds. The GIF remains for the configured retention period, which defaults to five seconds; bot warnings remain for at least five seconds and never expire before the GIF.
 
 By default, three GIFs from one member inside a rolling 60-second window trigger a one-hour server mute through Red's core `Mutes` cog. Core `Mutes` must have a mute role configured; Honeypot never falls back to a native timeout, warning, kick, or ban. Burst counters are in memory and reset when the cog reloads.
 
@@ -50,6 +50,7 @@ By default, three GIFs from one member inside a rolling 60-second window trigger
 |---|---|
 | `!honeypot gifdetector toggle <true\|false>` | Enable or disable GIF interception |
 | `!honeypot gifdetector animation <true\|false>` | Enable or disable the animated ICBM warning |
+| `!honeypot gifdetector retention [0-60]` | Show or set how long detected GIFs remain visible |
 | `!honeypot gifdetector threshold [2-20]` | Show or set the GIF count required for a mute |
 | `!honeypot gifdetector window [5-3600]` | Show or set the rolling window in seconds |
 | `!honeypot gifdetector muteduration [60-604800]` | Show or set the role mute duration in seconds |

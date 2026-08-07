@@ -1461,6 +1461,13 @@ class Honeypot(Cog):
         """Enable or disable the animated ICBM warning."""
         return await gif_detector.gif_detector_animation(self, ctx, value)
 
+    @gif_detector.command(name="retention", usage="[0-60]")
+    async def gif_detector_retention(
+        self, ctx: commands.Context, seconds: int = None
+    ) -> None:
+        """Show or set how long detected GIFs remain visible."""
+        return await gif_detector.gif_detector_retention(self, ctx, seconds)
+
     @gif_detector.command(name="threshold", usage="[2-20]")
     async def gif_detector_threshold(
         self, ctx: commands.Context, value: int = None
