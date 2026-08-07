@@ -117,6 +117,10 @@ EXPECTED_GUILD_DEFAULTS = {
         "generator",
     ],
     "attachment_patterns": ["^image$", "^image ?\\(\\d+\\)$", "^\\d+$"],
+    "gif_detector_enabled": False,
+    "gif_detector_animation_enabled": True,
+    "gif_detector_channels": [],
+    "gif_detector_secondary_message": "No gifs!",
     "joinwatch_enabled": False,
     "joinwatch_alert_enabled": True,
     "joinwatch_channel": None,
@@ -441,6 +445,16 @@ def _isolated_honeypot_modules(data_path: Path):
     discord.Forbidden = type("Forbidden", (Exception,), {})
     discord.HTTPException = type("HTTPException", (Exception,), {})
     discord.NotFound = type("NotFound", (discord.HTTPException,), {})
+
+    class _AllowedMentions:
+        def __init__(self, **values):
+            self.__dict__.update(values)
+
+        @classmethod
+        def none(cls):
+            return cls(everyone=False, roles=False, users=False, replied_user=False)
+
+    discord.AllowedMentions = _AllowedMentions
     discord.ButtonStyle = SimpleNamespace(danger=1, secondary=2, success=3, primary=4)
     discord.ui = SimpleNamespace(
         Button=object,

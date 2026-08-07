@@ -743,6 +743,55 @@ async def _doctor_bait_role_collision_checks(
     return tuple(results)
 
 
+def _doctor_gif_detector_checks(
+    cog,
+    guild,
+    me,
+    guild_settings: GuildSettings,
+) -> tuple[DoctorResult, ...]:
+    if not guild_settings.gif_detector_enabled:
+        return ()
+    results: list[DoctorResult] = []
+    for channel_id in guild_settings.gif_detector_channels:
+        channel = cog._get_text_channel_or_thread(guild, channel_id)
+        if channel is None:
+            results.append(
+                DoctorResult(
+                    "GIF detector channel is missing",
+                    "failed",
+                    "Run `honeypot gifdetector channel remove` and add a valid channel.",
+                )
+            )
+            continue
+        permissions = channel.permissions_for(me)
+        if not getattr(permissions, "send_messages", False):
+            results.append(
+                DoctorResult(
+                    f"GIF detector cannot send messages in {channel.mention}",
+                    "failed",
+                    "Grant Send Messages.",
+                )
+            )
+        if not getattr(permissions, "send_messages_in_threads", False):
+            results.append(
+                DoctorResult(
+                    "GIF detector cannot send messages in threads under "
+                    f"{channel.mention}",
+                    "failed",
+                    "Grant Send Messages in Threads.",
+                )
+            )
+        if not getattr(permissions, "manage_messages", False):
+            results.append(
+                DoctorResult(
+                    f"GIF detector cannot manage messages in {channel.mention}",
+                    "failed",
+                    "Grant Manage Messages.",
+                )
+            )
+    return tuple(results)
+
+
 async def _doctor_configuration_checks(
     cog,
     guild,
@@ -887,6 +936,7 @@ async def _doctor_configuration_checks(
                         f"Grant {permission_label}.",
                     )
                 )
+    results.extend(_doctor_gif_detector_checks(cog, guild, me, guild_settings))
     return tuple(results)
 
 

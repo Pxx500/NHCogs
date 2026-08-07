@@ -176,6 +176,10 @@ DEFAULTS: Mapping[str, object] = MappingProxyType(
         "stats": DEFAULT_STATS.copy(),
         "scam_keywords": SCAM_KEYWORDS.copy(),
         "attachment_patterns": DEFAULT_ATTACHMENT_PATTERNS.copy(),
+        "gif_detector_enabled": False,
+        "gif_detector_animation_enabled": True,
+        "gif_detector_channels": [],
+        "gif_detector_secondary_message": "No gifs!",
         "joinwatch_enabled": False,
         "joinwatch_alert_enabled": True,
         "joinwatch_channel": None,
@@ -202,6 +206,17 @@ def _bool(raw: Mapping[str, object], key: str) -> bool:
         return value
     log.warning("Invalid guild setting %s=%r; using default %r", key, value, DEFAULTS[key])
     return bool(DEFAULTS[key])
+
+
+def _str(raw: Mapping[str, object], key: str) -> str:
+    default = DEFAULTS[key]
+    if not isinstance(default, str):
+        raise TypeError(f"Internal default for {key} is not a string")
+    value = raw.get(key, default)
+    if isinstance(value, str):
+        return value
+    log.warning("Invalid guild setting %s=%r; using default %r", key, value, default)
+    return default
 
 
 def _int(raw: Mapping[str, object], key: str) -> int:
@@ -326,6 +341,10 @@ class GuildSettings:
     stats: dict[str, int]
     scam_keywords: list[str]
     attachment_patterns: list[str]
+    gif_detector_enabled: bool
+    gif_detector_animation_enabled: bool
+    gif_detector_channels: list[int]
+    gif_detector_secondary_message: str
     joinwatch_enabled: bool
     joinwatch_alert_enabled: bool
     joinwatch_channel: int | None
@@ -396,6 +415,14 @@ class GuildSettings:
             stats=_int_dict(raw, "stats"),
             scam_keywords=_list(raw, "scam_keywords", str),
             attachment_patterns=_list(raw, "attachment_patterns", str),
+            gif_detector_enabled=_bool(raw, "gif_detector_enabled"),
+            gif_detector_animation_enabled=_bool(
+                raw, "gif_detector_animation_enabled"
+            ),
+            gif_detector_channels=_list(raw, "gif_detector_channels", int),
+            gif_detector_secondary_message=_str(
+                raw, "gif_detector_secondary_message"
+            ),
             joinwatch_enabled=_bool(raw, "joinwatch_enabled"),
             joinwatch_alert_enabled=_bool(raw, "joinwatch_alert_enabled"),
             joinwatch_channel=_optional_int(raw, "joinwatch_channel"),
