@@ -371,20 +371,35 @@ class GateRevokeView(discord.ui.View):
         cog: NHMisc,
         opener_id: int,
         member: discord.Member,
-        award: Any,
+        awards: tuple[Any, ...],
     ) -> None:
         super().__init__(timeout=300)
         self.cog = cog
         self.opener_id = opener_id
         self.member = member
-        self.award = award
+        self.awards = awards
+        self.selected_award_id: int | None = None
         self.message: discord.Message | None = None
+        self._configure_select()
+        self._configure_actions()
+
+    @property
+    def selected_award(self) -> Any | None:
+        return next(
+            (
+                award
+                for award in self.awards
+                if award.award_id == self.selected_award_id
+            ),
+            None,
+        )
 
     def render_embed(self, *, notice: str | None = None) -> discord.Embed:
         return self.cog._build_gate_revoke_embed(
-            self.award.guild_id,
+            self.awards[0].guild_id,
             self.member,
-            self.award,
+            self.awards,
+            self.selected_award,
             notice=notice,
         )
 
@@ -406,20 +421,54 @@ class GateRevokeView(discord.ui.View):
             except discord.HTTPException:
                 pass
 
-    @discord.ui.button(
-        label="Revoke Gate",
-        style=discord.ButtonStyle.danger,
+    @discord.ui.select(
+        placeholder="Choose a Stargate to revoke",
+        min_values=1,
+        max_values=1,
+        row=0,
     )
-    async def confirm(
+    async def gate_select(
+        self,
+        interaction: discord.Interaction,
+        select: discord.ui.Select,
+    ) -> None:
+        self.selected_award_id = int(select.values[0])
+        self._configure_select()
+        self._configure_actions()
+        await interaction.response.edit_message(
+            embed=self.render_embed(),
+            view=self,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @discord.ui.button(
+        label="Shift to fill gap",
+        style=discord.ButtonStyle.danger,
+        row=1,
+    )
+    async def shift(
         self,
         interaction: discord.Interaction,
         _button: discord.ui.Button,
     ) -> None:
-        await self.cog._confirm_gate_revoke(interaction, self)
+        await self.cog._confirm_gate_revoke(interaction, self, compact=True)
+
+    @discord.ui.button(
+        label="Leave gap",
+        style=discord.ButtonStyle.danger,
+        row=1,
+    )
+    async def leave_gap(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        await self.cog._confirm_gate_revoke(interaction, self, compact=False)
 
     @discord.ui.button(
         label="Cancel",
         style=discord.ButtonStyle.secondary,
+        row=1,
     )
     async def cancel(
         self,
@@ -427,11 +476,40 @@ class GateRevokeView(discord.ui.View):
         _button: discord.ui.Button,
     ) -> None:
         self.stop()
-        await interaction.response.edit_message(
-            content="Gate revoke cancelled",
-            embed=None,
-            view=None,
-        )
+        await interaction.response.defer()
+        await interaction.delete_original_response()
+
+    def _configure_select(self) -> None:
+        self.gate_select.options = [
+            discord.SelectOption(
+                label=f"Stargate {award.ordinal}",
+                value=str(award.award_id),
+                description=(
+                    "Proof stored"
+                    if award.source_channel_id is not None
+                    and award.source_message_id is not None
+                    else "No proof stored"
+                ),
+                default=award.award_id == self.selected_award_id,
+            )
+            for award in self.awards
+        ]
+
+    def _configure_actions(self) -> None:
+        for action in (self.shift, self.leave_gap):
+            if action in self.children:
+                self.remove_item(action)
+        selected = self.selected_award
+        if selected is None:
+            return
+        latest_ordinal = max(int(award.ordinal) for award in self.awards)
+        if selected.ordinal == latest_ordinal:
+            self.shift.label = f"Revoke Stargate {selected.ordinal}"
+        else:
+            self.shift.label = "Shift to fill gap"
+        self.add_item(self.shift)
+        if selected.ordinal != latest_ordinal:
+            self.add_item(self.leave_gap)
 
 
 class AchievementRoleBindView(discord.ui.View):

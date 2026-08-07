@@ -70,6 +70,13 @@ class AwardResult:
 
 
 @dataclass(frozen=True, slots=True)
+class GateRevokeResult:
+    removed: AchievementAward
+    remaining: tuple[AchievementAward, ...]
+    ordinal_changes: tuple[tuple[int, int, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class StargateProof:
     ordinal: int
     source_channel_id: int
@@ -196,29 +203,24 @@ class AchievementStore:
     ) -> tuple[StargateProof, ...]:
         if set(expected_proofs) != {proof.ordinal for proof in proofs}:
             raise GateProofConflict("Reviewed Gate proofs do not match the replacement")
+        replacements = []
+        for proof in proofs:
+            expected = expected_proofs[proof.ordinal]
+            replacements.append(
+                (
+                    user_id,
+                    proof.ordinal,
+                    proof.source_channel_id,
+                    proof.source_message_id,
+                    expected.source_channel_id if expected is not None else None,
+                    expected.source_message_id if expected is not None else None,
+                )
+            )
         async with self._lock:
             return await asyncio.to_thread(
                 self._attach_stargate_proofs_sync,
                 guild_id,
-                tuple(
-                    (
-                        user_id,
-                        proof.ordinal,
-                        proof.source_channel_id,
-                        proof.source_message_id,
-                        (
-                            expected_proofs[proof.ordinal].source_channel_id
-                            if expected_proofs[proof.ordinal] is not None
-                            else None
-                        ),
-                        (
-                            expected_proofs[proof.ordinal].source_message_id
-                            if expected_proofs[proof.ordinal] is not None
-                            else None
-                        ),
-                    )
-                    for proof in proofs
-                ),
+                tuple(replacements),
             )
 
     async def missing_stargate_proofs(
@@ -233,29 +235,33 @@ class AchievementStore:
                 tuple(dict.fromkeys(user_ids)),
             )
 
-    async def get_latest_stargate(
+    async def get_active_stargates(
         self, guild_id: int, user_id: int
-    ) -> AchievementAward | None:
+    ) -> tuple[AchievementAward, ...]:
         async with self._lock:
             return await asyncio.to_thread(
-                self._get_latest_stargate_sync,
+                self._get_active_stargates_sync,
                 guild_id,
                 user_id,
             )
 
-    async def delete_latest_stargate(
+    async def revoke_stargate(
         self,
         guild_id: int,
         user_id: int,
         *,
-        expected_award_id: int,
-    ) -> AchievementAward | None:
+        expected_awards: tuple[AchievementAward, ...],
+        selected_award_id: int,
+        compact: bool,
+    ) -> GateRevokeResult | None:
         async with self._lock:
             return await asyncio.to_thread(
-                self._delete_latest_stargate_sync,
+                self._revoke_stargate_sync,
                 guild_id,
                 user_id,
-                expected_award_id,
+                expected_awards,
+                selected_award_id,
+                compact,
             )
 
     async def import_gate_progress(
@@ -531,11 +537,14 @@ class AchievementStore:
                 ON achievement_awards (guild_id, user_id, achievement_key)
                 WHERE ordinal IS NULL AND state IN ('pending', 'active');
 
-                CREATE UNIQUE INDEX IF NOT EXISTS achievement_ordinal_unique
+                CREATE UNIQUE INDEX IF NOT EXISTS achievement_ordinal_active
                 ON achievement_awards (
                     guild_id, user_id, achievement_key, ordinal
                 )
-                WHERE ordinal IS NOT NULL;
+                WHERE ordinal IS NOT NULL
+                    AND state IN ('pending', 'active');
+
+                DROP INDEX IF EXISTS achievement_ordinal_unique;
 
                 CREATE INDEX IF NOT EXISTS achievement_profile_lookup
                 ON achievement_awards (guild_id, user_id, state);
@@ -635,18 +644,20 @@ class AchievementStore:
         now = datetime.now(timezone.utc).isoformat()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            next_ordinal = int(
-                connection.execute(
-                    """
-                    SELECT COALESCE(MAX(ordinal), 0) + 1
-                    FROM achievement_awards
-                    WHERE guild_id = ? AND user_id = ?
-                        AND achievement_key = ?
-                        AND state IN ('pending', 'active')
-                    """,
-                    (guild_id, user_id, STARGATE_COMPLETED_KEY),
-                ).fetchone()[0]
-            )
+            rows = connection.execute(
+                """
+                SELECT ordinal
+                FROM achievement_awards
+                WHERE guild_id = ? AND user_id = ?
+                    AND achievement_key = ?
+                    AND state IN ('pending', 'active')
+                """,
+                (guild_id, user_id, STARGATE_COMPLETED_KEY),
+            ).fetchall()
+            occupied_ordinals = {int(row["ordinal"]) for row in rows}
+            next_ordinal = 1
+            while next_ordinal in occupied_ordinals:
+                next_ordinal += 1
             cursor = connection.execute(
                 """
                 INSERT INTO achievement_awards (
@@ -756,11 +767,11 @@ class AchievementStore:
             user_id: tuple(ordinals) for user_id, ordinals in missing.items()
         }
 
-    def _get_latest_stargate_sync(
+    def _get_active_stargates_sync(
         self, guild_id: int, user_id: int
-    ) -> AchievementAward | None:
+    ) -> tuple[AchievementAward, ...]:
         with self._connection() as connection:
-            row = connection.execute(
+            rows = connection.execute(
                 """
                 SELECT *
                 FROM achievement_awards
@@ -768,19 +779,20 @@ class AchievementStore:
                     AND achievement_key = ?
                     AND ordinal IS NOT NULL
                     AND state = 'active'
-                ORDER BY ordinal DESC, award_id DESC
-                LIMIT 1
+                ORDER BY ordinal, award_id
                 """,
                 (guild_id, user_id, STARGATE_COMPLETED_KEY),
-            ).fetchone()
-        return self._award_from_row(row) if row is not None else None
+            ).fetchall()
+        return tuple(self._award_from_row(row) for row in rows)
 
-    def _delete_latest_stargate_sync(
+    def _revoke_stargate_sync(
         self,
         guild_id: int,
         user_id: int,
-        expected_award_id: int,
-    ) -> AchievementAward | None:
+        expected_awards: tuple[AchievementAward, ...],
+        selected_award_id: int,
+        compact: bool,
+    ) -> GateRevokeResult | None:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             pending_increment = connection.execute(
@@ -798,7 +810,7 @@ class AchievementStore:
             if pending_increment is not None:
                 connection.rollback()
                 return None
-            row = connection.execute(
+            rows = connection.execute(
                 """
                 SELECT *
                 FROM achievement_awards
@@ -806,23 +818,73 @@ class AchievementStore:
                     AND achievement_key = ?
                     AND ordinal IS NOT NULL
                     AND state = 'active'
-                ORDER BY ordinal DESC, award_id DESC
-                LIMIT 1
+                ORDER BY ordinal, award_id
                 """,
                 (guild_id, user_id, STARGATE_COMPLETED_KEY),
-            ).fetchone()
-            if row is None or int(row["award_id"]) != expected_award_id:
+            ).fetchall()
+            current_awards = tuple(self._award_from_row(row) for row in rows)
+            if current_awards != expected_awards:
+                connection.rollback()
+                return None
+            selected = next(
+                (
+                    award
+                    for award in current_awards
+                    if award.award_id == selected_award_id
+                ),
+                None,
+            )
+            if selected is None:
                 connection.rollback()
                 return None
             cursor = connection.execute(
                 "DELETE FROM achievement_awards WHERE award_id = ? AND state = 'active'",
-                (expected_award_id,),
+                (selected_award_id,),
             )
             if cursor.rowcount != 1:
                 connection.rollback()
                 return None
+            survivors = tuple(
+                award for award in current_awards if award.award_id != selected_award_id
+            )
+            ordinal_changes_list = []
+            if compact:
+                for new_ordinal, award in enumerate(survivors, start=1):
+                    if award.ordinal is None:
+                        raise RuntimeError("Stored Stargate ordinal is missing")
+                    if award.ordinal != new_ordinal:
+                        ordinal_changes_list.append(
+                            (award.award_id, award.ordinal, new_ordinal)
+                        )
+            ordinal_changes = tuple(ordinal_changes_list)
+            for award_id, _old_ordinal, _new_ordinal in ordinal_changes:
+                connection.execute(
+                    "UPDATE achievement_awards SET ordinal = ? WHERE award_id = ?",
+                    (-award_id, award_id),
+                )
+            for award_id, _old_ordinal, new_ordinal in ordinal_changes:
+                connection.execute(
+                    "UPDATE achievement_awards SET ordinal = ? WHERE award_id = ?",
+                    (new_ordinal, award_id),
+                )
+            remaining_rows = connection.execute(
+                """
+                SELECT *
+                FROM achievement_awards
+                WHERE guild_id = ? AND user_id = ?
+                    AND achievement_key = ?
+                    AND ordinal IS NOT NULL
+                    AND state = 'active'
+                ORDER BY ordinal, award_id
+                """,
+                (guild_id, user_id, STARGATE_COMPLETED_KEY),
+            ).fetchall()
             connection.commit()
-        return self._award_from_row(row)
+        return GateRevokeResult(
+            selected,
+            tuple(self._award_from_row(row) for row in remaining_rows),
+            ordinal_changes,
+        )
 
     def _import_gate_progress_sync(
         self, guild_id: int, user_id: int, completed_count: int
@@ -1448,39 +1510,57 @@ class AchievementStore:
                         desired_count,
                     ),
                 )
-                connection.execute(
-                    """
-                    UPDATE achievement_awards
-                    SET state = 'active', revoked_at = NULL
-                    WHERE guild_id = ? AND user_id = ?
-                        AND achievement_key = ? AND ordinal <= ?
-                        AND state = 'revoked'
-                    """,
-                    (
-                        guild_id,
-                        user_id,
-                        STARGATE_COMPLETED_KEY,
-                        desired_count,
-                    ),
-                )
-                connection.executemany(
-                    """
-                    INSERT OR IGNORE INTO achievement_awards (
-                        guild_id, user_id, achievement_key, ordinal,
-                        awarded_at, state
-                    ) VALUES (?, ?, ?, ?, ?, 'active')
-                    """,
-                    (
+                for ordinal in range(1, desired_count + 1):
+                    active = connection.execute(
+                        """
+                        SELECT 1
+                        FROM achievement_awards
+                        WHERE guild_id = ? AND user_id = ?
+                            AND achievement_key = ? AND ordinal = ?
+                            AND state IN ('pending', 'active')
+                        LIMIT 1
+                        """,
+                        (guild_id, user_id, STARGATE_COMPLETED_KEY, ordinal),
+                    ).fetchone()
+                    if active is not None:
+                        continue
+                    historical = connection.execute(
+                        """
+                        SELECT award_id
+                        FROM achievement_awards
+                        WHERE guild_id = ? AND user_id = ?
+                            AND achievement_key = ? AND ordinal = ?
+                            AND state = 'revoked'
+                        ORDER BY award_id DESC
+                        LIMIT 1
+                        """,
+                        (guild_id, user_id, STARGATE_COMPLETED_KEY, ordinal),
+                    ).fetchone()
+                    if historical is not None:
+                        connection.execute(
+                            """
+                            UPDATE achievement_awards
+                            SET state = 'active', revoked_at = NULL
+                            WHERE award_id = ?
+                            """,
+                            (historical["award_id"],),
+                        )
+                        continue
+                    connection.execute(
+                        """
+                        INSERT INTO achievement_awards (
+                            guild_id, user_id, achievement_key, ordinal,
+                            awarded_at, state
+                        ) VALUES (?, ?, ?, ?, ?, 'active')
+                        """,
                         (
                             guild_id,
                             user_id,
                             STARGATE_COMPLETED_KEY,
                             ordinal,
                             now,
-                        )
-                        for ordinal in range(1, desired_count + 1)
-                    ),
-                )
+                        ),
+                    )
 
             for achievement_key, desired_user_ids in boolean_users.items():
                 desired_users = set(desired_user_ids)

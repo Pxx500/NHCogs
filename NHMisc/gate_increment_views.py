@@ -67,6 +67,11 @@ class GateIncrementReviewView(discord.ui.View):
             "",
         ]
         for candidate in self.candidates:
+            if (
+                candidate.target_role_id is not None
+                and candidate.user_id not in self.selected_user_ids
+            ):
+                continue
             current = (
                 f"<@&{candidate.current_gate_role_ids[-1]}>"
                 if candidate.current_gate_role_ids
@@ -81,6 +86,15 @@ class GateIncrementReviewView(discord.ui.View):
                     f"<@{candidate.user_id}> {current} → "
                     f"<@&{candidate.target_role_id}>"
                 )
+                if (
+                    candidate.target_ordinal is not None
+                    and candidate.target_ordinal != candidate.highest_ordinal + 1
+                ):
+                    lines.append(
+                        f"⚠️ <@{candidate.user_id}> will fill missing Stargate "
+                        f"{candidate.target_ordinal} instead of adding Stargate "
+                        f"{candidate.highest_ordinal + 1}"
+                    )
         if len(self.selected_user_ids) == 1:
             selected = next(
                 candidate
