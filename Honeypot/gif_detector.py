@@ -20,6 +20,8 @@ from .settings import GuildSettings
 
 SEEN_MESSAGE_LIMIT = 4096
 MAX_SECONDARY_MESSAGE_LENGTH = 1900
+GIF_RETENTION_MIN_SECONDS = 0
+GIF_RETENTION_MAX_SECONDS = 60
 GIF_THRESHOLD_MIN = 2
 GIF_THRESHOLD_MAX = 20
 GIF_WINDOW_MIN_SECONDS = 5
@@ -176,20 +178,52 @@ async def _delete_message(cog: Any, message: Any, action: str) -> None:
         await _record_http_failure(cog, message, action, error)
 
 
-async def _run_secondary(cog: Any, message: Any, text: str) -> None:
-    await _delete_message(cog, message, "Could not delete GIF message")
+async def _cleanup_cancelled_run(
+    cog: Any,
+    message: Any,
+    warning: Any,
+    *,
+    source_deleted: bool,
+) -> None:
+    if not source_deleted:
+        await _delete_message(cog, message, "Could not delete cancelled GIF message")
+    if warning is not None:
+        await _delete_message(cog, warning, "Could not delete cancelled GIF warning")
+
+
+async def _run_secondary(
+    cog: Any,
+    message: Any,
+    text: str,
+    retention_seconds: int,
+) -> None:
     warning = None
+    source_deleted = False
     try:
-        warning = await message.channel.send(
-            f"{message.author.mention} {text}",
-            allowed_mentions=_author_mentions(message),
+        try:
+            warning = await message.channel.send(
+                f"{message.author.mention} {text}",
+                allowed_mentions=_author_mentions(message),
+            )
+        except discord.HTTPException as error:
+            await _record_http_failure(cog, message, "Could not send GIF warning", error)
+        if retention_seconds:
+            await asyncio.sleep(retention_seconds)
+        await _delete_message(cog, message, "Could not delete GIF message")
+        source_deleted = True
+        if warning is not None:
+            warning_remaining_seconds = max(5 - retention_seconds, 0)
+            if warning_remaining_seconds:
+                await asyncio.sleep(warning_remaining_seconds)
+            await _delete_message(cog, warning, "Could not delete GIF warning")
+    except asyncio.CancelledError:
+        await _cleanup_cancelled_run(
+            cog,
+            message,
+            warning,
+            source_deleted=source_deleted,
         )
-    except discord.HTTPException as error:
-        await _record_http_failure(cog, message, "Could not send GIF warning", error)
-    if warning is None:
-        return
-    await asyncio.sleep(3)
-    await _delete_message(cog, warning, "Could not delete GIF warning")
+        raise
 
 
 def _author_mentions(message: Any) -> discord.AllowedMentions:
@@ -201,9 +235,29 @@ def _author_mentions(message: Any) -> discord.AllowedMentions:
     )
 
 
-async def _run_animated(cog: Any, message: Any) -> None:
+async def _delete_source_if_due(
+    cog: Any,
+    message: Any,
+    *,
+    retention_seconds: int,
+    elapsed_seconds: int,
+    source_deleted: bool,
+) -> bool:
+    if source_deleted or retention_seconds > elapsed_seconds:
+        return source_deleted
+    await _delete_message(cog, message, "Could not delete GIF message")
+    return True
+
+
+async def _run_animated(
+    cog: Any,
+    message: Any,
+    retention_seconds: int,
+) -> None:
     guild_id = message.guild.id
     warning = None
+    elapsed_seconds = 0
+    source_deleted = False
     try:
         try:
             warning = await message.channel.send(
@@ -215,12 +269,25 @@ async def _run_animated(cog: Any, message: Any) -> None:
                 cog, message, "Could not send animated GIF warning", error
             )
 
-        if warning is None:
-            await asyncio.sleep(5)
-        else:
-            remaining_seconds = 1
-            for elapsed_seconds, rocket_position in enumerate(range(2, 10, 2), start=1):
+        source_deleted = await _delete_source_if_due(
+            cog,
+            message,
+            retention_seconds=retention_seconds,
+            elapsed_seconds=elapsed_seconds,
+            source_deleted=source_deleted,
+        )
+
+        if warning is not None:
+            for rocket_position in range(2, 10, 2):
                 await asyncio.sleep(1)
+                elapsed_seconds += 1
+                source_deleted = await _delete_source_if_due(
+                    cog,
+                    message,
+                    retention_seconds=retention_seconds,
+                    elapsed_seconds=elapsed_seconds,
+                    source_deleted=source_deleted,
+                )
                 try:
                     await warning.edit(
                         content=render_icbm_frame(
@@ -231,20 +298,38 @@ async def _run_animated(cog: Any, message: Any) -> None:
                     )
                 except discord.NotFound:
                     warning = None
-                    remaining_seconds = 5 - elapsed_seconds
                     break
                 except discord.HTTPException as error:
                     await _record_http_failure(
                         cog, message, "Could not edit animated GIF warning", error
                     )
-            if warning is None:
-                await asyncio.sleep(remaining_seconds)
-            else:
-                await asyncio.sleep(1)
 
-        await _delete_message(cog, message, "Could not delete GIF message")
+        if warning is not None:
+            await asyncio.sleep(1)
+            elapsed_seconds += 1
+            source_deleted = await _delete_source_if_due(
+                cog,
+                message,
+                retention_seconds=retention_seconds,
+                elapsed_seconds=elapsed_seconds,
+                source_deleted=source_deleted,
+            )
+
+        if not source_deleted:
+            remaining_seconds = retention_seconds - elapsed_seconds
+            if remaining_seconds > 0:
+                await asyncio.sleep(remaining_seconds)
+            await _delete_message(cog, message, "Could not delete GIF message")
         if warning is not None:
             await _delete_message(cog, warning, "Could not delete animated GIF warning")
+    except asyncio.CancelledError:
+        await _cleanup_cancelled_run(
+            cog,
+            message,
+            warning,
+            source_deleted=source_deleted,
+        )
+        raise
     finally:
         cog._gif_detector_animated_guilds.discard(guild_id)
 
@@ -406,11 +491,23 @@ async def _admit_message(cog: Any, message: Any) -> None:
         and guild.id not in cog._gif_detector_animated_guilds
     ):
         cog._gif_detector_animated_guilds.add(guild.id)
-        _spawn(cog, _run_animated(cog, message))
+        _spawn(
+            cog,
+            _run_animated(
+                cog,
+                message,
+                configured.gif_detector_retention_seconds,
+            ),
+        )
     else:
         _spawn(
             cog,
-            _run_secondary(cog, message, configured.gif_detector_secondary_message),
+            _run_secondary(
+                cog,
+                message,
+                configured.gif_detector_secondary_message,
+                configured.gif_detector_retention_seconds,
+            ),
         )
     await _record_gif_hit(cog, message, configured)
 
@@ -491,6 +588,12 @@ async def config_gif_detector(cog: Any, ctx: commands.Context) -> None:
                 _format_channels(cog, ctx.guild, configured.gif_detector_channels),
             ),
             (_("Secondary message"), configured.gif_detector_secondary_message),
+            (
+                _("GIF retention"),
+                _("{seconds} seconds").format(
+                    seconds=configured.gif_detector_retention_seconds
+                ),
+            ),
             (_("Mute threshold"), str(configured.gif_detector_threshold)),
             (
                 _("Rolling window"),
@@ -516,6 +619,20 @@ async def gif_detector_toggle(cog: Any, ctx: commands.Context, value: bool) -> N
 async def gif_detector_animation(cog: Any, ctx: commands.Context, value: bool) -> None:
     await cog.config.guild(ctx.guild).gif_detector_animation_enabled.set(value)
     await ctx.send(_("✅ GIF detector animation enabled: {value}").format(value=str(value).lower()))
+
+
+async def gif_detector_retention(
+    cog: Any, ctx: commands.Context, seconds: int | None = None
+) -> None:
+    await _configure_bounded_integer(
+        cog,
+        ctx,
+        key="gif_detector_retention_seconds",
+        value=seconds,
+        minimum=GIF_RETENTION_MIN_SECONDS,
+        maximum=GIF_RETENTION_MAX_SECONDS,
+        label=_("GIF retention in seconds"),
+    )
 
 
 async def _configure_bounded_integer(
