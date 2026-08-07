@@ -193,18 +193,25 @@ Gate progress or change any roles. The interactive picker only offers Gates with
 proof, and the same source message may be attached to any number of users even when it
 was previously used for a normal Gate increment.
 
-The same action detects a strict batch list posted by the message author:
+The same action detects a strict batch list:
 
 ```text
 1 https://discord.com/channels/<server>/<channel>/<message>
-2 https://discord.com/channels/<server>/<channel>/<message>
+2 https://discord.com/channels/<server>/<channel>/<message> <@user> user_id
 ```
 
 Every line must contain an existing Gate number, one space, and a message link from the
-current server. Batch mode ignores mentions, targets only the author, and clearly marks
-the review as proof-only: it never adds or increments a Gate. When a listed Gate already
-has a proof, the moderator can replace every listed proof, attach only missing proofs, or
-cancel. Each selected operation is atomic, and a stale review prevents every change.
+current server. Optional targets after the link may be user mentions or bare user IDs;
+mentions may be adjacent and extra horizontal whitespace is ignored. Several targets on
+one line attach the same proof to that Gate ordinal for every listed member. A line with
+no targets belongs to the message author. Targeted members must be current non-bot server
+members, but do not need to be online or cached.
+
+Batch mode clearly marks the review as proof-only: it never adds or increments a Gate.
+When a listed Gate already has a proof, the moderator can replace every listed proof,
+attach only missing proofs, or cancel. The entire multi-user operation is atomic, and an
+invalid target, missing Gate, duplicate user-and-ordinal pair, changed proof, or stale
+source message prevents every write.
 
 ## Achievements
 
@@ -224,9 +231,9 @@ Apps → Grant achievements
 [p]achievement revoke <users...>
 ```
 
-`/achievements` publicly shows a member's recorded achievements and available proof
-links; the user Apps action shows the same profile ephemerally. Both are available to
-every server member.
+`/achievements` and the user Apps action show the same member profile ephemerally, with
+the same `Send publicly` button and published attribution. Both are available to every
+server member.
 
 The message Apps grant action uses the message author and mentions as its candidate
 list, then lets a moderator select up to 25 recipients and one or more achievements.

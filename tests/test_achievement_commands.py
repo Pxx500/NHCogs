@@ -308,6 +308,62 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         cog._achievement_store.get_profile.assert_awaited_once_with(1, 123)
         cog._achievement_store.list_definitions.assert_awaited_once_with(1)
 
+    async def test_achievements_user_action_uses_publish_view_with_fallback_mention(self):
+        guild = SimpleNamespace(id=1)
+        target = SimpleNamespace(id=123)
+        profile = object()
+        definitions = (object(),)
+        embed = object()
+        interaction = SimpleNamespace(
+            guild=guild,
+            user=SimpleNamespace(id=99),
+            response=SimpleNamespace(defer=mock.AsyncMock()),
+            edit_original_response=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(return_value=True),
+            get_profile=mock.AsyncMock(return_value=profile),
+            list_definitions=mock.AsyncMock(return_value=definitions),
+        )
+        cog._build_achievements_embed = mock.Mock(return_value=embed)
+
+        class FakeAchievementProfileView:
+            def __init__(self, embed, requester_id, command_mention):
+                self.embed = embed
+                self.requester_id = requester_id
+                self.command_mention = command_mention
+
+        package = ModuleType("_gatecount_nhmisc")
+        package.__path__ = []
+        views = ModuleType("_gatecount_nhmisc.achievement_views")
+        views.AchievementProfileView = FakeAchievementProfileView
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "_gatecount_nhmisc": package,
+                "_gatecount_nhmisc.achievement_views": views,
+            },
+        ):
+            await cog._achievements_user_context_action(interaction, target)
+
+        interaction.response.defer.assert_awaited_once_with(
+            ephemeral=True,
+            thinking=True,
+        )
+        interaction.edit_original_response.assert_awaited_once()
+        self.assertIs(
+            interaction.edit_original_response.await_args.kwargs["embed"],
+            embed,
+        )
+        view = interaction.edit_original_response.await_args.kwargs["view"]
+        self.assertIs(view.embed, embed)
+        self.assertEqual(view.requester_id, 99)
+        self.assertEqual(view.command_mention, "`/achievements`")
+        cog._achievement_store.get_profile.assert_awaited_once_with(1, 123)
+        cog._achievement_store.list_definitions.assert_awaited_once_with(1)
+
     async def test_achievements_slash_timeout_finishes_with_private_error(self):
         async def blocked_is_bootstrapped(_guild_id):
             await asyncio.Event().wait()

@@ -170,6 +170,107 @@ class AchievementStoreTests(unittest.IsolatedAsyncioTestCase):
             ((1, 50, 60), (3, 51, 61)),
         )
 
+    async def test_multi_user_proof_batch_updates_every_member_atomically(self):
+        await self.store.import_gate_progress(1, 2, 1)
+        await self.store.import_gate_progress(1, 3, 1)
+        assignments = (
+            achievement_store.StargateProofAssignment(
+                2,
+                achievement_store.StargateProof(1, 50, 60),
+            ),
+            achievement_store.StargateProofAssignment(
+                3,
+                achievement_store.StargateProof(1, 51, 61),
+            ),
+        )
+
+        await self.store.apply_stargate_proof_batch(
+            1,
+            assignments,
+            expected_proofs={(2, 1): None, (3, 1): None},
+            replace_existing=True,
+        )
+
+        first = await self.store.get_profile(1, 2)
+        second = await self.store.get_profile(1, 3)
+        self.assertEqual(first.stargate_count, 1)
+        self.assertEqual(second.stargate_count, 1)
+        self.assertEqual(first.stargate_proofs, (assignments[0].proof,))
+        self.assertEqual(second.stargate_proofs, (assignments[1].proof,))
+
+    async def test_multi_user_proof_batch_rolls_back_when_one_snapshot_is_stale(self):
+        await self.store.import_gate_progress(1, 2, 1)
+        await self.store.import_gate_progress(1, 3, 1)
+        original = achievement_store.StargateProof(1, 40, 41)
+        await self.store.attach_stargate_proof_links(1, 3, (original,))
+        assignments = (
+            achievement_store.StargateProofAssignment(
+                2, achievement_store.StargateProof(1, 50, 60)
+            ),
+            achievement_store.StargateProofAssignment(
+                3, achievement_store.StargateProof(1, 51, 61)
+            ),
+        )
+
+        with self.assertRaises(achievement_store.GateProofConflict):
+            await self.store.apply_stargate_proof_batch(
+                1,
+                assignments,
+                expected_proofs={(2, 1): None, (3, 1): None},
+                replace_existing=True,
+            )
+
+        self.assertEqual((await self.store.get_profile(1, 2)).stargate_proofs, ())
+        self.assertEqual(
+            (await self.store.get_profile(1, 3)).stargate_proofs,
+            (original,),
+        )
+
+    async def test_multi_user_add_missing_validates_but_preserves_existing_proof(self):
+        await self.store.import_gate_progress(1, 2, 1)
+        await self.store.import_gate_progress(1, 3, 1)
+        original = achievement_store.StargateProof(1, 40, 41)
+        await self.store.attach_stargate_proof_links(1, 2, (original,))
+        assignments = (
+            achievement_store.StargateProofAssignment(
+                2, achievement_store.StargateProof(1, 50, 60)
+            ),
+            achievement_store.StargateProofAssignment(
+                3, achievement_store.StargateProof(1, 51, 61)
+            ),
+        )
+
+        await self.store.apply_stargate_proof_batch(
+            1,
+            assignments,
+            expected_proofs={(2, 1): original, (3, 1): None},
+            replace_existing=False,
+        )
+
+        self.assertEqual(
+            (await self.store.get_profile(1, 2)).stargate_proofs,
+            (original,),
+        )
+        self.assertEqual(
+            (await self.store.get_profile(1, 3)).stargate_proofs,
+            (assignments[1].proof,),
+        )
+
+    async def test_multi_user_proof_batch_rejects_duplicate_user_gate_pair(self):
+        proof = achievement_store.StargateProof(1, 50, 60)
+        duplicate = (
+            achievement_store.StargateProofAssignment(2, proof),
+            achievement_store.StargateProofAssignment(2, proof),
+        )
+
+        with self.assertRaises(achievement_store.GateProofConflict):
+            await self.store.apply_stargate_proof_batch(
+                1,
+                duplicate,
+                expected_proofs={(2, 1): None},
+                replace_existing=True,
+            )
+
     async def test_batch_proof_missing_gate_rolls_back_every_link(self):
         await self.store.import_gate_progress(1, 2, 2)
 
