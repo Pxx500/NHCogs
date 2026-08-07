@@ -42,12 +42,17 @@ By default, only the server owner can use `!honeypot` and all subcommands. Red P
 
 ### gifdetector
 
-The GIF detector removes Discord `gifv` embeds only in configured channels and their threads. It ignores bots, webhooks, and protected moderators; at most one animated ICBM warning runs per server while additional GIFs use the short static warning.
+The GIF detector removes GIF uploads, direct GIF links, Discord GIF embeds, and supported Tenor/Giphy video transcodes in configured channels and their threads. Ordinary MP4 uploads and links remain allowed. It ignores bots, webhooks, and protected moderators; at most one compact five-second horizontal ICBM warning runs per server while additional GIFs use the short static warning.
+
+By default, three GIFs from one member inside a rolling 60-second window trigger a one-hour server mute through Red's core `Mutes` cog. Core `Mutes` must have a mute role configured; Honeypot never falls back to a native timeout, warning, kick, or ban. Burst counters are in memory and reset when the cog reloads.
 
 | Command | Description |
 |---|---|
 | `!honeypot gifdetector toggle <true\|false>` | Enable or disable GIF interception |
 | `!honeypot gifdetector animation <true\|false>` | Enable or disable the animated ICBM warning |
+| `!honeypot gifdetector threshold [2-20]` | Show or set the GIF count required for a mute |
+| `!honeypot gifdetector window [5-3600]` | Show or set the rolling window in seconds |
+| `!honeypot gifdetector muteduration [60-604800]` | Show or set the role mute duration in seconds |
 | `!honeypot gifdetector channel add [channel]` | Monitor a channel, or the current channel when omitted |
 | `!honeypot gifdetector channel remove [channel]` | Stop monitoring a channel, or the current channel when omitted |
 | `!honeypot gifdetector message set <text>` | Set the static warning shown for additional GIFs |
