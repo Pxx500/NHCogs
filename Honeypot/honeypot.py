@@ -18,6 +18,7 @@ from . import (
     detection,
     detection_runtime,
     diagnostics,
+    gif_detector,
     imagescan,
     joinwatch,
     review_publication,
@@ -164,6 +165,9 @@ class Honeypot(Cog):
         self._console_log_buffer = ReadOnlyLogBuffer()
         self._post_ban_sweep_tasks: set[asyncio.Task] = set()
         self._case_review_tasks: set[asyncio.Task] = set()
+        self._gif_detector_tasks: set[asyncio.Task] = set()
+        self._gif_detector_seen_messages: dict[tuple[int, int], None] = {}
+        self._gif_detector_animated_guilds: set[int] = set()
         self._hot_purge_users: dict[int, dict[int, datetime]] = defaultdict(dict)
         self._message_registry = MessageRegistry(
             cog_data_path(self) / "message_registry.sqlite"
@@ -269,6 +273,7 @@ class Honeypot(Cog):
                 payload.message_id,
                 bool(payload.data["pinned"]),
             )
+        await gif_detector.on_raw_message_edit(self, payload)
 
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, channel: typing.Any) -> None:
@@ -758,6 +763,8 @@ class Honeypot(Cog):
         self,
         ctx: commands.Context,
         config_sender: typing.Callable[..., typing.Awaitable[None]] | None = None,
+        *,
+        include_descendants: bool = False,
     ) -> None:
         private = self._group_overview_is_private(ctx)
         if private and config_sender is not None:
@@ -778,8 +785,14 @@ class Honeypot(Cog):
                 inline=False,
             )
 
+        def visible_commands(parent: commands.Group) -> typing.Iterator[typing.Any]:
+            for child in getattr(parent, "commands", ()):
+                yield child
+                if include_descendants:
+                    yield from visible_commands(child)
+
         command_lines = []
-        for child in command.commands:
+        for child in visible_commands(command):
             usage = f"{ctx.clean_prefix}{child.qualified_name}"
             if child.signature:
                 usage = f"{usage} {child.signature}"
@@ -927,6 +940,13 @@ class Honeypot(Cog):
             await self._cancel_owned_task(self._case_restore_task)
         finally:
             self._case_restore_task = None
+        pending_gif_tasks = tuple(self._gif_detector_tasks)
+        for task in pending_gif_tasks:
+            task.cancel()
+        if pending_gif_tasks:
+            await asyncio.gather(*pending_gif_tasks, return_exceptions=True)
+        self._gif_detector_tasks.clear()
+        self._gif_detector_animated_guilds.clear()
         pending_sweeps = tuple(self._post_ban_sweep_tasks)
         for task in pending_sweeps:
             task.cancel()
@@ -1275,6 +1295,7 @@ class Honeypot(Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
+        await gif_detector.on_message(self, message)
         return await detection.on_message(self, message)
 
     @tasks.loop(minutes=1)
@@ -1408,6 +1429,68 @@ class Honeypot(Cog):
     async def automated_kick_fail_warn(self, ctx: commands.Context, value: bool = None) -> None:
         """Warn when an automated kick cannot run because the user already left."""
         return await detection.automated_kick_fail_warn(self, ctx, value)
+
+    # ─── GIF detector sub-group ────────────────────────────────────────
+
+    @honeypot.group(name="gifdetector", invoke_without_command=True)
+    @commands.mod_or_permissions(manage_messages=True)
+    async def gif_detector(self, ctx: commands.Context) -> None:
+        """Configure channel-scoped GIF interception."""
+        return await self._send_group_overview(
+            ctx,
+            gif_detector.config_gif_detector,
+            include_descendants=True,
+        )
+
+    @gif_detector.command(name="toggle", usage="<true|false>")
+    async def gif_detector_toggle(self, ctx: commands.Context, value: bool) -> None:
+        """Enable or disable GIF interception."""
+        return await gif_detector.gif_detector_toggle(self, ctx, value)
+
+    @gif_detector.command(name="animation", usage="<true|false>")
+    async def gif_detector_animation(self, ctx: commands.Context, value: bool) -> None:
+        """Enable or disable the animated ICBM warning."""
+        return await gif_detector.gif_detector_animation(self, ctx, value)
+
+    @gif_detector.group(name="channel", invoke_without_command=True)
+    async def gif_detector_channel(self, ctx: commands.Context) -> None:
+        """Configure channels where GIF interception is active."""
+        return await self._send_group_overview(ctx, gif_detector.config_gif_detector)
+
+    @gif_detector_channel.command(name="add")
+    async def gif_detector_channel_add(
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel | discord.Thread = None,
+    ) -> None:
+        """Add a channel or its parent thread scope."""
+        return await gif_detector.gif_detector_channel_add(self, ctx, channel)
+
+    @gif_detector_channel.command(name="remove")
+    async def gif_detector_channel_remove(
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel | discord.Thread = None,
+    ) -> None:
+        """Remove a channel or its parent thread scope."""
+        return await gif_detector.gif_detector_channel_remove(self, ctx, channel)
+
+    @gif_detector.group(name="message", invoke_without_command=True)
+    async def gif_detector_message(self, ctx: commands.Context) -> None:
+        """Configure the static warning shown for additional GIFs."""
+        return await self._send_group_overview(ctx, gif_detector.config_gif_detector)
+
+    @gif_detector_message.command(name="set")
+    async def gif_detector_message_set(
+        self, ctx: commands.Context, *, text: str
+    ) -> None:
+        """Set the static GIF warning text."""
+        return await gif_detector.gif_detector_message_set(self, ctx, text=text)
+
+    @gif_detector_message.command(name="reset")
+    async def gif_detector_message_reset(self, ctx: commands.Context) -> None:
+        """Reset the static GIF warning text to its default."""
+        return await gif_detector.gif_detector_message_reset(self, ctx)
 
     # ─── channel sub-group ────────────────────────────────────────────
 

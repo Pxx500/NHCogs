@@ -40,6 +40,19 @@ By default, only the server owner can use `!honeypot` and all subcommands. Red P
 | `!honeypot honeypot whitelist_mode <bypass\|review\|fallback\|none>` | How whitelisted roles behave |
 | `!honeypot honeypot automated_kick_fail_warn <bool>` | Warn when the target has already left before the kick is applied |
 
+### gifdetector
+
+The GIF detector removes Discord `gifv` embeds only in configured channels and their threads. It ignores bots, webhooks, and protected moderators; at most one animated ICBM warning runs per server while additional GIFs use the short static warning.
+
+| Command | Description |
+|---|---|
+| `!honeypot gifdetector toggle <true\|false>` | Enable or disable GIF interception |
+| `!honeypot gifdetector animation <true\|false>` | Enable or disable the animated ICBM warning |
+| `!honeypot gifdetector channel add [channel]` | Monitor a channel, or the current channel when omitted |
+| `!honeypot gifdetector channel remove [channel]` | Stop monitoring a channel, or the current channel when omitted |
+| `!honeypot gifdetector message set <text>` | Set the static warning shown for additional GIFs |
+| `!honeypot gifdetector message reset` | Reset the static warning to `No gifs!` |
+
 ### channel
 
 | Command | Description |
