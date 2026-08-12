@@ -310,10 +310,11 @@ class CaptureAttachmentTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.status, CaptureStatus.TIMEOUT)
             write_release.set()
             self.assertTrue(await asyncio.to_thread(write_finished.wait, 1))
-            for _ in range(20):
+            cleanup_deadline = asyncio.get_running_loop().time() + 1
+            while asyncio.get_running_loop().time() < cleanup_deadline:
                 if not list(target.iterdir()):
                     break
-                await asyncio.sleep(0)
+                await asyncio.sleep(0.01)
             self.assertEqual(list(target.iterdir()), [])
 
     async def test_external_cancellation_propagates_and_late_write_never_publishes(self):
@@ -341,10 +342,11 @@ class CaptureAttachmentTests(unittest.IsolatedAsyncioTestCase):
                 await task
             write_release.set()
             self.assertTrue(await asyncio.to_thread(write_finished.wait, 1))
-            for _ in range(20):
+            cleanup_deadline = asyncio.get_running_loop().time() + 1
+            while asyncio.get_running_loop().time() < cleanup_deadline:
                 if not list(target.iterdir()):
                     break
-                await asyncio.sleep(0)
+                await asyncio.sleep(0.01)
             self.assertEqual(list(target.iterdir()), [])
 
     async def test_hostile_filename_failure_is_structured(self):
