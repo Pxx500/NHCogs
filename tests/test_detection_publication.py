@@ -301,6 +301,13 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                 )
                 channel = SimpleNamespace(
                     id=50,
+                    get_partial_message=mock.Mock(
+                        return_value=SimpleNamespace(
+                            edit=mock.AsyncMock(
+                                side_effect=honeypot.discord.NotFound("missing")
+                            )
+                        )
+                    ),
                     fetch_message=mock.AsyncMock(
                         side_effect=honeypot.discord.NotFound("missing")
                     ),
@@ -335,7 +342,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                     (50, 61),
                 )
                 channel.send.assert_awaited_once()
-                self.assertEqual(thread.send.await_count, 2)
+                self.assertEqual(thread.send.await_count, 1)
 
     async def test_restart_reprojects_primary_and_evidence_into_the_case_thread(self):
         with TemporaryDirectory() as directory:
@@ -396,6 +403,9 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                     fetch_message=mock.AsyncMock(
                         side_effect=lambda message_id: thread_messages[message_id]
                     ),
+                    get_partial_message=mock.Mock(
+                        side_effect=lambda message_id: thread_messages[message_id]
+                    ),
                 )
                 primary = SimpleNamespace(
                     id=60,
@@ -406,6 +416,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                 evidence_two = SimpleNamespace(edit=mock.AsyncMock())
                 channel = SimpleNamespace(
                     id=50,
+                    get_partial_message=mock.Mock(return_value=primary),
                     fetch_message=mock.AsyncMock(
                         side_effect=lambda message_id: {
                             60: primary, 61: evidence_one, 62: evidence_two
@@ -454,25 +465,22 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                 evidence_one.edit.assert_not_awaited()
                 evidence_two.edit.assert_not_awaited()
                 channel.send.assert_not_awaited()
-                self.assertEqual(thread.send.await_count, 4)
+                self.assertEqual(thread.send.await_count, 2)
                 thread.edit.assert_not_awaited()
                 self.assertTrue(
                     all(not call.kwargs["resolved"] for call in primary_view.call_args_list)
                 )
-                evidence_calls = [
+                message_calls = [
                     call
                     for call in thread.send.await_args_list
-                    if call.args[0].startswith("Message 1 attachments")
+                    if call.args[0].startswith("**M1")
                 ]
-                self.assertIsNotNone(evidence_calls[0].kwargs.get("view"))
-                self.assertTrue(
-                    all(call.kwargs.get("view") is None for call in evidence_calls[1:])
-                )
+                self.assertIsNotNone(message_calls[0].kwargs.get("view"))
                 self.assertTrue(
                     all(
                         call.kwargs.get("view") is None
                         for call in thread.send.await_args_list
-                        if call not in evidence_calls
+                        if call not in message_calls
                     )
                 )
 
@@ -515,6 +523,9 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                     fetch_message=mock.AsyncMock(
                         side_effect=lambda message_id: thread_messages[message_id]
                     ),
+                    get_partial_message=mock.Mock(
+                        side_effect=lambda message_id: thread_messages[message_id]
+                    ),
                 )
                 thread_created = False
 
@@ -539,6 +550,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                 channel = SimpleNamespace(id=50)
                 summary.channel = channel
                 channel.send = mock.AsyncMock(return_value=summary)
+                channel.get_partial_message = mock.Mock(return_value=summary)
                 channel.fetch_message = mock.AsyncMock(return_value=summary)
                 for cog in (first, second):
                     cog.bot.get_guild = mock.Mock(return_value=message.guild)
@@ -572,9 +584,9 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                     appended.case.case_id,
                 )
                 self.assertEqual(channel.send.await_count, 1)
-                self.assertEqual(thread.send.await_count, 3)
+                self.assertEqual(thread.send.await_count, 1)
                 self.assertEqual(snapshot.case.review_message_id, 60)
-                self.assertEqual(len(timeline), 3)
+                self.assertEqual(len(timeline), 1)
                 self.assertTrue(all(item.state == "published" for item in timeline))
 
     async def test_reclaimed_primary_publication_deletes_loser_orphan(self):
@@ -674,6 +686,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                 )
                 log_channel = SimpleNamespace(
                     id=90,
+                    get_partial_message=mock.Mock(return_value=existing),
                     fetch_message=mock.AsyncMock(return_value=existing),
                     send=mock.AsyncMock(),
                 )
@@ -697,8 +710,10 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                     )
 
                 existing.edit.assert_awaited_once()
+                log_channel.get_partial_message.assert_called_once_with(91)
+                log_channel.fetch_message.assert_not_awaited()
                 log_channel.send.assert_not_awaited()
-                self.assertEqual(thread.send.await_count, 2)
+                self.assertEqual(thread.send.await_count, 1)
 
     async def test_spam_review_deletes_before_review_publication(self):
         with TemporaryDirectory() as directory:
@@ -901,6 +916,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                 )
                 channel = SimpleNamespace(
                     id=50,
+                    get_partial_message=mock.Mock(return_value=summary),
                     fetch_message=mock.AsyncMock(return_value=summary),
                     send=mock.AsyncMock(),
                 )
