@@ -467,3 +467,6 @@ class ImageScanStore:
             item["files"] = files_by_event.get(str(row["event_id"]), [])
             rows.append(item)
         return rows
+
+    def export_samples(self, guild_id: int) -> list[dict[str, Any]]:
+        return self.rows(guild_id, include_inactive=True)

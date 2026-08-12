@@ -597,60 +597,40 @@ async def _capture_case_attachments_unlocked(
 
 
 def _case_timeline_attachment_line(attachment) -> str:
-    details = [attachment.capture_status]
     metadata = attachment.match_metadata
-    matched_filename = metadata.get("matched_filename")
     hash_diff = metadata.get(
         "hash_diff", metadata.get("distance", metadata.get("score"))
     )
     threshold = metadata.get("threshold")
-    if matched_filename:
-        match = f"matched {matched_filename}"
-        if hash_diff is not None:
-            difference = str(hash_diff)
-            if threshold is not None:
-                difference += f"/{threshold}"
-            match += f" (hash difference {difference})"
-        details.append(match)
-    elif metadata.get("matched"):
-        match = "matched known suspicious content"
-        if hash_diff is not None:
-            difference = str(hash_diff)
-            if threshold is not None:
-                difference += f"/{threshold}"
-            match += f" (hash difference {difference})"
-        details.append(match)
-    matches = metadata.get("matches")
-    if isinstance(matches, (list, tuple)):
-        for match in matches[:3]:
-            if not isinstance(match, typing.Mapping):
-                continue
-            filename = match.get("matched_filename", match.get("filename", "known sample"))
-            distance = match.get("hash_diff", match.get("distance", match.get("score")))
-            detail = f"matched {filename}"
-            if distance is not None:
-                difference = str(distance)
-                match_threshold = match.get("threshold")
-                if match_threshold is not None:
-                    difference += f"/{match_threshold}"
-                detail += f" (hash difference {difference})"
-            details.append(detail)
-    if attachment.learning_decision:
-        decisions = {
-            "true_positive": "True positive",
-            "false_positive": "False positive",
-            "ignored": "Ignored",
-        }
-        details.append(
-            decisions.get(attachment.learning_decision, attachment.learning_decision)
-        )
+    decisions = {
+        "true_positive": "TP",
+        "false_positive": "FP",
+        "ignored": "IGN",
+    }
+    decision = decisions.get(attachment.learning_decision, "?")
+    if attachment.capture_status in {
+        detection_runtime.CaptureStatus.FAILED.value,
+        detection_runtime.CaptureStatus.TIMEOUT.value,
+        detection_runtime.CaptureStatus.TOO_LARGE.value,
+    }:
+        return f"{attachment.key.position + 1}·CF"
+    if metadata.get("exact_decision") is not None:
+        match = "SHA"
+    elif hash_diff == 0:
+        match = "OH"
+    elif hash_diff is not None:
+        difference = str(hash_diff)
+        if threshold is not None:
+            difference += f"/{threshold}"
+        match = f"HD {difference}"
+    else:
+        match = None
+    details = f"{attachment.key.position + 1}·{decision}"
+    if match:
+        details += f"·{match}"
     if attachment.publication_error:
-        details.append(f"upload warning: {attachment.publication_error}")
-    filename = attachment.filename.replace("`", "ˋ")
-    return (
-        f"- {attachment.key.position + 1}. `{filename}`\n"
-        f"  {'; '.join(details)}"
-    )
+        details += "·CF"
+    return details
 
 
 def _case_timeline_message_content(message) -> str:
@@ -664,8 +644,8 @@ def _case_timeline_message_content(message) -> str:
     )
     source = message.jump_url or "Source unavailable"
     attachments = (
-        "\n\nAttachments:\n"
-        + "\n".join(
+        "\n\nFiles: "
+        + "  ".join(
             _case_timeline_attachment_line(attachment)
             for attachment in message.attachments
         )
@@ -673,7 +653,7 @@ def _case_timeline_message_content(message) -> str:
         else ""
     )
     return (
-        f"**Message {message.sequence}** • {source} • "
+        f"**M{message.sequence}** • {source} • "
         f"<t:{int(message.created_at.timestamp())}:F>\n"
         f"Status: {message.delete_status}\n"
         f"Signals:\n{reasons}\n```\n{content}\n```{attachments}"
@@ -693,7 +673,7 @@ def _case_timeline_message_chunks(message) -> tuple[str, ...]:
         prefix = (
             metadata + opening
             if not chunks
-            else f"**Message {message.sequence} (continued)**\n```\n"
+            else f"**M{message.sequence} (continued)**\n```\n"
         )
         suffix = "\n```"
         available = 2000 - len(prefix) - len(suffix)
@@ -712,7 +692,7 @@ def _case_timeline_message_chunks(message) -> tuple[str, ...]:
         chunks.append(payload)
 
     while trailing:
-        prefix = f"**Message {message.sequence} (continued)**\n"
+        prefix = f"**M{message.sequence} (continued)**\n"
         available = 2000 - len(prefix)
         split_at = min(len(trailing), available)
         if split_at < len(trailing):
@@ -875,16 +855,19 @@ async def _upsert_case_timeline_text(
     content: str,
     *,
     view: object = _TIMELINE_VIEW_UNSET,
+    files: list[discord.File] | None = None,
 ) -> None:
     edit_kwargs = {"content": content}
     send_kwargs = {}
     if view is not _TIMELINE_VIEW_UNSET:
         edit_kwargs["view"] = view
         send_kwargs["view"] = view
+    if files:
+        send_kwargs["files"] = files
     replace_message_id = None
     if publication.state == "published" and publication.message_id is not None:
         try:
-            message = await thread.fetch_message(publication.message_id)
+            message = thread.get_partial_message(publication.message_id)
             await message.edit(**edit_kwargs)
             return
         except discord.NotFound:
@@ -1006,7 +989,9 @@ async def _publish_case_timeline(
 ) -> None:
     timeline = render_timeline(snapshot)
     feedback_items = case_feedback_items(snapshot)
-    note_chunks = _case_note_chunks(timeline.case_notes)
+    note_chunks = (
+        _case_note_chunks(timeline.case_notes) if timeline.case_notes else ()
+    )
     timeline_publications = await asyncio.to_thread(
         cog._case_store.list_timeline_publications,
         snapshot.case.case_id,
@@ -1057,6 +1042,12 @@ async def _publish_case_timeline(
         )
         has_pending_image_feedback = bool(pending_message_feedback)
         message_chunks = _case_timeline_message_chunks(message)
+        legacy_evidence_layout = any(
+            publication.kind == "evidence"
+            and publication.message_sequence == message.sequence
+            and publication.chunk_index == 0
+            for publication in timeline_publications
+        )
         existing_message_chunks = sum(
             1
             for publication in timeline_publications
@@ -1076,7 +1067,7 @@ async def _publish_case_timeline(
             content = (
                 message_chunks[chunk_index]
                 if chunk_index < len(message_chunks)
-                else f"**Message {message.sequence} (continued)**\nNo additional content."
+                else f"**M{message.sequence} (continued)**\nNo additional content."
             )
             view = (
                 DetectionCaseView(
@@ -1088,11 +1079,23 @@ async def _publish_case_timeline(
                     resolved=resolved,
                     moderation_actions=(),
                 )
-                if chunk_index == 0 and not batches
+                if chunk_index == 0
+                and (not batches or not legacy_evidence_layout)
                 else None
             )
-            await _upsert_case_timeline_text(cog,
-                publication, thread, content, view=view
+            files = None
+            if chunk_index == 0 and batches and not legacy_evidence_layout:
+                files = [
+                    discord.File(
+                        Path(attachment.evidence_path),
+                        filename=attachment.filename,
+                        spoiler=attachment.spoiler,
+                        description=attachment.description,
+                    )
+                    for attachment in batches[0]
+                ]
+            await _upsert_case_timeline_text(
+                cog, publication, thread, content, view=view, files=files
             )
         limit_label = f"{upload_limit / (1024 * 1024):g} MiB"
         for attachment in oversized:
@@ -1103,7 +1106,12 @@ async def _publish_case_timeline(
                 attachment.key.position,
                 f"attachment exceeds the {limit_label} review destination upload limit",
             )
-        for chunk_index, batch in enumerate(batches):
+        evidence_batches = (
+            enumerate(batches)
+            if legacy_evidence_layout
+            else enumerate(batches[1:], start=1)
+        )
+        for chunk_index, batch in evidence_batches:
             evidence = await asyncio.to_thread(
                 cog._case_store.ensure_timeline_publication,
                 snapshot.case.case_id,
@@ -1370,7 +1378,9 @@ async def _publish_detection_case_serial(
         )
         if old_channel is not None:
             try:
-                existing = await old_channel.fetch_message(snapshot.case.review_message_id)
+                existing = old_channel.get_partial_message(
+                    snapshot.case.review_message_id
+                )
             except discord.NotFound:
                 cleared = await asyncio.to_thread(
                     cog._case_store.clear_review_message,
@@ -1381,18 +1391,31 @@ async def _publish_detection_case_serial(
                 if not cleared:
                     snapshot = await asyncio.to_thread(cog._case_store.get_case, case_id)
     if existing is not None:
-        await existing.edit(embed=embed, view=view)
-        thread = await _ensure_detection_case_thread(cog, snapshot, existing)
-        thread = await _activate_detection_case_thread(thread)
-        await _publish_case_timeline(cog,
-            snapshot,
-            thread,
-            resolved=resolved,
-            message_sequence=message_sequence,
-        )
-        if resolved:
-            await _finalize_detection_case_thread(thread)
-        return
+        try:
+            await existing.edit(embed=embed, view=view)
+        except discord.NotFound:
+            cleared = await asyncio.to_thread(
+                cog._case_store.clear_review_message,
+                case_id,
+                snapshot.case.review_channel_id,
+                snapshot.case.review_message_id,
+            )
+            if not cleared:
+                snapshot = await asyncio.to_thread(
+                    cog._case_store.get_case, case_id
+                )
+        else:
+            thread = await _ensure_detection_case_thread(cog, snapshot, existing)
+            thread = await _activate_detection_case_thread(thread)
+            await _publish_case_timeline(cog,
+                snapshot,
+                thread,
+                resolved=resolved,
+                message_sequence=message_sequence,
+            )
+            if resolved:
+                await _finalize_detection_case_thread(thread)
+            return
     if channel is None:
         raise RuntimeError(
             "No configured detection case publication destination is available."

@@ -911,7 +911,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                 )
                 self.assertNotIn("Individual", [item.label for item in view.children])
 
-    def test_timeline_attachment_humanizes_decision_and_escapes_filename(self):
+    def test_timeline_attachment_compacts_decision_without_filename(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 attachment = SimpleNamespace(
@@ -925,11 +925,8 @@ class CaseReviewControlTests(CaseExpiryTestCase):
 
                 line = honeypot.Honeypot._case_timeline_attachment_line(attachment)
 
-                self.assertEqual(
-                    line,
-                    "- 1. `[proof](https://evil.test).png`\n  captured; False positive",
-                )
-                self.assertNotIn("decision:", line)
+                self.assertEqual(line, "1·FP")
+                self.assertNotIn("evil.test", line)
 
     async def test_individual_image_action_opens_dropdown_and_routes_selected_image(self):
         with TemporaryDirectory() as directory:

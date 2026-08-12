@@ -3,8 +3,11 @@ imagescan sample bookkeeping they read.
 """
 
 import base64
+import json
+import shutil
 import sqlite3
 import unittest
+import zipfile
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -20,6 +23,74 @@ from tests.test_chatchart import load_nhmisc_module
 
 
 class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_imagescan_dump_exports_dated_samples_and_archive_paths(self):
+        with TemporaryDirectory() as directory:
+            data_path = Path(directory)
+            with _isolated_honeypot_modules(data_path) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog._imagescan_store.initialize()
+                sample_file = (
+                    cog._imagescan_files_path
+                    / "10"
+                    / "samples"
+                    / "imports"
+                    / "sample.png"
+                )
+                sample_file.parent.mkdir(parents=True)
+                sample_file.write_bytes(b"sample")
+                sample = {
+                    "sample_id": "sample-1",
+                    "guild_id": "10",
+                    "decision": "true_positive",
+                    "sha256": "a" * 64,
+                    "phash": "1" * 16,
+                    "dhash": "2" * 16,
+                    "ahash": "3" * 16,
+                    "source_message_id": "20",
+                    "source_channel_id": "30",
+                    "source_jump_url": None,
+                    "file_path": str(sample_file),
+                    "file_size_bytes": 6,
+                    "created_at": 1786554102,
+                    "moderator_id": "40",
+                }
+                cog._imagescan_store.insert(sample)
+                missing = dict(sample)
+                missing.update(
+                    sample_id="sample-2",
+                    sha256="b" * 64,
+                    file_path=str(sample_file.with_name("missing.png")),
+                )
+                cog._imagescan_store.insert(missing)
+                cog._imagescan_store.deactivate(10, "sample-2")
+
+                temp_root, archives = await honeypot.imagescan._imagescan_create_dump_archives(
+                    cog, 10
+                )
+                try:
+                    with zipfile.ZipFile(archives[0]) as archive:
+                        rows = [
+                            json.loads(line)
+                            for line in archive.read("samples.jsonl")
+                            .decode("utf-8")
+                            .splitlines()
+                        ]
+                        self.assertIn(
+                            "files/10/samples/imports/sample.png",
+                            archive.namelist(),
+                        )
+                finally:
+                    shutil.rmtree(temp_root, ignore_errors=True)
+
+                self.assertEqual(len(rows), 2)
+                self.assertEqual(rows[0]["created_at_iso"], "2026-08-12T17:01:42Z")
+                self.assertEqual(
+                    rows[0]["file"], "files/10/samples/imports/sample.png"
+                )
+                self.assertTrue(rows[0]["active"])
+                self.assertIsNone(rows[1]["file"])
+                self.assertFalse(rows[1]["active"])
+
     async def test_honeypot_errors_uses_persisted_operation_value(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:

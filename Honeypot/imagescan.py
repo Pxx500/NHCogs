@@ -401,6 +401,10 @@ async def _imagescan_create_dump_archives(cog, guild_id: int) -> tuple[Path, lis
     with (data_root / "imagescan.jsonl").open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    async with cog._imagescan_db_lock:
+        samples = await asyncio.to_thread(
+            cog._imagescan_store.export_samples, guild_id
+        )
     if cog._imagescan_db_path.exists():
         shutil.copy2(cog._imagescan_db_path, data_root / "imagescan.sqlite")
     source_files_root = cog._imagescan_files_path / str(guild_id)
@@ -411,6 +415,32 @@ async def _imagescan_create_dump_archives(cog, guild_id: int) -> tuple[Path, lis
             target = files_root / str(guild_id) / source.relative_to(source_files_root)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
+    with (data_root / "samples.jsonl").open("w", encoding="utf-8") as handle:
+        for sample in samples:
+            created_at = int(sample["created_at"])
+            source_path = Path(sample["file_path"]) if sample.get("file_path") else None
+            archive_path = None
+            if (
+                source_path is not None
+                and source_path.is_file()
+                and is_imagescan_sample_path_safe(source_files_root, source_path)
+            ):
+                try:
+                    relative_path = source_path.resolve().relative_to(
+                        source_files_root.resolve()
+                    )
+                except ValueError:
+                    relative_path = None
+                if relative_path is not None:
+                    archive_path = (Path("files") / str(guild_id) / relative_path).as_posix()
+            exported = dict(sample)
+            exported["created_at_iso"] = datetime.fromtimestamp(
+                created_at, timezone.utc
+            ).isoformat().replace("+00:00", "Z")
+            exported["file"] = archive_path
+            exported["active"] = bool(exported["active"])
+            exported.pop("file_path", None)
+            handle.write(json.dumps(exported, ensure_ascii=False) + "\n")
     archives = diagnostics._review_dump_zip_chunks(
         data_root, zip_root, REVIEW_DUMP_MAX_ZIP_BYTES
     )

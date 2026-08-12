@@ -148,7 +148,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                     (),
                 )
 
-    async def test_timeline_card_keeps_source_url_and_human_image_match_details(self):
+    async def test_timeline_card_keeps_source_url_and_compact_image_match_details(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 attachment = SimpleNamespace(
@@ -177,8 +177,8 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 content = honeypot.Honeypot._case_timeline_message_content(message)
 
                 self.assertIn(message.jump_url, content)
-                self.assertIn("matched known-scam.png", content)
-                self.assertIn("hash difference 3/17", content)
+                self.assertIn("Files: 1·?·HD 3/17", content)
+                self.assertNotIn("known-scam.png", content)
 
     async def test_timeline_card_shows_detector_score_and_effective_threshold(self):
         with TemporaryDirectory() as directory:
@@ -208,10 +208,61 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
 
                 content = honeypot.Honeypot._case_timeline_message_content(message)
 
-                self.assertIn(
-                    "matched known suspicious content (hash difference 3/17)",
-                    content,
+                self.assertIn("Files: 1·?·HD 3/17", content)
+
+    async def test_timeline_card_distinguishes_sha_and_optical_hash_matches(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                attachments = (
+                    SimpleNamespace(
+                        key=honeypot.AttachmentKey("case-1", 1, 0),
+                        filename="same-bytes.png",
+                        capture_status="captured",
+                        match_metadata={
+                            "matched": True,
+                            "score": 0,
+                            "threshold": 17,
+                            "exact_decision": "true_positive",
+                        },
+                        learning_decision="true_positive",
+                        publication_error=None,
+                    ),
+                    SimpleNamespace(
+                        key=honeypot.AttachmentKey("case-1", 1, 1),
+                        filename="same-image.png",
+                        capture_status="captured",
+                        match_metadata={
+                            "matched": True,
+                            "score": 0,
+                            "threshold": 17,
+                            "exact_decision": None,
+                        },
+                        learning_decision="false_positive",
+                        publication_error=None,
+                    ),
+                    SimpleNamespace(
+                        key=honeypot.AttachmentKey("case-1", 1, 2),
+                        filename="missing.png",
+                        capture_status="capture_failed",
+                        match_metadata={},
+                        learning_decision=None,
+                        publication_error=None,
+                    ),
                 )
+                message = SimpleNamespace(
+                    sequence=1,
+                    channel_id=30,
+                    created_at=datetime(2026, 7, 14, 12, tzinfo=timezone.utc),
+                    delete_status="Deleted",
+                    signal_reasons=("Image matched",),
+                    content="suspicious",
+                    jump_url=None,
+                    attachments=attachments,
+                )
+
+                content = honeypot.Honeypot._case_timeline_message_content(message)
+
+                self.assertIn("Files: 1·TP·SHA  2·FP·OH  3·CF", content)
 
     async def test_long_timeline_message_preserves_fenced_content_source_and_attachment_details(self):
         with TemporaryDirectory() as directory:
@@ -284,12 +335,12 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 payloads = [
                     call.args[0]
                     for call in thread.send.await_args_list
-                    if call.args[0].startswith("**Message 1")
+                    if call.args[0].startswith("**M1")
                 ]
                 message_calls = [
                     call
                     for call in thread.send.await_args_list
-                    if call.args[0].startswith("**Message 1")
+                    if call.args[0].startswith("**M1")
                 ]
                 self.assertIsInstance(
                     message_calls[0].kwargs.get("view"),
@@ -316,9 +367,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(rendered.count(source_url), 1)
                 self.assertNotIn("<#30>", rendered)
                 self.assertNotIn("\n\n```\n", payloads[0])
-                self.assertIn("proof.png", rendered)
-                self.assertIn("matched known-scam.png", rendered)
-                self.assertIn("hash difference 3", rendered)
+                self.assertIn("Files: 1·?·HD 3", rendered)
                 publications = sorted(
                     (
                         item
@@ -396,7 +445,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 message_calls = [
                     call
                     for call in thread.send.await_args_list
-                    if call.args and call.args[0].startswith("**Message ")
+                    if call.args and call.args[0].startswith("**M")
                 ]
                 self.assertEqual(len(message_calls), 2)
                 self.assertTrue(
@@ -462,9 +511,8 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                     )
 
                 payloads = [call.args[0] for call in thread.send.await_args_list]
-                self.assertEqual(payloads[0], "**Case operation notes**\nNo current operation warnings.")
-                self.assertTrue(payloads[1].startswith("**Message 1**"))
-                self.assertTrue(payloads[2].startswith("**Message 2**"))
+                self.assertTrue(payloads[0].startswith("**M1**"))
+                self.assertTrue(payloads[1].startswith("**M2**"))
                 thread.fetch_message.assert_not_awaited()
 
     async def test_incremental_timeline_does_not_edit_older_published_messages(self):
@@ -530,7 +578,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 new_payloads = [
                     call.args[0]
                     for call in thread.send.await_args_list
-                    if call.args and call.args[0].startswith("**Message 2**")
+                    if call.args and call.args[0].startswith("**M2**")
                 ]
                 self.assertEqual(len(new_payloads), 1)
 
@@ -628,14 +676,13 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("enforce_nonce", channel.send.await_args.kwargs)
                 summary.fetch_thread.assert_awaited_once()
                 summary.create_thread.assert_awaited_once()
-                self.assertEqual(thread.send.await_count, 2)
+                self.assertEqual(thread.send.await_count, 1)
                 self.assertNotIn("enforce_nonce", thread.send.await_args_list[0].kwargs)
-                self.assertNotIn("enforce_nonce", thread.send.await_args_list[1].kwargs)
                 self.assertEqual(endpoint.summary_message_id, 60)
                 self.assertEqual(endpoint.thread_id, 60)
-                self.assertEqual(timeline[0].kind, "case_note")
+                self.assertEqual(timeline[0].kind, "message")
                 self.assertEqual(timeline[0].message_id, 70)
-                payload = thread.send.await_args_list[1].args[0]
+                payload = thread.send.await_args_list[0].args[0]
                 source_url = "https://discord.test/channels/10/30/40"
                 self.assertEqual(payload.count(source_url), 1)
                 self.assertNotIn("<#30>", payload)
@@ -777,7 +824,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(batches, ())
                 self.assertEqual(oversized, ())
 
-    async def test_timeline_chunks_image_evidence_into_ten_file_batches(self):
+    async def test_timeline_combines_message_text_files_and_controls(self):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
@@ -796,7 +843,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                         description=f"evidence {position}",
                         spoiler=position == 0,
                     )
-                    for position in range(11)
+                    for position in range(4)
                 )
                 appended = await asyncio.to_thread(
                     cog._case_store.append_message,
@@ -805,7 +852,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                     ),
                     (),
                 )
-                for position in range(11):
+                for position in range(4):
                     evidence = data_path / f"proof-{position}.png"
                     evidence.write_bytes(b"image")
                     await asyncio.to_thread(
@@ -850,29 +897,19 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     await honeypot.review_publication._publish_case_timeline(cog, snapshot, thread, resolved=False)
 
-                self.assertEqual(thread.send.await_count, 4)
-                self.assertNotIn("files", thread.send.await_args_list[1].kwargs)
-                self.assertIsNone(thread.send.await_args_list[1].kwargs.get("view"))
-                self.assertEqual(len(thread.send.await_args_list[2].kwargs["files"]), 10)
-                self.assertEqual(len(thread.send.await_args_list[3].kwargs["files"]), 1)
-                self.assertEqual(
-                    thread.send.await_args_list[2].args[0],
-                    "Message 1 attachments",
-                )
-                self.assertEqual(
-                    thread.send.await_args_list[3].args[0],
-                    "Message 1 attachments",
-                )
+                self.assertEqual(thread.send.await_count, 1)
+                publication = thread.send.await_args
+                self.assertIn("copied content", publication.args[0])
+                self.assertEqual(len(publication.kwargs["files"]), 4)
                 self.assertIsInstance(
-                    thread.send.await_args_list[2].kwargs.get("view"),
+                    publication.kwargs.get("view"),
                     honeypot.DetectionCaseView,
                 )
                 self.assertEqual(
-                    thread.send.await_args_list[2].kwargs["view"].message_sequence,
+                    publication.kwargs["view"].message_sequence,
                     1,
                 )
-                self.assertIsNone(thread.send.await_args_list[3].kwargs.get("view"))
-                self.assertEqual(len(created_files), 11)
+                self.assertEqual(len(created_files), 4)
                 self.assertTrue(created_files[0].spoiler)
                 self.assertEqual(created_files[0].description, "evidence 0")
                 publications = await asyncio.to_thread(
@@ -881,9 +918,99 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(
                     [item.kind for item in publications],
-                    ["case_note", "evidence", "evidence", "message"],
+                    ["message"],
                 )
                 self.assertTrue(all(item.state == "published" for item in publications))
+
+    async def test_timeline_rerender_edits_known_message_without_fetching_it(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                await asyncio.to_thread(cog._case_store.initialize)
+                appended = await asyncio.to_thread(
+                    cog._case_store.append_message,
+                    honeypot.NewMessage(
+                        10, 20, 30, 40, "copied content",
+                        datetime(2026, 7, 14, 12, tzinfo=timezone.utc), None, (),
+                    ),
+                    (),
+                )
+                snapshot = await asyncio.to_thread(
+                    cog._case_store.get_case, appended.case.case_id
+                )
+                partial = SimpleNamespace(edit=mock.AsyncMock())
+                thread = SimpleNamespace(
+                    id=60,
+                    guild=SimpleNamespace(filesize_limit=8 * 1024 * 1024),
+                    send=mock.AsyncMock(return_value=SimpleNamespace(id=70)),
+                    fetch_message=mock.AsyncMock(),
+                    get_partial_message=mock.Mock(return_value=partial),
+                )
+                with mock.patch.object(
+                    honeypot.discord,
+                    "AllowedMentions",
+                    SimpleNamespace(none=lambda: None),
+                ):
+                    await honeypot.review_publication._publish_case_timeline(
+                        cog, snapshot, thread, resolved=False
+                    )
+                    await honeypot.review_publication._publish_case_timeline(
+                        cog, snapshot, thread, resolved=True
+                    )
+
+                thread.get_partial_message.assert_called_once_with(70)
+                thread.fetch_message.assert_not_awaited()
+                partial.edit.assert_awaited_once()
+                self.assertNotIn("attachments", partial.edit.await_args.kwargs)
+
+    async def test_timeline_rerender_replaces_a_missing_known_message(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                await asyncio.to_thread(cog._case_store.initialize)
+                appended = await asyncio.to_thread(
+                    cog._case_store.append_message,
+                    honeypot.NewMessage(
+                        10, 20, 30, 40, "copied content",
+                        datetime(2026, 7, 14, 12, tzinfo=timezone.utc), None, (),
+                    ),
+                    (),
+                )
+                snapshot = await asyncio.to_thread(
+                    cog._case_store.get_case, appended.case.case_id
+                )
+                partial = SimpleNamespace(
+                    edit=mock.AsyncMock(side_effect=honeypot.discord.NotFound())
+                )
+                thread = SimpleNamespace(
+                    id=60,
+                    guild=SimpleNamespace(filesize_limit=8 * 1024 * 1024),
+                    send=mock.AsyncMock(
+                        side_effect=(SimpleNamespace(id=70), SimpleNamespace(id=71))
+                    ),
+                    fetch_message=mock.AsyncMock(),
+                    get_partial_message=mock.Mock(return_value=partial),
+                )
+                with mock.patch.object(
+                    honeypot.discord,
+                    "AllowedMentions",
+                    SimpleNamespace(none=lambda: None),
+                ):
+                    await honeypot.review_publication._publish_case_timeline(
+                        cog, snapshot, thread, resolved=False
+                    )
+                    await honeypot.review_publication._publish_case_timeline(
+                        cog, snapshot, thread, resolved=True
+                    )
+
+                self.assertEqual(thread.send.await_count, 2)
+                publication = (
+                    await asyncio.to_thread(
+                        cog._case_store.list_timeline_publications,
+                        appended.case.case_id,
+                    )
+                )[0]
+                self.assertEqual(publication.message_id, 71)
 
     async def test_timeline_upload_limit_applies_to_each_file_not_batch_total(self):
         with TemporaryDirectory() as directory:
@@ -956,8 +1083,8 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     await honeypot.review_publication._publish_case_timeline(cog, snapshot, thread, resolved=False)
 
-                self.assertEqual(thread.send.await_count, 3)
-                self.assertEqual(len(thread.send.await_args_list[2].kwargs["files"]), 4)
+                self.assertEqual(thread.send.await_count, 1)
+                self.assertEqual(len(thread.send.await_args.kwargs["files"]), 4)
 
     async def test_evidence_rerender_replaces_batches_and_neutralizes_old_chunks(self):
         with TemporaryDirectory() as directory:
@@ -1033,6 +1160,9 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                     fetch_message=mock.AsyncMock(
                         side_effect=lambda message_id: published[message_id]
                     ),
+                    get_partial_message=mock.Mock(
+                        side_effect=lambda message_id: published[message_id]
+                    ),
                 )
                 with (
                     mock.patch.object(
@@ -1067,12 +1197,9 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                     (item for item in receipts if item.kind == "evidence"),
                     key=lambda item: item.chunk_index,
                 )
-                first = published[evidence_receipts[0].message_id]
-                obsolete = published[evidence_receipts[1].message_id]
+                self.assertEqual([item.chunk_index for item in evidence_receipts], [1])
+                obsolete = published[evidence_receipts[0].message_id]
                 self.assertEqual(thread.send.await_count, first_send_count)
-                self.assertEqual(len(first.attachments), 10)
-                self.assertIsInstance(first.view, honeypot.DetectionCaseView)
-                self.assertEqual(first.view.message_sequence, 1)
                 self.assertEqual(obsolete.attachments, [])
                 self.assertIsNone(obsolete.view)
                 self.assertIn("No additional attachments", obsolete.content)
@@ -1284,6 +1411,9 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                     fetch_message=mock.AsyncMock(
                         side_effect=lambda message_id: sent_messages[message_id]
                     ),
+                    get_partial_message=mock.Mock(
+                        side_effect=lambda message_id: sent_messages[message_id]
+                    ),
                 )
                 with mock.patch.object(
                     honeypot.discord,
@@ -1296,7 +1426,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                     )
                     await honeypot.review_publication._publish_case_timeline(cog, snapshot, thread, resolved=True)
 
-                self.assertEqual(thread.send.await_count, 2)
+                self.assertEqual(thread.send.await_count, 1)
                 resolution_messages = [
                     message
                     for message in sent_messages.values()
