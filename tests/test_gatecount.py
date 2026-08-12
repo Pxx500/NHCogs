@@ -47,6 +47,18 @@ class _UserFeedbackCheckFailure(Exception):
     pass
 
 
+class _HTTPException(Exception):
+    pass
+
+
+class _NotFound(_HTTPException):
+    pass
+
+
+class _Forbidden(_HTTPException):
+    pass
+
+
 def _decorator(*args, **kwargs):
     def wrapper(function):
         function.command = _decorator
@@ -75,6 +87,9 @@ def _load_nhmisc():
     discord.Color = _Color
     discord.Embed = _Embed
     discord.AllowedMentions = _AllowedMentions
+    discord.HTTPException = _HTTPException
+    discord.NotFound = _NotFound
+    discord.Forbidden = _Forbidden
 
     commands = types.ModuleType("redbot.core.commands")
     commands.Cog = _Cog
