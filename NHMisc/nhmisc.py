@@ -768,7 +768,7 @@ class NHMisc(commands.Cog):
             return None
         return tuple(users_by_role)
 
-    async def _reconcile_achievement_roles_for_guild(
+    async def _reconcile_achievement_roles_for_guild(  # noqa: PLR0912
         self, guild: discord.Guild
     ) -> None:
         definitions = tuple(
@@ -815,9 +815,10 @@ class NHMisc(commands.Cog):
                     reason="Achievement database reconciliation",
                 ):
                     corrected += 1
+            except discord.NotFound:
+                continue
             except (
                 commands.UserFeedbackCheckFailure,
-                discord.NotFound,
                 discord.Forbidden,
                 discord.HTTPException,
             ):
@@ -852,9 +853,10 @@ class NHMisc(commands.Cog):
                         reason="Achievement database reconciliation",
                     )
                     corrected += 1
+                except discord.NotFound:
+                    continue
                 except (
                     commands.UserFeedbackCheckFailure,
-                    discord.NotFound,
                     discord.Forbidden,
                     discord.HTTPException,
                 ):
