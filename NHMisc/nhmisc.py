@@ -3448,7 +3448,7 @@ class NHMisc(commands.Cog):
         )
         embed.add_field(
             name=action_heading,
-            value=self._format_direct_commands(ctx),
+            value=self._format_direct_commands(ctx, expand_singletons=True),
             inline=False,
         )
         return embed
@@ -3466,13 +3466,43 @@ class NHMisc(commands.Cog):
         return NHMisc._channel_allows_everyone(ctx.channel, ctx.guild)
 
     @staticmethod
-    def _format_direct_commands(ctx: commands.Context) -> str:
+    def _format_direct_commands(
+        ctx: commands.Context,
+        *,
+        preferred_order: tuple[str, ...] = (),
+        expand_singletons: bool = False,
+    ) -> str:
+        order = {name: index for index, name in enumerate(preferred_order)}
+        commands_to_render = sorted(
+            ctx.command.commands,
+            key=lambda command: order.get(
+                command.qualified_name.rsplit(" ", 1)[-1],
+                len(order),
+            ),
+        )
         lines = []
-        for command in ctx.command.commands:
+        for command in commands_to_render:
             if command.hidden:
                 continue
-            signature = command.signature.strip()
-            usage = f"{ctx.clean_prefix}{command.qualified_name}"
+            rendered_command = command
+            visible_children = tuple(
+                child
+                for child in getattr(rendered_command, "commands", ())
+                if not child.hidden
+            )
+            while (
+                expand_singletons
+                and not rendered_command.signature.strip()
+                and len(visible_children) == 1
+            ):
+                rendered_command = visible_children[0]
+                visible_children = tuple(
+                    child
+                    for child in getattr(rendered_command, "commands", ())
+                    if not child.hidden
+                )
+            signature = rendered_command.signature.strip()
+            usage = f"{ctx.clean_prefix}{rendered_command.qualified_name}"
             if signature:
                 usage = f"{usage} {signature}"
             lines.append(f"`{usage}`")
@@ -3491,6 +3521,7 @@ class NHMisc(commands.Cog):
 
     @commands.group(name="nhmisc", invoke_without_command=True)
     @commands.guild_only()
+    @commands.mod_or_permissions(manage_messages=True)
     async def nhmisc(self, ctx: commands.Context) -> None:
         """Configure NHMisc."""
         embed = discord.Embed(
@@ -3499,7 +3530,22 @@ class NHMisc(commands.Cog):
         )
         embed.add_field(
             name="Commands",
-            value=self._format_direct_commands(ctx),
+            value=self._format_direct_commands(
+                ctx,
+                preferred_order=(
+                    "log",
+                    "vcjumping",
+                    "forumautopin",
+                    "stickyroles",
+                    "cleanup",
+                    "activity",
+                    "usermodstats",
+                    "chatchart",
+                    "topyapper",
+                    "roleanalytics",
+                ),
+                expand_singletons=True,
+            ),
             inline=False,
         )
         await ctx.send(embed=embed)
@@ -3593,64 +3639,95 @@ class NHMisc(commands.Cog):
         await self._role_analytics.disable_guild(ctx.guild.id)
         await ctx.send("Role analytics disabled")
 
-    @nhmisc.command(name="channel")
+    @nhmisc.group(name="log", invoke_without_command=True)
     @commands.admin_or_permissions(manage_guild=True)
-    async def nhmisc_channel(self, ctx: commands.Context, channel: discord.TextChannel) -> None:
-        """Set the text channel used for voice event logs."""
+    async def nhmisc_log(self, ctx: commands.Context) -> None:
+        """Configure NHMisc logging destinations."""
+        config = await self.config.guild(ctx.guild).all()
+        embed = self._configuration_embed(
+            ctx=ctx,
+            title="Logging",
+            current=(
+                "Voice: "
+                + self._configured_channel_label(ctx.guild, config["voice_log_channel"]),
+                "Alert: "
+                + self._configured_channel_label(ctx.guild, config["alert_channel"]),
+                "Maintenance: "
+                + self._configured_channel_label(ctx.guild, config["maintenance_channel"]),
+                "Moderation: "
+                + self._configured_channel_label(
+                    ctx.guild, config["moderation_log_channel"]
+                ),
+            ),
+        )
+        await ctx.send(embed=embed)
+
+    async def _show_log_destination(
+        self,
+        ctx: commands.Context,
+        *,
+        title: str,
+        config_key: str,
+    ) -> None:
+        channel_id = await getattr(self.config.guild(ctx.guild), config_key)()
+        embed = discord.Embed(title=title)
+        current = (
+            "Run this command in a channel hidden from @everyone "
+            "to view the current configuration."
+            if self._channel_is_public(ctx)
+            else f"Channel: {self._configured_channel_label(ctx.guild, channel_id)}"
+        )
+        embed.add_field(name="Current configuration", value=current, inline=False)
+        await ctx.send(embed=embed)
+
+    @nhmisc_log.command(name="voice")
+    async def nhmisc_log_voice(
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        """Show or set the text channel used for voice event logs."""
+        if channel is None:
+            await self._show_log_destination(
+                ctx, title="Voice logging", config_key="voice_log_channel"
+            )
+            return
         missing_permissions = self._missing_log_permissions(ctx.guild, channel)
         if missing_permissions is not None:
             raise commands.UserFeedbackCheckFailure(missing_permissions)
-
         await self.config.guild(ctx.guild).voice_log_channel.set(channel.id)
         await ctx.send(f"Voice log channel set to {channel.mention}.")
 
-    @nhmisc.group(name="alert", invoke_without_command=True)
-    @commands.admin_or_permissions(manage_guild=True)
-    async def nhmisc_alert(self, ctx: commands.Context) -> None:
-        """Configure alert logging."""
-        channel_id = await self.config.guild(ctx.guild).alert_channel()
-        embed = self._configuration_embed(
-            ctx=ctx,
-            title="Alert logging",
-            current=(
-                f"Channel: {self._configured_channel_label(ctx.guild, channel_id)}",
-            ),
-            action_heading="Change it",
-        )
-        await ctx.send(embed=embed)
-
-    @nhmisc_alert.command(name="channel")
-    async def nhmisc_alert_channel(
-        self, ctx: commands.Context, channel: discord.TextChannel
+    @nhmisc_log.command(name="alert")
+    async def nhmisc_log_alert(
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel | None = None,
     ) -> None:
-        """Set the text channel used for alert logs."""
+        """Show or set the text channel used for alert logs."""
+        if channel is None:
+            await self._show_log_destination(
+                ctx, title="Alert logging", config_key="alert_channel"
+            )
+            return
         missing_permissions = self._missing_log_permissions(ctx.guild, channel)
         if missing_permissions is not None:
             raise commands.UserFeedbackCheckFailure(missing_permissions)
-
         await self.config.guild(ctx.guild).alert_channel.set(channel.id)
         await ctx.send(f"Alert channel set to {channel.mention}.")
 
-    @nhmisc.group(name="maintenance", invoke_without_command=True)
-    @commands.admin_or_permissions(manage_guild=True)
-    async def nhmisc_maintenance(self, ctx: commands.Context) -> None:
-        """Configure maintenance logging."""
-        channel_id = await self.config.guild(ctx.guild).maintenance_channel()
-        embed = self._configuration_embed(
-            ctx=ctx,
-            title="Maintenance logging",
-            current=(
-                f"Channel: {self._configured_channel_label(ctx.guild, channel_id)}",
-            ),
-            action_heading="Change it",
-        )
-        await ctx.send(embed=embed)
-
-    @nhmisc_maintenance.command(name="channel")
-    async def nhmisc_maintenance_channel(
-        self, ctx: commands.Context, channel: discord.TextChannel
+    @nhmisc_log.command(name="maintenance")
+    async def nhmisc_log_maintenance(
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel | None = None,
     ) -> None:
-        """Set the private channel used for maintenance logs."""
+        """Show or set the private channel used for maintenance logs."""
+        if channel is None:
+            await self._show_log_destination(
+                ctx, title="Maintenance logging", config_key="maintenance_channel"
+            )
+            return
         missing_permissions = self._missing_log_permissions(
             ctx.guild,
             channel,
@@ -3666,26 +3743,20 @@ class NHMisc(commands.Cog):
         await self.config.guild(ctx.guild).maintenance_channel.set(channel.id)
         await ctx.send(f"Maintenance channel set to {channel.mention}.")
 
-    @nhmisc.group(name="moderationlog", invoke_without_command=True)
-    @commands.admin_or_permissions(manage_guild=True)
-    async def nhmisc_moderationlog(self, ctx: commands.Context) -> None:
-        """Configure moderator action logging."""
-        channel_id = await self.config.guild(ctx.guild).moderation_log_channel()
-        embed = self._configuration_embed(
-            ctx=ctx,
-            title="Moderator action logging",
-            current=(
-                f"Channel: {self._configured_channel_label(ctx.guild, channel_id)}",
-            ),
-            action_heading="Change it",
-        )
-        await ctx.send(embed=embed)
-
-    @nhmisc_moderationlog.command(name="channel")
-    async def nhmisc_moderationlog_channel(
-        self, ctx: commands.Context, channel: discord.TextChannel
+    @nhmisc_log.command(name="moderation")
+    async def nhmisc_log_moderation(
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel | None = None,
     ) -> None:
-        """Set the private channel used for moderator action logs."""
+        """Show or set the private channel used for moderator action logs."""
+        if channel is None:
+            await self._show_log_destination(
+                ctx,
+                title="Moderator action logging",
+                config_key="moderation_log_channel",
+            )
+            return
         missing_permissions = self._missing_log_permissions(ctx.guild, channel)
         if missing_permissions is not None:
             raise commands.UserFeedbackCheckFailure(missing_permissions)
@@ -3730,44 +3801,6 @@ class NHMisc(commands.Cog):
 
         await self.config.guild(ctx.guild).vcjumping_window_seconds.set(seconds)
         await ctx.send(f"VC jumping window set to {seconds} seconds.")
-
-    @nhmisc.command(name="status")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def nhmisc_status(self, ctx: commands.Context) -> None:
-        """Show the current voice log configuration."""
-        config = await self.config.guild(ctx.guild).all()
-        channel = self._get_log_channel(ctx.guild, config["voice_log_channel"])
-        alert_channel = self._get_log_channel(ctx.guild, config["alert_channel"])
-        maintenance_channel = self._get_log_channel(
-            ctx.guild, config["maintenance_channel"]
-        )
-        moderation_log_channel = self._get_log_channel(
-            ctx.guild, config["moderation_log_channel"]
-        )
-        channel_label = channel.mention if channel is not None else "not set"
-        alert_channel_label = alert_channel.mention if alert_channel is not None else "not set"
-        maintenance_channel_label = (
-            maintenance_channel.mention if maintenance_channel is not None else "not set"
-        )
-        moderation_log_channel_label = (
-            moderation_log_channel.mention
-            if moderation_log_channel is not None
-            else "not set"
-        )
-        await ctx.send(
-            "Voice log channel: {channel}\n"
-            "Alert channel: {alert_channel}\n"
-            "Maintenance channel: {maintenance_channel}\n"
-            "Moderator action channel: {moderation_log_channel}\n"
-            "VC jumping: {count} channel entries in {seconds} seconds.".format(
-                channel=channel_label,
-                alert_channel=alert_channel_label,
-                maintenance_channel=maintenance_channel_label,
-                moderation_log_channel=moderation_log_channel_label,
-                count=config["vcjumping_visit_count"],
-                seconds=config["vcjumping_window_seconds"],
-            )
-        )
 
     @nhmisc.group(name="forumautopin", invoke_without_command=True)
     @commands.admin_or_permissions(manage_guild=True)

@@ -133,7 +133,7 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
             nhmisc.commands.UserFeedbackCheckFailure,
             "attach files",
         ):
-            await nhmisc.NHMisc.nhmisc_maintenance_channel.callback(
+            await nhmisc.NHMisc.nhmisc_log_maintenance.callback(
                 self.cog,
                 self.ctx,
                 channel,
@@ -141,99 +141,181 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(await self.cog.config.guild(self.guild).maintenance_channel())
 
-    async def test_group_commands_use_metadata_prefix_signature_and_direct_children(self):
-        nested = command_metadata("nhmisc alert channel nested", "<value>")
-        direct = command_metadata(
-            "nhmisc alert channel",
-            "<channel>",
-            children=(nested,),
+    async def test_group_commands_expand_singletons_to_the_first_branch(self):
+        self.ctx.author.guild_permissions.manage_guild = True
+        terminal = command_metadata(
+            "nhmisc stickyroles debuglogging toggle",
+            "<enabled>",
         )
-        hidden = command_metadata("nhmisc alert internal", hidden=True)
+        singleton = command_metadata(
+            "nhmisc stickyroles debuglogging",
+            children=(terminal,),
+        )
+        hidden = command_metadata("nhmisc stickyroles internal", hidden=True)
         self.ctx.clean_prefix = "?"
-        self.ctx.command = types.SimpleNamespace(commands=(direct, hidden))
-        self.channels[42] = types.SimpleNamespace(mention="<#42>")
-        self.cog.config = FakeConfig({"alert_channel": 42})
+        self.ctx.command = types.SimpleNamespace(commands=(singleton, hidden))
+        self.cog._sticky_roles = types.SimpleNamespace(
+            get_sticky_roles=mock.AsyncMock(return_value=frozenset())
+        )
 
-        await nhmisc.NHMisc.nhmisc_alert.callback(self.cog, self.ctx)
+        await nhmisc.NHMisc.nhmisc_stickyroles.callback(self.cog, self.ctx)
 
         embed = self.ctx.send.await_args.kwargs["embed"]
         fields = {field.name: field.value for field in embed.fields}
-        commands = fields["Change it"]
-        self.assertIn("?nhmisc alert channel <channel>", commands)
-        self.assertNotIn("nested", commands)
+        commands = fields["Commands"]
+        self.assertIn(
+            "?nhmisc stickyroles debuglogging toggle <enabled>",
+            commands,
+        )
+        self.assertNotIn("`?nhmisc stickyroles debuglogging`", commands)
         self.assertNotIn("internal", commands)
 
-    async def test_alert_group_shows_current_channel_and_change_command(self):
-        self.channels[42] = types.SimpleNamespace(mention="<#42>")
-        self.cog.config = FakeConfig({"alert_channel": 42})
+    async def test_group_commands_keep_distinct_bare_actions(self):
+        child = command_metadata("nhmisc cleanup user", "<target> <count>")
+        cleanup = command_metadata(
+            "nhmisc cleanup",
+            "<count>",
+            children=(child,),
+        )
+        self.ctx.command = types.SimpleNamespace(commands=(cleanup,))
 
-        await nhmisc.NHMisc.nhmisc_alert.callback(self.cog, self.ctx)
+        await nhmisc.NHMisc.nhmisc.callback(self.cog, self.ctx)
 
-        self.ctx.send.assert_awaited_once()
         embed = self.ctx.send.await_args.kwargs["embed"]
         fields = {field.name: field.value for field in embed.fields}
-        self.assertEqual(embed.title, "Alert logging")
-        self.assertIn("<#42>", fields["Current configuration"])
-        self.ctx.send_help.assert_not_awaited()
+        self.assertIn("!nhmisc cleanup <count>", fields["Commands"])
+        self.assertNotIn("cleanup user", fields["Commands"])
 
-    async def test_new_log_groups_start_unconfigured_without_using_alert_channel(self):
+    async def test_log_group_shows_all_destinations_and_complete_commands(self):
+        self.channels.update(
+            {
+                41: types.SimpleNamespace(mention="<#41>"),
+                42: types.SimpleNamespace(mention="<#42>"),
+            }
+        )
+        self.cog.config = FakeConfig(
+            {
+                "alert_channel": 42,
+                "voice_log_channel": 41,
+                "maintenance_channel": None,
+                "moderation_log_channel": None,
+            }
+        )
+        self.ctx.command = types.SimpleNamespace(
+            commands=(
+                command_metadata("nhmisc log voice", "[channel]"),
+                command_metadata("nhmisc log alert", "[channel]"),
+                command_metadata("nhmisc log maintenance", "[channel]"),
+                command_metadata("nhmisc log moderation", "[channel]"),
+            )
+        )
+
+        await nhmisc.NHMisc.nhmisc_log.callback(self.cog, self.ctx)
+
+        embed = self.ctx.send.await_args.kwargs["embed"]
+        fields = {field.name: field.value for field in embed.fields}
+        self.assertEqual(embed.title, "Logging")
+        self.assertIn("Voice: <#41>", fields["Current configuration"])
+        self.assertIn("Alert: <#42>", fields["Current configuration"])
+        self.assertIn("Maintenance: Not configured", fields["Current configuration"])
+        self.assertIn("Moderation: Not configured", fields["Current configuration"])
+        for log_type in ("voice", "alert", "maintenance", "moderation"):
+            self.assertIn(f"!nhmisc log {log_type} [channel]", fields["Commands"])
+
+    async def test_log_child_without_channel_shows_current_destination(self):
+        self.channels[42] = types.SimpleNamespace(mention="<#42>")
+        cases = (
+            ("voice", "voice_log_channel", "Voice logging"),
+            ("alert", "alert_channel", "Alert logging"),
+            ("maintenance", "maintenance_channel", "Maintenance logging"),
+            ("moderation", "moderation_log_channel", "Moderator action logging"),
+        )
+        for command_name, config_key, title in cases:
+            with self.subTest(command_name=command_name):
+                self.ctx.send.reset_mock()
+                self.cog.config = FakeConfig({config_key: 42})
+
+                command = getattr(nhmisc.NHMisc, f"nhmisc_log_{command_name}")
+                await command.callback(self.cog, self.ctx, None)
+
+                embed = self.ctx.send.await_args.kwargs["embed"]
+                fields = {field.name: field.value for field in embed.fields}
+                self.assertEqual(embed.title, title)
+                self.assertIn("Channel: <#42>", fields["Current configuration"])
+                self.assertEqual(
+                    await getattr(self.cog.config.guild(self.guild), config_key)(),
+                    42,
+                )
+
+    async def test_log_child_with_channel_updates_destination(self):
+        self.guild.me = object()
+        channel = types.SimpleNamespace(
+            id=73,
+            mention="<#73>",
+            permissions_for=lambda _target: types.SimpleNamespace(
+                view_channel=True,
+                send_messages=True,
+                attach_files=True,
+            ),
+        )
+        self.cog.config = FakeConfig({"alert_channel": None})
+
+        await nhmisc.NHMisc.nhmisc_log_alert.callback(self.cog, self.ctx, channel)
+
+        self.assertEqual(await self.cog.config.guild(self.guild).alert_channel(), 73)
+        self.ctx.send.assert_awaited_once_with("Alert channel set to <#73>.")
+
+    async def test_private_log_destinations_reject_public_channels(self):
+        self.guild.me = object()
+        channel = types.SimpleNamespace(
+            id=73,
+            mention="<#73>",
+            permissions_for=lambda target: types.SimpleNamespace(
+                view_channel=True,
+                send_messages=True,
+                attach_files=True,
+            ),
+        )
+        for command_name, config_key in (
+            ("maintenance", "maintenance_channel"),
+            ("moderation", "moderation_log_channel"),
+        ):
+            with self.subTest(command_name=command_name):
+                self.cog.config = FakeConfig({config_key: None})
+                command = getattr(nhmisc.NHMisc, f"nhmisc_log_{command_name}")
+
+                with self.assertRaisesRegex(
+                    nhmisc.commands.UserFeedbackCheckFailure,
+                    "private from @everyone",
+                ):
+                    await command.callback(self.cog, self.ctx, channel)
+
+                self.assertIsNone(
+                    await getattr(self.cog.config.guild(self.guild), config_key)()
+                )
+
+    async def test_public_channel_hides_log_configuration_but_keeps_commands(self):
+        self.ctx.channel = FakeInvocationChannel(public=True)
+        self.ctx.command = types.SimpleNamespace(
+            commands=(command_metadata("nhmisc log alert", "[channel]"),)
+        )
         self.channels[42] = types.SimpleNamespace(mention="<#42>")
         self.cog.config = FakeConfig(
             {
+                "voice_log_channel": None,
                 "alert_channel": 42,
                 "maintenance_channel": None,
                 "moderation_log_channel": None,
             }
         )
 
-        await nhmisc.NHMisc.nhmisc_maintenance.callback(self.cog, self.ctx)
-        await nhmisc.NHMisc.nhmisc_moderationlog.callback(self.cog, self.ctx)
-
-        embeds = [call.kwargs["embed"] for call in self.ctx.send.await_args_list]
-        self.assertEqual(
-            [embed.title for embed in embeds],
-            ["Maintenance logging", "Moderator action logging"],
-        )
-        for embed in embeds:
-            fields = {field.name: field.value for field in embed.fields}
-            self.assertIn("Not configured", fields["Current configuration"])
-            self.assertNotIn("<#42>", fields["Current configuration"])
-
-    async def test_public_channel_hides_configuration_but_keeps_commands(self):
-        self.ctx.channel = FakeInvocationChannel(public=True)
-        self.ctx.command = types.SimpleNamespace(
-            commands=(command_metadata("nhmisc alert channel", "<channel>"),)
-        )
-        self.channels[42] = types.SimpleNamespace(mention="<#42>")
-        self.cog.config = FakeConfig({"alert_channel": 42})
-
-        await nhmisc.NHMisc.nhmisc_alert.callback(self.cog, self.ctx)
+        await nhmisc.NHMisc.nhmisc_log.callback(self.cog, self.ctx)
 
         embed = self.ctx.send.await_args.kwargs["embed"]
         fields = {field.name: field.value for field in embed.fields}
         self.assertNotIn("<#42>", fields["Current configuration"])
         self.assertIn("hidden from @everyone", fields["Current configuration"])
-        self.assertIn("!nhmisc alert channel <channel>", fields["Change it"])
-
-    async def test_alert_group_labels_a_missing_configured_channel_without_its_id(self):
-        self.cog.config = FakeConfig({"alert_channel": 404})
-
-        await nhmisc.NHMisc.nhmisc_alert.callback(self.cog, self.ctx)
-
-        embed = self.ctx.send.await_args.kwargs["embed"]
-        fields = {field.name: field.value for field in embed.fields}
-        current = fields["Current configuration"]
-        self.assertIn("Configured channel is missing", current)
-        self.assertNotIn("404", current)
-
-    async def test_alert_group_labels_an_unconfigured_channel(self):
-        self.cog.config = FakeConfig({"alert_channel": None})
-
-        await nhmisc.NHMisc.nhmisc_alert.callback(self.cog, self.ctx)
-
-        embed = self.ctx.send.await_args.kwargs["embed"]
-        fields = {field.name: field.value for field in embed.fields}
-        self.assertIn("Channel: Not configured", fields["Current configuration"])
+        self.assertIn("!nhmisc log alert [channel]", fields["Commands"])
 
     async def test_activity_group_shows_channel_retention_and_useful_commands(self):
         self.channels[73] = types.SimpleNamespace(mention="<#73>")
@@ -513,12 +595,25 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         self.ctx.send_help.assert_not_awaited()
 
     async def test_nhmisc_root_shows_command_dashboard_instead_of_generic_help(self):
-        nested = command_metadata("nhmisc activity retention", "<days>")
+        log_children = (
+            command_metadata("nhmisc log voice", "[channel]"),
+            command_metadata("nhmisc log alert", "[channel]"),
+        )
+        roleanalytics_disable = command_metadata("nhmisc roleanalytics disable")
         self.ctx.command = types.SimpleNamespace(
             commands=(
-                command_metadata("nhmisc alert"),
-                command_metadata("nhmisc activity", children=(nested,)),
-                command_metadata("nhmisc status"),
+                command_metadata("nhmisc log", children=log_children),
+                command_metadata(
+                    "nhmisc roleanalytics",
+                    children=(roleanalytics_disable,),
+                ),
+                command_metadata(
+                    "nhmisc activity",
+                    children=(
+                        command_metadata("nhmisc activity retention", "<days>"),
+                        command_metadata("nhmisc activity current"),
+                    ),
+                ),
             )
         )
 
@@ -529,15 +624,26 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         fields = {field.name: field.value for field in embed.fields}
         self.assertEqual(embed.title, "NHMisc")
         commands = fields["Commands"]
-        self.assertIn("!nhmisc alert", commands)
+        self.assertIn("!nhmisc log", commands)
+        self.assertIn("!nhmisc roleanalytics disable", commands)
         self.assertIn("!nhmisc activity", commands)
-        self.assertIn("!nhmisc status", commands)
         self.assertNotIn("retention", commands)
+        self.assertNotIn("!nhmisc status", commands)
+        self.assertNotIn("!nhmisc channel", commands)
         self.ctx.send_help.assert_not_awaited()
 
     async def test_achievement_group_shows_revoke_command_instead_of_generic_help(self):
+        nested = command_metadata(
+            "achievement revoke confirm",
+            "<members...>",
+        )
         self.ctx.command = types.SimpleNamespace(
-            commands=(command_metadata("achievement revoke", "<members...>"),)
+            commands=(
+                command_metadata(
+                    "achievement revoke",
+                    children=(nested,),
+                ),
+            )
         )
 
         await nhmisc.NHMisc.achievement.callback(self.cog, self.ctx)
@@ -546,7 +652,8 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         embed = self.ctx.send.await_args.kwargs["embed"]
         fields = {field.name: field.value for field in embed.fields}
         self.assertEqual(embed.title, "Achievements")
-        self.assertIn("!achievement revoke <members...>", fields["Commands"])
+        self.assertIn("!achievement revoke", fields["Commands"])
+        self.assertNotIn("confirm", fields["Commands"])
         self.ctx.send_help.assert_not_awaited()
 
 
