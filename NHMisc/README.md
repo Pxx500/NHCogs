@@ -2,8 +2,8 @@
 
 `NHMisc` is a Red-DiscordBot cog with small moderation and server-utility tools.
 
-`[p]` means your bot prefix. If your bot prefix is `!`, then `[p]nhmisc status`
-is typed as `!nhmisc status`.
+`[p]` means your bot prefix. If your bot prefix is `!`, then `[p]nhmisc log`
+is typed as `!nhmisc log`.
 
 ## Installation
 
@@ -59,7 +59,7 @@ does not unpin starter messages that were pinned earlier.
 
 If one of these permissions is revoked later, autopinning stops silently on Discord's
 side. NHMisc reports it once per forum in the maintenance channel configured with
-`[p]nhmisc maintenance channel`, and reports it again only after a later pin succeeds
+`[p]nhmisc log maintenance`, and reports it again only after a later pin succeeds
 and the problem reappears. Deleting a configured forum removes it from the configuration
 and is also reported in the maintenance channel.
 
@@ -70,19 +70,19 @@ Move logs are sent immediately. If Discord audit logs later show that a moderato
 the member, the bot edits the move log and adds the moderator name and user ID.
 
 ```ini
-[p]nhmisc channel #voice-logs
+[p]nhmisc log voice #voice-logs
 ```
 
 Sets the text channel used for voice join, leave, and move logs.
 
 ```ini
-[p]nhmisc alert channel #alerts
+[p]nhmisc log alert #alerts
 ```
 
 Sets the alert channel used by higher-priority alerts, such as voice-channel jumping.
 
 ```ini
-[p]nhmisc maintenance channel #bot-maintenance
+[p]nhmisc log maintenance #bot-maintenance
 ```
 
 Sets the private channel used for operational messages, including achievement syncs and
@@ -90,7 +90,7 @@ backups, sticky-role maintenance, and forum-autopin failures. The bot needs View
 Send Messages, and Attach Files in this channel.
 
 ```ini
-[p]nhmisc moderationlog channel #moderator-actions
+[p]nhmisc log moderation #moderator-actions
 ```
 
 Sets the private channel used for non-pinging audit logs of moderator achievement and
@@ -109,12 +109,9 @@ different channels; entering the same channel repeatedly still counts.
 
 Sets the VC jumping detection window in seconds.
 
-```ini
-[p]nhmisc status
-```
-
-Shows the current voice log, alert, maintenance, and moderation-log channels, plus the VC
-jumping configuration.
+Running `[p]nhmisc log` without a log type shows all four configured destinations.
+Running one of its child commands without a channel shows that destination without changing it.
+VC jumping configuration is shown by `[p]nhmisc vcjumping`.
 
 Defaults:
 
