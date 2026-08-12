@@ -160,6 +160,348 @@ class GifDetectorAnimationTests(unittest.TestCase):
 
 
 class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_webp_fallback_is_scheduled_after_main_detection(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                message = SimpleNamespace(
+                    embeds=[],
+                    attachments=[],
+                    content="https://media.example.test/reaction.webp",
+                )
+                events = []
+
+                async def detect(*args, **kwargs):
+                    events.append("detection")
+
+                async def schedule(*args, **kwargs):
+                    events.append("webp-fallback")
+
+                with (
+                    mock.patch.object(
+                        honeypot.detection,
+                        "on_message",
+                        new=detect,
+                    ),
+                    mock.patch.object(
+                        gif_detector,
+                        "schedule_webp_fallback",
+                        new=schedule,
+                        create=True,
+                    ),
+                ):
+                    await cog.on_message(message)
+
+                self.assertEqual(events, ["detection", "webp-fallback"])
+
+    async def test_local_gif_evidence_skips_webp_fallback(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                message = SimpleNamespace(
+                    embeds=[SimpleNamespace(type="gifv")],
+                    attachments=[],
+                    content="",
+                )
+
+                with (
+                    mock.patch.object(
+                        gif_detector,
+                        "_admit_message",
+                        new=mock.AsyncMock(),
+                    ),
+                    mock.patch.object(
+                        honeypot.detection,
+                        "on_message",
+                        new=mock.AsyncMock(),
+                    ),
+                    mock.patch.object(
+                        gif_detector,
+                        "schedule_webp_fallback",
+                        new=mock.AsyncMock(),
+                        create=True,
+                    ) as fallback,
+                ):
+                    await cog.on_message(message)
+
+                fallback.assert_not_awaited()
+
+    async def test_animated_webp_fallback_reuses_existing_admission_path(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                cog.config.defaults.update(
+                    gif_detector_enabled=True,
+                    gif_detector_channels=[10],
+                )
+                cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
+                cog._is_protected_member = mock.AsyncMock(return_value=False)
+                cog._gif_detector_remote_inspector.inspect = mock.AsyncMock(
+                    return_value=True
+                )
+                guild = SimpleNamespace(id=1)
+                current_message = SimpleNamespace(
+                    id=30,
+                    guild=guild,
+                    channel=None,
+                    author=SimpleNamespace(id=20, bot=False),
+                    webhook_id=None,
+                    embeds=[],
+                    attachments=[],
+                    content="https://media.example.test/reaction.webp",
+                )
+                channel = SimpleNamespace(
+                    id=10,
+                    parent_id=None,
+                    fetch_message=mock.AsyncMock(return_value=current_message),
+                )
+                current_message.channel = channel
+                message = SimpleNamespace(
+                    id=30,
+                    guild=guild,
+                    channel=channel,
+                    author=SimpleNamespace(id=20, bot=False),
+                    webhook_id=None,
+                    embeds=[],
+                    attachments=[],
+                    content="https://media.example.test/reaction.webp",
+                )
+
+                with mock.patch.object(
+                    gif_detector,
+                    "_admit_message",
+                    new=mock.AsyncMock(),
+                ) as admit:
+                    await gif_detector.schedule_webp_fallback(cog, message)
+                    await asyncio.gather(*tuple(cog._gif_detector_tasks))
+
+                cog._gif_detector_remote_inspector.inspect.assert_awaited_once_with(
+                    "https://media.example.test/reaction.webp"
+                )
+                admit.assert_awaited_once_with(cog, current_message)
+
+    async def test_static_webp_does_not_enter_admission_path(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                cog.config.defaults.update(
+                    gif_detector_enabled=True,
+                    gif_detector_channels=[10],
+                )
+                cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
+                cog._is_protected_member = mock.AsyncMock(return_value=False)
+                cog._gif_detector_remote_inspector.inspect = mock.AsyncMock(
+                    return_value=False
+                )
+                message = SimpleNamespace(
+                    id=30,
+                    guild=SimpleNamespace(id=1),
+                    channel=SimpleNamespace(id=10, parent_id=None),
+                    author=SimpleNamespace(id=20, bot=False),
+                    webhook_id=None,
+                    embeds=[
+                        SimpleNamespace(
+                            type="image",
+                            image=SimpleNamespace(
+                                url="https://media.example.test/still.webp"
+                            ),
+                        )
+                    ],
+                    attachments=[],
+                    content="",
+                )
+
+                with mock.patch.object(
+                    gif_detector,
+                    "_admit_message",
+                    new=mock.AsyncMock(),
+                ) as admit:
+                    await gif_detector.schedule_webp_fallback(cog, message)
+                    await asyncio.gather(*tuple(cog._gif_detector_tasks))
+
+                admit.assert_not_awaited()
+
+    async def test_webp_removed_during_inspection_is_not_admitted(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                cog.config.defaults.update(
+                    gif_detector_enabled=True,
+                    gif_detector_channels=[10],
+                )
+                cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
+                cog._is_protected_member = mock.AsyncMock(return_value=False)
+                cog._gif_detector_remote_inspector.inspect = mock.AsyncMock(
+                    return_value=True
+                )
+                channel = SimpleNamespace(
+                    id=10,
+                    parent_id=None,
+                    fetch_message=mock.AsyncMock(),
+                )
+                message = SimpleNamespace(
+                    id=30,
+                    guild=SimpleNamespace(id=1),
+                    channel=channel,
+                    author=SimpleNamespace(id=20, bot=False),
+                    webhook_id=None,
+                    embeds=[],
+                    attachments=[],
+                    content="https://media.example.test/reaction.webp",
+                )
+                channel.fetch_message.return_value = SimpleNamespace(
+                    id=30,
+                    guild=message.guild,
+                    channel=channel,
+                    author=message.author,
+                    webhook_id=None,
+                    embeds=[],
+                    attachments=[],
+                    content="edited away",
+                )
+
+                with mock.patch.object(
+                    gif_detector,
+                    "_admit_message",
+                    new=mock.AsyncMock(),
+                ) as admit:
+                    await gif_detector.schedule_webp_fallback(cog, message)
+                    await asyncio.gather(*tuple(cog._gif_detector_tasks))
+
+                admit.assert_not_awaited()
+
+    async def test_webp_deleted_during_inspection_is_not_admitted_or_reported(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                cog.config.defaults.update(
+                    gif_detector_enabled=True,
+                    gif_detector_channels=[10],
+                )
+                cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
+                cog._is_protected_member = mock.AsyncMock(return_value=False)
+                cog._gif_detector_remote_inspector.inspect = mock.AsyncMock(
+                    return_value=True
+                )
+
+                class SourceGone(Exception):
+                    pass
+
+                channel = SimpleNamespace(
+                    id=10,
+                    parent_id=None,
+                    fetch_message=mock.AsyncMock(side_effect=SourceGone()),
+                )
+                message = SimpleNamespace(
+                    id=30,
+                    guild=SimpleNamespace(id=1),
+                    channel=channel,
+                    author=SimpleNamespace(id=20, bot=False),
+                    webhook_id=None,
+                    embeds=[],
+                    attachments=[],
+                    content="https://media.example.test/reaction.webp",
+                )
+
+                with (
+                    mock.patch.object(gif_detector.discord, "NotFound", SourceGone),
+                    mock.patch.object(
+                        gif_detector,
+                        "_admit_message",
+                        new=mock.AsyncMock(),
+                    ) as admit,
+                    mock.patch.object(
+                        cog,
+                        "_record_operational_failure",
+                        new=mock.AsyncMock(),
+                    ) as report,
+                ):
+                    await gif_detector.schedule_webp_fallback(cog, message)
+                    await asyncio.gather(*tuple(cog._gif_detector_tasks))
+
+                admit.assert_not_awaited()
+                report.assert_not_awaited()
+
+    async def test_ineligible_webp_message_is_rejected_before_remote_inspection(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                cog.config.defaults.update(
+                    gif_detector_enabled=True,
+                    gif_detector_channels=[10],
+                )
+                cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
+                cog._is_protected_member = mock.AsyncMock(return_value=True)
+                cog._gif_detector_remote_inspector.inspect = mock.AsyncMock(
+                    return_value=True
+                )
+                message = SimpleNamespace(
+                    id=30,
+                    guild=SimpleNamespace(id=1),
+                    channel=SimpleNamespace(id=10, parent_id=None),
+                    author=SimpleNamespace(id=20, bot=False),
+                    webhook_id=None,
+                    embeds=[],
+                    attachments=[],
+                    content="https://media.example.test/reaction.webp",
+                )
+
+                await gif_detector.schedule_webp_fallback(cog, message)
+                await asyncio.gather(*tuple(cog._gif_detector_tasks))
+
+                cog._gif_detector_remote_inspector.inspect.assert_not_awaited()
+
+    async def test_concurrent_webp_events_share_one_remote_inspection(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                cog.config.defaults.update(
+                    gif_detector_enabled=True,
+                    gif_detector_channels=[10],
+                )
+                cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
+                cog._is_protected_member = mock.AsyncMock(return_value=False)
+                started = asyncio.Event()
+                release = asyncio.Event()
+
+                async def inspect(url):
+                    started.set()
+                    await release.wait()
+                    return False
+
+                cog._gif_detector_remote_inspector.inspect = mock.AsyncMock(
+                    side_effect=inspect
+                )
+                message = SimpleNamespace(
+                    id=30,
+                    guild=SimpleNamespace(id=1),
+                    channel=SimpleNamespace(id=10, parent_id=None),
+                    author=SimpleNamespace(id=20, bot=False),
+                    webhook_id=None,
+                    embeds=[],
+                    attachments=[],
+                    content="https://media.example.test/reaction.webp",
+                )
+
+                await gif_detector.schedule_webp_fallback(cog, message)
+                await started.wait()
+                await gif_detector.schedule_webp_fallback(cog, message)
+                release.set()
+                await asyncio.gather(*tuple(cog._gif_detector_tasks))
+
+                self.assertEqual(
+                    cog._gif_detector_remote_inspector.inspect.await_count,
+                    1,
+                )
+
     async def test_new_hit_prunes_expired_rate_state_for_its_guild(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -944,7 +1286,84 @@ class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
                     await gif_detector.gif_detector_message_set(cog, ctx, text="   ")
 
 class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
-    async def test_late_raw_gifv_embed_uses_cached_message_without_fetching(self):
+    async def test_late_raw_webp_embed_schedules_remote_fallback(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                message = SimpleNamespace(
+                    id=30,
+                    embeds=[],
+                    attachments=[],
+                    content="",
+                )
+                payload = SimpleNamespace(
+                    message_id=30,
+                    data={
+                        "embeds": [
+                            {
+                                "type": "image",
+                                "image": {
+                                    "url": "https://media.example.test/reaction.webp"
+                                },
+                            }
+                        ]
+                    },
+                    message=message,
+                )
+
+                with mock.patch.object(
+                    gif_detector,
+                    "schedule_webp_fallback",
+                    new=mock.AsyncMock(),
+                ) as fallback:
+                    await cog.on_raw_message_edit(payload)
+
+                fallback.assert_awaited_once_with(
+                    cog,
+                    message,
+                    candidate="https://media.example.test/reaction.webp",
+                )
+
+    async def test_late_raw_webp_attachment_uses_its_cdn_url_as_candidate(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                message = SimpleNamespace(
+                    id=30,
+                    embeds=[],
+                    attachments=[],
+                    content="",
+                )
+                payload = SimpleNamespace(
+                    message_id=30,
+                    data={
+                        "attachments": [
+                            {
+                                "filename": "reaction.webp",
+                                "content_type": "image/webp",
+                                "url": "https://cdn.discordapp.com/attachments/1/2/reaction",
+                            }
+                        ]
+                    },
+                    message=message,
+                )
+
+                with mock.patch.object(
+                    gif_detector,
+                    "schedule_webp_fallback",
+                    new=mock.AsyncMock(),
+                ) as fallback:
+                    await cog.on_raw_message_edit(payload)
+
+                fallback.assert_awaited_once_with(
+                    cog,
+                    message,
+                    candidate="https://cdn.discordapp.com/attachments/1/2/reaction",
+                )
+
+    async def test_late_raw_gifv_embed_uses_updated_message_without_fetching(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("Honeypot.gif_detector")
@@ -976,7 +1395,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
                 payload = SimpleNamespace(
                     message_id=30,
                     data={"embeds": [{"type": "gifv"}]},
-                    cached_message=message,
+                    message=message,
                 )
 
                 with mock.patch.object(

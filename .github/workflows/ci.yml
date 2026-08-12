@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.10"
       - name: Install quality tools
-        run: python -m pip install ruff mypy Pillow matplotlib
+        run: python -m pip install ruff mypy Pillow matplotlib aiohttp==3.9.5 pytest pytest-xdist
       - name: Ruff
         run: ruff check .
       # Typing is a separate phase. mypy still reports errors across both cogs,
@@ -26,4 +26,4 @@ jobs:
         continue-on-error: true
         run: mypy
       - name: Unit tests
-        run: python -m unittest discover -s tests -t . -q
+        run: python -m pytest tests -q -n 4 --dist loadscope

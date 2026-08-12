@@ -101,6 +101,58 @@ def _embed_urls(embed: Any) -> Iterable[str]:
             yield url
 
 
+def _is_webp_url(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return urlparse(value).path.casefold().endswith(".webp")
+    except ValueError:
+        return False
+
+
+def _webp_candidates_from_fields(
+    *,
+    embeds: Any = (),
+    attachments: Any = (),
+    content: Any = "",
+) -> Iterable[str]:
+    seen: set[str] = set()
+    for attachment in _collection(attachments):
+        media_type = str(_field(attachment, "content_type", "")).casefold()
+        filename = str(_field(attachment, "filename", "")).casefold()
+        if media_type != "image/webp" and not filename.endswith(".webp"):
+            continue
+        for field_name in ("url", "proxy_url"):
+            url = _field(attachment, field_name)
+            if isinstance(url, str) and url not in seen:
+                seen.add(url)
+                yield url
+    for embed in _collection(embeds):
+        for field_name in ("url", "image", "thumbnail", "video"):
+            field_value = _field(embed, field_name)
+            candidates = (
+                (field_value,)
+                if isinstance(field_value, str)
+                else (_field(field_value, "url"), _field(field_value, "proxy_url"))
+            )
+            for url in candidates:
+                if _is_webp_url(url) and url not in seen:
+                    seen.add(url)
+                    yield url
+    for url in _urls_in_text(content):
+        if _is_webp_url(url) and url not in seen:
+            seen.add(url)
+            yield url
+
+
+def _webp_candidates(message: Any) -> Iterable[str]:
+    return _webp_candidates_from_fields(
+        embeds=getattr(message, "embeds", ()),
+        attachments=getattr(message, "attachments", ()),
+        content=getattr(message, "content", ""),
+    )
+
+
 def _has_gif_provider_provenance(embed: Any, urls: Iterable[str]) -> bool:
     if str(_field(embed, "type", "")).casefold() != "video":
         return False
@@ -494,19 +546,27 @@ async def _record_gif_hit(cog: Any, message: Any, configured: GuildSettings) -> 
         )
 
 
-async def _admit_message(cog: Any, message: Any) -> None:
+async def _eligible_settings(cog: Any, message: Any) -> GuildSettings | None:
     guild = message.guild
     if guild is None or message.author.bot or message.webhook_id is not None:
-        return
+        return None
     if await cog.bot.cog_disabled_in_guild(cog, guild):
-        return
+        return None
     configured = GuildSettings.from_mapping(await cog.config.guild(guild).all())
     if not configured.gif_detector_enabled:
-        return
+        return None
     if channel_scope_id(message.channel) not in configured.gif_detector_channels:
-        return
+        return None
     if await cog._is_protected_member(message.author, guild):
+        return None
+    return configured
+
+
+async def _admit_message(cog: Any, message: Any) -> None:
+    configured = await _eligible_settings(cog, message)
+    if configured is None:
         return
+    guild = message.guild
     if not _remember_message(cog, (guild.id, message.id)):
         return
     if (
@@ -535,27 +595,86 @@ async def _admit_message(cog: Any, message: Any) -> None:
     await _record_gif_hit(cog, message, configured)
 
 
-async def on_message(cog: Any, message: Any) -> None:
-    if has_gif_evidence(
+async def on_message(cog: Any, message: Any) -> bool:
+    detected = has_gif_evidence(
         embeds=getattr(message, "embeds", ()),
         attachments=getattr(message, "attachments", ()),
         content=getattr(message, "content", ""),
-    ):
+    )
+    if detected:
         await _admit_message(cog, message)
+    return detected
+
+
+async def schedule_webp_fallback(
+    cog: Any,
+    message: Any,
+    *,
+    candidate: str | None = None,
+) -> None:
+    """Schedule final remote WebP classification when a direct candidate exists."""
+
+    candidate = candidate or next(iter(_webp_candidates(message)), None)
+    if candidate is None or await _eligible_settings(cog, message) is None:
+        return
+    key = (message.guild.id, message.id)
+    async with cog._gif_detector_rate_lock:
+        if key in cog._gif_detector_webp_in_flight:
+            return
+        cog._gif_detector_webp_in_flight.add(key)
+
+    async def inspect() -> None:
+        try:
+            if await cog._gif_detector_remote_inspector.inspect(candidate) is True:
+                try:
+                    current_message = await message.channel.fetch_message(message.id)
+                except discord.NotFound:
+                    return
+                except discord.HTTPException as error:
+                    await _record_http_failure(
+                        cog, message, "Could not recheck remote WebP source", error
+                    )
+                    return
+                if candidate not in set(_webp_candidates(current_message)):
+                    return
+                await _admit_message(cog, current_message)
+        finally:
+            async with cog._gif_detector_rate_lock:
+                cog._gif_detector_webp_in_flight.discard(key)
+
+    _spawn(cog, inspect())
 
 
 async def on_raw_message_edit(cog: Any, payload: Any) -> None:
     raw_data = payload.data if isinstance(getattr(payload, "data", None), Mapping) else {}
-    if not has_gif_evidence(
+    local_gif = has_gif_evidence(
         embeds=raw_data.get("embeds", ()),
         attachments=raw_data.get("attachments", ()),
         content=raw_data.get("content", ""),
-    ):
+    )
+    webp_candidate = next(
+        iter(
+            _webp_candidates_from_fields(
+                embeds=raw_data.get("embeds", ()),
+                attachments=raw_data.get("attachments", ()),
+                content=raw_data.get("content", ""),
+            )
+        ),
+        None,
+    )
+    if not local_gif and webp_candidate is None:
         return
 
-    cached_message = getattr(payload, "cached_message", None)
-    if cached_message is not None:
-        await _admit_message(cog, cached_message)
+    updated_message = getattr(payload, "message", None)
+    if updated_message is not None:
+        if local_gif:
+            await _admit_message(cog, updated_message)
+        else:
+            await schedule_webp_fallback(
+                cog,
+                updated_message,
+                candidate=webp_candidate,
+            )
         return
 
     channel_id = getattr(payload, "channel_id", None)
@@ -579,7 +698,10 @@ async def on_raw_message_edit(cog: Any, payload: Any) -> None:
                 f"Could not fetch edited GIF message: {type(error).__name__}: {error}",
             )
         return
-    await _admit_message(cog, message)
+    if local_gif:
+        await _admit_message(cog, message)
+    else:
+        await schedule_webp_fallback(cog, message, candidate=webp_candidate)
 
 
 def _format_channels(cog: Any, guild: Any, channel_ids: list[int]) -> str:
