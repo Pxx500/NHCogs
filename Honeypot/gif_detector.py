@@ -156,6 +156,25 @@ def _same_webp_candidate(original: str, current: str) -> bool:
         return False
 
 
+def _prioritize_webp_candidates(candidates: Iterable[str]) -> tuple[str, ...]:
+    unique = tuple(dict.fromkeys(candidates))
+
+    def priority(url: str) -> int:
+        try:
+            parsed = urlparse(url)
+            query_names = {name for name, _value in parse_qsl(parsed.query)}
+            if (
+                (parsed.hostname or "").casefold() in _DISCORD_MEDIA_HOSTS
+                and query_names >= _DISCORD_SIGNATURE_QUERY_FIELDS
+            ):
+                return 0
+        except ValueError:
+            pass
+        return 1
+
+    return tuple(sorted(unique, key=priority))
+
+
 def _webp_candidates_from_fields(
     *,
     embeds: Any = (),
@@ -671,8 +690,13 @@ async def schedule_webp_fallback(
 ) -> None:
     """Schedule final remote WebP classification when a direct candidate exists."""
 
-    candidate = candidate or next(iter(_webp_candidates(message)), None)
-    if candidate is None or await _eligible_settings(cog, message) is None:
+    message_candidates = tuple(_webp_candidates(message))
+    candidates = _prioritize_webp_candidates(
+        (candidate, *message_candidates) if candidate is not None else message_candidates
+    )
+    if not candidates:
+        return
+    if await _eligible_settings(cog, message) is None:
         return
     key = (message.guild.id, message.id)
     async with cog._gif_detector_rate_lock:
@@ -682,7 +706,17 @@ async def schedule_webp_fallback(
 
     async def inspect() -> None:
         try:
-            if await cog._gif_detector_remote_inspector.inspect(candidate) is True:
+            animated_candidate = None
+            for inspected_candidate in candidates:
+                if (
+                    await cog._gif_detector_remote_inspector.inspect(
+                        inspected_candidate
+                    )
+                    is True
+                ):
+                    animated_candidate = inspected_candidate
+                    break
+            if animated_candidate is not None:
                 try:
                     current_message = await message.channel.fetch_message(message.id)
                 except discord.NotFound:
@@ -693,7 +727,7 @@ async def schedule_webp_fallback(
                     )
                     return
                 if not any(
-                    _same_webp_candidate(candidate, current_candidate)
+                    _same_webp_candidate(animated_candidate, current_candidate)
                     for current_candidate in _webp_candidates(current_message)
                 ):
                     return
@@ -712,16 +746,14 @@ async def on_raw_message_edit(cog: Any, payload: Any) -> None:
         attachments=raw_data.get("attachments", ()),
         content=raw_data.get("content", ""),
     )
-    webp_candidate = next(
-        iter(
-            _webp_candidates_from_fields(
-                embeds=raw_data.get("embeds", ()),
-                attachments=raw_data.get("attachments", ()),
-                content=raw_data.get("content", ""),
-            )
-        ),
-        None,
+    webp_candidates = tuple(
+        _webp_candidates_from_fields(
+            embeds=raw_data.get("embeds", ()),
+            attachments=raw_data.get("attachments", ()),
+            content=raw_data.get("content", ""),
+        )
     )
+    webp_candidate = next(iter(webp_candidates), None)
     if not local_gif and webp_candidate is None:
         return
 

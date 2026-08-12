@@ -283,6 +283,72 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 )
                 admit.assert_awaited_once_with(cog, current_message)
 
+    async def test_webp_fallback_prioritizes_signed_discord_candidate(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                cog.config.defaults.update(
+                    gif_detector_enabled=True,
+                    gif_detector_channels=[10],
+                )
+                cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
+                cog._is_protected_member = mock.AsyncMock(return_value=False)
+                unsigned_url = "https://cdn.discordapp.com/a/anim.webp"
+                signed_url = (
+                    "https://cdn.discordapp.com/a/anim.webp"
+                    "?ex=future&is=issued&hm=signature"
+                )
+
+                async def inspect(url):
+                    return True if url == signed_url else None
+
+                cog._gif_detector_remote_inspector.inspect = mock.AsyncMock(
+                    side_effect=inspect
+                )
+                guild = SimpleNamespace(id=1)
+                embed = SimpleNamespace(
+                    url=unsigned_url,
+                    image=None,
+                    thumbnail=SimpleNamespace(url=signed_url, proxy_url=None),
+                    video=None,
+                )
+                current_message = SimpleNamespace(
+                    id=30,
+                    guild=guild,
+                    channel=None,
+                    author=SimpleNamespace(id=20, bot=False),
+                    webhook_id=None,
+                    embeds=[embed],
+                    attachments=[],
+                    content=unsigned_url,
+                )
+                channel = SimpleNamespace(
+                    id=10,
+                    parent_id=None,
+                    fetch_message=mock.AsyncMock(return_value=current_message),
+                )
+                current_message.channel = channel
+                message = SimpleNamespace(**vars(current_message))
+                message.channel = channel
+
+                with mock.patch.object(
+                    gif_detector,
+                    "_admit_message",
+                    new=mock.AsyncMock(),
+                ) as admit:
+                    await gif_detector.schedule_webp_fallback(cog, message)
+                    await asyncio.gather(*tuple(cog._gif_detector_tasks))
+
+                self.assertEqual(
+                    [
+                        call.args[0]
+                        for call in cog._gif_detector_remote_inspector.inspect.await_args_list
+                    ],
+                    [signed_url],
+                )
+                admit.assert_awaited_once_with(cog, current_message)
+
     async def test_webp_fallback_accepts_refreshed_signature_for_same_attachment(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
