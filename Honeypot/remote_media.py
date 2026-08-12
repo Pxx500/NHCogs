@@ -7,16 +7,19 @@ import ipaddress
 import socket
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from io import BytesIO
 from typing import Any
 from urllib.parse import urlparse
 
 import aiohttp
 from aiohttp.abc import AbstractResolver
+from PIL import Image, UnidentifiedImageError
 
 MAX_WEBP_BYTES = 256 * 1024
 WEBP_CONNECT_TIMEOUT_SECONDS = 2
 WEBP_TOTAL_TIMEOUT_SECONDS = 4
 WEBP_DNS_TIMEOUT_SECONDS = 2
+WEBP_DECODE_TIMEOUT_SECONDS = 2
 WEBP_MAX_CONCURRENCY = 2
 WEBP_CACHE_TTL_SECONDS = 300
 WEBP_FAILURE_CACHE_TTL_SECONDS = 30
@@ -96,11 +99,33 @@ def _valid_animation_frame(payload: bytes, canvas: tuple[int, int]) -> bool:
     width = _uint24(payload[6:9]) + 1
     height = _uint24(payload[9:12]) + 1
     canvas_width, canvas_height = canvas
-    return (
+    dimensions_are_valid = (
         image_dimensions == (width, height)
         and x + width <= canvas_width
         and y + height <= canvas_height
     )
+    if not dimensions_are_valid:
+        return False
+    pixel_limit = Image.MAX_IMAGE_PIXELS
+    return pixel_limit is None or width * height <= pixel_limit
+
+
+def _decodes_animated_webp_prefix(data: bytes) -> bool:
+    complete = bytearray(data)
+    complete[4:8] = (len(complete) - 8).to_bytes(4, "little")
+    try:
+        with Image.open(BytesIO(complete)) as image:
+            if (
+                image.format != "WEBP"
+                or getattr(image, "n_frames", 1) < MIN_ANIMATION_FRAMES
+            ):
+                return False
+            for frame_index in range(MIN_ANIMATION_FRAMES):
+                image.seek(frame_index)
+                image.load()
+    except (Image.DecompressionBombError, OSError, UnidentifiedImageError, ValueError):
+        return False
+    return True
 
 
 async def _resolve_public_addresses(host: str) -> list[tuple[int, str]]:
@@ -254,7 +279,10 @@ class RemoteMediaInspector:
                 data.extend(chunk)
                 if len(data) > MAX_WEBP_BYTES:
                     return None
-            return classify_webp_animation(bytes(data))
+            return await asyncio.wait_for(
+                asyncio.to_thread(classify_webp_animation, bytes(data)),
+                timeout=WEBP_DECODE_TIMEOUT_SECONDS,
+            )
 
     def _remember(self, url: str, result: bool | None) -> None:
         ttl = (
@@ -279,7 +307,7 @@ def classify_webp_animation(data: bytes) -> bool | None:  # noqa: PLR0911, PLR09
         return None
     riff_size = int.from_bytes(data[4:8], "little")
     expected_size = riff_size + 8
-    if expected_size != len(data):
+    if expected_size < RIFF_HEADER_SIZE or len(data) > expected_size:
         return None
 
     offset = RIFF_HEADER_SIZE
@@ -330,6 +358,8 @@ def classify_webp_animation(data: bytes) -> bool | None:  # noqa: PLR0911, PLR09
             ):
                 return None
             animation_frames += 1
+            if animation_frames >= MIN_ANIMATION_FRAMES:
+                return True if _decodes_animated_webp_prefix(data[:next_offset]) else None
         elif kind in (b"VP8 ", b"VP8L") and animation_header:
             return None
         first_chunk = False

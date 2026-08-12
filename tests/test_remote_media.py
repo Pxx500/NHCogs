@@ -4,10 +4,13 @@ import asyncio
 import unittest
 from contextlib import asynccontextmanager
 from importlib import import_module
+from io import BytesIO
 from pathlib import Path
 from socket import AF_INET
 from tempfile import TemporaryDirectory
 from unittest import mock
+
+from PIL import Image
 
 from tests.harness import _isolated_honeypot_modules
 
@@ -33,12 +36,10 @@ def _animation_frame(
     width: int = 1,
     height: int = 1,
 ) -> bytes:
-    vp8_key_frame = (
-        b"\x10\x00\x00"
-        b"\x9d\x01\x2a"
-        + width.to_bytes(2, "little")
-        + height.to_bytes(2, "little")
-    )
+    output = BytesIO()
+    Image.new("RGBA", (width, height), "red").save(output, "WEBP", lossless=True)
+    standalone = output.getvalue()
+    image_chunk = standalone[12:]
     frame_header = (
         _uint24(x // 2)
         + _uint24(y // 2)
@@ -47,7 +48,7 @@ def _animation_frame(
         + _uint24(0)
         + b"\x00"
     )
-    return frame_header + _chunk(b"VP8 ", vp8_key_frame)
+    return frame_header + image_chunk
 
 
 class WebPAnimationClassificationTests(unittest.TestCase):
@@ -115,7 +116,62 @@ class WebPAnimationClassificationTests(unittest.TestCase):
         )
 
         self.assertIs(self.classify(full), True)
-        self.assertIsNone(self.classify(full[:-1]))
+        second_frame_end = full.find(b"ANMF", full.find(b"ANMF") + 1)
+        self.assertIsNone(self.classify(full[: second_frame_end + 16]))
+
+    def test_bounded_prefix_with_two_complete_frames_proves_animation(self):
+        vp8x = bytes((0b00000010,)) + (b"\x00" * 9)
+        full = bytearray(
+            _webp(
+                _chunk(b"VP8X", vp8x),
+                _chunk(b"ANIM", b"\x00" * 6),
+                _chunk(b"ANMF", _animation_frame()),
+                _chunk(b"ANMF", _animation_frame()),
+                _chunk(b"ANMF", _animation_frame()),
+            )
+        )
+        full[4:8] = (512 * 1024).to_bytes(4, "little")
+        third_frame = full.find(b"ANMF", full.find(b"ANMF", full.find(b"ANMF") + 1) + 1)
+
+        self.assertIs(self.classify(bytes(full[:third_frame])), True)
+
+    def test_corrupt_frame_payloads_do_not_prove_animation(self):
+        output = BytesIO()
+        frames = [
+            Image.new("RGBA", (2, 2), "red"),
+            Image.new("RGBA", (2, 2), "blue"),
+        ]
+        frames[0].save(
+            output,
+            "WEBP",
+            save_all=True,
+            append_images=frames[1:],
+            duration=100,
+            loop=0,
+            lossless=True,
+        )
+        corrupt = bytearray(output.getvalue())
+        offset = 12
+        while offset < len(corrupt):
+            size = int.from_bytes(corrupt[offset + 4 : offset + 8], "little")
+            payload_end = offset + 8 + size
+            if corrupt[offset : offset + 4] == b"ANMF":
+                image_chunk = offset + 8 + 16
+                image_size = int.from_bytes(
+                    corrupt[image_chunk + 4 : image_chunk + 8], "little"
+                )
+                image_payload = image_chunk + 8
+                header_size = (
+                    5
+                    if corrupt[image_chunk : image_chunk + 4] == b"VP8L"
+                    else 10
+                )
+                corrupt[
+                    image_payload + header_size : image_payload + image_size
+                ] = b"\xff" * (image_size - header_size)
+            offset = payload_end + (size % 2)
+
+        self.assertIsNone(self.classify(bytes(corrupt)))
 
     def test_single_frame_or_incomplete_riff_is_not_proven_animated(self):
         vp8x = bytes((0b00000010,)) + (b"\x00" * 9)
@@ -270,6 +326,29 @@ class RemoteWebPInspectionTests(unittest.IsolatedAsyncioTestCase):
             "media.example", 443, AF_INET
         )
         self.assertEqual([item["host"] for item in pinned], ["93.184.216.34"])
+
+    async def test_partial_range_proves_animation_from_two_complete_frames(self):
+        vp8x = bytes((0b00000010,)) + (b"\x00" * 9)
+        payload = _webp(
+            _chunk(b"VP8X", vp8x),
+            _chunk(b"ANIM", b"\x00" * 6),
+            _chunk(b"ANMF", _animation_frame()),
+            _chunk(b"ANMF", _animation_frame()),
+            _chunk(b"EXIF", b"x" * (self.remote_media.MAX_WEBP_BYTES * 2)),
+        )
+        response = _FakeResponse(
+            206,
+            [payload[: self.remote_media.MAX_WEBP_BYTES]],
+        )
+        inspector = self.remote_media.RemoteMediaInspector(
+            resolve_host=mock.AsyncMock(return_value=[(AF_INET, "93.184.216.34")]),
+            session_factory=_SessionFactory(response),
+        )
+
+        self.assertIs(
+            await inspector.inspect("https://media.example/reaction.webp"),
+            True,
+        )
 
     async def test_redirect_and_oversized_body_are_inconclusive(self):
         resolver = mock.AsyncMock(return_value=[(AF_INET, "93.184.216.34")])
