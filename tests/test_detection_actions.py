@@ -879,14 +879,10 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 await asyncio.wait_for(capture_started.wait(), timeout=1)
                 await asyncio.wait_for(source_deleted.wait(), timeout=1)
                 await asyncio.wait_for(cached_contained.wait(), timeout=1)
-                try:
-                    await asyncio.wait_for(role_started.wait(), timeout=0.05)
-                    role_started_before_capture_finished = True
-                except TimeoutError:
-                    role_started_before_capture_finished = False
+                await asyncio.wait_for(role_started.wait(), timeout=1)
+                role_started_before_capture_finished = not capture_finished.is_set()
 
                 release_capture.set()
-                await asyncio.wait_for(role_started.wait(), timeout=1)
                 release_role.set()
                 await task
                 snapshot = await asyncio.to_thread(

@@ -61,6 +61,7 @@ from .operations.context import (
     OperationLease,  # noqa: F401 - public module re-export
     OperationOutcome,  # noqa: F401 - public module re-export
 )
+from .remote_media import RemoteMediaInspector
 from .settings import (
     BAIT_ACTION_OPTIONS,  # noqa: F401 - public module re-export
     CORE_ACTION_OPTIONS,  # noqa: F401 - public module re-export
@@ -171,7 +172,9 @@ class Honeypot(Cog):
         self._gif_detector_hits: dict[tuple[int, int], deque[float]] = {}
         self._gif_detector_active_mutes: dict[tuple[int, int], float] = {}
         self._gif_detector_mutes_in_flight: set[tuple[int, int]] = set()
+        self._gif_detector_webp_in_flight: set[tuple[int, int]] = set()
         self._gif_detector_rate_lock = asyncio.Lock()
+        self._gif_detector_remote_inspector = RemoteMediaInspector()
         self._hot_purge_users: dict[int, dict[int, datetime]] = defaultdict(dict)
         self._message_registry = MessageRegistry(
             cog_data_path(self) / "message_registry.sqlite"
@@ -956,6 +959,7 @@ class Honeypot(Cog):
         self._gif_detector_hits.clear()
         self._gif_detector_active_mutes.clear()
         self._gif_detector_mutes_in_flight.clear()
+        self._gif_detector_webp_in_flight.clear()
         pending_sweeps = tuple(self._post_ban_sweep_tasks)
         for task in pending_sweeps:
             task.cancel()
@@ -1304,8 +1308,11 @@ class Honeypot(Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        await gif_detector.on_message(self, message)
-        return await detection.on_message(self, message)
+        gif_detected = await gif_detector.on_message(self, message)
+        result = await detection.on_message(self, message)
+        if not gif_detected:
+            await gif_detector.schedule_webp_fallback(self, message)
+        return result
 
     @tasks.loop(minutes=1)
     async def joinwatch_auto_role_loop(self) -> None:
