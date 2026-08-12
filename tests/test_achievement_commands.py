@@ -79,6 +79,64 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             delete_original_response=mock.AsyncMock(),
         )
 
+    async def test_reconciliation_ignores_departed_achievement_members(self):
+        definition = type(nhmisc.SOLO_GATER_DEFINITION)(
+            key="solo_gater",
+            display_name="Solo Gater",
+            kind=nhmisc.SOLO_GATER_DEFINITION.kind,
+            role_id=123,
+        )
+        store = SimpleNamespace(
+            list_definitions=mock.AsyncMock(return_value=(definition,)),
+            list_gate_projections=mock.AsyncMock(return_value={10: 1}),
+            projected_users_for_boolean=mock.AsyncMock(return_value=(10,)),
+        )
+        guild = SimpleNamespace(
+            id=1,
+            fetch_member=mock.AsyncMock(side_effect=nhmisc.discord.NotFound()),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = store
+        cog._role_analytics_users_with_roles = mock.AsyncMock(
+            return_value=tuple(() for _ in (*nhmisc.GATE_TIER_ROLE_IDS, 123))
+        )
+        cog._restore_gate_projection = mock.AsyncMock()
+        cog._edit_achievement_roles = mock.AsyncMock()
+        cog._send_maintenance_log = mock.AsyncMock(return_value=True)
+
+        await cog._reconcile_achievement_roles_for_guild(guild)
+
+        self.assertEqual(guild.fetch_member.await_count, 2)
+        cog._restore_gate_projection.assert_not_awaited()
+        cog._edit_achievement_roles.assert_not_awaited()
+        cog._send_maintenance_log.assert_not_awaited()
+
+    async def test_reconciliation_reports_non_not_found_failures(self):
+        store = SimpleNamespace(
+            list_definitions=mock.AsyncMock(return_value=()),
+            list_gate_projections=mock.AsyncMock(return_value={10: 1}),
+        )
+        guild = SimpleNamespace(
+            id=1,
+            fetch_member=mock.AsyncMock(side_effect=nhmisc.discord.Forbidden()),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = store
+        cog._role_analytics_users_with_roles = mock.AsyncMock(
+            return_value=tuple(() for _ in nhmisc.GATE_TIER_ROLE_IDS)
+        )
+        cog._restore_gate_projection = mock.AsyncMock()
+        cog._send_maintenance_log = mock.AsyncMock(return_value=True)
+
+        with mock.patch.object(nhmisc.log, "exception"):
+            await cog._reconcile_achievement_roles_for_guild(guild)
+
+        cog._send_maintenance_log.assert_awaited_once()
+        self.assertIn(
+            "Members skipped: 1",
+            cog._send_maintenance_log.await_args.args[1],
+        )
+
     async def test_successful_achievement_create_emits_one_moderation_log(self):
         guild = SimpleNamespace(id=1)
         ctx = SimpleNamespace(
