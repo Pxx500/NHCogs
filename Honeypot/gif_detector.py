@@ -9,7 +9,7 @@ from collections import deque
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 import discord
 from redbot.core import commands, modlog
@@ -106,6 +106,52 @@ def _is_webp_url(value: Any) -> bool:
         return False
     try:
         return urlparse(value).path.casefold().endswith(".webp")
+    except ValueError:
+        return False
+
+
+_DISCORD_MEDIA_HOSTS = frozenset(
+    {
+        "cdn.discordapp.com",
+        "media.discordapp.net",
+    }
+)
+_DISCORD_SIGNATURE_QUERY_FIELDS = frozenset({"ex", "is", "hm"})
+
+
+def _stable_query(value: str) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        sorted(
+            (name, field_value)
+            for name, field_value in parse_qsl(value, keep_blank_values=True)
+            if name not in _DISCORD_SIGNATURE_QUERY_FIELDS
+        )
+    )
+
+
+def _same_webp_candidate(original: str, current: str) -> bool:
+    if original == current:
+        return True
+    try:
+        original_url = urlparse(original)
+        current_url = urlparse(current)
+        original_host = (original_url.hostname or "").casefold()
+        current_host = (current_url.hostname or "").casefold()
+        return (
+            original_url.scheme.casefold() == "https"
+            and current_url.scheme.casefold() == "https"
+            and original_host in _DISCORD_MEDIA_HOSTS
+            and current_host == original_host
+            and original_url.username is None
+            and current_url.username is None
+            and original_url.password is None
+            and current_url.password is None
+            and original_url.port in (None, 443)
+            and current_url.port in (None, 443)
+            and original_url.path == current_url.path
+            and original_url.params == current_url.params
+            and _stable_query(original_url.query) == _stable_query(current_url.query)
+        )
     except ValueError:
         return False
 
@@ -287,18 +333,45 @@ def _author_mentions(message: Any) -> discord.AllowedMentions:
     )
 
 
-async def _delete_source_if_due(
+async def _show_impact(cog: Any, message: Any, warning: Any) -> Any | None:
+    try:
+        await warning.edit(
+            content="──────────💥",
+            allowed_mentions=_author_mentions(message),
+        )
+    except discord.NotFound:
+        return None
+    except discord.HTTPException as error:
+        await _record_http_failure(
+            cog, message, "Could not edit animated GIF warning", error
+        )
+    return warning
+
+
+async def _sleep_until(deadline: float) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining > 0:
+        await asyncio.sleep(remaining)
+
+
+async def _impact_and_delete_source(
     cog: Any,
     message: Any,
-    *,
-    retention_seconds: int,
-    elapsed_seconds: int,
-    source_deleted: bool,
-) -> bool:
-    if source_deleted or retention_seconds > elapsed_seconds:
-        return source_deleted
-    await _delete_message(cog, message, "Could not delete GIF message")
-    return True
+    warning: Any,
+) -> Any | None:
+    delete_task = asyncio.create_task(
+        _delete_message(cog, message, "Could not delete GIF message")
+    )
+    impact_task = asyncio.create_task(_show_impact(cog, message, warning))
+    delete_result, impact_result = await asyncio.gather(
+        delete_task,
+        impact_task,
+        return_exceptions=True,
+    )
+    for result in (delete_result, impact_result):
+        if isinstance(result, BaseException):
+            raise result
+    return impact_result
 
 
 async def _run_animated(
@@ -308,8 +381,9 @@ async def _run_animated(
 ) -> None:
     guild_id = message.guild.id
     warning = None
-    elapsed_seconds = 0
     source_deleted = False
+    started_at = time.monotonic()
+    impact_deadline = started_at + retention_seconds
     try:
         try:
             warning = await message.channel.send(
@@ -321,33 +395,25 @@ async def _run_animated(
                 cog, message, "Could not send animated GIF warning", error
             )
 
-        source_deleted = await _delete_source_if_due(
-            cog,
-            message,
-            retention_seconds=retention_seconds,
-            elapsed_seconds=elapsed_seconds,
-            source_deleted=source_deleted,
-        )
-
         if warning is not None:
-            for rocket_position in range(2, 10, 2):
-                await asyncio.sleep(1)
-                elapsed_seconds += 1
-                source_deleted = await _delete_source_if_due(
-                    cog,
-                    message,
-                    retention_seconds=retention_seconds,
-                    elapsed_seconds=elapsed_seconds,
-                    source_deleted=source_deleted,
-                )
+            animation_seconds = min(retention_seconds, 5)
+            for frame_second in range(1, animation_seconds):
+                await _sleep_until(started_at + frame_second)
+                if time.monotonic() >= impact_deadline:
+                    break
                 try:
-                    await warning.edit(
-                        content=render_icbm_frame(
-                            message.author.mention,
-                            rocket_position=rocket_position,
+                    await asyncio.wait_for(
+                        warning.edit(
+                            content=render_icbm_frame(
+                                message.author.mention,
+                                rocket_position=frame_second * 2,
+                            ),
+                            allowed_mentions=_author_mentions(message),
                         ),
-                        allowed_mentions=_author_mentions(message),
+                        timeout=max(impact_deadline - time.monotonic(), 0),
                     )
+                except asyncio.TimeoutError:
+                    break
                 except discord.NotFound:
                     warning = None
                     break
@@ -356,23 +422,14 @@ async def _run_animated(
                         cog, message, "Could not edit animated GIF warning", error
                     )
 
-        if warning is not None:
-            await asyncio.sleep(1)
-            elapsed_seconds += 1
-            source_deleted = await _delete_source_if_due(
-                cog,
-                message,
-                retention_seconds=retention_seconds,
-                elapsed_seconds=elapsed_seconds,
-                source_deleted=source_deleted,
-            )
-
-        if not source_deleted:
-            remaining_seconds = retention_seconds - elapsed_seconds
-            if remaining_seconds > 0:
-                await asyncio.sleep(remaining_seconds)
+        await _sleep_until(impact_deadline)
+        if warning is None:
             await _delete_message(cog, message, "Could not delete GIF message")
+        else:
+            warning = await _impact_and_delete_source(cog, message, warning)
+        source_deleted = True
         if warning is not None:
+            await asyncio.sleep(3)
             await _delete_message(cog, warning, "Could not delete animated GIF warning")
     except asyncio.CancelledError:
         await _cleanup_cancelled_run(
@@ -635,7 +692,10 @@ async def schedule_webp_fallback(
                         cog, message, "Could not recheck remote WebP source", error
                     )
                     return
-                if candidate not in set(_webp_candidates(current_message)):
+                if not any(
+                    _same_webp_candidate(candidate, current_candidate)
+                    for current_candidate in _webp_candidates(current_message)
+                ):
                     return
                 await _admit_message(cog, current_message)
         finally:
