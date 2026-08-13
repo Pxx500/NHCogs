@@ -186,7 +186,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     ),
                     mock.patch.object(
                         gif_detector,
-                        "schedule_webp_fallback",
+                        "schedule_remote_media_fallback",
                         new=schedule,
                         create=True,
                     ),
@@ -219,7 +219,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     ),
                     mock.patch.object(
                         gif_detector,
-                        "schedule_webp_fallback",
+                        "schedule_remote_media_fallback",
                         new=mock.AsyncMock(),
                         create=True,
                     ) as fallback,
@@ -227,6 +227,51 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     await cog.on_message(message)
 
                 fallback.assert_not_awaited()
+
+    async def test_animated_avif_url_uses_remote_admission_path(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                cog.config.defaults.update(
+                    gif_detector_enabled=True,
+                    gif_detector_channels=[10],
+                )
+                cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
+                cog._is_protected_member = mock.AsyncMock(return_value=False)
+                cog._gif_detector_remote_inspector.inspect = mock.AsyncMock(
+                    return_value=True
+                )
+                url = "https://cdn.discordapp.com/attachments/1/2/TEST.avif?hm=old"
+                guild = SimpleNamespace(id=1)
+                current_message = SimpleNamespace(
+                    id=30,
+                    guild=guild,
+                    channel=None,
+                    author=SimpleNamespace(id=20, bot=False),
+                    webhook_id=None,
+                    embeds=[],
+                    attachments=[],
+                    content=url,
+                )
+                channel = SimpleNamespace(
+                    id=10,
+                    parent_id=None,
+                    fetch_message=mock.AsyncMock(return_value=current_message),
+                )
+                current_message.channel = channel
+                message = SimpleNamespace(**vars(current_message))
+
+                with mock.patch.object(
+                    gif_detector,
+                    "_admit_message",
+                    new=mock.AsyncMock(),
+                ) as admit:
+                    await gif_detector.schedule_remote_media_fallback(cog, message)
+                    await asyncio.gather(*tuple(cog._gif_detector_tasks))
+
+                cog._gif_detector_remote_inspector.inspect.assert_awaited_once_with(url)
+                admit.assert_awaited_once_with(cog, current_message)
 
     async def test_animated_webp_fallback_reuses_existing_admission_path(self):
         with TemporaryDirectory() as directory:
@@ -275,7 +320,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     "_admit_message",
                     new=mock.AsyncMock(),
                 ) as admit:
-                    await gif_detector.schedule_webp_fallback(cog, message)
+                    await gif_detector.schedule_remote_media_fallback(cog, message)
                     await asyncio.gather(*tuple(cog._gif_detector_tasks))
 
                 cog._gif_detector_remote_inspector.inspect.assert_awaited_once_with(
@@ -337,7 +382,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     "_admit_message",
                     new=mock.AsyncMock(),
                 ) as admit:
-                    await gif_detector.schedule_webp_fallback(cog, message)
+                    await gif_detector.schedule_remote_media_fallback(cog, message)
                     await asyncio.gather(*tuple(cog._gif_detector_tasks))
 
                 self.assertEqual(
@@ -412,7 +457,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     "_admit_message",
                     new=mock.AsyncMock(),
                 ) as admit:
-                    await gif_detector.schedule_webp_fallback(cog, message)
+                    await gif_detector.schedule_remote_media_fallback(cog, message)
                     await asyncio.gather(*tuple(cog._gif_detector_tasks))
 
                 admit.assert_awaited_once_with(cog, current_message)
@@ -478,7 +523,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     "_admit_message",
                     new=mock.AsyncMock(),
                 ) as admit:
-                    await gif_detector.schedule_webp_fallback(cog, message)
+                    await gif_detector.schedule_remote_media_fallback(cog, message)
                     await asyncio.gather(*tuple(cog._gif_detector_tasks))
 
                 admit.assert_not_awaited()
@@ -493,7 +538,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 )
 
                 self.assertTrue(
-                    gif_detector._same_webp_candidate(
+                    gif_detector._same_remote_media_candidate(
                         original,
                         "https://media.discordapp.net/a/anim.webp"
                         "?format=webp&width=320&ex=new&is=new&hm=new",
@@ -508,7 +553,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     with self.subTest(changed=changed):
                         self.assertFalse(
-                            gif_detector._same_webp_candidate(original, changed)
+                            gif_detector._same_remote_media_candidate(original, changed)
                         )
 
     async def test_static_webp_does_not_enter_admission_path(self):
@@ -548,7 +593,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     "_admit_message",
                     new=mock.AsyncMock(),
                 ) as admit:
-                    await gif_detector.schedule_webp_fallback(cog, message)
+                    await gif_detector.schedule_remote_media_fallback(cog, message)
                     await asyncio.gather(*tuple(cog._gif_detector_tasks))
 
                 admit.assert_not_awaited()
@@ -598,7 +643,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     "_admit_message",
                     new=mock.AsyncMock(),
                 ) as admit:
-                    await gif_detector.schedule_webp_fallback(cog, message)
+                    await gif_detector.schedule_remote_media_fallback(cog, message)
                     await asyncio.gather(*tuple(cog._gif_detector_tasks))
 
                 admit.assert_not_awaited()
@@ -650,7 +695,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         new=mock.AsyncMock(),
                     ) as report,
                 ):
-                    await gif_detector.schedule_webp_fallback(cog, message)
+                    await gif_detector.schedule_remote_media_fallback(cog, message)
                     await asyncio.gather(*tuple(cog._gif_detector_tasks))
 
                 admit.assert_not_awaited()
@@ -681,7 +726,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     content="https://media.example.test/reaction.webp",
                 )
 
-                await gif_detector.schedule_webp_fallback(cog, message)
+                await gif_detector.schedule_remote_media_fallback(cog, message)
                 await asyncio.gather(*tuple(cog._gif_detector_tasks))
 
                 cog._gif_detector_remote_inspector.inspect.assert_not_awaited()
@@ -719,9 +764,9 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     content="https://media.example.test/reaction.webp",
                 )
 
-                await gif_detector.schedule_webp_fallback(cog, message)
+                await gif_detector.schedule_remote_media_fallback(cog, message)
                 await started.wait()
-                await gif_detector.schedule_webp_fallback(cog, message)
+                await gif_detector.schedule_remote_media_fallback(cog, message)
                 release.set()
                 await asyncio.gather(*tuple(cog._gif_detector_tasks))
 
@@ -1562,7 +1607,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
 
                 with mock.patch.object(
                     gif_detector,
-                    "schedule_webp_fallback",
+                    "schedule_remote_media_fallback",
                     new=mock.AsyncMock(),
                 ) as fallback:
                     await cog.on_raw_message_edit(payload)
@@ -1600,7 +1645,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
 
                 with mock.patch.object(
                     gif_detector,
-                    "schedule_webp_fallback",
+                    "schedule_remote_media_fallback",
                     new=mock.AsyncMock(),
                 ) as fallback:
                     await cog.on_raw_message_edit(payload)
@@ -1610,6 +1655,57 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
                     message,
                     candidate="https://cdn.discordapp.com/attachments/1/2/reaction",
                 )
+
+    async def test_late_raw_animated_image_attachment_uses_extensionless_cdn_candidate(
+        self,
+    ):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                gif_detector = import_module("Honeypot.gif_detector")
+                cog = honeypot.Honeypot(_Bot())
+                message = SimpleNamespace(
+                    id=30,
+                    embeds=[],
+                    attachments=[],
+                    content="",
+                )
+                cases = (
+                    ("reaction.avifs", "image/avif-sequence"),
+                    ("reaction.apng", "image/apng"),
+                )
+
+                for filename, content_type in cases:
+                    with self.subTest(filename=filename):
+                        candidate = (
+                            "https://cdn.discordapp.com/attachments/1/2/"
+                            f"{filename}.bin"
+                        )
+                        payload = SimpleNamespace(
+                            message_id=30,
+                            data={
+                                "attachments": [
+                                    {
+                                        "filename": filename,
+                                        "content_type": content_type,
+                                        "url": candidate,
+                                    }
+                                ]
+                            },
+                            message=message,
+                        )
+
+                        with mock.patch.object(
+                            gif_detector,
+                            "schedule_remote_media_fallback",
+                            new=mock.AsyncMock(),
+                        ) as fallback:
+                            await cog.on_raw_message_edit(payload)
+
+                        fallback.assert_awaited_once_with(
+                            cog,
+                            message,
+                            candidate=candidate,
+                        )
 
     async def test_late_raw_gifv_embed_uses_updated_message_without_fetching(self):
         with TemporaryDirectory() as directory:

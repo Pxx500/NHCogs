@@ -1,6 +1,8 @@
 """Behavioral tests for bounded remote-media classification."""
 
 import asyncio
+import random
+import threading
 import unittest
 from contextlib import asynccontextmanager
 from importlib import import_module
@@ -49,6 +51,41 @@ def _animation_frame(
         + b"\x00"
     )
     return frame_header + image_chunk
+
+
+def _animated_image(format_name: str) -> bytes:
+    output = BytesIO()
+    frames = [
+        Image.new("RGBA", (2, 2), "red"),
+        Image.new("RGBA", (2, 2), "blue"),
+    ]
+    frames[0].save(
+        output,
+        format_name,
+        save_all=True,
+        append_images=frames[1:],
+        duration=100,
+        loop=0,
+    )
+    return output.getvalue()
+
+
+def _noisy_apng() -> bytes:
+    generator = random.Random(0)
+    frames = [
+        Image.frombytes("RGB", (256, 256), generator.randbytes(256 * 256 * 3))
+        for _index in range(3)
+    ]
+    output = BytesIO()
+    frames[0].save(
+        output,
+        "PNG",
+        save_all=True,
+        append_images=frames[1:],
+        duration=100,
+        loop=0,
+    )
+    return output.getvalue()
 
 
 class WebPAnimationClassificationTests(unittest.TestCase):
@@ -197,6 +234,25 @@ class WebPAnimationClassificationTests(unittest.TestCase):
 
         self.assertIsNone(self.classify(outside_canvas))
 
+    def test_animation_canvas_respects_the_project_pixel_budget(self):
+        vp8x = (
+            bytes((0b00000010,))
+            + (b"\x00" * 3)
+            + _uint24(3000 - 1)
+            + _uint24(3000 - 1)
+        )
+
+        self.assertIsNone(
+            self.classify(
+                _webp(
+                    _chunk(b"VP8X", vp8x),
+                    _chunk(b"ANIM", b"\x00" * 6),
+                    _chunk(b"ANMF", _animation_frame()),
+                    _chunk(b"ANMF", _animation_frame()),
+                )
+            )
+        )
+
     def test_partial_or_misordered_animation_structure_is_inconclusive(self):
         vp8x = bytes((0b00000010,)) + (b"\x00" * 9)
         cases = (
@@ -249,7 +305,51 @@ class WebPAnimationClassificationTests(unittest.TestCase):
         self.assertIsNone(self.classify(_webp(_chunk(b"ANMF", b"\x00" * 15))))
 
 
-class RemoteWebPInspectionTests(unittest.IsolatedAsyncioTestCase):
+class DecodedAnimationClassificationTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = TemporaryDirectory()
+        self.modules = _isolated_honeypot_modules(Path(self.directory.name))
+        self.modules.__enter__()
+        self.remote_media = import_module("Honeypot.remote_media")
+
+    def tearDown(self):
+        self.modules.__exit__(None, None, None)
+        self.directory.cleanup()
+
+    def test_apng_default_image_is_not_counted_as_an_animation_frame(self):
+        output = BytesIO()
+        Image.new("RGBA", (2, 2), "red").save(
+            output,
+            "PNG",
+            save_all=True,
+            append_images=[Image.new("RGBA", (2, 2), "blue")],
+            default_image=True,
+            duration=100,
+            loop=0,
+        )
+
+        self.assertIs(
+            self.remote_media.classify_media_animation(output.getvalue()),
+            False,
+        )
+
+    def test_oversized_animation_canvas_is_rejected_before_loading_frames(self):
+        image = mock.MagicMock()
+        image.__enter__.return_value = image
+        image.format = "PNG"
+        image.size = (5000, 5000)
+        image.n_frames = 2
+        image.default_image = False
+
+        with mock.patch.object(self.remote_media.Image, "open", return_value=image):
+            self.assertIsNone(
+                self.remote_media.classify_media_animation(b"\x89PNG\r\n\x1a\n")
+            )
+
+        image.load.assert_not_called()
+
+
+class RemoteMediaInspectionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.directory = TemporaryDirectory()
         self.modules = _isolated_honeypot_modules(Path(self.directory.name))
@@ -319,13 +419,104 @@ class RemoteWebPInspectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request["url"], "https://media.example/reaction.webp")
         self.assertFalse(request["allow_redirects"])
         self.assertEqual(request["headers"]["Accept-Encoding"], "identity")
-        self.assertEqual(request["headers"]["Range"], "bytes=0-262143")
+        self.assertEqual(request["headers"]["Range"], "bytes=0-8388607")
         self.assertFalse(session_factory.kwargs["trust_env"])
         self.assertFalse(session_factory.kwargs["auto_decompress"])
         pinned = await session_factory.kwargs["connector"]._resolver.resolve(
             "media.example", 443, AF_INET
         )
         self.assertEqual([item["host"] for item in pinned], ["93.184.216.34"])
+
+    async def test_request_classifies_animated_avif(self):
+        session_factory = _SessionFactory(
+            _FakeResponse(200, [_animated_image("AVIF")])
+        )
+        inspector = self.remote_media.RemoteMediaInspector(
+            resolve_host=mock.AsyncMock(return_value=[(AF_INET, "93.184.216.34")]),
+            session_factory=session_factory,
+        )
+
+        self.assertIs(
+            await inspector.inspect("https://media.example/reaction.avif"),
+            True,
+        )
+
+    async def test_request_classifies_apng_but_not_static_avif_or_png(self):
+        resolver = mock.AsyncMock(return_value=[(AF_INET, "93.184.216.34")])
+        cases = (
+            ("reaction.png", _animated_image("PNG"), True),
+            ("still.png", Image.new("RGBA", (2, 2), "red"), False),
+            ("still.avif", Image.new("RGBA", (2, 2), "red"), False),
+        )
+
+        for filename, source, expected in cases:
+            with self.subTest(filename=filename):
+                if isinstance(source, Image.Image):
+                    output = BytesIO()
+                    source.save(output, filename.rsplit(".", 1)[1].upper())
+                    payload = output.getvalue()
+                else:
+                    payload = source
+                inspector = self.remote_media.RemoteMediaInspector(
+                    resolve_host=resolver,
+                    session_factory=_SessionFactory(_FakeResponse(200, [payload])),
+                )
+                self.assertIs(
+                    await inspector.inspect(f"https://media.example/{filename}"),
+                    expected,
+                )
+
+    async def test_apng_larger_than_the_old_prefix_budget_is_detected(self):
+        payload = _noisy_apng()
+        self.assertGreater(payload.__len__(), 256 * 1024)
+        inspector = self.remote_media.RemoteMediaInspector(
+            resolve_host=mock.AsyncMock(return_value=[(AF_INET, "93.184.216.34")]),
+            session_factory=_SessionFactory(_FakeResponse(200, [payload])),
+        )
+
+        self.assertIs(
+            await inspector.inspect("https://media.example/reaction.apng"),
+            True,
+        )
+
+    async def test_decode_timeout_keeps_its_concurrency_slot_until_thread_finishes(self):
+        first_started = threading.Event()
+        first_release = threading.Event()
+        calls = 0
+
+        def classify(data):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                first_started.set()
+                first_release.wait()
+            return False
+
+        inspector = self.remote_media.RemoteMediaInspector(
+            resolve_host=mock.AsyncMock(return_value=[(AF_INET, "93.184.216.34")]),
+            session_factory=_SessionFactory(_FakeResponse(200, [b"media"])),
+        )
+        inspector._decode_semaphore = asyncio.Semaphore(1)
+
+        with (
+            mock.patch.object(
+                self.remote_media,
+                "classify_media_animation",
+                side_effect=classify,
+            ),
+            mock.patch.object(self.remote_media, "MEDIA_DECODE_TIMEOUT_SECONDS", 0.01),
+        ):
+            self.assertIsNone(
+                await inspector.inspect("https://media.example/first.png")
+            )
+            self.assertTrue(first_started.is_set())
+            second = asyncio.create_task(
+                inspector.inspect("https://media.example/second.png")
+            )
+            await asyncio.sleep(0.03)
+            self.assertEqual(calls, 1)
+            first_release.set()
+            self.assertIs(await second, False)
 
     async def test_partial_range_proves_animation_from_two_complete_frames(self):
         vp8x = bytes((0b00000010,)) + (b"\x00" * 9)
@@ -334,11 +525,11 @@ class RemoteWebPInspectionTests(unittest.IsolatedAsyncioTestCase):
             _chunk(b"ANIM", b"\x00" * 6),
             _chunk(b"ANMF", _animation_frame()),
             _chunk(b"ANMF", _animation_frame()),
-            _chunk(b"EXIF", b"x" * (self.remote_media.MAX_WEBP_BYTES * 2)),
+            _chunk(b"EXIF", b"x" * (self.remote_media.MAX_MEDIA_BYTES * 2)),
         )
         response = _FakeResponse(
             206,
-            [payload[: self.remote_media.MAX_WEBP_BYTES]],
+            [payload[: self.remote_media.MAX_MEDIA_BYTES]],
         )
         inspector = self.remote_media.RemoteMediaInspector(
             resolve_host=mock.AsyncMock(return_value=[(AF_INET, "93.184.216.34")]),
@@ -354,7 +545,10 @@ class RemoteWebPInspectionTests(unittest.IsolatedAsyncioTestCase):
         resolver = mock.AsyncMock(return_value=[(AF_INET, "93.184.216.34")])
         for response in (
             _FakeResponse(302, []),
-            _FakeResponse(200, [b"x" * (256 * 1024), b"overflow"]),
+            _FakeResponse(
+                200,
+                [b"x" * self.remote_media.MAX_MEDIA_BYTES, b"overflow"],
+            ),
         ):
             with self.subTest(status=response.status):
                 inspector = self.remote_media.RemoteMediaInspector(
@@ -404,7 +598,7 @@ class RemoteWebPInspectionTests(unittest.IsolatedAsyncioTestCase):
 
         with mock.patch.object(
             self.remote_media,
-            "WEBP_DNS_TIMEOUT_SECONDS",
+            "MEDIA_DNS_TIMEOUT_SECONDS",
             0.01,
         ):
             self.assertIsNone(await inspector.inspect(url))
