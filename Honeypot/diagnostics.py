@@ -25,6 +25,7 @@ from redbot.core.utils.chat_formatting import box, pagify
 
 from .console_dump import build_log_dump
 from .detection_cases import OperationType
+from .remote_media import media_decoder_support
 from .settings import CORE_ACTION_OPTIONS, DEFAULT_STATS, GuildSettings
 
 _ = Translator("Honeypot", __file__)
@@ -752,6 +753,17 @@ def _doctor_gif_detector_checks(
     if not guild_settings.gif_detector_enabled:
         return ()
     results: list[DoctorResult] = []
+    for format_name, available in media_decoder_support().items():
+        results.append(
+            DoctorResult(
+                f"{format_name} decoder is "
+                f"{'available' if available else 'unavailable'}",
+                "healthy" if available else "failed",
+                "Reinstall the Honeypot requirements and reload the cog."
+                if not available
+                else "",
+            )
+        )
     for channel_id in guild_settings.gif_detector_channels:
         channel = cog._get_text_channel_or_thread(guild, channel_id)
         if channel is None:
