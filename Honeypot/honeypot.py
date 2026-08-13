@@ -172,7 +172,7 @@ class Honeypot(Cog):
         self._gif_detector_hits: dict[tuple[int, int], deque[float]] = {}
         self._gif_detector_active_mutes: dict[tuple[int, int], float] = {}
         self._gif_detector_mutes_in_flight: set[tuple[int, int]] = set()
-        self._gif_detector_webp_in_flight: set[tuple[int, int]] = set()
+        self._gif_detector_remote_media_in_flight: set[tuple[int, int]] = set()
         self._gif_detector_rate_lock = asyncio.Lock()
         self._gif_detector_remote_inspector = RemoteMediaInspector()
         self._hot_purge_users: dict[int, dict[int, datetime]] = defaultdict(dict)
@@ -959,7 +959,7 @@ class Honeypot(Cog):
         self._gif_detector_hits.clear()
         self._gif_detector_active_mutes.clear()
         self._gif_detector_mutes_in_flight.clear()
-        self._gif_detector_webp_in_flight.clear()
+        self._gif_detector_remote_media_in_flight.clear()
         pending_sweeps = tuple(self._post_ban_sweep_tasks)
         for task in pending_sweeps:
             task.cancel()
@@ -1311,7 +1311,7 @@ class Honeypot(Cog):
         gif_detected = await gif_detector.on_message(self, message)
         result = await detection.on_message(self, message)
         if not gif_detected:
-            await gif_detector.schedule_webp_fallback(self, message)
+            await gif_detector.schedule_remote_media_fallback(self, message)
         return result
 
     @tasks.loop(minutes=1)

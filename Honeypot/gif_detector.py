@@ -101,11 +101,19 @@ def _embed_urls(embed: Any) -> Iterable[str]:
             yield url
 
 
-def _is_webp_url(value: Any) -> bool:
+_REMOTE_ANIMATED_IMAGE_TYPES = frozenset(
+    ("image/apng", "image/avif", "image/avif-sequence", "image/png", "image/webp")
+)
+_REMOTE_ANIMATED_IMAGE_SUFFIXES = (".apng", ".avif", ".avifs", ".png", ".webp")
+
+
+def _is_remote_animated_image_url(value: Any) -> bool:
     if not isinstance(value, str):
         return False
     try:
-        return urlparse(value).path.casefold().endswith(".webp")
+        return urlparse(value).path.casefold().endswith(
+            _REMOTE_ANIMATED_IMAGE_SUFFIXES
+        )
     except ValueError:
         return False
 
@@ -129,7 +137,7 @@ def _stable_query(value: str) -> tuple[tuple[str, str], ...]:
     )
 
 
-def _same_webp_candidate(original: str, current: str) -> bool:
+def _same_remote_media_candidate(original: str, current: str) -> bool:
     if original == current:
         return True
     try:
@@ -156,7 +164,7 @@ def _same_webp_candidate(original: str, current: str) -> bool:
         return False
 
 
-def _prioritize_webp_candidates(candidates: Iterable[str]) -> tuple[str, ...]:
+def _prioritize_remote_media_candidates(candidates: Iterable[str]) -> tuple[str, ...]:
     unique = tuple(dict.fromkeys(candidates))
 
     def priority(url: str) -> int:
@@ -175,7 +183,7 @@ def _prioritize_webp_candidates(candidates: Iterable[str]) -> tuple[str, ...]:
     return tuple(sorted(unique, key=priority))
 
 
-def _webp_candidates_from_fields(
+def _remote_media_candidates_from_fields(
     *,
     embeds: Any = (),
     attachments: Any = (),
@@ -185,7 +193,10 @@ def _webp_candidates_from_fields(
     for attachment in _collection(attachments):
         media_type = str(_field(attachment, "content_type", "")).casefold()
         filename = str(_field(attachment, "filename", "")).casefold()
-        if media_type != "image/webp" and not filename.endswith(".webp"):
+        if (
+            media_type not in _REMOTE_ANIMATED_IMAGE_TYPES
+            and not filename.endswith(_REMOTE_ANIMATED_IMAGE_SUFFIXES)
+        ):
             continue
         for field_name in ("url", "proxy_url"):
             url = _field(attachment, field_name)
@@ -201,17 +212,17 @@ def _webp_candidates_from_fields(
                 else (_field(field_value, "url"), _field(field_value, "proxy_url"))
             )
             for url in candidates:
-                if _is_webp_url(url) and url not in seen:
+                if _is_remote_animated_image_url(url) and url not in seen:
                     seen.add(url)
                     yield url
     for url in _urls_in_text(content):
-        if _is_webp_url(url) and url not in seen:
+        if _is_remote_animated_image_url(url) and url not in seen:
             seen.add(url)
             yield url
 
 
-def _webp_candidates(message: Any) -> Iterable[str]:
-    return _webp_candidates_from_fields(
+def _remote_media_candidates(message: Any) -> Iterable[str]:
+    return _remote_media_candidates_from_fields(
         embeds=getattr(message, "embeds", ()),
         attachments=getattr(message, "attachments", ()),
         content=getattr(message, "content", ""),
@@ -682,16 +693,16 @@ async def on_message(cog: Any, message: Any) -> bool:
     return detected
 
 
-async def schedule_webp_fallback(
+async def schedule_remote_media_fallback(
     cog: Any,
     message: Any,
     *,
     candidate: str | None = None,
 ) -> None:
-    """Schedule final remote WebP classification when a direct candidate exists."""
+    """Schedule final remote animation classification for supported images."""
 
-    message_candidates = tuple(_webp_candidates(message))
-    candidates = _prioritize_webp_candidates(
+    message_candidates = tuple(_remote_media_candidates(message))
+    candidates = _prioritize_remote_media_candidates(
         (candidate, *message_candidates) if candidate is not None else message_candidates
     )
     if not candidates:
@@ -700,9 +711,9 @@ async def schedule_webp_fallback(
         return
     key = (message.guild.id, message.id)
     async with cog._gif_detector_rate_lock:
-        if key in cog._gif_detector_webp_in_flight:
+        if key in cog._gif_detector_remote_media_in_flight:
             return
-        cog._gif_detector_webp_in_flight.add(key)
+        cog._gif_detector_remote_media_in_flight.add(key)
 
     async def inspect() -> None:
         try:
@@ -723,18 +734,18 @@ async def schedule_webp_fallback(
                     return
                 except discord.HTTPException as error:
                     await _record_http_failure(
-                        cog, message, "Could not recheck remote WebP source", error
+                        cog, message, "Could not recheck remote image source", error
                     )
                     return
                 if not any(
-                    _same_webp_candidate(animated_candidate, current_candidate)
-                    for current_candidate in _webp_candidates(current_message)
+                    _same_remote_media_candidate(animated_candidate, current_candidate)
+                    for current_candidate in _remote_media_candidates(current_message)
                 ):
                     return
                 await _admit_message(cog, current_message)
         finally:
             async with cog._gif_detector_rate_lock:
-                cog._gif_detector_webp_in_flight.discard(key)
+                cog._gif_detector_remote_media_in_flight.discard(key)
 
     _spawn(cog, inspect())
 
@@ -746,15 +757,15 @@ async def on_raw_message_edit(cog: Any, payload: Any) -> None:
         attachments=raw_data.get("attachments", ()),
         content=raw_data.get("content", ""),
     )
-    webp_candidates = tuple(
-        _webp_candidates_from_fields(
+    remote_media_candidates = tuple(
+        _remote_media_candidates_from_fields(
             embeds=raw_data.get("embeds", ()),
             attachments=raw_data.get("attachments", ()),
             content=raw_data.get("content", ""),
         )
     )
-    webp_candidate = next(iter(webp_candidates), None)
-    if not local_gif and webp_candidate is None:
+    remote_media_candidate = next(iter(remote_media_candidates), None)
+    if not local_gif and remote_media_candidate is None:
         return
 
     updated_message = getattr(payload, "message", None)
@@ -762,10 +773,10 @@ async def on_raw_message_edit(cog: Any, payload: Any) -> None:
         if local_gif:
             await _admit_message(cog, updated_message)
         else:
-            await schedule_webp_fallback(
+            await schedule_remote_media_fallback(
                 cog,
                 updated_message,
-                candidate=webp_candidate,
+                candidate=remote_media_candidate,
             )
         return
 
@@ -793,7 +804,9 @@ async def on_raw_message_edit(cog: Any, payload: Any) -> None:
     if local_gif:
         await _admit_message(cog, message)
     else:
-        await schedule_webp_fallback(cog, message, candidate=webp_candidate)
+        await schedule_remote_media_fallback(
+            cog, message, candidate=remote_media_candidate
+        )
 
 
 def _format_channels(cog: Any, guild: Any, channel_ids: list[int]) -> str:
