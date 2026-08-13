@@ -15,15 +15,15 @@ import aiohttp
 from aiohttp.abc import AbstractResolver
 from PIL import Image, UnidentifiedImageError
 
-MAX_WEBP_BYTES = 256 * 1024
-WEBP_CONNECT_TIMEOUT_SECONDS = 2
-WEBP_TOTAL_TIMEOUT_SECONDS = 4
-WEBP_DNS_TIMEOUT_SECONDS = 2
-WEBP_DECODE_TIMEOUT_SECONDS = 2
-WEBP_MAX_CONCURRENCY = 2
-WEBP_CACHE_TTL_SECONDS = 300
-WEBP_FAILURE_CACHE_TTL_SECONDS = 30
-WEBP_CACHE_LIMIT = 512
+MAX_MEDIA_BYTES = 8 * 1024 * 1024
+MEDIA_CONNECT_TIMEOUT_SECONDS = 2
+MEDIA_TOTAL_TIMEOUT_SECONDS = 4
+MEDIA_DNS_TIMEOUT_SECONDS = 2
+MEDIA_DECODE_TIMEOUT_SECONDS = 2
+MEDIA_MAX_CONCURRENCY = 2
+MEDIA_CACHE_TTL_SECONDS = 300
+MEDIA_FAILURE_CACHE_TTL_SECONDS = 30
+MEDIA_CACHE_LIMIT = 512
 RIFF_HEADER_SIZE = 12
 VP8X_PAYLOAD_SIZE = 10
 ANIM_PAYLOAD_SIZE = 6
@@ -32,6 +32,14 @@ VP8_FRAME_HEADER_SIZE = 10
 VP8L_FRAME_HEADER_SIZE = 5
 VP8L_SIGNATURE = 0x2F
 MIN_ANIMATION_FRAMES = 2
+MAX_ANIMATION_FRAME_PIXELS = 4 * 1024 * 1024
+RGBA_BYTES_PER_PIXEL = 4
+MAX_DECODED_ANIMATION_BYTES = (
+    MAX_ANIMATION_FRAME_PIXELS * RGBA_BYTES_PER_PIXEL * MIN_ANIMATION_FRAMES
+)
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+AVIF_BRANDS = frozenset((b"avif", b"avis"))
+FTYP_MIN_BOX_SIZE = 16
 
 
 def _vp8_frame_dimensions(payload: bytes) -> tuple[int, int] | None:
@@ -106,8 +114,7 @@ def _valid_animation_frame(payload: bytes, canvas: tuple[int, int]) -> bool:
     )
     if not dimensions_are_valid:
         return False
-    pixel_limit = Image.MAX_IMAGE_PIXELS
-    return pixel_limit is None or width * height <= pixel_limit
+    return width * height <= MAX_ANIMATION_FRAME_PIXELS
 
 
 def _decodes_animated_webp_prefix(data: bytes) -> bool:
@@ -118,6 +125,7 @@ def _decodes_animated_webp_prefix(data: bytes) -> bool:
             if (
                 image.format != "WEBP"
                 or getattr(image, "n_frames", 1) < MIN_ANIMATION_FRAMES
+                or image.size[0] * image.size[1] > MAX_ANIMATION_FRAME_PIXELS
             ):
                 return False
             for frame_index in range(MIN_ANIMATION_FRAMES):
@@ -174,7 +182,7 @@ class _PinnedResolver(AbstractResolver):
         return None
 
 
-def _validated_webp_url(value: str) -> tuple[str, str] | None:
+def _validated_media_url(value: str) -> tuple[str, str] | None:
     try:
         parsed = urlparse(value)
         port = parsed.port
@@ -197,7 +205,7 @@ def _validated_webp_url(value: str) -> tuple[str, str] | None:
 
 
 class RemoteMediaInspector:
-    """Prove animation for a direct WebP URL through a pinned bounded request."""
+    """Prove animation for a direct image URL through a pinned bounded request."""
 
     def __init__(
         self,
@@ -207,11 +215,12 @@ class RemoteMediaInspector:
     ) -> None:
         self._resolve_host = resolve_host or _resolve_public_addresses
         self._session_factory = session_factory
-        self._semaphore = asyncio.Semaphore(WEBP_MAX_CONCURRENCY)
+        self._semaphore = asyncio.Semaphore(MEDIA_MAX_CONCURRENCY)
+        self._decode_semaphore = asyncio.Semaphore(MEDIA_MAX_CONCURRENCY)
         self._cache: dict[str, tuple[float, bool | None]] = {}
 
     async def inspect(self, url: str) -> bool | None:
-        validated = _validated_webp_url(url)
+        validated = _validated_media_url(url)
         if validated is None:
             return None
         request_url, hostname = validated
@@ -223,7 +232,7 @@ class RemoteMediaInspector:
             async with self._semaphore:
                 addresses = await asyncio.wait_for(
                     self._resolve_host(hostname),
-                    timeout=WEBP_DNS_TIMEOUT_SECONDS,
+                    timeout=MEDIA_DNS_TIMEOUT_SECONDS,
                 )
                 if not addresses or any(
                     not ipaddress.ip_address(address).is_global
@@ -255,8 +264,8 @@ class RemoteMediaInspector:
             limit=1,
         )
         timeout = aiohttp.ClientTimeout(
-            total=WEBP_TOTAL_TIMEOUT_SECONDS,
-            connect=WEBP_CONNECT_TIMEOUT_SECONDS,
+            total=MEDIA_TOTAL_TIMEOUT_SECONDS,
+            connect=MEDIA_CONNECT_TIMEOUT_SECONDS,
         )
         async with self._session_factory(
             connector=connector,
@@ -266,9 +275,9 @@ class RemoteMediaInspector:
         ) as session, session.get(
             url,
             headers={
-                "Accept": "image/webp",
+                "Accept": "image/avif,image/avif-sequence,image/apng,image/png,image/webp",
                 "Accept-Encoding": "identity",
-                "Range": f"bytes=0-{MAX_WEBP_BYTES - 1}",
+                "Range": f"bytes=0-{MAX_MEDIA_BYTES - 1}",
             },
             allow_redirects=False,
         ) as response:
@@ -277,23 +286,99 @@ class RemoteMediaInspector:
             data = bytearray()
             async for chunk in response.content.iter_chunked(64 * 1024):
                 data.extend(chunk)
-                if len(data) > MAX_WEBP_BYTES:
+                if len(data) > MAX_MEDIA_BYTES:
                     return None
+            await self._decode_semaphore.acquire()
+            decode_task = asyncio.create_task(
+                asyncio.to_thread(classify_media_animation, bytes(data))
+            )
+
+            def release_decode_slot(done: asyncio.Task) -> None:
+                self._decode_semaphore.release()
+                if not done.cancelled():
+                    done.exception()
+
+            decode_task.add_done_callback(release_decode_slot)
             return await asyncio.wait_for(
-                asyncio.to_thread(classify_webp_animation, bytes(data)),
-                timeout=WEBP_DECODE_TIMEOUT_SECONDS,
+                asyncio.shield(decode_task),
+                timeout=MEDIA_DECODE_TIMEOUT_SECONDS,
             )
 
     def _remember(self, url: str, result: bool | None) -> None:
         ttl = (
-            WEBP_CACHE_TTL_SECONDS
+            MEDIA_CACHE_TTL_SECONDS
             if result is not None
-            else WEBP_FAILURE_CACHE_TTL_SECONDS
+            else MEDIA_FAILURE_CACHE_TTL_SECONDS
         )
         self._cache[url] = (time.monotonic() + ttl, result)
-        if len(self._cache) > WEBP_CACHE_LIMIT:
+        if len(self._cache) > MEDIA_CACHE_LIMIT:
             oldest = next(iter(self._cache))
             del self._cache[oldest]
+
+
+def _is_avif(data: bytes) -> bool:
+    if len(data) < FTYP_MIN_BOX_SIZE or data[4:8] != b"ftyp":
+        return False
+    box_size = int.from_bytes(data[:4], "big")
+    if (
+        box_size < FTYP_MIN_BOX_SIZE
+        or box_size > len(data)
+        or (box_size - FTYP_MIN_BOX_SIZE) % 4
+    ):
+        return False
+    brands = {data[8:12]}
+    brands.update(
+        data[offset : offset + 4]
+        for offset in range(FTYP_MIN_BOX_SIZE, box_size, 4)
+    )
+    return bool(brands & AVIF_BRANDS)
+
+
+def _classify_decoded_animation(data: bytes, expected_format: str) -> bool | None:
+    try:
+        with Image.open(BytesIO(data)) as image:
+            if image.format != expected_format:
+                return None
+            width, height = image.size
+            frame_pixels = width * height
+            if (
+                width <= 0
+                or height <= 0
+                or frame_pixels > MAX_ANIMATION_FRAME_PIXELS
+                or frame_pixels
+                * RGBA_BYTES_PER_PIXEL
+                * MIN_ANIMATION_FRAMES
+                > MAX_DECODED_ANIMATION_BYTES
+            ):
+                return None
+            total_frames = getattr(image, "n_frames", 1)
+            default_frames = int(
+                expected_format == "PNG" and bool(getattr(image, "default_image", False))
+            )
+            animation_frames = total_frames - default_frames
+            if animation_frames < MIN_ANIMATION_FRAMES:
+                image.load()
+                return False
+            for frame_index in range(default_frames, default_frames + MIN_ANIMATION_FRAMES):
+                image.seek(frame_index)
+                if image.size[0] * image.size[1] > MAX_ANIMATION_FRAME_PIXELS:
+                    return None
+                image.load()
+    except (Image.DecompressionBombError, OSError, UnidentifiedImageError, ValueError):
+        return None
+    return True
+
+
+def classify_media_animation(data: bytes) -> bool | None:
+    """Return animation evidence for supported image containers."""
+
+    if len(data) >= RIFF_HEADER_SIZE and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return classify_webp_animation(data)
+    if data.startswith(PNG_SIGNATURE):
+        return _classify_decoded_animation(data, "PNG")
+    if _is_avif(data):
+        return _classify_decoded_animation(data, "AVIF")
+    return None
 
 
 def classify_webp_animation(data: bytes) -> bool | None:  # noqa: PLR0911, PLR0912
@@ -340,6 +425,8 @@ def classify_webp_animation(data: bytes) -> bool | None:  # noqa: PLR0911, PLR09
                 _uint24(data[payload_start + 4 : payload_start + 7]) + 1,
                 _uint24(data[payload_start + 7 : payload_start + 10]) + 1,
             )
+            if canvas[0] * canvas[1] > MAX_ANIMATION_FRAME_PIXELS:
+                return None
         elif kind == b"ANIM":
             if (
                 not animation_header
