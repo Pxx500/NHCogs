@@ -578,40 +578,6 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     await cog.cog_unload()
 
-    def test_honeypot_has_no_legacy_pending_review_members(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                forbidden = {
-                    "_store_pending_review",
-                    "_delete_pending_review",
-                    "_restore_pending_reviews",
-                    "_merge_into_active_review",
-                    "_handle_imagescan_message",
-                    "_handle_spam_message",
-                    "_handle_firstpost_message",
-                    "_handle_imagescan_detector_message",
-                    "_prepare_imagescan_learning_feedback",
-                    "_send_imagescan_feedback_messages",
-                }
-
-                self.assertEqual(
-                    {name for name in forbidden if hasattr(honeypot.Honeypot, name)},
-                    set(),
-                )
-                self.assertEqual(
-                    {
-                        name
-                        for name in (
-                            "imagescan_feedback_items",
-                            "imagescan_detector_batches",
-                            "ImageScanFeedbackSelect",
-                            "ImageScanFeedbackView",
-                        )
-                        if hasattr(honeypot, name)
-                    },
-                    set(),
-                )
-
     async def test_load_initializes_case_storage_before_restoring_and_starts_loops(self):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)

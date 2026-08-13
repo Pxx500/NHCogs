@@ -11,6 +11,7 @@ import sys
 import unittest
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
+from functools import lru_cache
 from importlib import util
 from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
@@ -388,8 +389,11 @@ def _dependency_load_order(module_paths: dict[str, Path]) -> tuple[str, ...]:
     return tuple(order)
 
 
-@contextmanager
-def _isolated_honeypot_modules(data_path: Path):
+@lru_cache(maxsize=1)
+def _honeypot_module_layout() -> tuple[
+    tuple[tuple[str, Path], ...], tuple[str, ...]
+]:
+    """Discover immutable source layout once per pytest worker."""
     module_paths = {}
     for path in PACKAGE_DIR.rglob("*.py"):
         relative = path.relative_to(PACKAGE_DIR)
@@ -400,7 +404,13 @@ def _isolated_honeypot_modules(data_path: Path):
         else:
             qualified_name = ".".join(relative.with_suffix("").parts)
         module_paths[qualified_name] = path
-    load_order = _dependency_load_order(module_paths)
+    return tuple(module_paths.items()), _dependency_load_order(module_paths)
+
+
+@contextmanager
+def _isolated_honeypot_modules(data_path: Path):
+    module_path_items, load_order = _honeypot_module_layout()
+    module_paths = dict(module_path_items)
     preexisting_honeypot_names = tuple(
         name
         for name in sys.modules
