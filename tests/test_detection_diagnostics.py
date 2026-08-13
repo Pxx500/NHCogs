@@ -23,6 +23,43 @@ from tests.test_chatchart import load_nhmisc_module
 
 
 class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_doctor_reports_every_missing_gif_detector_decoder(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)):
+                diagnostics = __import__(
+                    "Honeypot.diagnostics", fromlist=["_doctor_gif_detector_checks"]
+                )
+                configured = diagnostics.GuildSettings.from_mapping(
+                    self._doctor_config(gif_detector_enabled=True)
+                )
+
+                with mock.patch.object(
+                    diagnostics,
+                    "media_decoder_support",
+                    return_value={
+                        "GIF": False,
+                        "PNG/APNG": False,
+                        "WebP": False,
+                        "AVIF": False,
+                    },
+                ):
+                    results = diagnostics._doctor_gif_detector_checks(
+                        mock.Mock(), mock.Mock(), mock.Mock(), configured
+                    )
+
+                failed = {
+                    result.name for result in results if result.status == "failed"
+                }
+                self.assertEqual(
+                    failed,
+                    {
+                        "GIF decoder is unavailable",
+                        "PNG/APNG decoder is unavailable",
+                        "WebP decoder is unavailable",
+                        "AVIF decoder is unavailable",
+                    },
+                )
+
     async def test_imagescan_dump_exports_dated_samples_and_archive_paths(self):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)

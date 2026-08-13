@@ -316,6 +316,32 @@ class DecodedAnimationClassificationTests(unittest.TestCase):
         self.modules.__exit__(None, None, None)
         self.directory.cleanup()
 
+    def test_supported_media_decoders_are_reported_available(self):
+        self.assertEqual(
+            self.remote_media.media_decoder_support(),
+            {
+                "GIF": True,
+                "PNG/APNG": True,
+                "WebP": True,
+                "AVIF": True,
+            },
+        )
+        if "avif" in self.remote_media.features.get_supported():
+            self.assertIsNone(self.remote_media.pillow_avif)
+
+    def test_registered_extensions_without_native_codecs_are_unavailable(self):
+        with mock.patch.object(
+            self.remote_media.features,
+            "get_supported",
+            return_value=["pil", "zlib"],
+        ), mock.patch.object(self.remote_media, "pillow_avif", None):
+            support = self.remote_media.media_decoder_support()
+
+        self.assertTrue(support["GIF"])
+        self.assertTrue(support["PNG/APNG"])
+        self.assertFalse(support["WebP"])
+        self.assertFalse(support["AVIF"])
+
     def test_apng_default_image_is_not_counted_as_an_animation_frame(self):
         output = BytesIO()
         Image.new("RGBA", (2, 2), "red").save(
