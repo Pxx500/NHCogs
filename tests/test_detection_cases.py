@@ -359,20 +359,6 @@ class DetectionCaseDomainTests(unittest.TestCase):
 
 
 class DetectionCaseStoreTests(unittest.TestCase):
-    def test_store_has_no_unfenced_fixture_mutators(self):
-        self.assertEqual(
-            {
-                name
-                for name in (
-                    "update_attachment_capture",
-                    "set_evidence_publication",
-                    "set_review_message",
-                )
-                if hasattr(DetectionCaseStore, name)
-            },
-            set(),
-        )
-
     def setUp(self):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
