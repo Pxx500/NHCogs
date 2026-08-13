@@ -13,7 +13,15 @@ from urllib.parse import urlparse
 
 import aiohttp
 from aiohttp.abc import AbstractResolver
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, UnidentifiedImageError, features
+
+if "avif" not in features.get_supported():
+    try:
+        import pillow_avif
+    except ImportError:
+        pillow_avif = None
+else:
+    pillow_avif = None
 
 MAX_MEDIA_BYTES = 8 * 1024 * 1024
 MEDIA_CONNECT_TIMEOUT_SECONDS = 2
@@ -40,6 +48,24 @@ MAX_DECODED_ANIMATION_BYTES = (
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 AVIF_BRANDS = frozenset((b"avif", b"avis"))
 FTYP_MIN_BOX_SIZE = 16
+
+
+def media_decoder_support() -> dict[str, bool]:
+    """Return the actual decoder capabilities used by the GIF detector."""
+
+    extensions = Image.registered_extensions()
+    supported = set(features.get_supported())
+    plugin_avif = bool(
+        pillow_avif is not None
+        and getattr(pillow_avif.AvifImagePlugin, "SUPPORTED", False)
+    )
+    return {
+        "GIF": extensions.get(".gif") == "GIF",
+        "PNG/APNG": extensions.get(".png") == "PNG" and "zlib" in supported,
+        "WebP": extensions.get(".webp") == "WEBP" and "webp" in supported,
+        "AVIF": (extensions.get(".avif") == "AVIF" and "avif" in supported)
+        or plugin_avif,
+    }
 
 
 def _vp8_frame_dimensions(payload: bytes) -> tuple[int, int] | None:
