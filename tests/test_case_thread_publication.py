@@ -922,6 +922,119 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertTrue(all(item.state == "published" for item in publications))
 
+    async def test_timeline_rerender_adds_available_files_after_partial_capture(self):
+        with TemporaryDirectory() as directory:
+            data_path = Path(directory)
+            with _isolated_honeypot_modules(data_path) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                await asyncio.to_thread(cog._case_store.initialize)
+                attachments = tuple(
+                    honeypot.NewAttachment(
+                        position,
+                        f"proof-{position}.png",
+                        5,
+                        "image/png",
+                        10,
+                        20,
+                        f"https://cdn.test/{position}",
+                    )
+                    for position in range(4)
+                )
+                appended = await asyncio.to_thread(
+                    cog._case_store.append_message,
+                    honeypot.NewMessage(
+                        10,
+                        20,
+                        30,
+                        40,
+                        "copied content",
+                        datetime(2026, 7, 14, 12, tzinfo=timezone.utc),
+                        None,
+                        attachments,
+                    ),
+                    (),
+                )
+                initial_snapshot = await asyncio.to_thread(
+                    cog._case_store.get_case, appended.case.case_id
+                )
+                next_id = 70
+
+                async def send(*args, **kwargs):
+                    nonlocal next_id
+                    result = SimpleNamespace(id=next_id)
+                    next_id += 1
+                    return result
+
+                partial = SimpleNamespace(edit=mock.AsyncMock())
+                thread = SimpleNamespace(
+                    id=60,
+                    guild=SimpleNamespace(filesize_limit=8 * 1024 * 1024),
+                    send=mock.AsyncMock(side_effect=send),
+                    fetch_message=mock.AsyncMock(),
+                    get_partial_message=mock.Mock(return_value=partial),
+                )
+                created_files = []
+
+                def make_file(path, **kwargs):
+                    result = SimpleNamespace(path=path, **kwargs)
+                    created_files.append(result)
+                    return result
+
+                with (
+                    mock.patch.object(honeypot.discord, "File", side_effect=make_file),
+                    mock.patch.object(
+                        honeypot.discord,
+                        "AllowedMentions",
+                        SimpleNamespace(none=lambda: None),
+                    ),
+                ):
+                    await honeypot.review_publication._publish_case_timeline(
+                        cog, initial_snapshot, thread, resolved=False
+                    )
+                    for position in range(3):
+                        evidence = data_path / f"proof-{position}.png"
+                        evidence.write_bytes(b"image")
+                        await asyncio.to_thread(
+                            capture_attachment,
+                            cog._case_store,
+                            appended.case.case_id,
+                            1,
+                            position,
+                            evidence,
+                        )
+                    await asyncio.to_thread(
+                        cog._case_store.fail_pending_attachment_captures,
+                        appended.case.case_id,
+                        1,
+                        "attachment unavailable",
+                    )
+                    final_snapshot = await asyncio.to_thread(
+                        cog._case_store.get_case, appended.case.case_id
+                    )
+                    await honeypot.review_publication._publish_case_timeline(
+                        cog, final_snapshot, thread, resolved=False
+                    )
+                    await honeypot.review_publication._publish_case_timeline(
+                        cog, final_snapshot, thread, resolved=False
+                    )
+
+                self.assertGreaterEqual(thread.send.await_count, 1)
+                message_edits = [
+                    call.kwargs
+                    for call in partial.edit.await_args_list
+                    if call.kwargs["content"].startswith("**M1**")
+                ]
+                self.assertEqual(len(message_edits), 2)
+                edit = message_edits[0]
+                self.assertIn("4·CF", edit["content"])
+                self.assertEqual(len(edit["attachments"]), 3)
+                self.assertEqual(
+                    [item.filename for item in edit["attachments"]],
+                    ["proof-0.png", "proof-1.png", "proof-2.png"],
+                )
+                self.assertEqual(len(created_files), 3)
+                self.assertNotIn("attachments", message_edits[1])
+
     async def test_timeline_rerender_edits_known_message_without_fetching_it(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
