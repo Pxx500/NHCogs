@@ -874,6 +874,22 @@ class DetectionCaseStore:
             ).fetchone()
         return self._timeline_publication_from_row(row)
 
+    def update_timeline_publication_revision(
+        self,
+        logical_key: str,
+        *,
+        message_id: int,
+        revision: int,
+    ) -> bool:
+        with closing(self._connect()) as connection, connection:
+            cursor = connection.execute(
+                """UPDATE detection_timeline_publications
+                   SET revision = MAX(revision, ?)
+                   WHERE logical_key = ? AND state = 'published' AND message_id = ?""",
+                (revision, logical_key, message_id),
+            )
+            return cursor.rowcount == 1
+
     def claim_timeline_publication(
         self,
         logical_key: str,

@@ -711,7 +711,7 @@ def _case_publication_nonce(logical_key: str) -> int:
 
 
 async def _complete_case_timeline_publication(
-    cog, publication, sent_message, thread_id: int
+    cog, publication, sent_message, thread_id: int, *, revision: int = 1
 ) -> None:
     if publication.claim_token is None:
         raise RuntimeError("timeline publication is not claimed")
@@ -722,7 +722,7 @@ async def _complete_case_timeline_publication(
             publication.claim_token,
             channel_id=thread_id,
             message_id=sent_message.id,
-            revision=1,
+            revision=revision,
         )
     except KeyError:
         current = next(
@@ -844,8 +844,20 @@ async def _release_case_timeline_publication(cog, publication) -> None:
         await asyncio.to_thread(
             cog._case_store.release_timeline_publication_claim,
             publication.logical_key,
-            publication.claim_token,
+        publication.claim_token,
+    )
+
+
+def _case_timeline_discord_files(evidence_batch) -> list[discord.File]:
+    return [
+        discord.File(
+            Path(attachment.evidence_path),
+            filename=attachment.filename,
+            spoiler=attachment.spoiler,
+            description=attachment.description,
         )
+        for attachment in evidence_batch
+    ]
 
 
 async def _upsert_case_timeline_text(
@@ -855,20 +867,32 @@ async def _upsert_case_timeline_text(
     content: str,
     *,
     view: object = _TIMELINE_VIEW_UNSET,
-    files: list[discord.File] | None = None,
+    evidence_batch: tuple = (),
 ) -> None:
     edit_kwargs = {"content": content}
-    send_kwargs = {}
     if view is not _TIMELINE_VIEW_UNSET:
         edit_kwargs["view"] = view
-        send_kwargs["view"] = view
-    if files:
-        send_kwargs["files"] = files
+    # Revision 1 is text-only; later revisions record the uploaded file count.
+    evidence_revision = len(evidence_batch) + 1
+    attach_evidence = bool(evidence_batch) and (
+        publication.revision < evidence_revision
+    )
     replace_message_id = None
     if publication.state == "published" and publication.message_id is not None:
+        if attach_evidence:
+            edit_kwargs["attachments"] = _case_timeline_discord_files(
+                evidence_batch
+            )
         try:
             message = thread.get_partial_message(publication.message_id)
             await message.edit(**edit_kwargs)
+            if attach_evidence:
+                await asyncio.to_thread(
+                    cog._case_store.update_timeline_publication_revision,
+                    publication.logical_key,
+                    message_id=publication.message_id,
+                    revision=evidence_revision,
+                )
             return
         except discord.NotFound:
             replace_message_id = publication.message_id
@@ -877,8 +901,26 @@ async def _upsert_case_timeline_text(
     )
     if not owned:
         message = await thread.fetch_message(publication.message_id)
+        if evidence_batch and publication.revision < evidence_revision:
+            edit_kwargs["attachments"] = _case_timeline_discord_files(
+                evidence_batch
+            )
+        else:
+            edit_kwargs.pop("attachments", None)
         await message.edit(**edit_kwargs)
+        if "attachments" in edit_kwargs:
+            await asyncio.to_thread(
+                cog._case_store.update_timeline_publication_revision,
+                publication.logical_key,
+                message_id=publication.message_id,
+                revision=evidence_revision,
+            )
         return
+    send_kwargs = {}
+    if view is not _TIMELINE_VIEW_UNSET:
+        send_kwargs["view"] = view
+    if evidence_batch:
+        send_kwargs["files"] = _case_timeline_discord_files(evidence_batch)
     try:
         message = await thread.send(
             content,
@@ -887,7 +929,10 @@ async def _upsert_case_timeline_text(
             nonce=_case_publication_nonce(publication.logical_key),
         )
         await _complete_case_timeline_publication(cog,
-            publication, message, thread.id
+            publication,
+            message,
+            thread.id,
+            revision=evidence_revision,
         )
     except BaseException:
         await _release_case_timeline_publication(cog, publication)
@@ -1083,19 +1128,16 @@ async def _publish_case_timeline(
                 and (not batches or not legacy_evidence_layout)
                 else None
             )
-            files = None
+            evidence_batch = ()
             if chunk_index == 0 and batches and not legacy_evidence_layout:
-                files = [
-                    discord.File(
-                        Path(attachment.evidence_path),
-                        filename=attachment.filename,
-                        spoiler=attachment.spoiler,
-                        description=attachment.description,
-                    )
-                    for attachment in batches[0]
-                ]
+                evidence_batch = batches[0]
             await _upsert_case_timeline_text(
-                cog, publication, thread, content, view=view, files=files
+                cog,
+                publication,
+                thread,
+                content,
+                view=view,
+                evidence_batch=evidence_batch,
             )
         limit_label = f"{upload_limit / (1024 * 1024):g} MiB"
         for attachment in oversized:
@@ -1148,15 +1190,7 @@ async def _publish_case_timeline(
                     if same_batch:
                         await published.edit(view=view)
                     else:
-                        files = [
-                            discord.File(
-                                Path(attachment.evidence_path),
-                                filename=attachment.filename,
-                                spoiler=attachment.spoiler,
-                                description=attachment.description,
-                            )
-                            for attachment in batch
-                        ]
+                        files = _case_timeline_discord_files(batch)
                         await published.edit(
                             content=content,
                             attachments=files,
@@ -1172,15 +1206,7 @@ async def _publish_case_timeline(
                 published = await thread.fetch_message(evidence.message_id)
                 await published.edit(view=view)
                 continue
-            files = [
-                discord.File(
-                    Path(attachment.evidence_path),
-                    filename=attachment.filename,
-                    spoiler=attachment.spoiler,
-                    description=attachment.description,
-                )
-                for attachment in batch
-            ]
+            files = _case_timeline_discord_files(batch)
             try:
                 published = await thread.send(
                     content,
