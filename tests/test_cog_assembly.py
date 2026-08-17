@@ -48,14 +48,14 @@ class HoneypotMetadataTests(unittest.TestCase):
         self.assertEqual(metadata["author"], ["Pxx500"])
         self.assertEqual(
             metadata["short"],
-            "Detect and review suspicious activity with honeypot channels, signal "
-            "aggregation, image scanning, and join monitoring.",
+            "Detect and review suspicious activity with honeypot channels, manual "
+            "evidence capture, image scanning, and join monitoring.",
         )
         self.assertEqual(
             metadata["description"],
-            "Protect a server with honeypot channels and join monitoring, aggregate "
-            "suspicious messages into moderator cases, preserve review evidence, scan "
-            "images, and execute automatic or moderator-approved actions.",
+            "Protect a server with honeypot channels and join monitoring, capture "
+            "manual or automated moderation evidence, scan images, and execute "
+            "automatic or moderator-approved actions.",
         )
 
 

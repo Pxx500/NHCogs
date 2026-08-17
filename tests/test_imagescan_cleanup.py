@@ -16,6 +16,7 @@ def _install_redbot_stubs() -> None:
 
     discord = types.ModuleType("discord")
     discord.Attachment = object
+    discord.AllowedMentions = object
     discord.Forbidden = Exception
     discord.HTTPException = Exception
     discord.Message = object
@@ -31,6 +32,7 @@ def _install_redbot_stubs() -> None:
     discord.Object = object
     discord.Interaction = object
     discord.ButtonStyle = types.SimpleNamespace(danger=1, secondary=2, success=3, primary=4)
+    discord.TextStyle = types.SimpleNamespace(short=1, paragraph=2)
     discord.SelectOption = object
 
     class _View:
@@ -52,10 +54,15 @@ def _install_redbot_stubs() -> None:
             self.emoji = emoji
             self.callback = None
 
+    class _Modal:
+        pass
+
     discord.ui = types.SimpleNamespace(
         View=_View,
         Button=_Button,
+        Modal=_Modal,
         Select=object,
+        TextInput=object,
         button=lambda *args, **kwargs: (lambda fn: fn),
     )
     discord.ext = types.ModuleType("discord.ext")

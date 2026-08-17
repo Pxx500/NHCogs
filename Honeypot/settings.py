@@ -150,6 +150,8 @@ DEFAULTS: Mapping[str, object] = MappingProxyType(
         "fallback_action": "review",
         "dry_run": False,
         "logs_channel": None,
+        "manual_evidence_memes_channel": None,
+        "manual_evidence_mement_notification_channel": None,
         "honeypot_channel": None,
         "honeypot_channels": [],
         "mute_role": None,
@@ -319,6 +321,8 @@ class GuildSettings:
     fallback_action: FallbackActionOption
     dry_run: bool
     logs_channel: int | None
+    manual_evidence_memes_channel: int | None
+    manual_evidence_mement_notification_channel: int | None
     honeypot_channel: int | None
     honeypot_channels: list[int]
     mute_role: int | None
@@ -383,6 +387,12 @@ class GuildSettings:
             ),
             dry_run=_bool(raw, "dry_run"),
             logs_channel=_optional_int(raw, "logs_channel"),
+            manual_evidence_memes_channel=_optional_int(
+                raw, "manual_evidence_memes_channel"
+            ),
+            manual_evidence_mement_notification_channel=_optional_int(
+                raw, "manual_evidence_mement_notification_channel"
+            ),
             honeypot_channel=_optional_int(raw, "honeypot_channel"),
             honeypot_channels=_list(raw, "honeypot_channels", int),
             mute_role=_optional_int(raw, "mute_role"),
