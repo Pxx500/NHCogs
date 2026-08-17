@@ -31,13 +31,14 @@ By default, only the server owner can use `!honeypot` and all subcommands. Red P
 
 ### Manual evidence
 
-Moderators with Manage Messages can use the `Add evidence` message context action. It copies the message and its attachments to the private Honeypot logs channel, then deletes the source after the copy succeeds. The action can also apply `memen't`, mute, kick, or ban. Mute uses Red's core `Mutes` cog, while kick and ban use Honeypot's existing moderation path.
+Moderators with Manage Messages can use the `Add evidence` message context action. It copies the message and its attachments to the dedicated private manual evidence channel, then deletes the source after the copy succeeds. There is no fallback to the normal Honeypot logs channel. The action can also apply `memen't`, mute, kick, or ban. Mute uses Red's core `Mutes` cog, while kick and ban use Honeypot's existing moderation path.
 
-`Memen't` is available only in the configured memes channel and uses role ID `803692340749140008`. The moderator enters punishment reasons and mute duration in a modal while evidence publication runs in the background. Mute durations use `30m`, `2h`, `3d`, or `1w` format and may not exceed 28 days.
+`Memen't` is available only in the configured memes channel and uses role ID `803692340749140008`. Mute, kick, and ban are mutually exclusive dropdown choices, while `memen't` can be combined with mute. The moderator enters punishment reasons and mute duration in a modal while evidence publication runs in the background. If the modal is closed, the preliminary result provides an `Enter punishment details` button for the remainder of the five-minute deadline. Mute durations use `30m`, `2h`, `3d`, or `1w` format and may not exceed 28 days.
 
 | Command | Description |
 |---|---|
 | `!honeypot evidence status` | Show the private manual evidence configuration |
+| `!honeypot evidence channel <channel>` | Set the private destination for manual evidence |
 | `!honeypot evidence memes_channel <channel>` | Set the channel where `memen't` is available |
 | `!honeypot evidence mement_notification_channel <channel>` | Set the channel for successful `memen't` notifications |
 
