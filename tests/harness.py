@@ -26,6 +26,8 @@ EXPECTED_GUILD_DEFAULTS = {
     "fallback_action": "review",
     "dry_run": False,
     "logs_channel": None,
+    "manual_evidence_memes_channel": None,
+    "manual_evidence_mement_notification_channel": None,
     "honeypot_channel": None,
     "honeypot_channels": [],
     "mute_role": None,
@@ -469,11 +471,112 @@ def _isolated_honeypot_modules(data_path: Path):
             return cls(everyone=False, roles=False, users=False, replied_user=False)
 
     discord.AllowedMentions = _AllowedMentions
+    discord.AppCommandType = SimpleNamespace(message="message", user="user")
     discord.ButtonStyle = SimpleNamespace(danger=1, secondary=2, success=3, primary=4)
+    discord.TextStyle = SimpleNamespace(short=1, paragraph=2)
+    discord.Permissions = SimpleNamespace
+
+    class _File:
+        def __init__(self, fp, *, filename):
+            self.fp = fp
+            self.filename = filename
+
+    discord.File = _File
+
+    class _ContextMenu:
+        def __init__(self, *, name, callback):
+            self.name = name
+            self.callback = callback
+            self.default_permissions = None
+            self.guild_only = False
+
+    discord.app_commands = SimpleNamespace(ContextMenu=_ContextMenu)
+
+    class _View:
+        def __init__(self, *, timeout=None):
+            self.timeout = timeout
+            self.children = []
+            self.stopped = False
+
+        def add_item(self, item):
+            self.children.append(item)
+            item.view = self
+
+        def stop(self):
+            self.stopped = True
+
+        def clear_items(self):
+            self.children.clear()
+
+        def remove_item(self, item):
+            self.children.remove(item)
+
+    class _Button:
+        def __init__(
+            self,
+            *,
+            label=None,
+            style=None,
+            disabled=False,
+            row=None,
+            **values,
+        ):
+            self.label = label
+            self.style = style
+            self.disabled = disabled
+            self.row = row
+            self.callback = None
+            self.__dict__.update(values)
+
+    class _Select:
+        def __init__(self, *, placeholder=None, options=(), row=None, **values):
+            self.placeholder = placeholder
+            self.options = options
+            self.row = row
+            self.values = []
+            self.callback = None
+            self.__dict__.update(values)
+
+    class _SelectOption:
+        def __init__(self, *, label, value, default=False):
+            self.label = label
+            self.value = value
+            self.default = default
+
+    class _TextInput:
+        def __init__(
+            self,
+            *,
+            label,
+            style=None,
+            placeholder=None,
+            required=True,
+            max_length=None,
+            default=None,
+        ):
+            self.label = label
+            self.style = style
+            self.placeholder = placeholder
+            self.required = required
+            self.max_length = max_length
+            self.value = default or ""
+
+    class _Modal:
+        def __init__(self, *, title, timeout=None):
+            self.title = title
+            self.timeout = timeout
+            self.children = []
+
+        def add_item(self, item):
+            self.children.append(item)
+
+    discord.SelectOption = _SelectOption
     discord.ui = SimpleNamespace(
-        Button=object,
-        Select=object,
-        View=object,
+        Button=_Button,
+        Modal=_Modal,
+        Select=_Select,
+        TextInput=_TextInput,
+        View=_View,
         button=lambda *args, **kwargs: (lambda function: function),
     )
     discord.ext = ModuleType("discord.ext")
@@ -577,9 +680,25 @@ def _isolated_honeypot_modules(data_path: Path):
                 sys.modules[name] = module
 
 
+class _AppCommandTree:
+    def __init__(self):
+        self.commands = {}
+
+    def get_command(self, name, *, type):
+        return self.commands.get((name, type))
+
+    def add_command(self, command, *, override=False):
+        command_type = getattr(command, "type", "message")
+        self.commands[(command.name, command_type)] = command
+
+    def remove_command(self, name, *, type):
+        return self.commands.pop((name, type), None)
+
+
 class _Bot:
     def __init__(self, ready=True):
         self.ready = asyncio.Event()
+        self.tree = _AppCommandTree()
         if ready:
             self.ready.set()
 

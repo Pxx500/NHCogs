@@ -21,6 +21,7 @@ from . import (
     gif_detector,
     imagescan,
     joinwatch,
+    manual_evidence,
     review_publication,
     settings,
 )
@@ -162,6 +163,7 @@ class Honeypot(Cog):
             force_registration=True,
         )
         self.config.register_guild(**settings.DEFAULTS)
+        self._manual_evidence = manual_evidence.ManualEvidenceController(self)
 
         self._console_log_buffer = ReadOnlyLogBuffer()
         self._post_ban_sweep_tasks: set[asyncio.Task] = set()
@@ -285,6 +287,7 @@ class Honeypot(Cog):
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, channel: typing.Any) -> None:
         await self._message_registry.forget_channel(channel.guild.id, channel.id)
+        await manual_evidence.clear_deleted_channel(self, channel)
 
     @commands.Cog.listener()
     async def on_thread_delete(self, thread: typing.Any) -> None:
@@ -756,6 +759,10 @@ class Honeypot(Cog):
     def _group_overview_is_private(ctx: commands.Context) -> bool:
         guild = getattr(ctx, "guild", None)
         channel = getattr(ctx, "channel", None)
+        return Honeypot._channel_is_private(guild, channel)
+
+    @staticmethod
+    def _channel_is_private(guild: typing.Any, channel: typing.Any) -> bool:
         default_role = getattr(guild, "default_role", None)
         permissions_for = getattr(channel, "permissions_for", None)
         if default_role is None or not callable(permissions_for):
@@ -909,6 +916,7 @@ class Honeypot(Cog):
             lambda task: self._observe_background_task(task, "detection case view restoration")
         )
         self._install_console_log_buffer()
+        self._manual_evidence.register()
 
     @staticmethod
     def _observe_background_task(task: asyncio.Task, label: str) -> None:
@@ -940,6 +948,7 @@ class Honeypot(Cog):
 
     async def cog_unload(self) -> None:
         self._remove_console_log_buffer()
+        await self._manual_evidence.shutdown()
         self.joinwatch_auto_role_loop.cancel()
         self.purge_cache_cleanup_loop.cancel()
         self.firstpost_seen_flush_loop.cancel()
@@ -1354,6 +1363,38 @@ class Honeypot(Cog):
     async def honeypot(self, ctx: commands.Context) -> None:
         """Configure server safety and honeypot protections."""
         return await self._send_group_overview(ctx, detection.config_all)
+
+    @honeypot.group(name="evidence", invoke_without_command=True)
+    async def manual_evidence_settings(self, ctx: commands.Context) -> None:
+        """Configure manual evidence collection and punishments."""
+        return await manual_evidence.show_status(self, ctx)
+
+    @manual_evidence_settings.command(name="memes_channel")
+    async def manual_evidence_memes_channel(
+        self,
+        ctx: commands.Context,
+        target: discord.TextChannel,
+    ) -> None:
+        """Set the channel where the memen't action is available."""
+        return await manual_evidence.set_memes_channel(self, ctx, target)
+
+    @manual_evidence_settings.command(name="mement_notification_channel")
+    async def manual_evidence_mement_notification_channel(
+        self,
+        ctx: commands.Context,
+        target: discord.TextChannel,
+    ) -> None:
+        """Set the channel used for memen't notifications."""
+        return await manual_evidence.set_mement_notification_channel(
+            self,
+            ctx,
+            target,
+        )
+
+    @manual_evidence_settings.command(name="status")
+    async def manual_evidence_status(self, ctx: commands.Context) -> None:
+        """Show manual evidence configuration."""
+        return await manual_evidence.show_status(self, ctx)
 
     @honeypot.group(name="debug", invoke_without_command=True)
     async def debug(self, ctx: commands.Context) -> None:
