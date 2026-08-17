@@ -21,19 +21,23 @@ class ManualEvidenceSelectionTests(unittest.TestCase):
 
                 selection = selection_type()
                 selection.toggle_mement()
-                selection.toggle_mute()
+                selection.select_member_action("mute")
                 self.assertTrue(selection.mement)
                 self.assertTrue(selection.mute)
-                self.assertEqual(selection.member_action.value, "none")
+                self.assertEqual(selection.member_action.value, "mute")
 
                 selection.select_member_action("kick")
                 self.assertFalse(selection.mement)
                 self.assertFalse(selection.mute)
                 self.assertEqual(selection.member_action.value, "kick")
 
-                selection.toggle_mute()
-                self.assertTrue(selection.mute)
+                selection.toggle_mement()
+                self.assertTrue(selection.mement)
                 self.assertEqual(selection.member_action.value, "none")
+
+                selection.select_member_action("mute")
+                self.assertTrue(selection.mement)
+                self.assertTrue(selection.mute)
 
                 selection.select_member_action("ban")
                 self.assertFalse(selection.mement)
@@ -63,15 +67,18 @@ class ManualEvidenceSettingsTests(unittest.TestCase):
                 settings = import_module("Honeypot.settings")
 
                 defaults = settings.GuildSettings.from_mapping({})
+                self.assertIsNone(defaults.manual_evidence_channel)
                 self.assertIsNone(defaults.manual_evidence_memes_channel)
                 self.assertIsNone(defaults.manual_evidence_mement_notification_channel)
 
                 configured = settings.GuildSettings.from_mapping(
                     {
+                        "manual_evidence_channel": 789,
                         "manual_evidence_memes_channel": 123,
                         "manual_evidence_mement_notification_channel": 456,
                     }
                 )
+                self.assertEqual(configured.manual_evidence_channel, 789)
                 self.assertEqual(configured.manual_evidence_memes_channel, 123)
                 self.assertEqual(
                     configured.manual_evidence_mement_notification_channel,
@@ -147,12 +154,12 @@ class ManualEvidenceViewTests(unittest.TestCase):
                     child.label for child in ordinary.children if hasattr(child, "label")
                 }
                 self.assertNotIn("Memen't: Off", ordinary_labels)
-                self.assertIn("Mute: Off", ordinary_labels)
+                self.assertNotIn("Mute: Off", ordinary_labels)
                 self.assertIn("Confirm", ordinary_labels)
                 self.assertIn("Cancel", ordinary_labels)
                 self.assertEqual(
                     [option.value for option in ordinary.member_action.options],
-                    ["none", "kick", "ban"],
+                    ["none", "mute", "kick", "ban"],
                 )
 
                 memes = view_type(
@@ -168,25 +175,28 @@ class ManualEvidenceViewTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
                 module = import_module("Honeypot.manual_evidence")
-                selection = module.EvidenceSelection(mement=True, mute=True)
-                modal = module.PunishmentDetailsModal(
+                selection = module.EvidenceSelection(
+                    mement=True,
+                    member_action=module.MemberAction.MUTE,
+                )
+                modal = module.PunishmentDetailsSession(
                     SimpleNamespace(),
-                    SimpleNamespace(),
+                    SimpleNamespace(user=SimpleNamespace(id=10)),
                     SimpleNamespace(),
                     selection,
-                )
+                ).create_modal()
 
                 self.assertEqual(
                     [child.label for child in modal.children],
                     ["Memen't reason", "Mute duration", "Mute reason"],
                 )
 
-                kick_modal = module.PunishmentDetailsModal(
+                kick_modal = module.PunishmentDetailsSession(
                     SimpleNamespace(),
-                    SimpleNamespace(),
+                    SimpleNamespace(user=SimpleNamespace(id=10)),
                     SimpleNamespace(),
                     module.EvidenceSelection(member_action=module.MemberAction.KICK),
-                )
+                ).create_modal()
                 self.assertEqual(
                     [child.label for child in kick_modal.children],
                     ["Kick reason"],
@@ -206,7 +216,10 @@ class ManualEvidenceViewTests(unittest.TestCase):
                 rendered = module._render_evidence(
                     source,
                     SimpleNamespace(id=10, display_name="moderator"),
-                    module.EvidenceSelection(mement=True, mute=True),
+                    module.EvidenceSelection(
+                        mement=True,
+                        member_action=module.MemberAction.MUTE,
+                    ),
                     source_deletion="Pending",
                 )
 
@@ -215,12 +228,56 @@ class ManualEvidenceViewTests(unittest.TestCase):
 
 
 class ManualEvidenceContextActionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_normal_logs_channel_is_not_an_evidence_fallback(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)):
+                module = import_module("Honeypot.manual_evidence")
+                logs_channel = SimpleNamespace(id=900)
+                guild = SimpleNamespace(
+                    id=1,
+                    get_channel=lambda channel_id: (
+                        logs_channel if channel_id == logs_channel.id else None
+                    ),
+                )
+                guild_config = SimpleNamespace(
+                    all=mock.AsyncMock(
+                        return_value={
+                            "logs_channel": logs_channel.id,
+                            "manual_evidence_channel": None,
+                        }
+                    )
+                )
+                cog = SimpleNamespace(
+                    bot=SimpleNamespace(tree=_CommandTree()),
+                    config=SimpleNamespace(guild=lambda _guild: guild_config),
+                )
+                response = SimpleNamespace(send_message=mock.AsyncMock())
+                interaction = SimpleNamespace(
+                    guild=guild,
+                    permissions=SimpleNamespace(manage_messages=True),
+                    user=SimpleNamespace(id=10),
+                    response=response,
+                )
+                source = SimpleNamespace(
+                    id=50,
+                    guild=guild,
+                    channel=SimpleNamespace(id=123),
+                )
+                controller = module.ManualEvidenceController(cog)
+
+                await controller.open(interaction, source)
+
+                response.send_message.assert_awaited_once_with(
+                    "The manual evidence channel is not configured.",
+                    ephemeral=True,
+                )
+
     async def test_configured_memes_channel_opens_private_mement_view(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
                 module = import_module("Honeypot.manual_evidence")
-                logs_channel = SimpleNamespace(
-                    id=900,
+                evidence_channel = SimpleNamespace(
+                    id=902,
                     permissions_for=lambda role: SimpleNamespace(view_channel=False),
                 )
                 source_channel = SimpleNamespace(id=123, mention="#memes")
@@ -229,12 +286,13 @@ class ManualEvidenceContextActionTests(unittest.IsolatedAsyncioTestCase):
                     id=1,
                     default_role=SimpleNamespace(id=0),
                     get_channel=lambda channel_id: (
-                        logs_channel if channel_id == logs_channel.id else None
+                        evidence_channel if channel_id == evidence_channel.id else None
                     ),
                     get_role=lambda role_id: role if role_id == role.id else None,
                 )
                 config_values = {
-                    "logs_channel": logs_channel.id,
+                    "logs_channel": 900,
+                    "manual_evidence_channel": evidence_channel.id,
                     "manual_evidence_memes_channel": source_channel.id,
                     "manual_evidence_mement_notification_channel": 901,
                 }
@@ -303,7 +361,9 @@ class ManualEvidenceContextActionTests(unittest.IsolatedAsyncioTestCase):
 
                 memes = ConfigValue(123)
                 notifications = ConfigValue(456)
+                evidence = ConfigValue(123)
                 guild_config = SimpleNamespace(
+                    manual_evidence_channel=evidence,
                     manual_evidence_memes_channel=memes,
                     manual_evidence_mement_notification_channel=notifications,
                 )
@@ -316,6 +376,7 @@ class ManualEvidenceContextActionTests(unittest.IsolatedAsyncioTestCase):
                 await module.clear_deleted_channel(cog, channel)
 
                 memes.clear.assert_awaited_once_with()
+                evidence.clear.assert_awaited_once_with()
                 notifications.clear.assert_not_awaited()
 
 
@@ -336,11 +397,12 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                     moderator_id=10,
                     allow_mement=False,
                 )
-                view.selection.toggle_mute()
+                view.selection.select_member_action("mute")
                 interaction = SimpleNamespace(
+                    user=SimpleNamespace(id=10),
                     response=SimpleNamespace(
                         send_modal=mock.AsyncMock(side_effect=module.discord.HTTPException())
-                    )
+                    ),
                 )
 
                 with self.assertRaises(module.discord.HTTPException):
@@ -382,7 +444,7 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                 result = await controller._run_preliminary(
                     interaction,
                     source,
-                    module.EvidenceSelection(mute=True),
+                    module.EvidenceSelection(member_action=module.MemberAction.MUTE),
                 )
 
                 self.assertIsNone(result)
@@ -428,7 +490,12 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                     delete=mock.AsyncMock(),
                 )
                 guild_config = SimpleNamespace(
-                    all=mock.AsyncMock(return_value={"logs_channel": 900})
+                    all=mock.AsyncMock(
+                        return_value={
+                            "logs_channel": 999,
+                            "manual_evidence_channel": 900,
+                        }
+                    )
                 )
                 cog = SimpleNamespace(
                     bot=SimpleNamespace(tree=_CommandTree()),
@@ -442,7 +509,7 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                     moderator_id=10,
                     allow_mement=False,
                 )
-                view.selection.toggle_mute()
+                view.selection.select_member_action("mute")
                 response = SimpleNamespace(send_modal=mock.AsyncMock())
                 interaction = SimpleNamespace(
                     guild=source.guild,
@@ -461,7 +528,9 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(finish_upload.is_set())
                 await upload_started.wait()
                 finish_upload.set()
-                await asyncio.gather(*controller._tasks)
+                initial_modal = response.send_modal.await_args.args[0]
+                await initial_modal.session.preliminary_task
+                await controller.shutdown()
 
     async def test_confirm_publishes_evidence_before_deleting_source(self):
         with TemporaryDirectory() as directory:
@@ -506,6 +575,7 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                     all=mock.AsyncMock(
                         return_value={
                             "logs_channel": logs_channel.id,
+                            "manual_evidence_channel": logs_channel.id,
                             "manual_evidence_memes_channel": None,
                             "manual_evidence_mement_notification_channel": None,
                         }
@@ -580,7 +650,12 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                     delete=mock.AsyncMock(),
                 )
                 guild_config = SimpleNamespace(
-                    all=mock.AsyncMock(return_value={"logs_channel": logs_channel.id})
+                    all=mock.AsyncMock(
+                        return_value={
+                            "logs_channel": 999,
+                            "manual_evidence_channel": logs_channel.id,
+                        }
+                    )
                 )
                 cog = SimpleNamespace(
                     bot=SimpleNamespace(tree=_CommandTree()),
@@ -651,7 +726,12 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                     delete=mock.AsyncMock(side_effect=module.discord.HTTPException()),
                 )
                 guild_config = SimpleNamespace(
-                    all=mock.AsyncMock(return_value={"logs_channel": 900})
+                    all=mock.AsyncMock(
+                        return_value={
+                            "logs_channel": 999,
+                            "manual_evidence_channel": 900,
+                        }
+                    )
                 )
                 cog = SimpleNamespace(
                     bot=SimpleNamespace(tree=_CommandTree()),
@@ -760,7 +840,12 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                     delete=mock.AsyncMock(side_effect=delete_source),
                 )
                 guild_config = SimpleNamespace(
-                    all=mock.AsyncMock(return_value={"logs_channel": 900})
+                    all=mock.AsyncMock(
+                        return_value={
+                            "logs_channel": 999,
+                            "manual_evidence_channel": 900,
+                        }
+                    )
                 )
                 cog = SimpleNamespace(
                     bot=SimpleNamespace(tree=_CommandTree()),
@@ -785,6 +870,90 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ManualEvidencePunishmentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_preliminary_success_exposes_a_button_that_reopens_details(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)):
+                module = import_module("Honeypot.manual_evidence")
+                evidence_message = SimpleNamespace(
+                    jump_url="https://discord/evidence/700",
+                    edit=mock.AsyncMock(),
+                    delete=mock.AsyncMock(),
+                )
+                logs_channel = SimpleNamespace(
+                    id=900,
+                    send=mock.AsyncMock(return_value=evidence_message),
+                )
+                target = SimpleNamespace(id=20, display_name="target")
+                guild = SimpleNamespace(
+                    id=1,
+                    get_member=lambda _member_id: target,
+                    get_channel=lambda _channel_id: logs_channel,
+                )
+                source = SimpleNamespace(
+                    id=50,
+                    guild=guild,
+                    channel=SimpleNamespace(id=123, mention="#general"),
+                    author=target,
+                    content="offense",
+                    attachments=(),
+                    created_at=SimpleNamespace(timestamp=lambda: 1_700_000_000),
+                    delete=mock.AsyncMock(),
+                )
+                guild_config = SimpleNamespace(
+                    all=mock.AsyncMock(
+                        return_value={
+                            "logs_channel": 999,
+                            "manual_evidence_channel": 900,
+                        }
+                    )
+                )
+                cog = SimpleNamespace(
+                    bot=SimpleNamespace(tree=_CommandTree()),
+                    config=SimpleNamespace(guild=lambda _guild: guild_config),
+                    _observe_background_task=mock.Mock(),
+                )
+                controller = module.ManualEvidenceController(cog)
+                moderator = SimpleNamespace(id=10, display_name="moderator")
+                interaction = SimpleNamespace(
+                    guild=guild,
+                    user=moderator,
+                    response=SimpleNamespace(send_modal=mock.AsyncMock()),
+                    followup=SimpleNamespace(send=mock.AsyncMock()),
+                )
+                view = module.EvidenceActionView(
+                    controller,
+                    source,
+                    moderator_id=moderator.id,
+                    allow_mement=False,
+                )
+                view.selection.select_member_action("mute")
+
+                await controller.confirm(interaction, view)
+                initial = interaction.response.send_modal.await_args.args[0]
+                await initial.session.preliminary_task
+
+                recovery = next(
+                    (
+                        call.kwargs.get("view")
+                        for call in interaction.followup.send.await_args_list
+                        if call.kwargs.get("view") is not None
+                    ),
+                    None,
+                )
+                self.assertIsNotNone(recovery)
+                self.assertEqual(recovery.children[0].label, "Enter punishment details")
+
+                reopen_interaction = SimpleNamespace(
+                    user=moderator,
+                    response=SimpleNamespace(send_modal=mock.AsyncMock()),
+                )
+                await recovery.children[0].callback(reopen_interaction)
+
+                reopen_interaction.response.send_modal.assert_awaited_once()
+                reopened = reopen_interaction.response.send_modal.await_args.args[0]
+                self.assertIs(reopened.session, initial.session)
+                await controller.shutdown()
+
     async def test_invalid_mute_duration_reopens_the_modal_without_losing_reason(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
@@ -793,12 +962,14 @@ class ManualEvidencePunishmentTests(unittest.IsolatedAsyncioTestCase):
                 controller = module.ManualEvidenceController(
                     SimpleNamespace(bot=SimpleNamespace(tree=_CommandTree()))
                 )
-                modal = module.PunishmentDetailsModal(
+                session = module.PunishmentDetailsSession(
                     controller,
-                    preliminary,
+                    SimpleNamespace(user=SimpleNamespace(id=10)),
                     SimpleNamespace(),
-                    module.EvidenceSelection(mute=True),
+                    module.EvidenceSelection(member_action=module.MemberAction.MUTE),
                 )
+                session.preliminary_task = preliminary
+                modal = session.create_modal()
                 modal.inputs["mute_duration"].value = "forever"
                 modal.inputs["mute_reason"].value = "NSFW content"
                 response = SimpleNamespace(send_modal=mock.AsyncMock())
@@ -810,7 +981,117 @@ class ManualEvidencePunishmentTests(unittest.IsolatedAsyncioTestCase):
                 retry = response.send_modal.await_args.args[0]
                 self.assertEqual(retry.title, "Invalid mute duration. Try again")
                 self.assertEqual(retry.inputs["mute_reason"].value, "NSFW content")
-                self.assertIs(retry.preliminary_task, preliminary)
+                self.assertIs(retry.session.preliminary_task, preliminary)
+                self.assertTrue(session.active)
+
+    async def test_expired_details_replace_pending_actions_in_evidence(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)):
+                module = import_module("Honeypot.manual_evidence")
+                moderator = SimpleNamespace(id=10, display_name="moderator")
+                target = SimpleNamespace(id=20, display_name="target")
+                source = SimpleNamespace(
+                    id=50,
+                    guild=SimpleNamespace(id=1),
+                    channel=SimpleNamespace(id=123, mention="#memes"),
+                    author=target,
+                    content="bad meme",
+                    created_at=SimpleNamespace(timestamp=lambda: 1_700_000_000),
+                )
+                selection = module.EvidenceSelection(
+                    mement=True,
+                    member_action=module.MemberAction.MUTE,
+                )
+                evidence_message = SimpleNamespace(
+                    jump_url="https://discord/evidence/700",
+                    edit=mock.AsyncMock(),
+                )
+                result = module.PreliminaryResult(
+                    source_message=source,
+                    moderator=moderator,
+                    selection=selection,
+                    settings=module.GuildSettings.from_mapping({}),
+                    evidence=module.PublishedEvidence(
+                        primary=evidence_message,
+                        parts=(),
+                        content_external=False,
+                    ),
+                    outcomes=["Memen't: Applied", "Mute: Waiting for details"],
+                    member=target,
+                )
+                preliminary = asyncio.get_running_loop().create_future()
+                preliminary.set_result(result)
+                initiating = SimpleNamespace(
+                    user=moderator,
+                    followup=SimpleNamespace(send=mock.AsyncMock()),
+                )
+                controller = module.ManualEvidenceController(
+                    SimpleNamespace(bot=SimpleNamespace(tree=_CommandTree()))
+                )
+                session = module.PunishmentDetailsSession(
+                    controller,
+                    initiating,
+                    source,
+                    selection,
+                )
+                session.preliminary_task = preliminary
+
+                expired = await session.expire()
+
+                self.assertTrue(expired)
+                self.assertFalse(session.active)
+                content = evidence_message.edit.await_args.kwargs["content"]
+                self.assertIn("Memen't: Applied", content)
+                self.assertIn(
+                    "Memen't notification: Cancelled because no reason was submitted",
+                    content,
+                )
+                self.assertIn(
+                    "Mute: Cancelled because details were not submitted",
+                    content,
+                )
+                self.assertNotIn("Waiting for details", content)
+
+    async def test_expired_session_does_not_reopen_invalid_mute_modal(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)):
+                module = import_module("Honeypot.manual_evidence")
+                moderator = SimpleNamespace(id=10)
+                selection = module.EvidenceSelection(member_action=module.MemberAction.MUTE)
+                controller = module.ManualEvidenceController(
+                    SimpleNamespace(bot=SimpleNamespace(tree=_CommandTree()))
+                )
+                session = module.PunishmentDetailsSession(
+                    controller,
+                    SimpleNamespace(
+                        user=moderator,
+                        followup=SimpleNamespace(send=mock.AsyncMock()),
+                    ),
+                    SimpleNamespace(),
+                    selection,
+                )
+                preliminary = asyncio.get_running_loop().create_future()
+                preliminary.set_result(None)
+                session.preliminary_task = preliminary
+                modal = session.create_modal()
+                modal.inputs["mute_duration"].value = "forever"
+                modal.inputs["mute_reason"].value = "reason"
+                await session.expire()
+                response = SimpleNamespace(
+                    send_modal=mock.AsyncMock(),
+                    send_message=mock.AsyncMock(),
+                )
+
+                await controller.submit_details(
+                    SimpleNamespace(response=response),
+                    modal,
+                )
+
+                response.send_modal.assert_not_awaited()
+                response.send_message.assert_awaited_once_with(
+                    "Punishment details are no longer active.",
+                    ephemeral=True,
+                )
 
     async def test_mement_and_mute_are_applied_and_notified_independently(self):
         with TemporaryDirectory() as directory:
@@ -845,7 +1126,10 @@ class ManualEvidencePunishmentTests(unittest.IsolatedAsyncioTestCase):
                     jump_url="https://discord/evidence/700",
                     edit=mock.AsyncMock(),
                 )
-                selection = module.EvidenceSelection(mement=True, mute=True)
+                selection = module.EvidenceSelection(
+                    mement=True,
+                    member_action=module.MemberAction.MUTE,
+                )
                 settings = module.GuildSettings.from_mapping(
                     {"manual_evidence_mement_notification_channel": 901}
                 )
@@ -880,12 +1164,14 @@ class ManualEvidencePunishmentTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
                 controller = module.ManualEvidenceController(cog)
-                modal = module.PunishmentDetailsModal(
+                session = module.PunishmentDetailsSession(
                     controller,
-                    preliminary,
+                    SimpleNamespace(user=moderator),
                     source,
                     selection,
                 )
+                session.preliminary_task = preliminary
+                modal = session.create_modal()
                 modal.inputs["mement_reason"].value = "inappropriate meme"
                 modal.inputs["mute_duration"].value = "30m"
                 modal.inputs["mute_reason"].value = "NSFW content"
@@ -904,7 +1190,7 @@ class ManualEvidencePunishmentTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(
                     notification_channel.send.await_args.kwargs["allowed_mentions"].users,
-                    [target, moderator],
+                    [target],
                 )
                 mutes.mute_user.assert_awaited_once()
                 mute_call = mutes.mute_user.await_args
@@ -914,6 +1200,10 @@ class ManualEvidencePunishmentTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     offense_channel.send.await_args.args[0],
                     "<@20> was muted by <@10> for 30m.\nReason: NSFW content",
+                )
+                self.assertEqual(
+                    offense_channel.send.await_args.kwargs["allowed_mentions"].users,
+                    [target, moderator],
                 )
                 evidence_content = evidence_message.edit.await_args.kwargs["content"]
                 self.assertIn("Memen't reason: inappropriate meme", evidence_content)
@@ -963,12 +1253,14 @@ class ManualEvidencePunishmentTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
                 controller = module.ManualEvidenceController(cog)
-                modal = module.PunishmentDetailsModal(
+                session = module.PunishmentDetailsSession(
                     controller,
-                    preliminary,
+                    SimpleNamespace(user=moderator),
                     source,
                     selection,
                 )
+                session.preliminary_task = preliminary
+                modal = session.create_modal()
                 modal.inputs["member_action_reason"].value = "repeated abuse"
                 interaction = SimpleNamespace(
                     user=moderator,
@@ -991,6 +1283,20 @@ class ManualEvidencePunishmentTests(unittest.IsolatedAsyncioTestCase):
                     "Kick reason: repeated abuse",
                     evidence_message.edit.await_args.kwargs["content"],
                 )
+
+                duplicate = session.create_modal()
+                duplicate.inputs["member_action_reason"].value = "second submission"
+                duplicate_interaction = SimpleNamespace(
+                    response=SimpleNamespace(send_message=mock.AsyncMock()),
+                )
+
+                await controller.submit_details(duplicate_interaction, duplicate)
+
+                duplicate_interaction.response.send_message.assert_awaited_once_with(
+                    "Punishment details are no longer active.",
+                    ephemeral=True,
+                )
+                self.assertEqual(cog._execute_action.await_count, 1)
 
 
 if __name__ == "__main__":

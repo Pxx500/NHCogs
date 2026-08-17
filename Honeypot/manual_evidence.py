@@ -1,5 +1,7 @@
 """Manual evidence collection and moderator-selected punishments."""
 
+from __future__ import annotations
+
 import asyncio
 import io
 import re
@@ -18,10 +20,12 @@ MAX_MUTE_SECONDS = 28 * 24 * 60 * 60
 PREVIEW_LENGTH = 1200
 DISCORD_MESSAGE_LIMIT = 2_000
 MAX_REASON_LENGTH = 500
+DETAILS_TIMEOUT_SECONDS = 300
 
 
 class MemberAction(str, Enum):
     NONE = "none"
+    MUTE = "mute"
     KICK = "kick"
     BAN = "ban"
 
@@ -29,24 +33,21 @@ class MemberAction(str, Enum):
 @dataclass
 class EvidenceSelection:
     mement: bool = False
-    mute: bool = False
     member_action: MemberAction = MemberAction.NONE
+
+    @property
+    def mute(self) -> bool:
+        return self.member_action is MemberAction.MUTE
 
     def toggle_mement(self) -> None:
         self.mement = not self.mement
-        if self.mement:
-            self.member_action = MemberAction.NONE
-
-    def toggle_mute(self) -> None:
-        self.mute = not self.mute
-        if self.mute:
+        if self.mement and self.member_action in (MemberAction.KICK, MemberAction.BAN):
             self.member_action = MemberAction.NONE
 
     def select_member_action(self, action: str) -> None:
         self.member_action = MemberAction(action)
-        if self.member_action is not MemberAction.NONE:
+        if self.member_action in (MemberAction.KICK, MemberAction.BAN):
             self.mement = False
-            self.mute = False
 
 
 @dataclass(frozen=True)
@@ -70,7 +71,7 @@ class PreliminaryResult:
 @dataclass(frozen=True)
 class PreliminaryContext:
     settings: GuildSettings
-    logs_channel: Any
+    evidence_channel: Any
     member: Any | None
 
 
@@ -91,28 +92,121 @@ def parse_mute_duration(value: str) -> int:
     return duration
 
 
-class PunishmentDetailsModal(discord.ui.Modal):
+class PunishmentDetailsSession:
     def __init__(
         self,
         controller: Any,
-        preliminary_task: Any,
+        interaction: discord.Interaction,
         source_message: discord.Message,
         selection: EvidenceSelection,
+    ) -> None:
+        self.controller = controller
+        self.interaction = interaction
+        self.source_message = source_message
+        self.selection = selection
+        self.moderator_id = interaction.user.id
+        self.preliminary_task: asyncio.Task[PreliminaryResult | None] | None = None
+        self.timeout_task: asyncio.Task[Any] | None = None
+        self.recovery_message: Any | None = None
+        self._active = True
+        self._lock = asyncio.Lock()
+        self.recovery_view = PunishmentDetailsRecoveryView(self)
+
+    @property
+    def active(self) -> bool:
+        return self._active
+
+    def create_modal(
+        self,
+        *,
+        title: str = "Punishment details",
+        defaults: dict[str, str] | None = None,
+    ) -> PunishmentDetailsModal:
+        return PunishmentDetailsModal(self, title=title, defaults=defaults)
+
+    def start(self, preliminary_task: asyncio.Task[PreliminaryResult | None]) -> None:
+        self.preliminary_task = preliminary_task
+        timeout_task = asyncio.create_task(self._wait_for_deadline())
+        self.timeout_task = timeout_task
+        self.controller._own_task(timeout_task, "manual evidence details timeout")
+
+    async def send_modal(
+        self,
+        interaction: discord.Interaction,
+        *,
+        title: str = "Punishment details",
+        defaults: dict[str, str] | None = None,
+    ) -> bool:
+        async with self._lock:
+            if not self._active:
+                return False
+            await interaction.response.send_modal(self.create_modal(title=title, defaults=defaults))
+            return True
+
+    async def claim(self) -> bool:
+        async with self._lock:
+            if not self._active:
+                return False
+            self._active = False
+            self._cancel_timeout()
+        await self._disable_recovery()
+        return True
+
+    async def expire(self) -> bool:
+        async with self._lock:
+            if not self._active:
+                return False
+            self._active = False
+            self._cancel_timeout()
+        await self._disable_recovery()
+        await self.controller.expire_details(self)
+        return True
+
+    async def attach_recovery_message(self, message: Any) -> None:
+        self.recovery_message = message
+        if not self._active:
+            await self._disable_recovery()
+
+    def _cancel_timeout(self) -> None:
+        task = self.timeout_task
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+
+    async def _disable_recovery(self) -> None:
+        button = self.recovery_view.open_button
+        button.disabled = True
+        message = self.recovery_message
+        if message is None:
+            return
+        try:
+            await message.edit(view=self.recovery_view)
+        except discord.HTTPException:
+            pass
+
+    async def _wait_for_deadline(self) -> None:
+        await asyncio.sleep(DETAILS_TIMEOUT_SECONDS)
+        await self.expire()
+
+
+class PunishmentDetailsModal(discord.ui.Modal):
+    def __init__(
+        self,
+        session: PunishmentDetailsSession,
         *,
         title: str = "Punishment details",
         defaults: dict[str, str] | None = None,
     ) -> None:
         super().__init__(title=title, timeout=300)
-        self.controller = controller
-        self.preliminary_task = preliminary_task
-        self.source_message = source_message
-        self.selection = selection
+        self.session = session
+        self.controller = session.controller
+        self.source_message = session.source_message
+        self.selection = session.selection
         self.inputs: dict[str, discord.ui.TextInput] = {}
         self.defaults = defaults or {}
 
-        if selection.mement:
+        if self.selection.mement:
             self._add_reason("mement_reason", "Memen't reason")
-        if selection.mute:
+        if self.selection.mute:
             duration = discord.ui.TextInput(
                 label="Mute duration",
                 placeholder="30m, 2h, 3d, or 1w",
@@ -123,9 +217,9 @@ class PunishmentDetailsModal(discord.ui.Modal):
             self.inputs["mute_duration"] = duration
             self.add_item(duration)
             self._add_reason("mute_reason", "Mute reason")
-        if selection.member_action is MemberAction.KICK:
+        if self.selection.member_action is MemberAction.KICK:
             self._add_reason("member_action_reason", "Kick reason")
-        elif selection.member_action is MemberAction.BAN:
+        elif self.selection.member_action is MemberAction.BAN:
             self._add_reason("member_action_reason", "Ban reason")
 
     def _add_reason(self, name: str, label: str) -> None:
@@ -141,6 +235,37 @@ class PunishmentDetailsModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await self.controller.submit_details(interaction, self)
+
+
+class PunishmentDetailsRecoveryView(discord.ui.View):
+    def __init__(self, session: PunishmentDetailsSession) -> None:
+        super().__init__(timeout=DETAILS_TIMEOUT_SECONDS)
+        self.session = session
+        self.open_button = discord.ui.Button(
+            label="Enter punishment details",
+            style=discord.ButtonStyle.primary,
+        )
+        self.open_button.callback = self._open
+        self.add_item(self.open_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.session.moderator_id:
+            return True
+        await interaction.response.send_message(
+            "Only the moderator who started this action can enter its details.",
+            ephemeral=True,
+        )
+        return False
+
+    async def _open(self, interaction: discord.Interaction) -> None:
+        if not await self.session.send_modal(interaction):
+            await interaction.response.send_message(
+                "Punishment details are no longer active.",
+                ephemeral=True,
+            )
+
+    async def on_timeout(self) -> None:
+        await self.session.expire()
 
 
 class EvidenceActionView(discord.ui.View):
@@ -167,14 +292,6 @@ class EvidenceActionView(discord.ui.View):
             )
             self.mement_button.callback = self._toggle_mement
             self.add_item(self.mement_button)
-
-        self.mute_button = discord.ui.Button(
-            label="Mute: Off",
-            style=discord.ButtonStyle.secondary,
-            row=0,
-        )
-        self.mute_button.callback = self._toggle_mute
-        self.add_item(self.mute_button)
 
         self.member_action = discord.ui.Select(
             placeholder="Member action: None",
@@ -224,6 +341,11 @@ class EvidenceActionView(discord.ui.View):
                 default=selected is MemberAction.NONE,
             ),
             discord.SelectOption(
+                label="Mute",
+                value=MemberAction.MUTE.value,
+                default=selected is MemberAction.MUTE,
+            ),
+            discord.SelectOption(
                 label="Kick",
                 value=MemberAction.KICK.value,
                 default=selected is MemberAction.KICK,
@@ -243,10 +365,6 @@ class EvidenceActionView(discord.ui.View):
                 if self.selection.mement
                 else discord.ButtonStyle.secondary
             )
-        self.mute_button.label = "Mute: On" if self.selection.mute else "Mute: Off"
-        self.mute_button.style = (
-            discord.ButtonStyle.success if self.selection.mute else discord.ButtonStyle.secondary
-        )
         self.member_action.placeholder = (
             f"Member action: {self.selection.member_action.value.title()}"
         )
@@ -254,11 +372,6 @@ class EvidenceActionView(discord.ui.View):
 
     async def _toggle_mement(self, interaction: discord.Interaction) -> None:
         self.selection.toggle_mement()
-        self._refresh()
-        await interaction.response.edit_message(view=self)
-
-    async def _toggle_mute(self, interaction: discord.Interaction) -> None:
-        self.selection.toggle_mute()
         self._refresh()
         await interaction.response.edit_message(view=self)
 
@@ -283,6 +396,7 @@ class ManualEvidenceController:
     def __init__(self, cog: Any) -> None:
         self.cog = cog
         self._tasks: set[asyncio.Task[Any]] = set()
+        self._task_labels: dict[asyncio.Task[Any], str] = {}
         self.context_menu = discord.app_commands.ContextMenu(
             name="Add evidence",
             callback=self.open,
@@ -326,6 +440,7 @@ class ManualEvidenceController:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
         self._tasks.clear()
+        self._task_labels.clear()
 
     async def confirm(
         self,
@@ -334,19 +449,18 @@ class ManualEvidenceController:
     ) -> None:
         selection = EvidenceSelection(
             mement=view.selection.mement,
-            mute=view.selection.mute,
             member_action=view.selection.member_action,
         )
         view.stop()
-        modal = None
-        if selection.mement or selection.mute or selection.member_action is not MemberAction.NONE:
-            modal = PunishmentDetailsModal(
+        session = None
+        if selection.mement or selection.member_action is not MemberAction.NONE:
+            session = PunishmentDetailsSession(
                 self,
-                None,
+                interaction,
                 view.source_message,
                 selection,
             )
-            await interaction.response.send_modal(modal)
+            await session.send_modal(interaction)
         else:
             await interaction.response.defer(ephemeral=True)
 
@@ -355,22 +469,29 @@ class ManualEvidenceController:
                 interaction,
                 view.source_message,
                 selection,
+                session,
             )
         )
+        self._own_task(task, "manual evidence action")
+        if session is not None:
+            session.start(task)
+
+    def _own_task(self, task: asyncio.Task[Any], label: str) -> None:
         self._tasks.add(task)
+        self._task_labels[task] = label
         task.add_done_callback(self._finish_task)
-        if modal is not None:
-            modal.preliminary_task = task
 
     def _finish_task(self, task: asyncio.Task[Any]) -> None:
         self._tasks.discard(task)
-        self.cog._observe_background_task(task, "manual evidence action")
+        label = self._task_labels.pop(task, "manual evidence action")
+        self.cog._observe_background_task(task, label)
 
     async def _run_preliminary(
         self,
         interaction: discord.Interaction,
         source_message: discord.Message,
         selection: EvidenceSelection,
+        session: PunishmentDetailsSession | None = None,
     ) -> PreliminaryResult | None:
         guild = source_message.guild
         prepared = await self._prepare_preliminary(
@@ -381,12 +502,12 @@ class ManualEvidenceController:
         if prepared is None:
             return None
         guild_settings = prepared.settings
-        logs_channel = prepared.logs_channel
+        evidence_channel = prepared.evidence_channel
         member = prepared.member
 
         try:
             evidence = await _publish_evidence(
-                logs_channel,
+                evidence_channel,
                 source_message,
                 interaction.user,
                 selection,
@@ -429,18 +550,37 @@ class ManualEvidenceController:
         try:
             await _update_evidence(result)
         except discord.HTTPException:
-            await interaction.followup.send(
+            await self._send_preliminary_followup(
+                interaction,
                 "Evidence was saved and the source message was deleted, but "
                 "the evidence summary could not be updated.\n"
                 f"{evidence.primary.jump_url}",
-                ephemeral=True,
+                session,
             )
         else:
-            await interaction.followup.send(
+            await self._send_preliminary_followup(
+                interaction,
                 f"Evidence saved and the source message was deleted.\n{evidence.primary.jump_url}",
-                ephemeral=True,
+                session,
             )
         return result
+
+    @staticmethod
+    async def _send_preliminary_followup(
+        interaction: discord.Interaction,
+        content: str,
+        session: PunishmentDetailsSession | None,
+    ) -> None:
+        if session is None or not session.active:
+            await interaction.followup.send(content, ephemeral=True)
+            return
+        message = await interaction.followup.send(
+            content,
+            ephemeral=True,
+            view=session.recovery_view,
+            wait=True,
+        )
+        await session.attach_recovery_message(message)
 
     async def _prepare_preliminary(
         self,
@@ -450,9 +590,7 @@ class ManualEvidenceController:
     ) -> PreliminaryContext | None:
         guild = source_message.guild
         member = await _resolve_source_member(guild, source_message.author)
-        selected_punishment = (
-            selection.mement or selection.mute or selection.member_action is not MemberAction.NONE
-        )
+        selected_punishment = selection.mement or selection.member_action is not MemberAction.NONE
         if selected_punishment and member is None:
             await interaction.followup.send(
                 "The source author is no longer available as a server member. "
@@ -476,12 +614,12 @@ class ManualEvidenceController:
 
         raw_config = await self.cog.config.guild(guild).all()
         guild_settings = GuildSettings.from_mapping(raw_config)
-        logs_channel = (
-            guild.get_channel(guild_settings.logs_channel)
-            if guild_settings.logs_channel is not None
+        evidence_channel = (
+            guild.get_channel(guild_settings.manual_evidence_channel)
+            if guild_settings.manual_evidence_channel is not None
             else None
         )
-        if logs_channel is None:
+        if evidence_channel is None:
             await interaction.followup.send(
                 "Evidence could not be saved. The source message was not deleted.",
                 ephemeral=True,
@@ -492,7 +630,7 @@ class ManualEvidenceController:
         if callable(permission_check):
             missing = permission_check(
                 guild,
-                logs_channel,
+                evidence_channel,
                 read_history=True,
                 embed_links=True,
                 attach_files=True,
@@ -507,7 +645,7 @@ class ManualEvidenceController:
             if missing is not None:
                 await interaction.followup.send(missing, ephemeral=True)
                 return None
-        return PreliminaryContext(guild_settings, logs_channel, member)
+        return PreliminaryContext(guild_settings, evidence_channel, member)
 
     @staticmethod
     async def _apply_preliminary_mement(
@@ -555,19 +693,33 @@ class ManualEvidenceController:
                 duration_seconds = parse_mute_duration(duration_label)
             except ValueError:
                 defaults = {name: field.value for name, field in modal.inputs.items()}
-                retry = PunishmentDetailsModal(
-                    self,
-                    modal.preliminary_task,
-                    modal.source_message,
-                    modal.selection,
+                reopened = await modal.session.send_modal(
+                    interaction,
                     title="Invalid mute duration. Try again",
                     defaults=defaults,
                 )
-                await interaction.response.send_modal(retry)
+                if not reopened:
+                    await interaction.response.send_message(
+                        "Punishment details are no longer active.",
+                        ephemeral=True,
+                    )
                 return
 
+        if not await modal.session.claim():
+            await interaction.response.send_message(
+                "Punishment details are no longer active.",
+                ephemeral=True,
+            )
+            return
         await interaction.response.defer(ephemeral=True)
-        preliminary = await modal.preliminary_task
+        preliminary_task = modal.session.preliminary_task
+        if preliminary_task is None:
+            await interaction.followup.send(
+                "Punishments were not applied because evidence collection did not start.",
+                ephemeral=True,
+            )
+            return
+        preliminary = await preliminary_task
         if preliminary is None:
             await interaction.followup.send(
                 "Punishments were not applied because evidence collection failed.",
@@ -595,7 +747,7 @@ class ManualEvidenceController:
         if independent_actions:
             await asyncio.gather(*independent_actions)
 
-        if modal.selection.member_action is not MemberAction.NONE:
+        if modal.selection.member_action in (MemberAction.KICK, MemberAction.BAN):
             reason = modal.inputs["member_action_reason"].value.strip()
             await self._apply_member_action(preliminary, reason)
 
@@ -609,6 +761,42 @@ class ManualEvidenceController:
             return
         await interaction.followup.send(
             f"Selected punishments were processed.\n{preliminary.evidence.primary.jump_url}",
+            ephemeral=True,
+        )
+
+    async def expire_details(self, session: PunishmentDetailsSession) -> None:
+        preliminary_task = session.preliminary_task
+        if preliminary_task is None:
+            return
+        preliminary = await preliminary_task
+        if preliminary is None:
+            return
+
+        selection = session.selection
+        if selection.mement and "Memen't: Applied" in preliminary.outcomes:
+            _set_action_outcome(
+                preliminary.outcomes,
+                "Memen't notification:",
+                "Memen't notification: Cancelled because no reason was submitted",
+            )
+        if selection.member_action is not MemberAction.NONE:
+            action = selection.member_action.value.title()
+            _set_action_outcome(
+                preliminary.outcomes,
+                f"{action}:",
+                f"{action}: Cancelled because details were not submitted",
+            )
+        try:
+            await _update_evidence(preliminary)
+        except discord.HTTPException:
+            await session.interaction.followup.send(
+                "Punishment details expired, but the evidence summary could not be updated.",
+                ephemeral=True,
+            )
+            return
+        await session.interaction.followup.send(
+            "Punishment details expired. No pending punishments were applied.\n"
+            f"{preliminary.evidence.primary.jump_url}",
             ephemeral=True,
         )
 
@@ -632,7 +820,7 @@ class ManualEvidenceController:
         try:
             await channel.send(
                 f"<@{target.id}> received memen't from <@{moderator.id}>.\nReason: {reason}",
-                allowed_mentions=_moderation_mentions(target, moderator),
+                allowed_mentions=_target_only_mentions(target),
             )
         except discord.HTTPException:
             result.outcomes.append("Memen't notification: Failed")
@@ -778,30 +966,32 @@ class ManualEvidenceController:
 
         raw_config = await self.cog.config.guild(guild).all()
         settings = GuildSettings.from_mapping(raw_config)
-        logs_channel = (
-            guild.get_channel(settings.logs_channel) if settings.logs_channel is not None else None
+        evidence_channel = (
+            guild.get_channel(settings.manual_evidence_channel)
+            if settings.manual_evidence_channel is not None
+            else None
         )
-        if logs_channel is None:
+        if evidence_channel is None:
             await interaction.response.send_message(
-                "The Honeypot logs channel is not configured.",
+                "The manual evidence channel is not configured.",
                 ephemeral=True,
             )
             return
-        if logs_channel.id == source_message.channel.id:
+        if evidence_channel.id == source_message.channel.id:
             await interaction.response.send_message(
                 "Messages in the evidence channel cannot be added as evidence.",
                 ephemeral=True,
             )
             return
-        if not self.cog._channel_is_private(guild, logs_channel):
+        if not self.cog._channel_is_private(guild, evidence_channel):
             await interaction.response.send_message(
-                "The Honeypot logs channel must be private.",
+                "The manual evidence channel must be private.",
                 ephemeral=True,
             )
             return
         missing = self.cog._missing_channel_permissions(
             guild,
-            logs_channel,
+            evidence_channel,
             read_history=True,
             embed_links=True,
             attach_files=True,
@@ -845,7 +1035,7 @@ class ManualEvidenceController:
 
 
 async def _publish_evidence(
-    logs_channel: Any,
+    evidence_channel: Any,
     source_message: discord.Message,
     moderator: Any,
     selection: EvidenceSelection,
@@ -873,7 +1063,7 @@ async def _publish_evidence(
             source_deletion="Pending",
             content_override="[Stored in message.txt]",
         )
-    primary = await logs_channel.send(
+    primary = await evidence_channel.send(
         content=rendered,
         allowed_mentions=discord.AllowedMentions.none(),
     )
@@ -883,7 +1073,7 @@ async def _publish_evidence(
             [await attachment.to_file(use_cached=True) for attachment in source_message.attachments]
         )
         for start in range(0, len(files), 10):
-            part = await logs_channel.send(
+            part = await evidence_channel.send(
                 content=f"Evidence files for source message {source_message.id}.",
                 files=files[start : start + 10],
                 allowed_mentions=discord.AllowedMentions.none(),
@@ -942,19 +1132,26 @@ def _moderation_mentions(target: Any, moderator: Any) -> discord.AllowedMentions
     )
 
 
+def _target_only_mentions(target: Any) -> discord.AllowedMentions:
+    return discord.AllowedMentions(
+        everyone=False,
+        roles=False,
+        users=[target],
+        replied_user=False,
+    )
+
+
 def _initial_action_outcomes(selection: EvidenceSelection) -> list[str]:
     outcomes = []
     if selection.mement:
         outcomes.append("Memen't: Pending")
-    if selection.mute:
-        outcomes.append("Mute: Waiting for details")
     if selection.member_action is not MemberAction.NONE:
         outcomes.append(f"{selection.member_action.value.title()}: Waiting for details")
     return outcomes
 
 
 def _evidence_result_reserve(selection: EvidenceSelection) -> int:
-    reason_count = int(selection.mement) + int(selection.mute)
+    reason_count = int(selection.mement)
     if selection.member_action is not MemberAction.NONE:
         reason_count += 1
     return reason_count * (MAX_REASON_LENGTH + 150)
@@ -977,7 +1174,8 @@ async def show_status(cog: Any, ctx: Any) -> None:
     role = ctx.guild.get_role(MEMENT_ROLE_ID)
     await ctx.send(
         "Manual evidence settings\n"
-        f"Evidence channel: {_channel_label(ctx.guild, guild_settings.logs_channel)}\n"
+        "Evidence channel: "
+        f"{_channel_label(ctx.guild, guild_settings.manual_evidence_channel)}\n"
         f"Memes channel: {_channel_label(ctx.guild, guild_settings.manual_evidence_memes_channel)}\n"
         "Memen't notification channel: "
         f"{_channel_label(ctx.guild, guild_settings.manual_evidence_mement_notification_channel)}\n"
@@ -998,6 +1196,24 @@ async def set_memes_channel(cog: Any, ctx: Any, target: discord.TextChannel) -> 
         return
     await cog.config.guild(ctx.guild).manual_evidence_memes_channel.set(target.id)
     await ctx.send(f"Manual evidence memes channel set to {target.mention}.")
+
+
+async def set_evidence_channel(cog: Any, ctx: Any, target: discord.TextChannel) -> None:
+    if not cog._channel_is_private(ctx.guild, target):
+        await ctx.send("The manual evidence channel must be private.")
+        return
+    missing = cog._missing_channel_permissions(
+        ctx.guild,
+        target,
+        read_history=True,
+        embed_links=True,
+        attach_files=True,
+    )
+    if missing is not None:
+        await ctx.send(missing)
+        return
+    await cog.config.guild(ctx.guild).manual_evidence_channel.set(target.id)
+    await ctx.send(f"Manual evidence channel set to {target.mention}.")
 
 
 async def set_mement_notification_channel(
@@ -1033,8 +1249,6 @@ def _render_evidence(
     selected = []
     if selection.mement:
         selected.append("Memen't")
-    if selection.mute:
-        selected.append("Mute")
     if selection.member_action is not MemberAction.NONE:
         selected.append(selection.member_action.value.title())
     action_label = ", ".join(selected) if selected else "None"
@@ -1060,6 +1274,7 @@ def _render_evidence(
 async def clear_deleted_channel(cog: Any, channel: Any) -> None:
     guild_config = cog.config.guild(channel.guild)
     for name in (
+        "manual_evidence_channel",
         "manual_evidence_memes_channel",
         "manual_evidence_mement_notification_channel",
     ):

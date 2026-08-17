@@ -1378,6 +1378,15 @@ class Honeypot(Cog):
         """Set the channel where the memen't action is available."""
         return await manual_evidence.set_memes_channel(self, ctx, target)
 
+    @manual_evidence_settings.command(name="channel")
+    async def manual_evidence_channel(
+        self,
+        ctx: commands.Context,
+        target: discord.TextChannel,
+    ) -> None:
+        """Set the private channel used for manual evidence."""
+        return await manual_evidence.set_evidence_channel(self, ctx, target)
+
     @manual_evidence_settings.command(name="mement_notification_channel")
     async def manual_evidence_mement_notification_channel(
         self,

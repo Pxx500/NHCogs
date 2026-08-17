@@ -26,6 +26,7 @@ EXPECTED_GUILD_DEFAULTS = {
     "fallback_action": "review",
     "dry_run": False,
     "logs_channel": None,
+    "manual_evidence_channel": None,
     "manual_evidence_memes_channel": None,
     "manual_evidence_mement_notification_channel": None,
     "honeypot_channel": None,
