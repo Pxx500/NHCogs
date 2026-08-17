@@ -2,8 +2,8 @@
     "author": ["Pxx500"],
     "name": "Honeypot",
     "install_msg": "Thank you for installing this cog!\nDo `[p]help Honeypot` to get the list of commands and their description.",
-    "short": "Detect and review suspicious activity with honeypot channels, signal aggregation, image scanning, and join monitoring.",
-    "description": "Protect a server with honeypot channels and join monitoring, aggregate suspicious messages into moderator cases, preserve review evidence, scan images, and execute automatic or moderator-approved actions.",
+    "short": "Detect and review suspicious activity with honeypot channels, manual evidence capture, image scanning, and join monitoring.",
+    "description": "Protect a server with honeypot channels and join monitoring, capture manual or automated moderation evidence, scan images, and execute automatic or moderator-approved actions.",
     "tags": [
         "channel",
         "bots",
