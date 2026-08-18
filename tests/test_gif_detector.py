@@ -1528,7 +1528,11 @@ class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
                     gif_detector_retention_seconds=12,
                 )
                 cog._send_config_dump = mock.AsyncMock()
-                configured_channel = SimpleNamespace(id=10, mention="#gifs")
+                configured_channel = SimpleNamespace(
+                    id=10,
+                    name="gifs",
+                    mention="<#10>",
+                )
                 guild = SimpleNamespace(
                     id=1,
                     get_channel=lambda channel_id: (

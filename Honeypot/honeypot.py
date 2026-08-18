@@ -117,8 +117,6 @@ JoinwatchSelection = joinwatch.JoinwatchSelection
 select_due_joinwatch_assignments = joinwatch.select_due_joinwatch_assignments
 
 
-ImageScanDecision = imagescan.ImageScanDecision
-IMAGE_SCAN_DECISIONS = imagescan.IMAGE_SCAN_DECISIONS
 KICK_FAIL_WARNING_REASON = "Suspicious activity: target left before the kick could be applied."
 
 
@@ -349,13 +347,6 @@ class Honeypot(Cog):
         reason: str,
     ) -> bool:
         return await detection._remove_review_mute_role(self, member, role, reason)
-
-    def _honeypot_channel_ids(
-        self,
-        honeypot_channels: typing.Iterable[object],
-        legacy_channel_id: object,
-    ) -> list[int]:
-        return detection._honeypot_channel_ids(self, honeypot_channels, legacy_channel_id)
 
     async def _send_config_dump(
         self,
@@ -739,8 +730,12 @@ class Honeypot(Cog):
     def _format_channel_setting(self, guild: discord.Guild, channel_id: int | None) -> str:
         channel = self._get_text_channel_or_thread(guild, channel_id)
         if channel is not None:
-            return f"{channel.mention} ({channel.id})"
-        return _("not set") if channel_id is None else _("missing ({id})").format(id=channel_id)
+            return f"#{channel.name}"
+        return (
+            _("not set")
+            if channel_id is None
+            else _("missing channel ({id})").format(id=channel_id)
+        )
 
     def _format_role_setting(self, guild: discord.Guild, role_id: int | None) -> str:
         role = guild.get_role(role_id) if role_id else None
@@ -894,8 +889,24 @@ class Honeypot(Cog):
         if self._console_log_buffer in root_logger.handlers:
             root_logger.removeHandler(self._console_log_buffer)
 
+    async def _prune_unknown_guild_config(self) -> None:
+        registered_keys = settings.DEFAULTS.keys()
+        for guild_id, values in (await self.config.all_guilds()).items():
+            unknown_keys = sorted(set(values).difference(registered_keys))
+            if not unknown_keys:
+                continue
+            guild_config = self.config.guild_from_id(guild_id)
+            for key in unknown_keys:
+                await guild_config.clear_raw(key)
+            log.info(
+                "Removed unknown Honeypot config keys for guild %s: %s",
+                guild_id,
+                ", ".join(unknown_keys),
+            )
+
     async def cog_load(self) -> None:
         await super().cog_load()
+        await self._prune_unknown_guild_config()
         await self._init_firstpost_seen_store()
         await self._init_imagescan_store()
         await self._message_registry.initialize()
@@ -1715,12 +1726,6 @@ class Honeypot(Cog):
     ) -> None:
         return await channel_routing.configure_single(self, ctx, "bait_role", target)
 
-    @channels.command(name="image-scan")
-    async def channels_image_scan(
-        self, ctx: commands.Context, target: discord.TextChannel | discord.Thread = None
-    ) -> None:
-        return await channel_routing.configure_single(self, ctx, "image_scan", target)
-
     @channels.command(name="gif-debug")
     async def channels_gif_debug(
         self, ctx: commands.Context, target: discord.TextChannel | discord.Thread = None
@@ -1818,20 +1823,6 @@ class Honeypot(Cog):
     async def imagescan_remove(self, ctx: commands.Context, identifier: str) -> None:
         """Remove an image sample and its stored file from the active dataset."""
         return await imagescan.imagescan_remove(self, ctx, identifier)
-
-    @debug_imagescan.command(name="legacy_toggle")
-    async def imagescan_toggle(self, ctx: commands.Context, value: bool = None) -> None:
-        """Enable or disable image shadow reviews."""
-        return await imagescan.imagescan_toggle(self, ctx, value)
-
-    @imagescan.command(name="channel")
-    async def imagescan_channel(
-        self,
-        ctx: commands.Context,
-        channel: discord.TextChannel | discord.Thread = None,
-    ) -> None:
-        """Set the channel for image shadow reviews."""
-        return await channel_routing.configure_single(self, ctx, "image_scan", channel)
 
     @imagescan.group(name="detector", invoke_without_command=True)
     async def imagescan_detector(self, ctx: commands.Context) -> None:

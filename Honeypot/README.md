@@ -87,7 +87,6 @@ By default, three GIFs from one member inside a rolling 60-second window trigger
 | `!honeypot channels manual-evidence [channel]` | Show or set the private manual evidence destination |
 | `!honeypot channels joinwatch [channel]` | Show or set the JoinWatch destination |
 | `!honeypot channels bait-role [channel]` | Show or set the bait-role destination |
-| `!honeypot channels image-scan [channel]` | Show or set the image scan destination |
 | `!honeypot channels gif-debug [channel]` | Show or set the GIF diagnostics destination |
 | `!honeypot channels mement-notifications [channel]` | Show or set the memen't notification destination |
 | `!honeypot channels memes [channel]` | Show or set the memes source channel |
@@ -169,7 +168,6 @@ Detection cases expire 24 hours after the first detection. This lifetime is fixe
 | `!honeypot imagescan dropfile <identifier>` | Remove a stored image file while keeping its hashes active |
 | `!honeypot imagescan rebuild` | Recompute image detector threshold state |
 | `!honeypot imagescan status` | Show image detector settings, samples, and timing |
-| `!honeypot imagescan channel [channel]` | Show or set the image scan destination |
 | `!honeypot imagescan detector toggle <bool>` | Enable or disable production image detection |
 | `!honeypot imagescan detector action <none\|review\|kick\|ban>` | Action for image detector matches |
 | `!honeypot imagescan detector threshold <0-100>` | Maximum image hash distance |

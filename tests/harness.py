@@ -30,7 +30,6 @@ EXPECTED_GUILD_DEFAULTS = {
     "manual_evidence_channel": None,
     "manual_evidence_memes_channel": None,
     "manual_evidence_mement_notification_channel": None,
-    "honeypot_channel": None,
     "honeypot_channels": [],
     "mute_role": None,
     "purge_backward_seconds": 60,
@@ -43,8 +42,6 @@ EXPECTED_GUILD_DEFAULTS = {
     "spam_action": "review",
     "spam_window_seconds": 10,
     "spam_min_channels": 2,
-    "imagescan_enabled": False,
-    "imagescan_channel": None,
     "imagescan_detector_enabled": False,
     "imagescan_detector_action": "review",
     "imagescan_detector_threshold": 20,
@@ -211,12 +208,16 @@ class _LoopStub:
 
 
 class _GuildConfig:
-    def __init__(self, values, stats):
+    def __init__(self, defaults, values, stats):
+        self._defaults = defaults
         self._values = values
         self._stats = stats
 
     async def all(self):
-        return dict(self._values)
+        return {**self._defaults, **self._values}
+
+    async def clear_raw(self, key):
+        self._values.pop(str(key), None)
 
     @asynccontextmanager
     async def stats(self):
@@ -226,6 +227,7 @@ class _GuildConfig:
 class _Config:
     def __init__(self):
         self.defaults = {}
+        self._guilds = {}
         self._stats = {}
 
     def register_guild(self, **defaults):
@@ -235,7 +237,17 @@ class _Config:
         return self.guild_from_id(guild.id)
 
     def guild_from_id(self, guild_id):
-        return _GuildConfig(self.defaults, self._stats)
+        return _GuildConfig(
+            self.defaults,
+            self._guilds.setdefault(guild_id, {}),
+            self._stats,
+        )
+
+    async def all_guilds(self):
+        return {
+            guild_id: {**self.defaults, **values}
+            for guild_id, values in self._guilds.items()
+        }
 
 
 class _Cog:

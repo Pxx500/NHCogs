@@ -1054,8 +1054,7 @@ def _format_channels(cog: Any, guild: Any, channel_ids: list[int]) -> str:
         return _("Not configured")
     labels = []
     for channel_id in channel_ids[:20]:
-        channel = cog._get_text_channel_or_thread(guild, channel_id)
-        labels.append(channel.mention if channel is not None else _("Unknown channel"))
+        labels.append(cog._format_channel_setting(guild, channel_id))
     remaining = len(channel_ids) - len(labels)
     if remaining:
         labels.append(_("… and {count} more").format(count=remaining))

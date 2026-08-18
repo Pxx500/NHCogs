@@ -4,7 +4,7 @@ signals are gathered from a message before the pipeline acts on them.
 
 import asyncio
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import get_ident
@@ -309,6 +309,68 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([signal.detector for signal in hit], ["honeypot"])
                 self.assertEqual(hit[0].action, honeypot.ActionIntent.BAN)
                 self.assertEqual(miss, ())
+
+    async def test_legacy_honeypot_channel_field_does_not_enable_detection(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog._is_forward_purge_active = mock.Mock(return_value=False)
+                cog._suspicion_reasons = mock.AsyncMock(
+                    return_value=["young account"]
+                )
+
+                signals = await cog._collect_detection_signals(
+                    self._message(channel_id=9),
+                    honeypot.GuildSettings.from_mapping(
+                        {"honeypot_channel": 9, "action": "ban"}
+                    ),
+                )
+
+                self.assertEqual(signals, ())
+
+    async def test_explicitly_empty_detection_lists_do_not_restore_defaults(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                settings = honeypot.GuildSettings.from_mapping(
+                    {
+                        "scam_keywords": [],
+                        "attachment_patterns": [],
+                    }
+                )
+                author = SimpleNamespace(
+                    created_at=datetime.now(timezone.utc) - timedelta(days=30)
+                )
+                keyword_message = self._message(content="free nitro")
+                keyword_message.author = author
+                attachment_message = self._message(
+                    attachments=[
+                        SimpleNamespace(
+                            content_type="application/octet-stream",
+                            filename="image.png",
+                        ),
+                        SimpleNamespace(
+                            content_type="application/octet-stream",
+                            filename="image (1).png",
+                        ),
+                    ]
+                )
+                attachment_message.author = author
+
+                keyword_reasons = await cog._suspicion_reasons(
+                    keyword_message, settings
+                )
+                attachment_reasons = await cog._suspicion_reasons(
+                    attachment_message, settings
+                )
+
+                self.assertNotIn("Matched keywords: free nitro", keyword_reasons)
+                self.assertFalse(
+                    any(
+                        reason.startswith("Matched attachment rules:")
+                        for reason in attachment_reasons
+                    )
+                )
 
     async def test_whitelist_bypass_still_collects_non_actionable_honeypot_signal(self):
         with TemporaryDirectory() as directory:

@@ -340,6 +340,45 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                     "??honeypot channels gif-detector remove [channel]", rendered
                 )
 
+    async def test_channels_overview_uses_names_without_repeating_channel_ids(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                channel = SimpleNamespace(
+                    id=77,
+                    name="automod-filter",
+                    mention="<#77>",
+                )
+                guild = SimpleNamespace(
+                    get_channel=mock.Mock(
+                        side_effect=lambda channel_id: (
+                            channel if channel_id == channel.id else None
+                        )
+                    )
+                )
+                configured = dict(honeypot.settings.DEFAULTS)
+                configured["errors_channel"] = channel.id
+                cog = object.__new__(honeypot.Honeypot)
+                cog.bot = SimpleNamespace(get_channel=mock.Mock(return_value=None))
+                cog.config = SimpleNamespace(
+                    guild=mock.Mock(
+                        return_value=SimpleNamespace(
+                            all=mock.AsyncMock(return_value=configured)
+                        )
+                    )
+                )
+                cog._send_config_dump = mock.AsyncMock()
+                ctx = SimpleNamespace(guild=guild, clean_prefix="!")
+
+                await honeypot.Honeypot.channels.callback(cog, ctx)
+
+                entries = cog._send_config_dump.await_args.args[2]
+                rendered = "\n".join(
+                    f"{label}\n{value}" for label, value in entries
+                )
+                self.assertIn("Errors: #automod-filter", rendered)
+                self.assertNotIn("<#77>", rendered)
+                self.assertNotIn("(77)", rendered)
+
     async def test_gif_scope_paths_share_permission_validation(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -423,7 +462,7 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                 channel = SimpleNamespace(send=mock.AsyncMock())
                 configured = dict(honeypot.settings.DEFAULTS)
                 configured["errors_channel"] = 77
-                configured["logs_channel"] = 88
+                configured["review_channel"] = 88
                 cog = object.__new__(honeypot.Honeypot)
                 cog.bot = SimpleNamespace(get_guild=mock.Mock(return_value=guild))
                 cog.config = SimpleNamespace(
