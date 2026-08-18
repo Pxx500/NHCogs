@@ -1347,9 +1347,10 @@ async def on_member_update(cog, before: discord.Member, after: discord.Member) -
                 mention=after.mention,
                 id=after.id,
             )
-        logs_channel_id = guild_settings.logs_channel
-        logs_channel = cog._get_text_channel_or_thread(after.guild, logs_channel_id)
-        if logs_channel is not None:
+        bait_channel = cog._get_text_channel_or_thread(
+            after.guild, guild_settings.baitrole_channel
+        )
+        if bait_channel is not None:
             embed = discord.Embed(
                 title=_("Bait role triggered"),
                 description=description,
@@ -1358,7 +1359,10 @@ async def on_member_update(cog, before: discord.Member, after: discord.Member) -
             )
             embed.set_thumbnail(url=after.display_avatar)
             try:
-                await logs_channel.send(embed=embed)
+                await bait_channel.send(
+                    embed=embed,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
             except discord.HTTPException as exc:
                 log.debug("Failed to send bait role log for user %s in guild %s", after.id, after.guild.id)
                 await cog._record_operational_failure(
@@ -1381,24 +1385,6 @@ async def joinwatch_toggle(cog, ctx: commands.Context, value: bool = None) -> No
     else:
         await cog.config.guild(ctx.guild).joinwatch_enabled.set(value)
         await ctx.send(_("✅ Joinwatch enabled set to {value}").format(value=value))
-
-
-async def channel(cog, ctx: commands.Context, target: discord.TextChannel | discord.Thread = None) -> None:
-    if target is None:
-        v = await cog.config.guild(ctx.guild).joinwatch_channel()
-        await ctx.send(_("Joinwatch channel: {channel}").format(channel=ctx.guild.get_channel(v) if v else _("not set")))
-    else:
-        is_thread = isinstance(target, discord.Thread)
-        missing = cog._missing_channel_permissions(
-            ctx.guild,
-            target,
-            send_messages=not is_thread,
-            send_in_threads=is_thread,
-        )
-        if missing is not None:
-            raise commands.UserFeedbackCheckFailure(missing)
-        await cog.config.guild(ctx.guild).joinwatch_channel.set(target.id)
-        await ctx.send(_("✅ Joinwatch channel set to {channel.mention}").format(channel=target))
 
 
 async def joinwatch_alert_toggle(cog, ctx: commands.Context, value: bool = None) -> None:

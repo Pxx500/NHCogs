@@ -950,7 +950,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 )
                 published = []
 
-                async def publish_case(case_id, _config, _channel, **kwargs):
+                async def publish_case(case_id, _config, **kwargs):
                     snapshot = await asyncio.to_thread(
                         cog._case_store.get_case, case_id
                     )

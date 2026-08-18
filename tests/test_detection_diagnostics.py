@@ -372,7 +372,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 ).read_text(encoding="utf-8").removesuffix("\n")
                 self.assertEqual(actual, expected)
 
-    async def test_logs_rejects_thread_destination(self):
+    async def test_review_destination_rejects_threads(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 text_channel_type = type("TextChannel", (), {})
@@ -386,10 +386,10 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                     view_channel=True,
                     send_messages=True,
                 )
-                logs_setting = SimpleNamespace(set=mock.AsyncMock())
+                review_setting = SimpleNamespace(set=mock.AsyncMock())
                 cog = honeypot.Honeypot(_Bot())
                 cog.config = SimpleNamespace(
-                    guild=lambda guild: SimpleNamespace(logs_channel=logs_setting)
+                    guild=lambda guild: SimpleNamespace(review_channel=review_setting)
                 )
                 ctx = SimpleNamespace(
                     guild=SimpleNamespace(id=10, me=SimpleNamespace()),
@@ -397,11 +397,13 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 )
 
                 with self.assertRaises(honeypot.commands.UserFeedbackCheckFailure):
-                    await cog.logs(ctx, target)
+                    await honeypot.channel_routing.configure_single(
+                        cog, ctx, "review", target
+                    )
 
-                logs_setting.set.assert_not_awaited()
+                review_setting.set.assert_not_awaited()
 
-    async def test_doctor_reports_thread_logs_destination_as_invalid(self):
+    async def test_doctor_reports_thread_review_destination_as_invalid(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 text_channel_type = type("TextChannel", (), {})
@@ -423,9 +425,9 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                             return_value={
                                 "enabled": False,
                                 "action": "none",
-                                "fallback_action": "none",
+                                "fallback_action": "review",
                                 "whitelist_mode": "bypass",
-                                "logs_channel": target.id,
+                                "review_channel": target.id,
                             }
                         )
                     )
@@ -437,9 +439,9 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 await cog.honeypot_doctor(ctx)
 
                 report = "\n".join(call.args[0] for call in ctx.send.await_args_list)
-                self.assertIn("Logs channel must be a normal text channel", report)
+                self.assertIn("Review must be a normal text channel", report)
 
-    async def test_doctor_checks_thread_permissions_on_logs_fallback_destination(self):
+    async def test_doctor_checks_review_destination_thread_permissions(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 text_channel_type = type("TextChannel", (), {})
@@ -465,10 +467,9 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                             return_value={
                                 "enabled": False,
                                 "action": "none",
-                                "fallback_action": "none",
+                                "fallback_action": "review",
                                 "whitelist_mode": "bypass",
-                                "logs_channel": target.id,
-                                "review_channel": None,
+                                "review_channel": target.id,
                             }
                         )
                     )
@@ -480,7 +481,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 await cog.honeypot_doctor(ctx)
 
                 report = "\n".join(call.args[0] for call in ctx.send.await_args_list)
-                self.assertIn("Logs channel cannot host case threads", report)
+                self.assertIn("Review channel permissions", report)
                 self.assertIn("Create Public Threads", report)
 
     async def test_case_database_healthcheck_rejects_read_only_main_database(self):

@@ -503,8 +503,6 @@ async def _execute_detection_message_child(
     operation_type: OperationType,
     sequence: int,
     now: datetime,
-    *,
-    publication_channel=None,
 ) -> bool:
     operation = next(
         (
@@ -527,7 +525,6 @@ async def _execute_detection_message_child(
         await cog._execute_detection_case_operation(
             claimed,
             claim_time,
-            publication_channel=publication_channel,
         )
         return True
     return False
@@ -749,7 +746,6 @@ async def _execute_detection_case_operation(
     operation,
     now: datetime,
     *,
-    publication_channel=None,
     live_message=None,
     timings: dict[str, float] | None = None,
 ) -> None:
@@ -774,7 +770,6 @@ async def _execute_detection_case_operation(
             snapshot=snapshot,
             lease=lease,
             now=now,
-            publication_channel=publication_channel,
             live_message=live_message,
             timings=timings,
         )
@@ -1074,10 +1069,7 @@ def _resolve_unavailable_review_signals(
 ) -> tuple[DetectionSignal, ...]:
     review_available = bool(
         guild_settings.review_enabled
-        and (
-            guild_settings.review_channel is not None
-            or guild_settings.logs_channel is not None
-        )
+        and guild_settings.review_channel is not None
     )
     if review_available:
         return signals
@@ -1113,7 +1105,6 @@ async def _process_detected_message(
     cog,
     message: discord.Message,
     guild_settings: GuildSettings,
-    logs_channel: discord.TextChannel | discord.Thread | None,
     signals: tuple[DetectionSignal, ...],
     *,
     timings: dict[str, float] | None = None,
@@ -1264,7 +1255,6 @@ async def _process_detected_message(
                         child_type,
                         append.message.sequence,
                         datetime.now(timezone.utc),
-                        publication_channel=logs_channel,
                     )
                 if any(
                     operation.operation_type == OperationType.REVIEW_PUBLISH
@@ -1274,13 +1264,11 @@ async def _process_detected_message(
                     await cog._publish_detection_case(
                         append.case.case_id,
                         guild_settings.review_channel,
-                        logs_channel,
                     )
             return
         await cog._execute_detection_case_operation(
             pipeline_claim,
             datetime.now(timezone.utc),
-            publication_channel=logs_channel,
             live_message=message,
             timings=timings,
         )
@@ -1305,7 +1293,6 @@ async def _process_detected_message(
             await cog._execute_detection_case_operation(
                 review_claim,
                 datetime.now(timezone.utc),
-                publication_channel=logs_channel,
             )
         elif (
             not append.message_created
@@ -1314,7 +1301,6 @@ async def _process_detected_message(
             await cog._publish_detection_case(
                 append.case.case_id,
                 guild_settings.review_channel,
-                logs_channel,
             )
     return
 
@@ -1822,9 +1808,6 @@ async def on_message(cog, message: discord.Message) -> None:
             guild_settings = GuildSettings.from_mapping(raw_config)
             if not guild_settings.enabled:
                 return
-            logs_channel = cog._get_text_channel_or_thread(
-                message.guild, guild_settings.logs_channel
-            )
             if await cog._is_protected_member(message.author, message.guild):
                 return
             signals_started = perf_counter()
@@ -1841,7 +1824,6 @@ async def on_message(cog, message: discord.Message) -> None:
             await cog._process_detected_message(
                 message,
                 guild_settings,
-                logs_channel,
                 signals,
                 timings=timings,
                 admission_lock=admission_lock,
@@ -1966,72 +1948,6 @@ async def create(cog, ctx: commands.Context) -> None:
         if honeypot_channel.id not in channel_ids:
             channel_ids.append(honeypot_channel.id)
     await ctx.send(_("✅ Honeypot channel added: {channel.mention}").format(channel=honeypot_channel))
-
-
-async def channel_add(cog, ctx: commands.Context, target: discord.TextChannel | discord.Thread) -> None:
-    missing = cog._missing_channel_permissions(
-        ctx.guild,
-        target,
-        send_messages=False,
-        read_history=True,
-        manage_messages=True,
-    )
-    if missing is not None:
-        raise commands.UserFeedbackCheckFailure(missing)
-    raw_config = await cog.config.guild(ctx.guild).all()
-    guild_settings = GuildSettings.from_mapping(raw_config)
-    if target.id in cog._honeypot_channel_ids(
-        guild_settings.honeypot_channels,
-        guild_settings.honeypot_channel,
-    ):
-        raise commands.UserFeedbackCheckFailure(_("That channel is already a honeypot channel."))
-    async with cog.config.guild(ctx.guild).honeypot_channels() as channel_ids:
-        channel_ids.append(target.id)
-    await ctx.send(_("✅ Honeypot channel added: {channel.mention}").format(channel=target))
-
-
-async def channel_remove(cog, ctx: commands.Context, target: discord.TextChannel | discord.Thread) -> None:
-    removed = False
-    async with cog.config.guild(ctx.guild).honeypot_channels() as channel_ids:
-        while target.id in channel_ids:
-            channel_ids.remove(target.id)
-            removed = True
-    if await cog.config.guild(ctx.guild).honeypot_channel() == target.id:
-        await cog.config.guild(ctx.guild).honeypot_channel.set(None)
-        removed = True
-    if not removed:
-        raise commands.UserFeedbackCheckFailure(_("That channel is not a honeypot channel."))
-    await ctx.send(_("✅ Honeypot channel removed: {channel.mention}").format(channel=target))
-
-
-async def channel_list(cog, ctx: commands.Context) -> None:
-    raw_config = await cog.config.guild(ctx.guild).all()
-    guild_settings = GuildSettings.from_mapping(raw_config)
-    channel_ids = cog._honeypot_channel_ids(
-        guild_settings.honeypot_channels,
-        guild_settings.honeypot_channel,
-    )
-    await ctx.send(
-        _("Honeypot channels:\n{channels}").format(
-            channels=_format_honeypot_channel_list(cog, ctx.guild, channel_ids),
-        )
-    )
-
-
-async def logs(cog, ctx: commands.Context, target: discord.TextChannel = None) -> None:
-    if target is None:
-        v = await cog.config.guild(ctx.guild).logs_channel()
-        await ctx.send(_("Logs channel: {channel}").format(channel=ctx.guild.get_channel(v) if v else _("not set")))
-    else:
-        if not isinstance(target, discord.TextChannel):
-            raise commands.UserFeedbackCheckFailure(
-                _("The logs channel must be a normal text channel.")
-            )
-        missing = cog._missing_channel_permissions(ctx.guild, target)
-        if missing is not None:
-            raise commands.UserFeedbackCheckFailure(missing)
-        await cog.config.guild(ctx.guild).logs_channel.set(target.id)
-        await ctx.send(_("✅ Logs channel set to {channel.mention}").format(channel=target))
 
 
 async def punishment_mute_role(cog, ctx: commands.Context, role: discord.Role = None) -> None:
@@ -2211,33 +2127,6 @@ async def review_toggle(cog, ctx: commands.Context, value: bool = None) -> None:
     else:
         await cog.config.guild(ctx.guild).review_enabled.set(value)
         await ctx.send(_("✅ Review enabled set to {value}").format(value=value))
-
-
-async def review_channel(
-    cog, ctx: commands.Context, target: discord.TextChannel = None
-) -> None:
-    if target is None:
-        v = await cog.config.guild(ctx.guild).review_channel()
-        await ctx.send(_("Review channel: {channel}").format(channel=ctx.guild.get_channel(v) if v else _("not set")))
-    else:
-        if not isinstance(target, discord.TextChannel):
-            raise commands.UserFeedbackCheckFailure(
-                _("The review destination must be a normal text channel.")
-            )
-        missing = cog._missing_channel_permissions(
-            ctx.guild,
-            target,
-            read_history=True,
-            create_public_threads=True,
-            send_in_threads=True,
-            embed_links=True,
-            attach_files=True,
-            manage_threads=True,
-        )
-        if missing is not None:
-            raise commands.UserFeedbackCheckFailure(missing)
-        await cog.config.guild(ctx.guild).review_channel.set(target.id)
-        await ctx.send(_("✅ Review channel set to {channel.mention}").format(channel=target))
 
 
 async def review_kick_fail_warn(cog, ctx: commands.Context, value: str = None) -> None:
@@ -2437,12 +2326,6 @@ async def config_channel(cog, ctx: commands.Context) -> None:
                         guild_settings.honeypot_channels,
                         guild_settings.honeypot_channel,
                     ),
-                ),
-            ),
-            (
-                _("Logs channel"),
-                cog._format_channel_setting(
-                    ctx.guild, guild_settings.logs_channel
                 ),
             ),
         ],
@@ -2666,12 +2549,6 @@ async def config_all(cog, ctx: commands.Context) -> None:
                         guild_settings.honeypot_channels,
                         guild_settings.honeypot_channel,
                     ),
-                ),
-            ),
-            (
-                _("Logs channel"),
-                cog._format_channel_setting(
-                    ctx.guild, guild_settings.logs_channel
                 ),
             ),
             (_("Review"), cog._format_bool_setting(guild_settings.review_enabled)),

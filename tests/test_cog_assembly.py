@@ -61,6 +61,65 @@ class HoneypotMetadataTests(unittest.TestCase):
 
 class CogAssemblyContractTests(unittest.TestCase):
 
+    def test_channel_configuration_exposes_central_semantic_categories(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                command_names = {
+                    command.qualified_name
+                    for command in honeypot.Honeypot.__cog_commands__
+                }
+
+        self.assertIn("honeypot channels", command_names)
+        self.assertNotIn("honeypot channel", command_names)
+        self.assertNotIn("honeypot channel logs", command_names)
+        for category in (
+            "review",
+            "errors",
+            "manual-evidence",
+            "joinwatch",
+            "bait-role",
+            "image-scan",
+            "gif-debug",
+            "mement-notifications",
+        ):
+            with self.subTest(category=category):
+                self.assertIn(f"honeypot channels {category}", command_names)
+
+    def test_every_registered_channel_category_has_declared_command_paths(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                command_names = {
+                    command.qualified_name
+                    for command in honeypot.Honeypot.__cog_commands__
+                }
+                categories = honeypot.channel_routing.CHANNEL_CATEGORIES
+
+        for category in categories:
+            with self.subTest(category=category.key, path="central"):
+                self.assertIsNotNone(category.central_command)
+                self.assertIn(
+                    f"honeypot channels {category.central_command}",
+                    command_names,
+                    f"Channel category {category.key} is missing its central command",
+                )
+            if category.module_command is not None:
+                with self.subTest(category=category.key, path="module"):
+                    self.assertIn(
+                        f"honeypot {category.module_command}",
+                        command_names,
+                        f"Channel category {category.key} is missing its module command",
+                    )
+
+    def test_gif_debug_exposes_runtime_toggle(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                command_names = {
+                    command.qualified_name
+                    for command in honeypot.Honeypot.__cog_commands__
+                }
+
+        self.assertIn("honeypot gifdetector debug toggle", command_names)
+
     def test_command_listener_and_loop_assembly_matches_contract(self):
         contract = json.loads(
             (Path(__file__).with_name("honeypot_command_contract.json")).read_text(
@@ -193,11 +252,12 @@ class CogAssemblyContractTests(unittest.TestCase):
         a new split row updates them deliberately.
         """
         expected_counts = {
-            "detection": 79,
-            "diagnostics": 10,
-            "gif_detector": 10,
-            "imagescan": 23,
-            "joinwatch": 16,
+            "channel_routing": 29,
+            "detection": 74,
+            "diagnostics": 12,
+            "gif_detector": 9,
+            "imagescan": 22,
+            "joinwatch": 15,
             "review_publication": 13,
         }
         tree = ast.parse((PACKAGE_DIR / "honeypot.py").read_text(encoding="utf-8"))
@@ -283,11 +343,23 @@ class CogAssemblyContractTests(unittest.TestCase):
                     self.assertIsNotNone(module, f"{module_name} is not importable")
                     for method_name, target_name, first_argument in items:
                         with self.subTest(shell=f"{module_name}.{method_name}"):
-                            self.assertEqual(
-                                target_name,
-                                method_name,
-                                "shell delegates to a differently named twin",
-                            )
+                            if module_name == "channel_routing":
+                                self.assertIn(
+                                    target_name,
+                                    {
+                                        "add_multiple",
+                                        "configure_single",
+                                        "list_multiple",
+                                        "remove_multiple",
+                                        "send_overview",
+                                    },
+                                )
+                            else:
+                                self.assertEqual(
+                                    target_name,
+                                    method_name,
+                                    "shell delegates to a differently named twin",
+                                )
                             self.assertTrue(
                                 isinstance(first_argument, ast.Name)
                                 and first_argument.id == "self",

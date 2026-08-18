@@ -59,7 +59,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 message = self._message(honeypot, attachment_count=0)
                 self._configure_public_boundary(
                     cog,
-                    {"enabled": True, "logs_channel": None},
+                    {"enabled": True},
                 )
                 cog._observe_message = mock.AsyncMock(
                     side_effect=RuntimeError("registry unavailable")
@@ -85,7 +85,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
-                            return_value={"enabled": "true", "logs_channel": None}
+                            return_value={"enabled": "true"}
                         )
                     )
                 )
@@ -123,7 +123,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     cog,
                     {
                         "enabled": True,
-                        "logs_channel": None,
                     },
                 )
                 del cog._is_protected_member
@@ -158,7 +157,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     cog,
                     {
                         "enabled": True,
-                        "logs_channel": None,
                     },
                 )
                 del cog._is_protected_member
@@ -181,7 +179,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": None,
                     "honeypot_channels": [9],
                     "whitelisted_roles": [7],
@@ -225,7 +222,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": None,
                     "honeypot_channels": [9],
                     "whitelisted_roles": [7],
@@ -284,7 +280,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": None,
                     "spam_enabled": True,
                     "spam_action": "review",
@@ -342,7 +337,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True,
                     "dry_run": True,
-                    "logs_channel": None,
                     "review_channel": None,
                     "review_enabled": True,
                     "firstpost_enabled": False,
@@ -401,7 +395,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": None,
                     "spam_enabled": False,
                     "firstpost_enabled": True,
@@ -456,7 +449,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     "enabled": True,
                     "review_enabled": True,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": None,
                     "spam_enabled": True,
                     "spam_action": "ban",
@@ -545,7 +537,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": None,
                     "spam_enabled": False,
                     "firstpost_enabled": True,
@@ -585,7 +576,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     "enabled": True,
                     "review_enabled": True,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": None,
                     "spam_enabled": False,
                     "firstpost_enabled": False,
@@ -641,7 +631,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     {
                         "enabled": True,
                         "dry_run": False,
-                        "logs_channel": None,
                         "review_channel": None,
                         "spam_enabled": False,
                         "firstpost_enabled": False,
@@ -668,7 +657,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 message = self._message(honeypot, attachment_count=0)
                 config = {
                     "enabled": True, "review_enabled": True,
-                    "dry_run": False, "logs_channel": None,
+                    "dry_run": False,
                     "review_channel": None, "spam_enabled": False,
                     "firstpost_enabled": False, "firstpost_collect_enabled": False,
                 }
@@ -705,7 +694,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     cog,
                     {
                         "enabled": True, "review_enabled": True,
-                        "dry_run": False, "logs_channel": None,
+                        "dry_run": False,
                         "review_channel": None, "spam_enabled": False,
                         "firstpost_enabled": False, "firstpost_collect_enabled": False,
                     },
@@ -743,7 +732,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     {
                         "enabled": True,
                         "dry_run": True,
-                        "logs_channel": None,
                         "review_channel": None,
                         "spam_enabled": False,
                         "firstpost_enabled": True,
@@ -775,7 +763,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     delete_error=honeypot.discord.Forbidden("manage messages denied"),
                 )
                 config = {
-                    "enabled": True, "dry_run": False, "logs_channel": None,
+                    "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": False,
                     "firstpost_enabled": True, "firstpost_action": "review",
                     "firstpost_collect_enabled": False,
@@ -821,7 +809,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 cog.bot.get_guild = lambda guild_id: message.guild
                 prior.guild = message.guild
                 config = {
-                    "enabled": True, "dry_run": False, "logs_channel": None,
+                    "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": True,
                     "spam_action": "none", "firstpost_enabled": False,
                     "firstpost_collect_enabled": False,
@@ -853,7 +841,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0, channel_id=999)
                 config = {
-                    "enabled": True, "dry_run": False, "logs_channel": None,
+                    "enabled": True, "dry_run": False,
                     "review_channel": None, "honeypot_channels": [999],
                     "whitelisted_roles": [], "fallback_action": "none",
                     "action": "none", "spam_enabled": False,
@@ -897,7 +885,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     )
 
                 config = {
-                    "enabled": True, "dry_run": False, "logs_channel": None,
+                    "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": True,
                     "spam_action": "ban", "firstpost_enabled": False,
                     "firstpost_collect_enabled": False,
@@ -957,7 +945,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 cog.bot.get_guild = lambda guild_id: first.guild
                 other.bot.get_guild = lambda guild_id: first.guild
                 config = {
-                    "enabled": True, "dry_run": False, "logs_channel": None,
+                    "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": False,
                     "firstpost_enabled": True, "firstpost_action": "ban",
                     "firstpost_collect_enabled": False,

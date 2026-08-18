@@ -82,6 +82,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     set_pinned=mock.AsyncMock(),
                     forget_channel=mock.AsyncMock(),
                 )
+                honeypot.channel_routing.clear_deleted_channel = mock.AsyncMock()
 
                 await cog.on_raw_message_delete(SimpleNamespace(message_id=10))
                 await cog.on_raw_bulk_message_delete(
@@ -97,6 +98,9 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 cog._message_registry.forget_many.assert_awaited_once_with({11, 12})
                 cog._message_registry.set_pinned.assert_awaited_once_with(13, True)
                 cog._message_registry.forget_channel.assert_awaited_once_with(15, 14)
+                honeypot.channel_routing.clear_deleted_channel.assert_awaited_once_with(
+                    cog, channel
+                )
 
     def test_fallback_keeps_diagnostic_commands_on_cog_and_exposes_implementations(self):
         implementation_names = (
@@ -247,7 +251,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_guild_settings_coerce_optional_discord_ids(self):
         raw = {
-            "logs_channel": 11,
+            "errors_channel": 11,
             "honeypot_channel": 22,
             "mute_role": "invalid",
             "imagescan_channel": 33,
@@ -261,7 +265,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertLogs("red.Honeypot", level=logging.WARNING) as captured:
                     guild_settings = honeypot.GuildSettings.from_mapping(raw)
 
-                self.assertEqual(guild_settings.logs_channel, 11)
+                self.assertEqual(guild_settings.errors_channel, 11)
                 self.assertEqual(guild_settings.honeypot_channel, 22)
                 self.assertIsNone(guild_settings.mute_role)
                 self.assertEqual(guild_settings.imagescan_channel, 33)

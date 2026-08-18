@@ -1,4 +1,4 @@
 **Honeypot doctor:**
 ❌ Honeypot action is invalid - Run `honeypot honeypot action`.
-❌ Review channel is missing - Run `honeypot review channel`.
+❌ Review channel is missing - Run `honeypot channels review`.
 ⚠️ Honeypot is disabled.
