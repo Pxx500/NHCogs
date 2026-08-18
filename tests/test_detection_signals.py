@@ -92,7 +92,6 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                     honeypot.GuildSettings.from_mapping(
                         {"review_enabled": True}
                     ),
-                    None,
                     (signal,),
                 )
 

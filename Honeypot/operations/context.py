@@ -48,7 +48,6 @@ class OperationContext:
     snapshot: CaseSnapshot
     lease: OperationLease
     now: datetime
-    publication_channel: object | None = None
     live_message: object | None = None
     timings: dict[str, float] | None = None
 

@@ -149,7 +149,8 @@ DEFAULTS: Mapping[str, object] = MappingProxyType(
         "action": None,
         "fallback_action": "review",
         "dry_run": False,
-        "logs_channel": None,
+        "errors_channel": None,
+        "maintainer_id": None,
         "manual_evidence_channel": None,
         "manual_evidence_memes_channel": None,
         "manual_evidence_mement_notification_channel": None,
@@ -180,6 +181,8 @@ DEFAULTS: Mapping[str, object] = MappingProxyType(
         "scam_keywords": SCAM_KEYWORDS.copy(),
         "attachment_patterns": DEFAULT_ATTACHMENT_PATTERNS.copy(),
         "gif_detector_enabled": False,
+        "gif_detector_debug_enabled": False,
+        "gif_detector_debug_channel": None,
         "gif_detector_animation_enabled": True,
         "gif_detector_channels": [],
         "gif_detector_secondary_message": "No gifs!",
@@ -201,6 +204,7 @@ DEFAULTS: Mapping[str, object] = MappingProxyType(
         "joinwatch_pending_role_assignments": {},
         "joinwatch_pending_roles": {},
         "baitrole_enabled": False,
+        "baitrole_channel": None,
         "baitrole_id": None,
         "baitrole_action": "ban",
     }
@@ -321,7 +325,8 @@ class GuildSettings:
     action: CoreActionOption | None
     fallback_action: FallbackActionOption
     dry_run: bool
-    logs_channel: int | None
+    errors_channel: int | None
+    maintainer_id: int | None
     manual_evidence_channel: int | None
     manual_evidence_memes_channel: int | None
     manual_evidence_mement_notification_channel: int | None
@@ -352,6 +357,8 @@ class GuildSettings:
     scam_keywords: list[str]
     attachment_patterns: list[str]
     gif_detector_enabled: bool
+    gif_detector_debug_enabled: bool
+    gif_detector_debug_channel: int | None
     gif_detector_animation_enabled: bool
     gif_detector_channels: list[int]
     gif_detector_secondary_message: str
@@ -373,6 +380,7 @@ class GuildSettings:
     joinwatch_pending_role_assignments: dict[str, dict[str, object]]
     joinwatch_pending_roles: dict[str, dict[str, object]]
     baitrole_enabled: bool
+    baitrole_channel: int | None
     baitrole_id: int | None
     baitrole_action: BaitActionOption
 
@@ -388,7 +396,8 @@ class GuildSettings:
                 raw, "fallback_action", FallbackActionOption, FallbackActionOption.REVIEW
             ),
             dry_run=_bool(raw, "dry_run"),
-            logs_channel=_optional_int(raw, "logs_channel"),
+            errors_channel=_optional_int(raw, "errors_channel"),
+            maintainer_id=_optional_int(raw, "maintainer_id"),
             manual_evidence_channel=_optional_int(raw, "manual_evidence_channel"),
             manual_evidence_memes_channel=_optional_int(
                 raw, "manual_evidence_memes_channel"
@@ -437,6 +446,10 @@ class GuildSettings:
             scam_keywords=_list(raw, "scam_keywords", str),
             attachment_patterns=_list(raw, "attachment_patterns", str),
             gif_detector_enabled=_bool(raw, "gif_detector_enabled"),
+            gif_detector_debug_enabled=_bool(raw, "gif_detector_debug_enabled"),
+            gif_detector_debug_channel=_optional_int(
+                raw, "gif_detector_debug_channel"
+            ),
             gif_detector_animation_enabled=_bool(
                 raw, "gif_detector_animation_enabled"
             ),
@@ -479,6 +492,7 @@ class GuildSettings:
             ),
             joinwatch_pending_roles=_nested_dict(raw, "joinwatch_pending_roles"),
             baitrole_enabled=_bool(raw, "baitrole_enabled"),
+            baitrole_channel=_optional_int(raw, "baitrole_channel"),
             baitrole_id=_optional_int(raw, "baitrole_id"),
             baitrole_action=_enum(
                 raw, "baitrole_action", BaitActionOption, BaitActionOption.BAN

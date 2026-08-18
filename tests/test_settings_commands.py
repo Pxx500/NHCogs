@@ -33,6 +33,34 @@ class _OverviewAllowedMentions:
         return cls.marker
 
 
+class _ListSetting:
+    def __init__(self, values):
+        self.values = values
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return self.values
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+
+class _ScalarSetting:
+    def __init__(self, value):
+        self.value = value
+
+    def __call__(self):
+        async def read():
+            return self.value
+
+        return read()
+
+    async def set(self, value):
+        self.value = value
+
+
 class ImageScanSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_threshold_defaults_in_public_threshold_query(self):
         with TemporaryDirectory() as directory:
@@ -254,7 +282,6 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
         "debug",
         "debug_imagescan",
         "honeypot_settings",
-        "channels",
         "punishment",
         "purge",
         "spam",
@@ -272,6 +299,230 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
         "bait_role",
         "config_dump",
     )
+
+    async def test_channels_overview_lists_categories_and_active_prefix_commands(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = object.__new__(honeypot.Honeypot)
+                cog.config = SimpleNamespace(
+                    guild=mock.Mock(
+                        return_value=SimpleNamespace(
+                            all=mock.AsyncMock(
+                                return_value=dict(honeypot.settings.DEFAULTS)
+                            )
+                        )
+                    )
+                )
+                cog._format_channel_setting = mock.Mock(
+                    return_value="Not configured"
+                )
+                cog._send_config_dump = mock.AsyncMock()
+                ctx = SimpleNamespace(guild=object(), clean_prefix="??")
+
+                await honeypot.Honeypot.channels.callback(cog, ctx)
+
+                cog._send_config_dump.assert_awaited_once()
+                entries = cog._send_config_dump.await_args.args[2]
+                rendered = "\n".join(
+                    f"{label}\n{value}" for label, value in entries
+                )
+                self.assertIn("Destinations", rendered)
+                self.assertIn("Sources and scopes", rendered)
+                self.assertIn("Review: Not configured", rendered)
+                self.assertIn("Errors: Not configured", rendered)
+                self.assertIn("GIF debug logging: false", rendered)
+                self.assertIn("??honeypot channels review [channel]", rendered)
+                self.assertIn("??honeypot channels gif-debug [channel]", rendered)
+                self.assertIn(
+                    "??honeypot channels honeypot add <channel>", rendered
+                )
+                self.assertIn(
+                    "??honeypot channels gif-detector remove [channel]", rendered
+                )
+
+    async def test_gif_scope_paths_share_permission_validation(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                values = []
+                guild_config = SimpleNamespace(
+                    gif_detector_channels=_ListSetting(values)
+                )
+                cog = object.__new__(honeypot.Honeypot)
+                cog.config = SimpleNamespace(
+                    guild=mock.Mock(return_value=guild_config)
+                )
+                cog._missing_channel_permissions = mock.Mock(
+                    return_value="I need `Manage Messages` in #gifs."
+                )
+                target = SimpleNamespace(
+                    id=12,
+                    parent_id=10,
+                    parent=SimpleNamespace(id=10, mention="#gifs"),
+                    mention="#thread",
+                )
+                ctx = SimpleNamespace(
+                    guild=object(),
+                    channel=target,
+                    send=mock.AsyncMock(),
+                )
+
+                for command in (
+                    honeypot.Honeypot.gif_detector_channel_add,
+                    honeypot.Honeypot.channels_gif_detector_add,
+                ):
+                    with self.subTest(command=command.qualified_name):
+                        with self.assertRaises(
+                            honeypot.commands.UserFeedbackCheckFailure
+                        ):
+                            await command.callback(cog, ctx, target)
+
+                self.assertEqual(values, [])
+                self.assertEqual(cog._missing_channel_permissions.call_count, 2)
+
+    async def test_deleted_channel_cleanup_clears_all_registered_references(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                deleted_id = 44
+                settings = {}
+                for category in honeypot.channel_routing.CHANNEL_CATEGORIES:
+                    if category.cardinality == "single":
+                        value = deleted_id if category.key in {
+                            "errors",
+                            "gif_debug",
+                        } else 99
+                        settings[category.config_field] = _ScalarSetting(value)
+                    else:
+                        values = (
+                            [11, deleted_id, 55, deleted_id]
+                            if category.key == "honeypot_scope"
+                            else [11, 55]
+                        )
+                        settings[category.config_field] = _ListSetting(values)
+                cog = SimpleNamespace(
+                    config=SimpleNamespace(
+                        guild=mock.Mock(return_value=SimpleNamespace(**settings))
+                    )
+                )
+                channel = SimpleNamespace(
+                    id=deleted_id,
+                    guild=SimpleNamespace(id=123),
+                )
+
+                await honeypot.channel_routing.clear_deleted_channel(cog, channel)
+
+                self.assertIsNone(settings["errors_channel"].value)
+                self.assertIsNone(settings["gif_detector_debug_channel"].value)
+                self.assertEqual(settings["review_channel"].value, 99)
+                self.assertEqual(settings["honeypot_channels"].values, [11, 55])
+                self.assertEqual(settings["gif_detector_channels"].values, [11, 55])
+
+    async def test_operational_alerts_use_only_the_errors_destination(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                guild = object()
+                channel = SimpleNamespace(send=mock.AsyncMock())
+                configured = dict(honeypot.settings.DEFAULTS)
+                configured["errors_channel"] = 77
+                configured["logs_channel"] = 88
+                cog = object.__new__(honeypot.Honeypot)
+                cog.bot = SimpleNamespace(get_guild=mock.Mock(return_value=guild))
+                cog.config = SimpleNamespace(
+                    guild_from_id=mock.Mock(
+                        return_value=SimpleNamespace(
+                            all=mock.AsyncMock(return_value=configured)
+                        )
+                    )
+                )
+                cog._get_text_channel_or_thread = mock.Mock(return_value=channel)
+
+                await honeypot.Honeypot._send_operational_alert(cog, 123, "failure")
+
+                cog._get_text_channel_or_thread.assert_called_once_with(guild, 77)
+                channel.send.assert_awaited_once()
+                args, kwargs = channel.send.await_args
+                self.assertEqual(args[0], "failure")
+                self.assertFalse(kwargs["allowed_mentions"].users)
+
+    async def test_operational_alert_mentions_only_the_configured_maintainer(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                guild = object()
+                channel = SimpleNamespace(send=mock.AsyncMock())
+                configured = dict(honeypot.settings.DEFAULTS)
+                configured["errors_channel"] = 77
+                configured["maintainer_id"] = 555
+                cog = object.__new__(honeypot.Honeypot)
+                cog.bot = SimpleNamespace(get_guild=mock.Mock(return_value=guild))
+                cog.config = SimpleNamespace(
+                    guild_from_id=mock.Mock(
+                        return_value=SimpleNamespace(
+                            all=mock.AsyncMock(return_value=configured)
+                        )
+                    )
+                )
+                cog._get_text_channel_or_thread = mock.Mock(return_value=channel)
+
+                with mock.patch.object(
+                    honeypot.discord,
+                    "Object",
+                    side_effect=lambda *, id: SimpleNamespace(id=id),
+                ):
+                    await honeypot.Honeypot._send_operational_alert(
+                        cog, 123, "failure"
+                    )
+
+                args, kwargs = channel.send.await_args
+                self.assertEqual(args[0], "<@555> failure")
+                mentions = kwargs["allowed_mentions"]
+                self.assertFalse(mentions.everyone)
+                self.assertFalse(mentions.roles)
+                self.assertFalse(mentions.replied_user)
+                self.assertEqual([user.id for user in mentions.users], [555])
+
+    async def test_error_maintainer_command_sets_shows_and_clears_member(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                setting = _ScalarSetting(None)
+                cog = object.__new__(honeypot.Honeypot)
+                cog.config = SimpleNamespace(
+                    guild=mock.Mock(
+                        return_value=SimpleNamespace(maintainer_id=setting)
+                    )
+                )
+                member = SimpleNamespace(id=555, mention="<@555>")
+                guild = SimpleNamespace(
+                    get_member=mock.Mock(
+                        side_effect=lambda member_id: (
+                            member if member_id == member.id else None
+                        )
+                    )
+                )
+                ctx = SimpleNamespace(
+                    guild=guild,
+                    clean_prefix="??",
+                    send=mock.AsyncMock(),
+                )
+
+                await honeypot.Honeypot.honeypot_errors_maintainer.callback(
+                    cog, ctx, member
+                )
+                self.assertEqual(setting.value, 555)
+
+                ctx.send.reset_mock()
+                await honeypot.Honeypot.honeypot_errors_maintainer.callback(
+                    cog, ctx, None
+                )
+                rendered = ctx.send.await_args.args[0]
+                self.assertIn("Error maintainer: <@555>", rendered)
+                self.assertIn(
+                    "??honeypot errors maintainer <member>", rendered
+                )
+                self.assertIn("??honeypot errors maintainer clear", rendered)
+
+                await honeypot.Honeypot.honeypot_errors_maintainer_clear.callback(
+                    cog, ctx
+                )
+                self.assertIsNone(setting.value)
 
     async def test_public_group_shows_runtime_syntax_without_reading_config(self):
         with TemporaryDirectory() as directory:

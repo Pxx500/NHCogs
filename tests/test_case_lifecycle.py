@@ -276,7 +276,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
                 cog = honeypot.Honeypot(bot)
-                cog.config = self._config({"logs_channel": 30})
+                cog.config = self._config({"errors_channel": 30})
                 honeypot.discord.AllowedMentions = SimpleNamespace(none=lambda: None)
                 appended = self._append_case(honeypot, cog, now)
                 operation = cog._case_store.ensure_operation(
@@ -539,7 +539,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = honeypot.Honeypot(_Bot())
-                cog.config = self._config({"logs_channel": None, "review_channel": None})
+                cog.config = self._config({"review_channel": None})
                 appended = self._append_case(
                     honeypot, cog, datetime.now(timezone.utc) - timedelta(hours=25)
                 )

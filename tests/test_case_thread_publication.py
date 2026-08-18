@@ -39,11 +39,11 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
 
                 cog._publish_detection_case_serial = render
                 first = asyncio.create_task(
-                    cog._publish_detection_case("case-1", None, None)
+                    cog._publish_detection_case("case-1", None)
                 )
                 await asyncio.wait_for(first_started.wait(), timeout=1)
                 second = asyncio.create_task(
-                    cog._publish_detection_case("case-1", None, None)
+                    cog._publish_detection_case("case-1", None)
                 )
                 await asyncio.sleep(0)
 
@@ -656,7 +656,6 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                     await cog._publish_detection_case(
                         appended.case.case_id,
                         50,
-                        None,
                     )
 
                 endpoint = await asyncio.to_thread(

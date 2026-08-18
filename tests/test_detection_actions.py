@@ -38,7 +38,6 @@ class DetectionActionTests(DetectionPipelineTestCase):
                     "enabled": True,
                     "dry_run": "false",
                     "honeypot_channels": [400],
-                    "logs_channel": None,
                     "review_enabled": False,
                     "review_channel": None,
                 }
@@ -83,7 +82,6 @@ class DetectionActionTests(DetectionPipelineTestCase):
                     "enabled": True,
                     "dry_run": "false",
                     "honeypot_channels": [400],
-                    "logs_channel": None,
                     "review_enabled": False,
                     "review_channel": None,
                     "fallback_action": "kick",
@@ -140,7 +138,6 @@ class DetectionActionTests(DetectionPipelineTestCase):
                     {
                         "enabled": True,
                         "dry_run": True,
-                        "logs_channel": None,
                         "review_channel": None,
                         "honeypot_channels": [message.channel.id],
                         "action": "review",
@@ -179,7 +176,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 second.guild = first.guild
                 second.author = first.author
                 config = {
-                    "enabled": True, "dry_run": False, "logs_channel": None,
+                    "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": False,
                     "firstpost_enabled": False, "firstpost_collect_enabled": False,
                 }
@@ -237,7 +234,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 message.guild.me = SimpleNamespace(id=1)
                 cog.bot.get_guild = lambda guild_id: message.guild
                 config = {
-                    "enabled": True, "dry_run": False, "logs_channel": None,
+                    "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": True,
                     "spam_action": "ban", "firstpost_enabled": True,
                     "firstpost_action": "ban", "firstpost_collect_enabled": False,
@@ -281,7 +278,6 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": None,
                     "review_enabled": True,
                     "honeypot_channels": [400],
@@ -332,7 +328,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
 
                 published = []
 
-                async def publish_case(case_id, _config, _channel, **kwargs):
+                async def publish_case(case_id, _config, **kwargs):
                     skip_if_done = kwargs.get("skip_if_done")
                     if skip_if_done is not None and skip_if_done.done():
                         return False
@@ -487,7 +483,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 )
                 published = []
 
-                async def publish_case(case_id, _config, _channel, **kwargs):
+                async def publish_case(case_id, _config, **kwargs):
                     snapshot = await asyncio.to_thread(
                         cog._case_store.get_case, case_id
                     )
@@ -525,7 +521,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 message = self._message(honeypot, attachment_count=0)
                 message.guild = guild
                 config = {
-                    "enabled": True, "dry_run": False, "logs_channel": None,
+                    "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": True,
                     "spam_action": "ban", "firstpost_enabled": False,
                     "firstpost_collect_enabled": False,
@@ -569,7 +565,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 message = self._message(honeypot, attachment_count=0)
                 message.guild = guild
                 config = {
-                    "enabled": True, "dry_run": False, "logs_channel": None,
+                    "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": True,
                     "spam_action": "kick", "firstpost_enabled": False,
                     "firstpost_collect_enabled": False,
@@ -606,7 +602,6 @@ class DetectionActionTests(DetectionPipelineTestCase):
                     config = {
                         "enabled": True,
                         "dry_run": True,
-                        "logs_channel": None,
                         "review_channel": None,
                         "spam_enabled": True,
                         "spam_action": action,
@@ -774,7 +769,6 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": None,
                     "spam_enabled": True,
                     "spam_action": "ban",
@@ -857,7 +851,6 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": None,
                     "mute_role": role.id,
                     "spam_enabled": True,
@@ -909,7 +902,6 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": None,
                     "spam_enabled": True,
                     "spam_action": "ban",
@@ -991,7 +983,6 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": None,
                     "honeypot_channels": [400],
                     "whitelisted_roles": [],

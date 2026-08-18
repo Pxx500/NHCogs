@@ -54,7 +54,6 @@ class _MessageProcessState:
 @dataclass(frozen=True)
 class _PublicationTrigger:
     has_review_publication: bool
-    logs_channel: object | None
 
 
 async def message_process_handler(
@@ -381,12 +380,6 @@ async def _trigger_publication_preview(
     capture_task: asyncio.Task,
 ) -> _PublicationTrigger:
     first_publish_started = perf_counter()
-    logs_channel = (
-        context.publication_channel
-        or cog._get_text_channel_or_thread(
-            state.guild, state.guild_settings.logs_channel
-        )
-    )
     review_publication = next(
         (
             item
@@ -402,7 +395,6 @@ async def _trigger_publication_preview(
             await cog._publish_detection_case(
                 context.operation.case_id,
                 state.guild_settings.review_channel,
-                logs_channel,
                 message_sequence=state.source.sequence,
                 skip_if_done=capture_task,
             )
@@ -426,7 +418,6 @@ async def _trigger_publication_preview(
     ) * 1000
     return _PublicationTrigger(
         has_review_publication=has_review_publication,
-        logs_channel=logs_channel,
     )
 
 
@@ -443,13 +434,11 @@ async def _trigger_publication_completion(
         OperationType.REVIEW_PUBLISH,
         state.source.sequence,
         context.now,
-        publication_channel=context.publication_channel,
     )
     if trigger.has_review_publication and not review_executed:
         await cog._publish_detection_case(
             context.operation.case_id,
             state.guild_settings.review_channel,
-            trigger.logs_channel,
             message_sequence=state.source.sequence,
         )
     state.timings["refresh_ms"] = (

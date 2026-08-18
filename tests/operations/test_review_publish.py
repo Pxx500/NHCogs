@@ -49,12 +49,11 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
         return appended, operation, claimed, context
 
     @staticmethod
-    def _configure(cog, *, review_channel=101, logs_channel=202):
+    def _configure(cog, *, review_channel=101, extra=None):
         async def load_config():
-            return {
-                "review_channel": review_channel,
-                "logs_channel": logs_channel,
-            }
+            values = {"review_channel": review_channel}
+            values.update(extra or {})
+            return values
 
         def guild_config(guild_id):
             if guild_id != 10:
@@ -68,7 +67,6 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
         async def publish_case(
             case_id,
             review_channel,
-            logs_channel,
             *,
             message_sequence=None,
         ):
@@ -76,7 +74,6 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                 (
                     case_id,
                     review_channel,
-                    logs_channel,
                     message_sequence,
                 )
             )
@@ -110,7 +107,6 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                 source_delete = import_module("Honeypot.operations.source_delete")
                 now = datetime.now(timezone.utc)
                 guild = object()
-                configured_logs_channel = object()
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
                 cog = honeypot.Honeypot(bot)
@@ -123,13 +119,9 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                     message_sequence=message_sequence,
                 )
                 claimed = cog._case_store.claim_operation(operation.operation_id, now)
-                explicit_publication_channel = object()
                 publications = []
 
                 self._configure(cog)
-                cog._get_text_channel_or_thread = (
-                    lambda configured_guild, channel_id: configured_logs_channel
-                )
                 cog._publish_detection_case = self._record_publications(publications)
 
                 self.assertIs(
@@ -198,7 +190,6 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                 await cog._execute_detection_case_operation(
                     claimed,
                     now,
-                    publication_channel=explicit_publication_channel,
                 )
 
                 snapshot = cog._case_store.get_case(appended.case.case_id)
@@ -213,7 +204,6 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                         (
                             appended.case.case_id,
                             101,
-                            explicit_publication_channel,
                             message_sequence,
                         )
                     ],
@@ -221,28 +211,18 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(completed.status, honeypot.OperationStatus.SUCCEEDED)
                 self.assertIsNone(completed.result)
 
-    async def test_configured_logs_channel_is_used_without_explicit_channel(self):
+    async def test_configured_review_channel_is_used(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 handler_module = import_module("Honeypot.operations.review_publish")
                 now = datetime.now(timezone.utc)
-                guild = object()
-                configured_logs_channel = object()
-                bot = _Bot()
-                bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(_Bot())
                 appended, _operation, _claimed, context = (
                     self._claim_review_publish(honeypot, cog, now)
                 )
                 self._configure(cog)
                 publications = []
 
-                def resolve_logs_channel(configured_guild, channel_id):
-                    self.assertIs(configured_guild, guild)
-                    self.assertEqual(channel_id, 202)
-                    return configured_logs_channel
-
-                cog._get_text_channel_or_thread = resolve_logs_channel
                 cog._publish_detection_case = self._record_publications(publications)
 
                 outcome = await handler_module.review_publish_handler(cog, context)
@@ -253,7 +233,6 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                         (
                             appended.case.case_id,
                             101,
-                            configured_logs_channel,
                             appended.message.sequence,
                         )
                     ],
@@ -261,7 +240,40 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(outcome.result)
                 self.assertEqual(outcome.follow_ups, ())
 
-    async def test_guild_unavailable_publishes_with_no_logs_channel(self):
+    async def test_logs_channel_is_not_a_review_publication_fallback(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                handler_module = import_module("Honeypot.operations.review_publish")
+                now = datetime.now(timezone.utc)
+                cog = honeypot.Honeypot(_Bot())
+                appended, _operation, _claimed, context = (
+                    self._claim_review_publish(honeypot, cog, now)
+                )
+                self._configure(
+                    cog,
+                    review_channel=None,
+                    extra={"logs_channel": 202},
+                )
+                publications = []
+
+                async def publish_case(*args, **kwargs):
+                    publications.append((args, kwargs))
+
+                cog._publish_detection_case = publish_case
+
+                await handler_module.review_publish_handler(cog, context)
+
+                self.assertEqual(
+                    publications,
+                    [
+                        (
+                            (appended.case.case_id, None),
+                            {"message_sequence": appended.message.sequence},
+                        )
+                    ],
+                )
+
+    async def test_guild_unavailable_still_uses_configured_review_channel_id(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 handler_module = import_module("Honeypot.operations.review_publish")
@@ -283,7 +295,6 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                         (
                             appended.case.case_id,
                             101,
-                            None,
                             appended.message.sequence,
                         )
                     ],
