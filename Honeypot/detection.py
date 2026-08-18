@@ -269,20 +269,6 @@ async def _remove_review_mute_role(
     return True
 
 
-def _honeypot_channel_ids(
-    cog,
-    honeypot_channels: typing.Iterable[object],
-    legacy_channel_id: object,
-) -> list[int]:
-    channel_ids: list[int] = []
-    for channel_id in honeypot_channels:
-        if isinstance(channel_id, int) and channel_id not in channel_ids:
-            channel_ids.append(channel_id)
-    if isinstance(legacy_channel_id, int) and legacy_channel_id not in channel_ids:
-        channel_ids.append(legacy_channel_id)
-    return channel_ids
-
-
 def _format_honeypot_channel_list(cog, guild: discord.Guild, channel_ids: list[int]) -> str:
     if not channel_ids:
         return _("not set")
@@ -918,10 +904,7 @@ async def _honeypot_signals(
     *,
     image_evidence: DetectionSignal | None = None,
 ) -> tuple[DetectionSignal, ...]:
-    if message.channel.id not in cog._honeypot_channel_ids(
-        guild_settings.honeypot_channels,
-        guild_settings.honeypot_channel,
-    ):
+    if message.channel.id not in guild_settings.honeypot_channels:
         return ()
     whitelisted_role_ids = set(guild_settings.whitelisted_roles)
     has_whitelist_role = any(
@@ -998,10 +981,7 @@ async def _collect_detection_signals(
         signals.append(forward)
     in_honeypot = (
         message.channel.id
-        in cog._honeypot_channel_ids(
-            guild_settings.honeypot_channels,
-            guild_settings.honeypot_channel,
-        )
+        in guild_settings.honeypot_channels
     )
     if in_honeypot:
         image = None
@@ -1312,7 +1292,7 @@ async def _suspicion_reasons(
     content = message.content.lower()
     if message.author.created_at > datetime.now(timezone.utc) - timedelta(days=7):
         reasons.append(_("Account is under 7 days old"))
-    scam_keywords = guild_settings.scam_keywords or SCAM_KEYWORDS
+    scam_keywords = guild_settings.scam_keywords
     matched_keywords = matched_scam_keywords(scam_keywords, content)
     if matched_keywords:
         reasons.append(_("Matched keywords: {keywords}").format(keywords=", ".join(matched_keywords[:5])))
@@ -1321,9 +1301,7 @@ async def _suspicion_reasons(
     image_attachment_count = sum(1 for attachment in message.attachments if imagescan.is_image_attachment(attachment))
     if image_attachment_count >= 4:
         reasons.append(_("Multiple image attachments: {count}").format(count=image_attachment_count))
-    attachment_patterns = (
-        guild_settings.attachment_patterns or DEFAULT_ATTACHMENT_PATTERNS
-    )
+    attachment_patterns = guild_settings.attachment_patterns
     filename_bases = [attachment.filename.rsplit(".", 1)[0].lower() for attachment in message.attachments]
     generic_attachment_count = sum(1 for filename_base in filename_bases if GENERIC_ATTACHMENT_NAME_RE.fullmatch(filename_base))
     if generic_attachment_count >= 2:
@@ -1598,7 +1576,7 @@ def _firstpost_suspicion_reasons(
     if attachment_count == 4:
         reasons.append(_("First post with four attachments"))
     elif attachment_count == 2:
-        scam_keywords = guild_settings.scam_keywords or SCAM_KEYWORDS
+        scam_keywords = guild_settings.scam_keywords
         matched_keywords = matched_scam_keywords(
             scam_keywords,
             content,
@@ -1621,7 +1599,7 @@ async def _spam_suspicion_reasons(
     min_channels = guild_settings.spam_min_channels or 2
     min_channels = max(SPAM_CHANNEL_MIN, min(min_channels, SPAM_CHANNEL_MAX))
     content = message.content.strip().lower()
-    scam_keywords = guild_settings.scam_keywords or SCAM_KEYWORDS
+    scam_keywords = guild_settings.scam_keywords
     has_signal = bool(message.attachments) or bool(matched_scam_keywords(scam_keywords, content))
     if not has_signal:
         return []
@@ -2322,10 +2300,7 @@ async def config_channel(cog, ctx: commands.Context) -> None:
                 _format_honeypot_channel_list(
                     cog,
                     ctx.guild,
-                    cog._honeypot_channel_ids(
-                        guild_settings.honeypot_channels,
-                        guild_settings.honeypot_channel,
-                    ),
+                    guild_settings.honeypot_channels,
                 ),
             ),
         ],
@@ -2545,10 +2520,7 @@ async def config_all(cog, ctx: commands.Context) -> None:
                 _format_honeypot_channel_list(
                     cog,
                     ctx.guild,
-                    cog._honeypot_channel_ids(
-                        guild_settings.honeypot_channels,
-                        guild_settings.honeypot_channel,
-                    ),
+                    guild_settings.honeypot_channels,
                 ),
             ),
             (_("Review"), cog._format_bool_setting(guild_settings.review_enabled)),
