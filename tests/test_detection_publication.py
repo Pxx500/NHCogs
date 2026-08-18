@@ -25,7 +25,6 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                     "enabled": True,
                     "review_enabled": False,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": 50,
                     "honeypot_channels": [9],
                     "whitelisted_roles": [],
@@ -66,7 +65,6 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                     {
                         "enabled": True,
                         "dry_run": True,
-                        "logs_channel": None,
                         "review_channel": None,
                         "review_enabled": True,
                         "firstpost_enabled": False,
@@ -117,7 +115,6 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                         "enabled": True,
                         "review_enabled": True,
                         "dry_run": False,
-                        "logs_channel": None,
                         "review_channel": None,
                         "spam_enabled": False,
                         "firstpost_enabled": False,
@@ -159,7 +156,6 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                         "enabled": True,
                         "review_enabled": True,
                         "dry_run": False,
-                        "logs_channel": None,
                         "review_channel": None,
                         "spam_enabled": False,
                         "firstpost_enabled": False,
@@ -242,7 +238,6 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                         "enabled": True,
                         "review_enabled": True,
                         "dry_run": False,
-                        "logs_channel": None,
                         "review_channel": None,
                         "spam_enabled": False,
                         "firstpost_enabled": False,
@@ -331,7 +326,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                     ),
                 ):
                     await cog._publish_detection_case(
-                        appended.case.case_id, 50, None
+                        appended.case.case_id, 50
                     )
 
                 snapshot = await asyncio.to_thread(
@@ -569,10 +564,10 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                 ):
                     await asyncio.gather(
                         first._publish_detection_case(
-                            appended.case.case_id, 50, None
+                            appended.case.case_id, 50
                         ),
                         second._publish_detection_case(
-                            appended.case.case_id, 50, None
+                            appended.case.case_id, 50
                         ),
                     )
 
@@ -638,7 +633,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                 ):
                     with self.assertRaisesRegex(RuntimeError, "lease was lost"):
                         await loser._publish_detection_case(
-                            appended.case.case_id, 50, None
+                            appended.case.case_id, 50
                         )
 
                 snapshot = await asyncio.to_thread(
@@ -706,7 +701,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                     ),
                 ):
                     await cog._publish_detection_case(
-                        appended.case.case_id, None, None
+                        appended.case.case_id, None
                     )
 
                 existing.edit.assert_awaited_once()
@@ -729,13 +724,14 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                     await release_publication.wait()
                     return SimpleNamespace(id=900)
 
-                logs_channel = SimpleNamespace(id=700, send=mock.AsyncMock(side_effect=publish))
+                review_channel = SimpleNamespace(
+                    id=700, send=mock.AsyncMock(side_effect=publish)
+                )
                 config = {
                     "enabled": True,
                     "review_enabled": True,
                     "dry_run": False,
-                    "logs_channel": 700,
-                    "review_channel": None,
+                    "review_channel": 700,
                     "spam_enabled": True,
                     "spam_action": "review",
                     "spam_min_channels": 2,
@@ -763,7 +759,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                 cog._is_forward_purge_active.return_value = False
                 cog._get_text_channel_or_thread = mock.Mock(
                     side_effect=lambda guild, channel_id: (
-                        logs_channel if channel_id == logs_channel.id else None
+                        review_channel if channel_id == review_channel.id else None
                     )
                 )
 
@@ -774,9 +770,10 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                     honeypot, attachment_count=1, message_id=300, channel_id=400
                 )
                 first.guild.get_channel = lambda channel_id: (
-                    logs_channel if channel_id == logs_channel.id else None
+                    review_channel if channel_id == review_channel.id else None
                 )
                 second.guild = first.guild
+                cog.bot.get_guild = lambda guild_id: first.guild
 
                 await cog._observe_message(first)
                 task = asyncio.create_task(cog.on_message(second))
@@ -807,7 +804,6 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                 config_values = {
                     "dry_run": False,
                     "review_channel": 50,
-                    "logs_channel": None,
                 }
                 cog.config = SimpleNamespace(
                     guild_from_id=lambda guild_id: SimpleNamespace(

@@ -291,7 +291,6 @@ class ManualEvidenceContextActionTests(unittest.IsolatedAsyncioTestCase):
                     get_role=lambda role_id: role if role_id == role.id else None,
                 )
                 config_values = {
-                    "logs_channel": 900,
                     "manual_evidence_channel": evidence_channel.id,
                     "manual_evidence_memes_channel": source_channel.id,
                     "manual_evidence_mement_notification_channel": 901,
@@ -471,7 +470,7 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                     await finish_upload.wait()
                     return evidence_message
 
-                logs_channel = SimpleNamespace(
+                evidence_channel = SimpleNamespace(
                     id=900,
                     send=mock.AsyncMock(side_effect=publish),
                 )
@@ -479,7 +478,7 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                     id=50,
                     guild=SimpleNamespace(
                         id=1,
-                        get_channel=lambda _channel_id: logs_channel,
+                        get_channel=lambda _channel_id: evidence_channel,
                         get_member=lambda _member_id: source.author,
                     ),
                     channel=SimpleNamespace(id=123, mention="#general"),
@@ -492,7 +491,6 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                 guild_config = SimpleNamespace(
                     all=mock.AsyncMock(
                         return_value={
-                            "logs_channel": 999,
                             "manual_evidence_channel": 900,
                         }
                     )
@@ -548,12 +546,12 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                     events.append("publish")
                     return evidence_message
 
-                logs_channel = SimpleNamespace(id=900, send=mock.AsyncMock(side_effect=publish))
+                evidence_channel = SimpleNamespace(id=900, send=mock.AsyncMock(side_effect=publish))
                 source_channel = SimpleNamespace(id=123, mention="#general")
                 guild = SimpleNamespace(
                     id=1,
                     get_channel=lambda channel_id: (
-                        logs_channel if channel_id == logs_channel.id else None
+                        evidence_channel if channel_id == evidence_channel.id else None
                     ),
                 )
                 source = SimpleNamespace(
@@ -574,8 +572,7 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                 guild_config = SimpleNamespace(
                     all=mock.AsyncMock(
                         return_value={
-                            "logs_channel": logs_channel.id,
-                            "manual_evidence_channel": logs_channel.id,
+                            "manual_evidence_channel": evidence_channel.id,
                             "manual_evidence_memes_channel": None,
                             "manual_evidence_mement_notification_channel": None,
                         }
@@ -610,7 +607,7 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(events[:2], ["publish", "delete"])
                 self.assertIn(
                     "offending content",
-                    logs_channel.send.await_args_list[0].kwargs["content"],
+                    evidence_channel.send.await_args_list[0].kwargs["content"],
                 )
                 interaction.followup.send.assert_awaited()
 
@@ -624,7 +621,7 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                     edit=mock.AsyncMock(),
                     delete=mock.AsyncMock(),
                 )
-                logs_channel = SimpleNamespace(
+                evidence_channel = SimpleNamespace(
                     id=900,
                     send=mock.AsyncMock(return_value=evidence_message),
                 )
@@ -632,7 +629,7 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                 guild = SimpleNamespace(
                     id=1,
                     get_channel=lambda channel_id: (
-                        logs_channel if channel_id == logs_channel.id else None
+                        evidence_channel if channel_id == evidence_channel.id else None
                     ),
                 )
                 attachment = SimpleNamespace(
@@ -652,8 +649,7 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                 guild_config = SimpleNamespace(
                     all=mock.AsyncMock(
                         return_value={
-                            "logs_channel": 999,
-                            "manual_evidence_channel": logs_channel.id,
+                            "manual_evidence_channel": evidence_channel.id,
                         }
                     )
                 )
@@ -699,7 +695,7 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                     edit=mock.AsyncMock(),
                     delete=mock.AsyncMock(),
                 )
-                logs_channel = SimpleNamespace(
+                evidence_channel = SimpleNamespace(
                     id=900,
                     send=mock.AsyncMock(return_value=evidence_message),
                 )
@@ -712,7 +708,7 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                 guild = SimpleNamespace(
                     id=1,
                     get_member=lambda _member_id: author,
-                    get_channel=lambda _channel_id: logs_channel,
+                    get_channel=lambda _channel_id: evidence_channel,
                     get_role=lambda _role_id: role,
                 )
                 source = SimpleNamespace(
@@ -728,7 +724,6 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                 guild_config = SimpleNamespace(
                     all=mock.AsyncMock(
                         return_value={
-                            "logs_channel": 999,
                             "manual_evidence_channel": 900,
                         }
                     )
@@ -765,7 +760,7 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                     SimpleNamespace(delete=mock.AsyncMock()),
                     SimpleNamespace(delete=mock.AsyncMock()),
                 ]
-                logs_channel = SimpleNamespace(send=mock.AsyncMock(side_effect=published))
+                evidence_channel = SimpleNamespace(send=mock.AsyncMock(side_effect=published))
                 content = "x" * 4_000
                 source = SimpleNamespace(
                     id=50,
@@ -777,13 +772,13 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                 )
 
                 await module._publish_evidence(
-                    logs_channel,
+                    evidence_channel,
                     source,
                     SimpleNamespace(id=10, display_name="moderator"),
                     module.EvidenceSelection(),
                 )
 
-                primary_call, files_call = logs_channel.send.await_args_list
+                primary_call, files_call = evidence_channel.send.await_args_list
                 self.assertLessEqual(len(primary_call.kwargs["content"]), 2_000)
                 self.assertNotIn(content, primary_call.kwargs["content"])
                 text_file = files_call.kwargs["files"][0]
@@ -811,7 +806,7 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                 async def add_roles(*args, **kwargs):
                     events.append("mement")
 
-                logs_channel = SimpleNamespace(
+                evidence_channel = SimpleNamespace(
                     id=900,
                     send=mock.AsyncMock(side_effect=publish),
                 )
@@ -819,7 +814,7 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                 guild = SimpleNamespace(
                     id=1,
                     get_channel=lambda channel_id: (
-                        logs_channel if channel_id == logs_channel.id else None
+                        evidence_channel if channel_id == evidence_channel.id else None
                     ),
                     get_role=lambda role_id: role if role_id == role.id else None,
                     get_member=lambda _member_id: author,
@@ -842,7 +837,6 @@ class ManualEvidencePreliminaryFlowTests(unittest.IsolatedAsyncioTestCase):
                 guild_config = SimpleNamespace(
                     all=mock.AsyncMock(
                         return_value={
-                            "logs_channel": 999,
                             "manual_evidence_channel": 900,
                         }
                     )
@@ -879,7 +873,7 @@ class ManualEvidencePunishmentTests(unittest.IsolatedAsyncioTestCase):
                     edit=mock.AsyncMock(),
                     delete=mock.AsyncMock(),
                 )
-                logs_channel = SimpleNamespace(
+                evidence_channel = SimpleNamespace(
                     id=900,
                     send=mock.AsyncMock(return_value=evidence_message),
                 )
@@ -887,7 +881,7 @@ class ManualEvidencePunishmentTests(unittest.IsolatedAsyncioTestCase):
                 guild = SimpleNamespace(
                     id=1,
                     get_member=lambda _member_id: target,
-                    get_channel=lambda _channel_id: logs_channel,
+                    get_channel=lambda _channel_id: evidence_channel,
                 )
                 source = SimpleNamespace(
                     id=50,
@@ -902,7 +896,6 @@ class ManualEvidencePunishmentTests(unittest.IsolatedAsyncioTestCase):
                 guild_config = SimpleNamespace(
                     all=mock.AsyncMock(
                         return_value={
-                            "logs_channel": 999,
                             "manual_evidence_channel": 900,
                         }
                     )

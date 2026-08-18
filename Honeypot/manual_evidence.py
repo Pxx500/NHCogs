@@ -1184,51 +1184,6 @@ async def show_status(cog: Any, ctx: Any) -> None:
     )
 
 
-async def set_memes_channel(cog: Any, ctx: Any, target: discord.TextChannel) -> None:
-    missing = cog._missing_channel_permissions(
-        ctx.guild,
-        target,
-        send_messages=False,
-        read_history=True,
-    )
-    if missing is not None:
-        await ctx.send(missing)
-        return
-    await cog.config.guild(ctx.guild).manual_evidence_memes_channel.set(target.id)
-    await ctx.send(f"Manual evidence memes channel set to {target.mention}.")
-
-
-async def set_evidence_channel(cog: Any, ctx: Any, target: discord.TextChannel) -> None:
-    if not cog._channel_is_private(ctx.guild, target):
-        await ctx.send("The manual evidence channel must be private.")
-        return
-    missing = cog._missing_channel_permissions(
-        ctx.guild,
-        target,
-        read_history=True,
-        embed_links=True,
-        attach_files=True,
-    )
-    if missing is not None:
-        await ctx.send(missing)
-        return
-    await cog.config.guild(ctx.guild).manual_evidence_channel.set(target.id)
-    await ctx.send(f"Manual evidence channel set to {target.mention}.")
-
-
-async def set_mement_notification_channel(
-    cog: Any,
-    ctx: Any,
-    target: discord.TextChannel,
-) -> None:
-    missing = cog._missing_channel_permissions(ctx.guild, target)
-    if missing is not None:
-        await ctx.send(missing)
-        return
-    await cog.config.guild(ctx.guild).manual_evidence_mement_notification_channel.set(target.id)
-    await ctx.send(f"Memen't notification channel set to {target.mention}.")
-
-
 def _channel_label(guild: discord.Guild, channel_id: int | None) -> str:
     if channel_id is None:
         return "not set"

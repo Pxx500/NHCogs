@@ -934,20 +934,6 @@ async def imagescan_toggle(cog, ctx: commands.Context, value: bool = None) -> No
         await ctx.send(_("✅ Image scan enabled set to {value}").format(value=value))
 
 
-async def imagescan_channel(
-    cog,
-    ctx: commands.Context,
-    channel: discord.TextChannel | discord.Thread = None,
-) -> None:
-    if channel is None:
-        channel_id = await cog.config.guild(ctx.guild).imagescan_channel()
-        current = cog._get_text_channel_or_thread(ctx.guild, channel_id)
-        await ctx.send(_("Current image scan channel: {channel}").format(channel=current.mention if current else "None"))
-        return
-    await cog.config.guild(ctx.guild).imagescan_channel.set(channel.id)
-    await ctx.send(_("✅ Image scan channel set to {channel}").format(channel=channel.mention))
-
-
 async def imagescan_detector_toggle(cog, ctx: commands.Context, value: bool = None) -> None:
     if value is None:
         v = await cog.config.guild(ctx.guild).imagescan_detector_enabled()

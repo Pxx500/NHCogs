@@ -1289,7 +1289,6 @@ async def _publish_detection_case(
     cog,
     case_id: str,
     review_channel_id: int | None,
-    logs_channel: discord.TextChannel | discord.Thread | None,
     *,
     message_sequence: int | None = None,
     skip_if_done: asyncio.Task | None = None,
@@ -1304,7 +1303,6 @@ async def _publish_detection_case(
         await cog._publish_detection_case_serial(
             case_id,
             review_channel_id,
-            logs_channel,
             message_sequence=message_sequence,
         )
         return True
@@ -1329,7 +1327,6 @@ async def _publish_detection_case_serial(
     cog,
     case_id: str,
     review_channel_id: int | None,
-    logs_channel: discord.TextChannel | discord.Thread | None,
     *,
     message_sequence: int | None = None,
 ) -> None:
@@ -1353,7 +1350,7 @@ async def _publish_detection_case_serial(
         raise RuntimeError(
             "The configured review destination must be a text channel."
         )
-    channel = review_channel or logs_channel
+    channel = review_channel
     has_persisted_primary = bool(
         snapshot.case.review_channel_id and snapshot.case.review_message_id
     )
@@ -1586,9 +1583,7 @@ async def _case_review_rerender(cog, case_id: str) -> None:
         return
     raw_config = await cog.config.guild_from_id(snapshot.case.guild_id).all()
     guild_settings = GuildSettings.from_mapping(raw_config)
-    await cog._publish_detection_case(
-        case_id, guild_settings.review_channel, None
-    )
+    await cog._publish_detection_case(case_id, guild_settings.review_channel)
 
 
 async def _case_review_rerender_if_open(cog, case_id: str) -> None:

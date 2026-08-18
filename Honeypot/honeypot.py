@@ -14,6 +14,7 @@ from redbot.core.data_manager import cog_data_path
 from redbot.core.i18n import Translator, cog_i18n
 
 from . import (
+    channel_routing,
     cleanup,
     detection,
     detection_runtime,
@@ -287,11 +288,12 @@ class Honeypot(Cog):
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, channel: typing.Any) -> None:
         await self._message_registry.forget_channel(channel.guild.id, channel.id)
-        await manual_evidence.clear_deleted_channel(self, channel)
+        await channel_routing.clear_deleted_channel(self, channel)
 
     @commands.Cog.listener()
     async def on_thread_delete(self, thread: typing.Any) -> None:
         await self._message_registry.forget_channel(thread.guild.id, thread.id)
+        await channel_routing.clear_deleted_channel(self, thread)
 
     async def cog_after_invoke(self, ctx: commands.Context) -> commands.Context | None:
         """Finish command cleanup without AAA3A_utils' redundant success reaction."""
@@ -408,11 +410,9 @@ class Honeypot(Cog):
         operation_type: OperationType,
         sequence: int,
         now: datetime,
-        *,
-        publication_channel=None,
     ) -> bool:
         return await detection._execute_detection_message_child(
-            self, snapshot, operation_type, sequence, now, publication_channel=publication_channel
+            self, snapshot, operation_type, sequence, now
         )
 
     async def _release_detection_case_roles(
@@ -425,7 +425,6 @@ class Honeypot(Cog):
         operation,
         now: datetime,
         *,
-        publication_channel=None,
         live_message=None,
         timings: dict[str, float] | None = None,
     ) -> None:
@@ -433,7 +432,6 @@ class Honeypot(Cog):
             self,
             operation,
             now,
-            publication_channel=publication_channel,
             live_message=live_message,
             timings=timings,
         )
@@ -450,7 +448,6 @@ class Honeypot(Cog):
         self,
         message: discord.Message,
         guild_settings: GuildSettings,
-        logs_channel: discord.TextChannel | discord.Thread | None,
         signals: tuple[DetectionSignal, ...],
         *,
         timings: dict[str, float] | None = None,
@@ -460,7 +457,6 @@ class Honeypot(Cog):
             self,
             message,
             guild_settings,
-            logs_channel,
             signals,
             timings=timings,
             admission_lock=admission_lock,
@@ -1023,11 +1019,23 @@ class Honeypot(Cog):
             raw_config = await self.config.guild_from_id(guild_id).all()
             guild_settings = GuildSettings.from_mapping(raw_config)
             channel = self._get_text_channel_or_thread(
-                guild, guild_settings.logs_channel
+                guild, guild_settings.errors_channel
             )
             if channel is None:
                 return
-            await channel.send(content, allowed_mentions=discord.AllowedMentions.none())
+            maintainer_id = guild_settings.maintainer_id
+            if maintainer_id is None:
+                alert_content = content
+                allowed_mentions = discord.AllowedMentions.none()
+            else:
+                alert_content = f"<@{maintainer_id}> {content}"
+                allowed_mentions = discord.AllowedMentions(
+                    everyone=False,
+                    roles=False,
+                    users=[discord.Object(id=maintainer_id)],
+                    replied_user=False,
+                )
+            await channel.send(alert_content, allowed_mentions=allowed_mentions)
         except Exception:
             log.warning("Could not publish Honeypot operational alert", exc_info=True)
 
@@ -1201,7 +1209,6 @@ class Honeypot(Cog):
         self,
         case_id: str,
         review_channel_id: int | None,
-        logs_channel: discord.TextChannel | discord.Thread | None,
         *,
         message_sequence: int | None = None,
         skip_if_done: asyncio.Task | None = None,
@@ -1210,7 +1217,6 @@ class Honeypot(Cog):
             self,
             case_id,
             review_channel_id,
-            logs_channel,
             message_sequence=message_sequence,
             skip_if_done=skip_if_done,
         )
@@ -1219,12 +1225,11 @@ class Honeypot(Cog):
         self,
         case_id: str,
         review_channel_id: int | None,
-        logs_channel: discord.TextChannel | discord.Thread | None,
         *,
         message_sequence: int | None = None,
     ) -> None:
         return await review_publication._publish_detection_case_serial(
-            self, case_id, review_channel_id, logs_channel, message_sequence=message_sequence
+            self, case_id, review_channel_id, message_sequence=message_sequence
         )
 
     async def _dismiss_case_review_prompt(
@@ -1373,31 +1378,31 @@ class Honeypot(Cog):
     async def manual_evidence_memes_channel(
         self,
         ctx: commands.Context,
-        target: discord.TextChannel,
+        target: discord.TextChannel = None,
     ) -> None:
         """Set the channel where the memen't action is available."""
-        return await manual_evidence.set_memes_channel(self, ctx, target)
+        return await channel_routing.configure_single(self, ctx, "memes_source", target)
 
     @manual_evidence_settings.command(name="channel")
     async def manual_evidence_channel(
         self,
         ctx: commands.Context,
-        target: discord.TextChannel,
+        target: discord.TextChannel = None,
     ) -> None:
         """Set the private channel used for manual evidence."""
-        return await manual_evidence.set_evidence_channel(self, ctx, target)
+        return await channel_routing.configure_single(
+            self, ctx, "manual_evidence", target
+        )
 
     @manual_evidence_settings.command(name="mement_notification_channel")
     async def manual_evidence_mement_notification_channel(
         self,
         ctx: commands.Context,
-        target: discord.TextChannel,
+        target: discord.TextChannel = None,
     ) -> None:
         """Set the channel used for memen't notifications."""
-        return await manual_evidence.set_mement_notification_channel(
-            self,
-            ctx,
-            target,
+        return await channel_routing.configure_single(
+            self, ctx, "mement_notifications", target
         )
 
     @manual_evidence_settings.command(name="status")
@@ -1558,7 +1563,9 @@ class Honeypot(Cog):
         channel: discord.TextChannel | discord.Thread = None,
     ) -> None:
         """Add a channel or its parent thread scope."""
-        return await gif_detector.gif_detector_channel_add(self, ctx, channel)
+        return await channel_routing.add_multiple(
+            self, ctx, "gif_detector_scope", channel
+        )
 
     @gif_detector_channel.command(name="remove")
     async def gif_detector_channel_remove(
@@ -1567,7 +1574,35 @@ class Honeypot(Cog):
         channel: discord.TextChannel | discord.Thread = None,
     ) -> None:
         """Remove a channel or its parent thread scope."""
-        return await gif_detector.gif_detector_channel_remove(self, ctx, channel)
+        return await channel_routing.remove_multiple(
+            self, ctx, "gif_detector_scope", channel
+        )
+
+    @gif_detector_channel.command(name="list")
+    async def gif_detector_channel_list(self, ctx: commands.Context) -> None:
+        """List channels where GIF interception is active."""
+        return await channel_routing.list_multiple(self, ctx, "gif_detector_scope")
+
+    @gif_detector.group(name="debug", invoke_without_command=True)
+    async def gif_detector_debug(self, ctx: commands.Context) -> None:
+        """Configure GIF interception diagnostics."""
+        return await self._send_group_overview(ctx, gif_detector.config_gif_detector)
+
+    @gif_detector_debug.command(name="toggle", usage="<true|false>")
+    async def gif_detector_debug_toggle(
+        self, ctx: commands.Context, value: bool
+    ) -> None:
+        """Enable or disable GIF interception diagnostics."""
+        return await gif_detector.gif_detector_debug_toggle(self, ctx, value)
+
+    @gif_detector_debug.command(name="channel")
+    async def gif_detector_debug_channel(
+        self,
+        ctx: commands.Context,
+        target: discord.TextChannel | discord.Thread = None,
+    ) -> None:
+        """Set the moderator channel for GIF interception diagnostics."""
+        return await channel_routing.configure_single(self, ctx, "gif_debug", target)
 
     @gif_detector.group(name="message", invoke_without_command=True)
     async def gif_detector_message(self, ctx: commands.Context) -> None:
@@ -1588,36 +1623,123 @@ class Honeypot(Cog):
 
     # ─── channel sub-group ────────────────────────────────────────────
 
-    @honeypot.group(name="channel", invoke_without_command=True)
+    @honeypot.group(name="channels", invoke_without_command=True)
     async def channels(self, ctx: commands.Context) -> None:
-        """Configure honeypot and log channels."""
-        return await self._send_group_overview(ctx, detection.config_channel)
+        """Configure every Honeypot channel category."""
+        return await channel_routing.send_overview(self, ctx)
+
+    @channels.group(name="honeypot", invoke_without_command=True)
+    async def channels_honeypot(self, ctx: commands.Context) -> None:
+        """Configure channels used as honeypot detection sources."""
+        return await channel_routing.list_multiple(self, ctx, "honeypot_scope")
 
     @commands.bot_has_guild_permissions(manage_channels=True)
-    @channels.command()
+    @channels_honeypot.command()
     async def create(self, ctx: commands.Context) -> None:
         """Create and register a new honeypot channel."""
         return await detection.create(self, ctx)
 
-    @channels.command(name="add")
+    @channels_honeypot.command(name="add")
     async def channel_add(self, ctx: commands.Context, target: discord.TextChannel | discord.Thread) -> None:
         """Register an existing channel as a honeypot channel."""
-        return await detection.channel_add(self, ctx, target)
+        return await channel_routing.add_multiple(self, ctx, "honeypot_scope", target)
 
-    @channels.command(name="remove")
+    @channels_honeypot.command(name="remove")
     async def channel_remove(self, ctx: commands.Context, target: discord.TextChannel | discord.Thread) -> None:
         """Unregister a honeypot channel."""
-        return await detection.channel_remove(self, ctx, target)
+        return await channel_routing.remove_multiple(self, ctx, "honeypot_scope", target)
 
-    @channels.command(name="list")
+    @channels_honeypot.command(name="list")
     async def channel_list(self, ctx: commands.Context) -> None:
         """List registered honeypot channels."""
-        return await detection.channel_list(self, ctx)
+        return await channel_routing.list_multiple(self, ctx, "honeypot_scope")
 
-    @channels.command()
-    async def logs(self, ctx: commands.Context, target: discord.TextChannel = None) -> None:
-        """Set the channel used for honeypot logs."""
-        return await detection.logs(self, ctx, target)
+    @channels.group(name="gif-detector", invoke_without_command=True)
+    async def channels_gif_detector(self, ctx: commands.Context) -> None:
+        """Configure channels monitored for GIFs."""
+        return await channel_routing.list_multiple(self, ctx, "gif_detector_scope")
+
+    @channels_gif_detector.command(name="add")
+    async def channels_gif_detector_add(
+        self,
+        ctx: commands.Context,
+        target: discord.TextChannel | discord.Thread = None,
+    ) -> None:
+        return await channel_routing.add_multiple(
+            self, ctx, "gif_detector_scope", target
+        )
+
+    @channels_gif_detector.command(name="remove")
+    async def channels_gif_detector_remove(
+        self,
+        ctx: commands.Context,
+        target: discord.TextChannel | discord.Thread = None,
+    ) -> None:
+        return await channel_routing.remove_multiple(
+            self, ctx, "gif_detector_scope", target
+        )
+
+    @channels_gif_detector.command(name="list")
+    async def channels_gif_detector_list(self, ctx: commands.Context) -> None:
+        return await channel_routing.list_multiple(self, ctx, "gif_detector_scope")
+
+    @channels.command(name="review")
+    async def channels_review(
+        self, ctx: commands.Context, target: discord.TextChannel = None
+    ) -> None:
+        return await channel_routing.configure_single(self, ctx, "review", target)
+
+    @channels.command(name="errors")
+    async def channels_errors(
+        self, ctx: commands.Context, target: discord.TextChannel | discord.Thread = None
+    ) -> None:
+        return await channel_routing.configure_single(self, ctx, "errors", target)
+
+    @channels.command(name="manual-evidence")
+    async def channels_manual_evidence(
+        self, ctx: commands.Context, target: discord.TextChannel = None
+    ) -> None:
+        return await channel_routing.configure_single(
+            self, ctx, "manual_evidence", target
+        )
+
+    @channels.command(name="joinwatch")
+    async def channels_joinwatch(
+        self, ctx: commands.Context, target: discord.TextChannel | discord.Thread = None
+    ) -> None:
+        return await channel_routing.configure_single(self, ctx, "joinwatch", target)
+
+    @channels.command(name="bait-role")
+    async def channels_bait_role(
+        self, ctx: commands.Context, target: discord.TextChannel | discord.Thread = None
+    ) -> None:
+        return await channel_routing.configure_single(self, ctx, "bait_role", target)
+
+    @channels.command(name="image-scan")
+    async def channels_image_scan(
+        self, ctx: commands.Context, target: discord.TextChannel | discord.Thread = None
+    ) -> None:
+        return await channel_routing.configure_single(self, ctx, "image_scan", target)
+
+    @channels.command(name="gif-debug")
+    async def channels_gif_debug(
+        self, ctx: commands.Context, target: discord.TextChannel | discord.Thread = None
+    ) -> None:
+        return await channel_routing.configure_single(self, ctx, "gif_debug", target)
+
+    @channels.command(name="mement-notifications")
+    async def channels_mement_notifications(
+        self, ctx: commands.Context, target: discord.TextChannel = None
+    ) -> None:
+        return await channel_routing.configure_single(
+            self, ctx, "mement_notifications", target
+        )
+
+    @channels.command(name="memes")
+    async def channels_memes(
+        self, ctx: commands.Context, target: discord.TextChannel = None
+    ) -> None:
+        return await channel_routing.configure_single(self, ctx, "memes_source", target)
 
     # ─── punishment sub-group ─────────────────────────────────────────
 
@@ -1702,14 +1824,14 @@ class Honeypot(Cog):
         """Enable or disable image shadow reviews."""
         return await imagescan.imagescan_toggle(self, ctx, value)
 
-    @debug_imagescan.command(name="legacy_channel")
+    @imagescan.command(name="channel")
     async def imagescan_channel(
         self,
         ctx: commands.Context,
         channel: discord.TextChannel | discord.Thread = None,
     ) -> None:
         """Set the channel for image shadow reviews."""
-        return await imagescan.imagescan_channel(self, ctx, channel)
+        return await channel_routing.configure_single(self, ctx, "image_scan", channel)
 
     @imagescan.group(name="detector", invoke_without_command=True)
     async def imagescan_detector(self, ctx: commands.Context) -> None:
@@ -1790,7 +1912,7 @@ class Honeypot(Cog):
         self, ctx: commands.Context, target: discord.TextChannel = None
     ) -> None:
         """Set the channel for moderator review requests."""
-        return await detection.review_channel(self, ctx, target)
+        return await channel_routing.configure_single(self, ctx, "review", target)
 
     @review.command(name="kick_fail_warn")
     async def review_kick_fail_warn(self, ctx: commands.Context, value: str = None) -> None:
@@ -1886,7 +2008,7 @@ class Honeypot(Cog):
     @joinwatch.command()
     async def channel(self, ctx: commands.Context, target: discord.TextChannel | discord.Thread = None) -> None:
         """Set the channel for young-account join alerts."""
-        return await joinwatch.channel(self, ctx, target)
+        return await channel_routing.configure_single(self, ctx, "joinwatch", target)
 
     @joinwatch.group(name="alert", invoke_without_command=True)
     async def joinwatch_alert(self, ctx: commands.Context) -> None:
@@ -1981,6 +2103,15 @@ class Honeypot(Cog):
         """Set the action for bait role enforcement."""
         return await detection.bait_action(self, ctx, value)
 
+    @bait_role.command(name="channel")
+    async def bait_role_channel(
+        self,
+        ctx: commands.Context,
+        target: discord.TextChannel | discord.Thread = None,
+    ) -> None:
+        """Set the channel for bait role events."""
+        return await channel_routing.configure_single(self, ctx, "bait_role", target)
+
     # ─── config dump ───────────────────────────────────────────────────
 
     @honeypot.group(name="config", invoke_without_command=True)
@@ -2068,6 +2199,20 @@ class Honeypot(Cog):
         """Acknowledge all currently visible Honeypot operational failures."""
         return await diagnostics.honeypot_errors_clear(self, ctx)
 
+    @honeypot_errors.group(name="maintainer", invoke_without_command=True)
+    async def honeypot_errors_maintainer(
+        self,
+        ctx: commands.Context,
+        member: discord.Member = None,
+    ) -> None:
+        """Show or set the person pinged for operational failures."""
+        return await diagnostics.honeypot_errors_maintainer(self, ctx, member)
+
+    @honeypot_errors_maintainer.command(name="clear")
+    async def honeypot_errors_maintainer_clear(self, ctx: commands.Context) -> None:
+        """Stop pinging a maintainer for operational failures."""
+        return await diagnostics.honeypot_errors_maintainer_clear(self, ctx)
+
     # ─── stats ────────────────────────────────────────────────────────
 
     @honeypot.command(name="modstats")
@@ -2091,8 +2236,6 @@ class Honeypot(Cog):
         guild,
         me,
         honeypot_channels: typing.Sequence,
-        logs_channel,
-        review_channel,
     ) -> tuple[DoctorResult, ...]:
         # Binds the two purge predicates through their owning module: importing
         # them into diagnostics would close an import cycle, and reading them
@@ -2102,8 +2245,6 @@ class Honeypot(Cog):
             guild,
             me,
             honeypot_channels,
-            logs_channel,
-            review_channel=review_channel,
             missing_purge_permissions=detection.missing_purge_permissions,
             is_purgeable_message_channel=detection.is_purgeable_message_channel,
         )

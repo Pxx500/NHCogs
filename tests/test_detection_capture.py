@@ -44,7 +44,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": None,
                     "spam_enabled": False,
                     "firstpost_enabled": False,
@@ -85,7 +84,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 message.attachments[2].size = 4
                 message.attachments[2].read = mock.AsyncMock(return_value=b"12345")
                 config = {
-                    "enabled": True, "dry_run": False, "logs_channel": None,
+                    "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": True,
                     "spam_action": "review", "firstpost_enabled": False,
                     "firstpost_collect_enabled": False,
@@ -248,7 +247,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                     {
                         "enabled": True,
                         "dry_run": False,
-                        "logs_channel": None,
                         "review_channel": None,
                         "spam_enabled": False,
                         "firstpost_enabled": False,
@@ -302,7 +300,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                     {
                         "enabled": True,
                         "dry_run": False,
-                        "logs_channel": None,
                         "review_channel": None,
                         "spam_enabled": False,
                         "firstpost_enabled": False,
@@ -360,7 +357,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                     {
                         "enabled": True,
                         "dry_run": False,
-                        "logs_channel": None,
                         "review_channel": None,
                         "spam_enabled": False,
                         "firstpost_enabled": False,
@@ -447,7 +443,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                     {
                         "enabled": True,
                         "dry_run": False,
-                        "logs_channel": None,
                         "review_channel": None,
                         "spam_enabled": False,
                         "firstpost_enabled": False,
@@ -530,7 +525,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                     {
                         "enabled": True,
                         "dry_run": False,
-                        "logs_channel": None,
                         "review_channel": None,
                         "review_enabled": True,
                         "spam_enabled": False,
@@ -566,7 +560,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                     {
                         "enabled": True,
                         "dry_run": False,
-                        "logs_channel": None,
                         "review_channel": None,
                         "spam_enabled": False,
                         "firstpost_enabled": False,
@@ -615,7 +608,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                     {
                         "enabled": True,
                         "dry_run": False,
-                        "logs_channel": None,
                         "review_channel": None,
                         "spam_enabled": False,
                         "firstpost_enabled": False,
@@ -789,7 +781,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": None,
                     "spam_enabled": True,
                     "spam_action": "review",
@@ -947,7 +938,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 message = self._message(honeypot, attachment_count=1)
                 self._configure_public_boundary(
                     cog, {"enabled": True, "review_enabled": True,
-                          "dry_run": False, "logs_channel": None,
+                          "dry_run": False,
                           "review_channel": None, "spam_enabled": False,
                           "firstpost_enabled": False, "firstpost_collect_enabled": False}
                 )
@@ -981,7 +972,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                     {
                         "enabled": True,
                         "dry_run": False,
-                        "logs_channel": None,
                         "review_channel": None,
                         "spam_enabled": False,
                         "firstpost_enabled": False,
@@ -1118,7 +1108,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 await cog._init_imagescan_store()
                 message = self._message(honeypot, attachment_count=6)
                 config = {
-                    "enabled": True, "dry_run": False, "logs_channel": None,
+                    "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": False,
                     "firstpost_enabled": False, "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": True,
@@ -1191,7 +1181,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": None,
                     "spam_enabled": False,
                     "firstpost_enabled": False,
@@ -1262,7 +1251,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 cog._observe_message = mock.AsyncMock()
                 cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
                 cog.config.guild = lambda guild: SimpleNamespace(
-                    all=mock.AsyncMock(return_value={"enabled": True, "logs_channel": None})
+                    all=mock.AsyncMock(return_value={"enabled": True})
                 )
                 batch_key = (message.guild.id, message.id)
                 completed = asyncio.create_task(asyncio.sleep(0, result={"data": b"image"}))

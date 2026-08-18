@@ -23,6 +23,7 @@ from redbot.core import commands
 from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import box, pagify
 
+from . import channel_routing
 from .console_dump import build_log_dump
 from .detection_cases import OperationType
 from .remote_media import media_decoder_support
@@ -473,6 +474,46 @@ async def honeypot_errors_clear(cog, ctx: commands.Context) -> None:
     await ctx.send(_("Acknowledged {count} Honeypot errors.").format(count=count))
 
 
+async def honeypot_errors_maintainer(
+    cog,
+    ctx: commands.Context,
+    member: discord.Member | None = None,
+) -> None:
+    """Show or set the person pinged for Honeypot operational failures."""
+    setting = cog.config.guild(ctx.guild).maintainer_id
+    if member is not None:
+        await setting.set(member.id)
+        await ctx.send(
+            _("✅ Error maintainer set to {member.mention}").format(member=member),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
+
+    maintainer_id = await setting()
+    maintainer = ctx.guild.get_member(maintainer_id) if maintainer_id else None
+    if maintainer is not None:
+        label = maintainer.mention
+    elif maintainer_id is not None:
+        label = f"<@{maintainer_id}>"
+    else:
+        label = _("Not configured")
+    prefix = ctx.clean_prefix
+    await ctx.send(
+        _(
+            "Error maintainer: {maintainer}\n"
+            "Set: `{prefix}honeypot errors maintainer <member>`\n"
+            "Clear: `{prefix}honeypot errors maintainer clear`"
+        ).format(maintainer=label, prefix=prefix),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+async def honeypot_errors_maintainer_clear(cog, ctx: commands.Context) -> None:
+    """Stop pinging a maintainer for Honeypot operational failures."""
+    await cog.config.guild(ctx.guild).maintainer_id.set(None)
+    await ctx.send(_("✅ Error maintainer cleared."))
+
+
 async def honeypot_mod_stats(cog, ctx: commands.Context) -> None:
     """Show detailed moderation statistics."""
     stats = DEFAULT_STATS.copy()
@@ -810,9 +851,6 @@ async def _doctor_configuration_checks(
     me,
     guild_settings: GuildSettings,
     honeypot_channels: typing.Sequence,
-    logs_channel,
-    logs_channel_invalid: bool,
-    review_channel,
 ) -> tuple[DoctorResult, ...]:
     results: list[DoctorResult] = []
     if not guild_settings.enabled:
@@ -846,38 +884,7 @@ async def _doctor_configuration_checks(
             DoctorResult(
                 "No honeypot channel exists",
                 "failed",
-                "Run `honeypot channel add`.",
-            )
-        )
-    if logs_channel_invalid:
-        results.append(
-            DoctorResult(
-                "Logs channel must be a normal text channel",
-                "failed",
-                "Run `honeypot channel logs` with a normal text channel.",
-            )
-        )
-    if guild_settings.enabled and logs_channel is None and not logs_channel_invalid:
-        results.append(
-            DoctorResult(
-                "Logs channel is missing",
-                "failed",
-                "Run `honeypot channel logs`.",
-            )
-        )
-    review_required = (
-        guild_settings.fallback_action.value == "review"
-        or guild_settings.review_enabled
-        or guild_settings.whitelist_mode.value == "review"
-        or (guild_settings.firstpost_enabled and guild_settings.firstpost_action.value == "review")
-        or (guild_settings.spam_enabled and guild_settings.spam_action.value == "review")
-    )
-    if review_required and review_channel is None:
-        results.append(
-            DoctorResult(
-                "Review channel is missing",
-                "failed",
-                "Run `honeypot review channel`.",
+                "Run `honeypot channels honeypot add`.",
             )
         )
     results.extend(await _doctor_bait_role_collision_checks(cog, guild.id, guild_settings))
@@ -918,37 +925,103 @@ async def _doctor_configuration_checks(
                     "Move bot role above the joinwatch auto-role.",
                 )
             )
-    if guild_settings.joinwatch_enabled and guild_settings.joinwatch_alert_enabled:
-        joinwatch_channel = cog._get_text_channel_or_thread(guild, guild_settings.joinwatch_channel)
-        if joinwatch_channel is None:
-            results.append(
-                DoctorResult(
-                    "Joinwatch alert channel is missing",
-                    "failed",
-                    "Run `honeypot joinwatch channel`.",
-                )
+    results.extend(_doctor_gif_detector_checks(cog, guild, me, guild_settings))
+    return tuple(results)
+
+
+def _destination_is_required(key: str, settings: GuildSettings) -> bool:
+    review_required = (
+        settings.fallback_action.value == "review"
+        or settings.review_enabled
+        or settings.whitelist_mode.value == "review"
+        or settings.firstpost_enabled
+        and settings.firstpost_action.value == "review"
+        or settings.spam_enabled
+        and settings.spam_action.value == "review"
+    )
+    return {
+        "errors": any(
+            (
+                settings.enabled,
+                settings.firstpost_enabled,
+                settings.spam_enabled,
+                settings.imagescan_detector_enabled,
+                settings.gif_detector_enabled,
+                settings.joinwatch_enabled,
+                settings.baitrole_enabled,
             )
-        else:
-            perms = joinwatch_channel.permissions_for(me)
-            send_permission = (
-                "send_messages_in_threads"
-                if isinstance(joinwatch_channel, discord.Thread)
-                else "send_messages"
-            )
-            if not getattr(perms, send_permission, False):
-                permission_label = (
-                    "Send Messages in Threads"
-                    if send_permission == "send_messages_in_threads"
-                    else "Send Messages"
-                )
+        ),
+        "review": review_required,
+        "joinwatch": settings.joinwatch_enabled
+        and settings.joinwatch_alert_enabled,
+        "bait_role": settings.baitrole_enabled,
+        "image_scan": settings.imagescan_enabled,
+        "gif_debug": settings.gif_detector_debug_enabled,
+    }.get(key, False)
+
+
+async def _doctor_destination_checks(
+    cog,
+    guild,
+    me,
+    settings: GuildSettings,
+) -> tuple[DoctorResult, ...]:
+    permission_names = {
+        "send_messages": ("send_messages", "Send Messages"),
+        "read_history": ("read_message_history", "Read Message History"),
+        "create_public_threads": ("create_public_threads", "Create Public Threads"),
+        "send_in_threads": ("send_messages_in_threads", "Send Messages in Threads"),
+        "embed_links": ("embed_links", "Embed Links"),
+        "attach_files": ("attach_files", "Attach Files"),
+        "manage_threads": ("manage_threads", "Manage Threads"),
+    }
+    results = []
+    for spec in channel_routing.CHANNEL_CATEGORIES:
+        if spec.kind != "destination":
+            continue
+        channel_id = getattr(settings, spec.config_field)
+        channel = (
+            cog._get_text_channel_or_thread(guild, channel_id)
+            if channel_id is not None
+            else None
+        )
+        if channel is None:
+            if channel_id is not None or _destination_is_required(spec.key, settings):
                 results.append(
                     DoctorResult(
-                        "Cannot send joinwatch alerts",
+                        f"{spec.label} channel is missing",
                         "failed",
-                        f"Grant {permission_label}.",
+                        f"Run `honeypot channels {spec.central_command}`.",
                     )
                 )
-    results.extend(_doctor_gif_detector_checks(cog, guild, me, guild_settings))
+            continue
+        if not spec.allow_threads and not isinstance(channel, discord.TextChannel):
+            results.append(
+                DoctorResult(
+                    f"{spec.label} must be a normal text channel",
+                    "failed",
+                    f"Run `honeypot channels {spec.central_command}`.",
+                )
+            )
+            continue
+        permissions = channel.permissions_for(me)
+        missing = []
+        if not getattr(permissions, "view_channel", False):
+            missing.append("View Channel")
+        for permission in spec.required_permissions:
+            attribute, label = permission_names[permission]
+            if permission == "send_messages" and isinstance(channel, discord.Thread):
+                attribute, label = "send_messages_in_threads", "Send Messages in Threads"
+            if not getattr(permissions, attribute, False):
+                missing.append(label)
+        if missing:
+            results.append(
+                DoctorResult(
+                    f"{spec.label} channel permissions",
+                    "failed",
+                    "Grant: " + ", ".join(missing),
+                )
+            )
     return tuple(results)
 
 
@@ -957,9 +1030,7 @@ async def _doctor_channel_permission_checks(
     guild,
     me,
     honeypot_channels: typing.Sequence,
-    logs_channel,
     *,
-    review_channel,
     missing_purge_permissions,
     is_purgeable_message_channel,
 ) -> tuple[DoctorResult, ...]:
@@ -995,38 +1066,6 @@ async def _doctor_channel_permission_checks(
                 "\nManage - " + ", ".join(skipped_channels),
             )
         )
-    if logs_channel is not None:
-        perms = logs_channel.permissions_for(me)
-        if not perms.send_messages:
-            results.append(DoctorResult("Cannot send logs", "failed", "Grant Send Messages."))
-    case_destination = review_channel or logs_channel
-    if case_destination is not None:
-        perms = case_destination.permissions_for(me)
-        destination_label = "Review channel" if review_channel is not None else "Logs channel"
-        required = (
-            ("view_channel", "View Channel"),
-            ("send_messages", "Send Messages"),
-            ("create_public_threads", "Create Public Threads"),
-            ("send_messages_in_threads", "Send Messages in Threads"),
-            ("read_message_history", "Read Message History"),
-            ("embed_links", "Embed Links"),
-            ("attach_files", "Attach Files"),
-            ("manage_threads", "Manage Threads"),
-        )
-        missing = [label for attribute, label in required if not getattr(perms, attribute, False)]
-        if not isinstance(case_destination, discord.TextChannel) or missing:
-            detail = (
-                "Use a normal text channel."
-                if not isinstance(case_destination, discord.TextChannel)
-                else "Grant: " + ", ".join(missing)
-            )
-            results.append(
-                DoctorResult(
-                    f"{destination_label} cannot host case threads",
-                    "failed",
-                    detail,
-                )
-            )
     return tuple(results)
 
 
@@ -1110,19 +1149,6 @@ async def honeypot_doctor(cog, ctx: commands.Context) -> None:
         )
         if (channel := cog._get_text_channel_or_thread(ctx.guild, channel_id)) is not None
     )
-    logs_channel_id = guild_settings.logs_channel
-    configured_logs_channel = (
-        cog._get_cached_message_channel(ctx.guild, logs_channel_id)
-        if isinstance(logs_channel_id, int)
-        else None
-    )
-    logs_channel = (
-        configured_logs_channel
-        if isinstance(configured_logs_channel, discord.TextChannel)
-        else None
-    )
-    logs_channel_invalid = configured_logs_channel is not None and logs_channel is None
-    review_channel = cog._get_text_channel_or_thread(ctx.guild, guild_settings.review_channel)
     checks: list[DoctorCheck] = [
         partial(
             _doctor_configuration_checks,
@@ -1131,17 +1157,13 @@ async def honeypot_doctor(cog, ctx: commands.Context) -> None:
             me,
             guild_settings,
             honeypot_channels,
-            logs_channel,
-            logs_channel_invalid,
-            review_channel,
         ),
+        partial(_doctor_destination_checks, cog, ctx.guild, me, guild_settings),
         partial(
             cog._doctor_channel_permission_checks,
             ctx.guild,
             me,
             honeypot_channels,
-            logs_channel,
-            review_channel,
         ),
         partial(_doctor_guild_permission_checks, cog, me, guild_settings),
     ]

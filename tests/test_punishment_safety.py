@@ -652,7 +652,7 @@ class BaitRoleSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(modules.__exit__, None, None, None)
 
         bait_role = SimpleNamespace(id=501)
-        logs_channel = SimpleNamespace(id=601, send=mock.AsyncMock())
+        bait_channel = SimpleNamespace(id=601, send=mock.AsyncMock())
         guild = SimpleNamespace(
             id=100,
             me=SimpleNamespace(
@@ -665,7 +665,7 @@ class BaitRoleSafetyTests(unittest.IsolatedAsyncioTestCase):
             ),
             get_role=lambda role_id: bait_role if role_id == bait_role.id else None,
             get_channel=lambda channel_id: (
-                logs_channel if channel_id == logs_channel.id else None
+                bait_channel if channel_id == bait_channel.id else None
             ),
             get_thread=lambda _channel_id: None,
         )
@@ -695,7 +695,7 @@ class BaitRoleSafetyTests(unittest.IsolatedAsyncioTestCase):
         stats = {}
         raw_config = {
             "dry_run": dry_run,
-            "logs_channel": logs_channel.id,
+            "baitrole_channel": bait_channel.id,
             "baitrole_enabled": True,
             "baitrole_id": bait_role.id,
             "baitrole_action": "ban",
@@ -734,7 +734,7 @@ class BaitRoleSafetyTests(unittest.IsolatedAsyncioTestCase):
         ):
             await cog.on_member_update(before, after)
 
-        moderator_embed = logs_channel.send.await_args.kwargs["embed"]
+        moderator_embed = bait_channel.send.await_args.kwargs["embed"]
         return after, modlog_create_case, moderator_embed
 
     async def test_current_dry_run_plans_bait_ban(self):

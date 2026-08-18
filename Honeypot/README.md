@@ -19,8 +19,9 @@ Requires `AAA3A_utils`. Red will show the pip install command if missing.
 ## Quick Setup
 
 ```ini
-[p]honeypot channel create
-[p]honeypot channel logs #mod-logs
+[p]honeypot channels honeypot create
+[p]honeypot channels errors #your-errors-channel
+[p]honeypot channels review #your-review-channel
 [p]honeypot honeypot action ban
 [p]honeypot honeypot toggle true
 ```
@@ -31,7 +32,7 @@ By default, only the server owner can use `!honeypot` and all subcommands. Red P
 
 ### Manual evidence
 
-Moderators with Manage Messages can use the `Add evidence` message context action. It copies the message and its attachments to the dedicated private manual evidence channel, then deletes the source after the copy succeeds. There is no fallback to the normal Honeypot logs channel. The action can also apply `memen't`, mute, kick, or ban. Mute uses Red's core `Mutes` cog, while kick and ban use Honeypot's existing moderation path.
+Moderators with Manage Messages can use the `Add evidence` message context action. It copies the message and its attachments to the dedicated private manual evidence channel, then deletes the source after the copy succeeds. Manual evidence never borrows another channel category. The action can also apply `memen't`, mute, kick, or ban. Mute uses Red's core `Mutes` cog, while kick and ban use Honeypot's existing moderation path.
 
 `Memen't` is available only in the configured memes channel and uses role ID `803692340749140008`. Mute, kick, and ban are mutually exclusive dropdown choices, while `memen't` can be combined with mute. The moderator enters punishment reasons and mute duration in a modal while evidence publication runs in the background. If the modal is closed, the preliminary result provides an `Enter punishment details` button for the remainder of the five-minute deadline. Mute durations use `30m`, `2h`, `3d`, or `1w` format and may not exceed 28 days.
 
@@ -69,18 +70,34 @@ By default, three GIFs from one member inside a rolling 60-second window trigger
 | `!honeypot gifdetector muteduration [60-604800]` | Show or set the role mute duration in seconds |
 | `!honeypot gifdetector channel add [channel]` | Monitor a channel, or the current channel when omitted |
 | `!honeypot gifdetector channel remove [channel]` | Stop monitoring a channel, or the current channel when omitted |
+| `!honeypot gifdetector channel list` | List monitored channels |
+| `!honeypot gifdetector debug toggle <true\|false>` | Enable or disable moderator-only shot diagnostics |
+| `!honeypot gifdetector debug channel [channel]` | Show or set the shot diagnostics destination |
 | `!honeypot gifdetector message set <text>` | Set the static warning shown for additional GIFs |
 | `!honeypot gifdetector message reset` | Reset the static warning to `No gifs!` |
 
-### channel
+### channels
+
+`!honeypot channels` shows every destination and source/scope with its current value. Destination categories are independent. Setting one never changes another.
 
 | Command | Description |
 |---------|-------------|
-| `!honeypot channel create` | Create and add a new `#honeypot` channel at position 0 |
-| `!honeypot channel add <channel>` | Add an existing honeypot channel |
-| `!honeypot channel remove <channel>` | Remove a honeypot channel |
-| `!honeypot channel list` | List honeypot channels |
-| `!honeypot channel logs <channel>` | Set the logs channel |
+| `!honeypot channels review [channel]` | Show or set the review destination |
+| `!honeypot channels errors [channel]` | Show or set the shared technical error destination |
+| `!honeypot channels manual-evidence [channel]` | Show or set the private manual evidence destination |
+| `!honeypot channels joinwatch [channel]` | Show or set the JoinWatch destination |
+| `!honeypot channels bait-role [channel]` | Show or set the bait-role destination |
+| `!honeypot channels image-scan [channel]` | Show or set the image scan destination |
+| `!honeypot channels gif-debug [channel]` | Show or set the GIF diagnostics destination |
+| `!honeypot channels mement-notifications [channel]` | Show or set the memen't notification destination |
+| `!honeypot channels memes [channel]` | Show or set the memes source channel |
+| `!honeypot channels honeypot create` | Create and add a new `#honeypot` channel at position 0 |
+| `!honeypot channels honeypot add <channel>` | Add an existing honeypot source |
+| `!honeypot channels honeypot remove <channel>` | Remove a honeypot source |
+| `!honeypot channels honeypot list` | List honeypot sources |
+| `!honeypot channels gif-detector add [channel]` | Add a GIF detector scope |
+| `!honeypot channels gif-detector remove [channel]` | Remove a GIF detector scope |
+| `!honeypot channels gif-detector list` | List GIF detector scopes |
 
 ### punishment
 
@@ -152,6 +169,7 @@ Detection cases expire 24 hours after the first detection. This lifetime is fixe
 | `!honeypot imagescan dropfile <identifier>` | Remove a stored image file while keeping its hashes active |
 | `!honeypot imagescan rebuild` | Recompute image detector threshold state |
 | `!honeypot imagescan status` | Show image detector settings, samples, and timing |
+| `!honeypot imagescan channel [channel]` | Show or set the image scan destination |
 | `!honeypot imagescan detector toggle <bool>` | Enable or disable production image detection |
 | `!honeypot imagescan detector action <none\|review\|kick\|ban>` | Action for image detector matches |
 | `!honeypot imagescan detector threshold <0-100>` | Maximum image hash distance |
@@ -180,14 +198,16 @@ Detection cases expire 24 hours after the first detection. This lifetime is fixe
 | `!honeypot bait_role toggle <bool>` | Enable or disable the bait role trap |
 | `!honeypot bait_role role <role>` | Set the bait role |
 | `!honeypot bait_role action <kick\|ban>` | Action to take when users take the bait role |
+| `!honeypot bait_role channel [channel]` | Show or set the bait-role destination |
 
 ### errors
 
-`!honeypot errors` on its own lists unacknowledged operational failures.
+`!honeypot errors` on its own lists unacknowledged operational failures. Use `!honeypot errors maintainer @user` to show or set the person pinged for new failures.
 
 | Command | Description |
 |---------|-------------|
 | `!honeypot errors clear` | Acknowledge all currently visible operational failures |
+| `!honeypot errors maintainer clear` | Stop pinging the configured maintainer |
 
 ### other
 
@@ -398,18 +418,27 @@ Setup:
 
 When the trap is enabled and a non-exempt user receives the bait role, the cog
 immediately performs the configured bait action: `kick` or `ban`. It then sends a
-log embed to the configured logs channel if one is available.
+log embed to the configured bait-role channel if one is available.
 
 The bait trap ignores bot owners, server mods, server admins, users with
 `Manage Server`, and users whose top role is at or above the bot's top role. If
 the bait role is deleted or no bait role is configured, the trap does nothing.
 
+## Adding a channel category
+
+Channel routing is declared in `channel_routing.py`. To add a category:
+
+1. Reuse an existing semantic category when it fits
+2. Otherwise add one `ChannelCategory` entry with its config field, type, permissions, central command, and module command
+3. Route publication through that category and use the shared configuration operations
+4. Add the declared static commands. The registry contract tests name any missing central or module path
+5. Send every technical failure through the shared `errors` category. Never add a cross-category fallback
+
 ## Permissions
 
 - View Channel, Send Messages, Read Message History, Manage Messages (in honeypot channel)
 - Manage Messages (in every visible channel where cached purge should remove recent scammer messages)
-- View Channel, Send Messages, Read Message History, Embed Links, and Attach Files
-  (in logs and review channels)
+- View Channel and the permissions declared for each configured destination
 - Create Public Threads, Send Messages in Threads, and Manage Threads
   (in the review channel)
 - Send Messages (in the joinwatch channel)

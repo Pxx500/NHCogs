@@ -61,7 +61,6 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": None,
                     "spam_enabled": True,
                     "spam_action": "review",
@@ -116,7 +115,6 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                         "enabled": True,
                         "review_enabled": True,
                         "dry_run": False,
-                        "logs_channel": None,
                         "review_channel": None,
                         "spam_enabled": False,
                         "firstpost_enabled": False,
@@ -201,7 +199,7 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0)
                 config = {
-                    "enabled": True, "dry_run": False, "logs_channel": None,
+                    "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": True,
                     "spam_action": "review", "firstpost_enabled": False,
                     "firstpost_collect_enabled": False,
@@ -232,7 +230,7 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=6)
                 config = {
-                    "enabled": True, "dry_run": False, "logs_channel": None,
+                    "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": False,
                     "firstpost_enabled": False, "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": True,
@@ -294,7 +292,6 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True,
                     "dry_run": True,
-                    "logs_channel": None,
                     "review_channel": None,
                     "honeypot_channels": [message.channel.id],
                     "action": "ban",
@@ -355,7 +352,6 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": None,
                     "spam_enabled": True,
                     "spam_action": "review",
@@ -523,7 +519,6 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": None,
                     "spam_enabled": True,
                     "spam_action": "review",
@@ -594,7 +589,6 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True,
                     "dry_run": False,
-                    "logs_channel": None,
                     "review_channel": None,
                     "spam_enabled": True,
                     "spam_action": "review",
