@@ -23,6 +23,33 @@ from tests.harness import (
 
 
 class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_load_prunes_unknown_guild_config_keys(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog.config._guilds[42] = {
+                    "enabled": False,
+                    "honeypot_channels": [123],
+                    "honeypot_channel": 456,
+                    "imagescan_channel": 789,
+                }
+                cog._init_firstpost_seen_store = _async_noop
+                cog._init_imagescan_store = _async_noop
+                cog._run_detection_reconciliation = _async_noop
+                cog._restore_detection_case_views = _async_noop
+
+                await cog.cog_load()
+                try:
+                    self.assertEqual(
+                        cog.config._guilds[42],
+                        {
+                            "enabled": False,
+                            "honeypot_channels": [123],
+                        },
+                    )
+                finally:
+                    await cog.cog_unload()
+
     async def test_user_privacy_deletion_attempts_cases_after_registry_failure(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -145,7 +172,6 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             ("WhitelistModeOption", "WHITELIST_MODE_OPTIONS", ("bypass", "review", "fallback", "none")),
             ("JoinwatchAutoRoleActionOption", "JOINWATCH_AUTO_ROLE_ACTION_OPTIONS", ("none", "kick", "ban")),
             ("BaitActionOption", "BAIT_ACTION_OPTIONS", ("kick", "ban")),
-            ("ImageScanDecision", "IMAGE_SCAN_DECISIONS", ("true_positive", "false_positive")),
             ("ImageScanDetectorActionOption", "IMAGE_SCAN_DETECTOR_ACTION_OPTIONS", ("none", "review", "kick", "ban")),
             ("ReviewKickFailWarningMode", "REVIEW_KICK_FAIL_WARNING_MODES", ("false", "true", "manual")),
         )
@@ -231,7 +257,6 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             "firstpost_collect_enabled": True,
             "firstpost_enabled": True,
             "spam_enabled": True,
-            "imagescan_enabled": True,
             "imagescan_detector_enabled": True,
             "review_enabled": True,
             "automated_kick_fail_warning": True,
@@ -252,9 +277,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_guild_settings_coerce_optional_discord_ids(self):
         raw = {
             "errors_channel": 11,
-            "honeypot_channel": 22,
             "mute_role": "invalid",
-            "imagescan_channel": 33,
             "review_channel": 44,
             "joinwatch_channel": 55,
             "joinwatch_auto_role_id": 66,
@@ -266,9 +289,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     guild_settings = honeypot.GuildSettings.from_mapping(raw)
 
                 self.assertEqual(guild_settings.errors_channel, 11)
-                self.assertEqual(guild_settings.honeypot_channel, 22)
                 self.assertIsNone(guild_settings.mute_role)
-                self.assertEqual(guild_settings.imagescan_channel, 33)
                 self.assertEqual(guild_settings.review_channel, 44)
                 self.assertEqual(guild_settings.joinwatch_channel, 55)
                 self.assertEqual(guild_settings.joinwatch_auto_role_id, 66)
@@ -377,7 +398,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertIn("action", "\n".join(captured.output))
 
-    async def test_guild_settings_preserve_legacy_and_canonical_honeypot_channels(self):
+    async def test_guild_settings_copy_canonical_honeypot_channels(self):
         canonical = [10, 20]
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -388,7 +409,6 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
 
-                self.assertEqual(guild_settings.honeypot_channel, 30)
                 self.assertEqual(guild_settings.honeypot_channels, [10, 20])
                 self.assertIsNot(guild_settings.honeypot_channels, canonical)
 
@@ -399,14 +419,6 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
                 with self.assertRaises(FrozenInstanceError):
                     guild_settings.enabled = True
-
-    async def test_guild_settings_item_access_fails_with_migration_guidance(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                guild_settings = honeypot.GuildSettings.from_mapping({})
-
-                with self.assertRaisesRegex(TypeError, r"settings\.enabled"):
-                    guild_settings["enabled"]
 
     async def test_guild_settings_defaults_exactly_match_registered_config(self):
         with TemporaryDirectory() as directory:
@@ -525,10 +537,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 class StaleConfig:
                     def __init__(self):
                         self.read_count = 0
-
-                    async def all_guilds(self):
-                        self.read_count += 1
-                        return {
+                        self.values = {
                             1: {
                                 "pending_reviews": {
                                     "99": {
@@ -539,6 +548,19 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                                 }
                             }
                         }
+
+                    async def all_guilds(self):
+                        self.read_count += 1
+                        return self.values
+
+                    def guild_from_id(self, guild_id):
+                        values = self.values[guild_id]
+
+                        class GuildConfig:
+                            async def clear_raw(self, key):
+                                values.pop(key, None)
+
+                        return GuildConfig()
 
                 class Store:
                     def initialize(self):
@@ -577,7 +599,8 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     await cog._case_restore_task
                     await asyncio.sleep(0)
 
-                    self.assertEqual(stale_config.read_count, 0)
+                    self.assertEqual(stale_config.read_count, 1)
+                    self.assertEqual(stale_config.values[1], {})
                     self.assertEqual(getattr(bot, "restored_views", []), [])
                 finally:
                     await cog.cog_unload()

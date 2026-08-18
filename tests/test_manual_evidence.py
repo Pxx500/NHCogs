@@ -228,21 +228,21 @@ class ManualEvidenceViewTests(unittest.TestCase):
 
 
 class ManualEvidenceContextActionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_normal_logs_channel_is_not_an_evidence_fallback(self):
+    async def test_errors_channel_is_not_an_evidence_fallback(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
                 module = import_module("Honeypot.manual_evidence")
-                logs_channel = SimpleNamespace(id=900)
+                errors_channel = SimpleNamespace(id=900)
                 guild = SimpleNamespace(
                     id=1,
                     get_channel=lambda channel_id: (
-                        logs_channel if channel_id == logs_channel.id else None
+                        errors_channel if channel_id == errors_channel.id else None
                     ),
                 )
                 guild_config = SimpleNamespace(
                     all=mock.AsyncMock(
                         return_value={
-                            "logs_channel": logs_channel.id,
+                            "errors_channel": errors_channel.id,
                             "manual_evidence_channel": None,
                         }
                     )

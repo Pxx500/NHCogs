@@ -78,7 +78,6 @@ class CogAssemblyContractTests(unittest.TestCase):
             "manual-evidence",
             "joinwatch",
             "bait-role",
-            "image-scan",
             "gif-debug",
             "mement-notifications",
         ):
@@ -252,11 +251,11 @@ class CogAssemblyContractTests(unittest.TestCase):
         a new split row updates them deliberately.
         """
         expected_counts = {
-            "channel_routing": 29,
-            "detection": 74,
+            "channel_routing": 27,
+            "detection": 73,
             "diagnostics": 12,
             "gif_detector": 9,
-            "imagescan": 22,
+            "imagescan": 21,
             "joinwatch": 15,
             "review_publication": 13,
         }

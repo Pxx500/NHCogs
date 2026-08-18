@@ -11,7 +11,6 @@ import tempfile
 import typing
 import zipfile
 from datetime import datetime, timezone
-from enum import Enum
 from pathlib import Path
 from time import perf_counter
 
@@ -35,10 +34,7 @@ _ = Translator("Honeypot", __file__)
 log = logging.getLogger("red.Honeypot")
 
 IMAGE_SCAN_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
-IMAGE_SCAN_COUNTS = (2, 4)
 IMAGE_SCAN_MAX_ATTACHMENTS = 4
-IMAGE_SCAN_FEEDBACK_TIMEOUT_SECONDS = 24 * 60 * 60
-IMAGE_SCAN_FEEDBACK_BULK_LABELS = ("All TP", "All FP", "Ignore all", "Individual")
 IMAGE_ATTACHMENT_EXTENSIONS = {
     ".avif",
     ".bmp",
@@ -50,14 +46,6 @@ IMAGE_ATTACHMENT_EXTENSIONS = {
     ".tiff",
     ".webp",
 }
-
-
-class ImageScanDecision(str, Enum):
-    TRUE_POSITIVE = "true_positive"
-    FALSE_POSITIVE = "false_positive"
-
-
-IMAGE_SCAN_DECISIONS = tuple(member.value for member in ImageScanDecision)
 
 
 def is_image_attachment(attachment: discord.Attachment) -> bool:
@@ -914,24 +902,6 @@ async def imagescan_remove(cog, ctx: commands.Context, identifier: str) -> None:
             threshold=state["effective_threshold"],
         )
     )
-
-
-async def imagescan_toggle(cog, ctx: commands.Context, value: bool = None) -> None:
-    if value is None:
-        v = await cog.config.guild(ctx.guild).imagescan_enabled()
-        await ctx.send(
-            _("Current: {value}. Choices: {options}").format(
-                value=str(v).lower(),
-                options=cog._format_options(BOOL_OPTIONS),
-            )
-        )
-    else:
-        if value and await cog.config.guild(ctx.guild).imagescan_channel() is None:
-            raise commands.UserFeedbackCheckFailure(
-                _("Set an image scan channel first with `honeypot imagescan channel`.")
-            )
-        await cog.config.guild(ctx.guild).imagescan_enabled.set(value)
-        await ctx.send(_("✅ Image scan enabled set to {value}").format(value=value))
 
 
 async def imagescan_detector_toggle(cog, ctx: commands.Context, value: bool = None) -> None:

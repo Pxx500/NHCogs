@@ -955,7 +955,6 @@ def _destination_is_required(key: str, settings: GuildSettings) -> bool:
         "joinwatch": settings.joinwatch_enabled
         and settings.joinwatch_alert_enabled,
         "bait_role": settings.baitrole_enabled,
-        "image_scan": settings.imagescan_enabled,
         "gif_debug": settings.gif_detector_debug_enabled,
     }.get(key, False)
 
@@ -1143,10 +1142,7 @@ async def honeypot_doctor(cog, ctx: commands.Context) -> None:
 
     honeypot_channels = tuple(
         channel
-        for channel_id in cog._honeypot_channel_ids(
-            guild_settings.honeypot_channels,
-            guild_settings.honeypot_channel,
-        )
+        for channel_id in guild_settings.honeypot_channels
         if (channel := cog._get_text_channel_or_thread(ctx.guild, channel_id)) is not None
     )
     checks: list[DoctorCheck] = [

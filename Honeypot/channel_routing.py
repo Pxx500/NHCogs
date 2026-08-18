@@ -98,14 +98,6 @@ CHANNEL_CATEGORIES = (
         module_command="bait_role channel",
     ),
     ChannelCategory(
-        "image_scan",
-        "imagescan_channel",
-        "Image scan",
-        "destination",
-        central_command="image-scan",
-        module_command="imagescan channel",
-    ),
-    ChannelCategory(
         "gif_debug",
         "gif_detector_debug_channel",
         "GIF debug",

@@ -1,11 +1,10 @@
 {
-  "command_count": 144,
-  "command_structure_sha256": "7199378306eb8563ba8550b4f8eb904afdc6118690b68b6a0e460f66287fc7ed",
+  "command_count": 141,
+  "command_structure_sha256": "e2167c7b35358e520b865dc0a244a051bc63bff0698af5a509f030bfb40b499d",
   "intentionally_undocumented_debug_commands": [
     "honeypot debug imagescan cleanup_events",
     "honeypot debug imagescan dump",
     "honeypot debug imagescan importtpzip",
-    "honeypot debug imagescan legacy_toggle",
     "honeypot debug resetstats",
     "honeypot debug reviewdump"
   ],
@@ -28,14 +27,13 @@
     "purge_cache_cleanup_loop"
   ],
   "readme": {
-    "leaf_count": 114,
-    "row_count": 108,
+    "leaf_count": 111,
+    "row_count": 106,
     "rows_without_command": [],
     "undocumented_commands": [
       "honeypot debug imagescan cleanup_events",
       "honeypot debug imagescan dump",
       "honeypot debug imagescan importtpzip",
-      "honeypot debug imagescan legacy_toggle",
       "honeypot debug resetstats",
       "honeypot debug reviewdump"
     ]

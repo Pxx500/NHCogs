@@ -240,7 +240,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(outcome.result)
                 self.assertEqual(outcome.follow_ups, ())
 
-    async def test_logs_channel_is_not_a_review_publication_fallback(self):
+    async def test_errors_channel_is_not_a_review_publication_fallback(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 handler_module = import_module("Honeypot.operations.review_publish")
@@ -252,7 +252,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                 self._configure(
                     cog,
                     review_channel=None,
-                    extra={"logs_channel": 202},
+                    extra={"errors_channel": 202},
                 )
                 publications = []
 

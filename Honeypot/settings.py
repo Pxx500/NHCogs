@@ -154,7 +154,6 @@ DEFAULTS: Mapping[str, object] = MappingProxyType(
         "manual_evidence_channel": None,
         "manual_evidence_memes_channel": None,
         "manual_evidence_mement_notification_channel": None,
-        "honeypot_channel": None,
         "honeypot_channels": [],
         "mute_role": None,
         "purge_backward_seconds": PURGE_BACKWARD_DEFAULT_SECONDS,
@@ -167,8 +166,6 @@ DEFAULTS: Mapping[str, object] = MappingProxyType(
         "spam_action": "review",
         "spam_window_seconds": 10,
         "spam_min_channels": 2,
-        "imagescan_enabled": False,
-        "imagescan_channel": None,
         "imagescan_detector_enabled": False,
         "imagescan_detector_action": "review",
         "imagescan_detector_threshold": 20,
@@ -330,7 +327,6 @@ class GuildSettings:
     manual_evidence_channel: int | None
     manual_evidence_memes_channel: int | None
     manual_evidence_mement_notification_channel: int | None
-    honeypot_channel: int | None
     honeypot_channels: list[int]
     mute_role: int | None
     purge_backward_seconds: int
@@ -343,8 +339,6 @@ class GuildSettings:
     spam_action: CoreActionOption
     spam_window_seconds: int
     spam_min_channels: int
-    imagescan_enabled: bool
-    imagescan_channel: int | None
     imagescan_detector_enabled: bool
     imagescan_detector_action: ImageScanDetectorActionOption
     imagescan_detector_threshold: int
@@ -405,7 +399,6 @@ class GuildSettings:
             manual_evidence_mement_notification_channel=_optional_int(
                 raw, "manual_evidence_mement_notification_channel"
             ),
-            honeypot_channel=_optional_int(raw, "honeypot_channel"),
             honeypot_channels=_list(raw, "honeypot_channels", int),
             mute_role=_optional_int(raw, "mute_role"),
             purge_backward_seconds=_int(raw, "purge_backward_seconds"),
@@ -420,8 +413,6 @@ class GuildSettings:
             spam_action=_enum(raw, "spam_action", CoreActionOption, CoreActionOption.REVIEW),
             spam_window_seconds=_int(raw, "spam_window_seconds"),
             spam_min_channels=_int(raw, "spam_min_channels"),
-            imagescan_enabled=_bool(raw, "imagescan_enabled"),
-            imagescan_channel=_optional_int(raw, "imagescan_channel"),
             imagescan_detector_enabled=_bool(raw, "imagescan_detector_enabled"),
             imagescan_detector_action=_enum(
                 raw,
@@ -497,9 +488,4 @@ class GuildSettings:
             baitrole_action=_enum(
                 raw, "baitrole_action", BaitActionOption, BaitActionOption.BAN
             ),
-        )
-
-    def __getitem__(self, key: str) -> object:
-        raise TypeError(
-            f"GuildSettings does not support settings[{key!r}]; use settings.{key} instead"
         )
