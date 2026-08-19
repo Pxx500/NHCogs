@@ -74,27 +74,26 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
                 cog._publish_detection_case_serial = mock.AsyncMock()
+                capture_finished = asyncio.Event()
+                capture_case_attachments = cog._capture_case_attachments
+
+                async def capture_and_signal(*args, **kwargs):
+                    try:
+                        return await capture_case_attachments(*args, **kwargs)
+                    finally:
+                        asyncio.get_running_loop().call_soon(
+                            capture_finished.set
+                        )
+
+                cog._capture_case_attachments = mock.AsyncMock(
+                    side_effect=capture_and_signal
+                )
                 for publication_lock in cog._detection_publication_locks:
                     await publication_lock.acquire()
 
-                async def wait_for_ready_evidence():
-                    while True:
-                        snapshot = await asyncio.to_thread(
-                            active_case,
-                            cog._case_store,
-                            message.guild.id,
-                            message.author.id,
-                        )
-                        if snapshot is not None and all(
-                            item.capture_status != "pending"
-                            for item in snapshot.attachments
-                        ):
-                            return
-                        await asyncio.sleep(0)
-
                 try:
                     processing = asyncio.create_task(cog.on_message(message))
-                    await asyncio.wait_for(wait_for_ready_evidence(), timeout=1)
+                    await asyncio.wait_for(capture_finished.wait(), timeout=1)
                 finally:
                     for publication_lock in cog._detection_publication_locks:
                         publication_lock.release()
