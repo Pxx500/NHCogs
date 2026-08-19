@@ -12,7 +12,7 @@
     "fields": [
       {
         "name": "Resolution:",
-        "value": "Kicked\n<@9001> • <t:1784030700:F>"
+        "value": "Kick (<@9001>)"
       }
     ],
     "incomplete_evidence": false,
@@ -33,7 +33,7 @@
       [
         {
           "name": "Resolution:",
-          "value": "Kicked\n<@9001> • <t:1784030700:F>"
+          "value": "Kick (<@9001>)"
         }
       ]
     ],
