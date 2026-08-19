@@ -1,6 +1,7 @@
 import importlib.util
 import sys
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -502,7 +503,7 @@ class CaseReviewProjectionTests(unittest.TestCase):
         self.assertNotIn("HTTPException", visible)
         self.assertNotIn("case-1", visible)
 
-    def test_automatic_ban_keeps_image_reviewer_out_of_moderation_attribution(self):
+    def test_terminal_summary_combines_automatic_ban_and_image_review(self):
         snapshot = self.snapshot(channels=(20,))
         resolved_at = snapshot.case.created_at + timedelta(minutes=5)
         case = cases.CaseRecord(
@@ -534,18 +535,132 @@ class CaseReviewProjectionTests(unittest.TestCase):
         snapshot = cases.CaseSnapshot(
             case,
             snapshot.messages,
-            snapshot.attachments,
+            tuple(
+                replace(
+                    attachment,
+                    learning_decision="true_positive",
+                    learning_metadata={"moderator_id": 99},
+                )
+                for attachment in snapshot.attachments
+            ),
             snapshot.signals,
             (automatic_ban,),
         )
 
         projection = case_review.render_case(snapshot)
-        visible = projection.description + "\n" + "\n".join(
-            field.value for page in projection.pages for field in page
+        resolution = next(
+            field for field in projection.fields if field.name == "Resolution:"
         )
 
-        self.assertIn("Banned automatically", visible)
-        self.assertNotIn("<@99>", visible)
+        self.assertEqual(resolution.value, "Ban (automatically)\nAll TP (<@99>)")
+        self.assertNotIn("Moderation:", [field.name for field in projection.fields])
+
+    def test_terminal_summary_keeps_manual_action_and_mixed_review_compact(self):
+        snapshot = self.snapshot(channels=(20,))
+        resolved_at = snapshot.case.created_at + timedelta(minutes=5)
+        case = cases.CaseRecord(
+            **{
+                **snapshot.case.__dict__,
+                "status": cases.CaseStatus.RESOLVED,
+                "resolution": "kick",
+                "moderator_id": 200,
+                "resolved_at": resolved_at,
+            }
+        )
+        manual_kick = cases.OperationRecord(
+            "op-manual-kick",
+            "case-1",
+            None,
+            "moderator_kick",
+            cases.OperationStatus.SUCCEEDED,
+            1,
+            snapshot.case.created_at,
+            resolved_at,
+            None,
+            None,
+            "kick",
+            200,
+            "moderator-kick:case-1",
+            None,
+            None,
+        )
+        decisions = (
+            ("true_positive", 100),
+            ("false_positive", 300),
+            ("ignored", 100),
+        )
+        snapshot = cases.CaseSnapshot(
+            case,
+            snapshot.messages,
+            tuple(
+                replace(
+                    attachment,
+                    learning_decision=decision,
+                    learning_metadata={"moderator_id": reviewer_id},
+                )
+                for attachment, (decision, reviewer_id) in zip(
+                    snapshot.attachments,
+                    decisions,
+                    strict=True,
+                )
+            ),
+            snapshot.signals,
+            (manual_kick,),
+        )
+
+        projection = case_review.render_case(snapshot)
+        resolution = next(
+            field for field in projection.fields if field.name == "Resolution:"
+        )
+
+        self.assertEqual(
+            resolution.value,
+            "Kick (<@200>)\n1 TP, 1 FP, 1 ignored (<@100>, <@300>)",
+        )
+        self.assertEqual(len(resolution.value.splitlines()), 2)
+
+    def test_image_only_resolution_caps_reviewer_mentions_on_one_line(self):
+        snapshot = self.snapshot(channels=(20,))
+        case = cases.CaseRecord(
+            **{
+                **snapshot.case.__dict__,
+                "status": cases.CaseStatus.RESOLVED,
+                "resolution": "images:fp",
+                "moderator_id": 999,
+            }
+        )
+        attachments = snapshot.attachments + (
+            self.attachment(1, 2, "extra.png", detector_matched=True),
+        )
+        snapshot = cases.CaseSnapshot(
+            case,
+            snapshot.messages,
+            tuple(
+                replace(
+                    attachment,
+                    learning_decision="false_positive",
+                    learning_metadata={"moderator_id": reviewer_id},
+                )
+                for attachment, reviewer_id in zip(
+                    attachments,
+                    (100, 200, 300, 400),
+                    strict=True,
+                )
+            ),
+            snapshot.signals,
+            snapshot.operations,
+        )
+
+        projection = case_review.render_case(snapshot)
+        resolution = next(
+            field for field in projection.fields if field.name == "Resolution:"
+        )
+
+        self.assertEqual(
+            resolution.value,
+            "All FP (<@100>, <@200>, <@400>, +1 more)",
+        )
+        self.assertEqual(len(resolution.value.splitlines()), 1)
 
     def test_review_keeps_user_id_but_hides_case_uuid(self):
         projection = case_review.render_case(self.snapshot())
