@@ -196,7 +196,7 @@ class JoinwatchSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
                     return_value=alert_channel
                 )
                 cog._increment_stat = mock.AsyncMock()
-                honeypot.joinwatch._store_joinwatch_pending_role_alert = mock.AsyncMock()
+                honeypot.joinwatch_state.store_alert_reference = mock.AsyncMock()
                 guild = SimpleNamespace(id=100)
                 member = SimpleNamespace(
                     id=200,
@@ -632,7 +632,7 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = object.__new__(honeypot.Honeypot)
                 configure = mock.AsyncMock()
-                honeypot.joinwatch.config_joinwatch = configure
+                honeypot.joinwatch_commands.config_joinwatch = configure
                 ctx = SimpleNamespace(
                     clean_prefix="!",
                     command=SimpleNamespace(

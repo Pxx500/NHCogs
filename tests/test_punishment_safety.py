@@ -434,6 +434,7 @@ class JoinwatchDryRunTests(unittest.IsolatedAsyncioTestCase):
                     top_role=_Ranked(1),
                     add_roles=mock.AsyncMock(),
                 )
+                pending_assignments = {}
                 pending_roles = {}
                 stats = {}
                 raw_config = {
@@ -446,10 +447,14 @@ class JoinwatchDryRunTests(unittest.IsolatedAsyncioTestCase):
                     "joinwatch_auto_role_id": role.id,
                     "joinwatch_auto_role_timer_minutes": 30,
                     "joinwatch_auto_role_random_delay_enabled": False,
+                    "joinwatch_pending_role_assignments": pending_assignments,
                     "joinwatch_pending_roles": pending_roles,
                 }
                 guild_config = SimpleNamespace(
                     all=mock.AsyncMock(return_value=raw_config),
+                    joinwatch_pending_role_assignments=lambda: _Store(
+                        pending_assignments
+                    ),
                     joinwatch_pending_roles=lambda: _Store(pending_roles),
                     stats=lambda: _Store(stats),
                 )

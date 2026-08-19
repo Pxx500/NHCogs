@@ -23,6 +23,8 @@ from . import (
     gif_detector,
     imagescan,
     joinwatch,
+    joinwatch_commands,
+    joinwatch_state,
     manual_evidence,
     review_publication,
     settings,
@@ -94,12 +96,11 @@ log = logging.getLogger("red.Honeypot")
 COG_AUTHOR = "Pxx500"
 COG_REPO_NAME = "NHCogs"
 COG_REPO_URL = "https://github.com/Pxx500/NHCogs"
-JOINWATCH_MAX_ACCOUNT_AGE_HOURS = joinwatch.JOINWATCH_MAX_ACCOUNT_AGE_HOURS
 CONSOLE_DUMP_USAGE = diagnostics.CONSOLE_DUMP_USAGE
 
 
-JOINWATCH_RETRY_DELAY_MINUTES = joinwatch.JOINWATCH_RETRY_DELAY_MINUTES
-JOINWATCH_MAX_RETRIES = joinwatch.JOINWATCH_MAX_RETRIES
+JOINWATCH_RETRY_DELAY_MINUTES = joinwatch_state.JOINWATCH_RETRY_DELAY_MINUTES
+JOINWATCH_MAX_RETRIES = joinwatch_state.JOINWATCH_MAX_RETRIES
 REVIEW_DUMP_START = diagnostics.REVIEW_DUMP_START
 REVIEW_DUMP_MAX_ZIP_BYTES = diagnostics.REVIEW_DUMP_MAX_ZIP_BYTES
 REVIEW_DUMP_ATTACHMENT_DELAY_SECONDS = diagnostics.REVIEW_DUMP_ATTACHMENT_DELAY_SECONDS
@@ -111,11 +112,6 @@ DETECTION_HEARTBEAT_INTERVAL_SECONDS = 60.0
 
 DoctorResult = diagnostics.DoctorResult
 DoctorCheck = diagnostics.DoctorCheck
-
-
-JoinwatchSelectedAction = joinwatch.JoinwatchSelectedAction
-JoinwatchSelection = joinwatch.JoinwatchSelection
-select_due_joinwatch_assignments = joinwatch.select_due_joinwatch_assignments
 
 
 KICK_FAIL_WARNING_REASON = "Suspicious activity: target left before the kick could be applied."
@@ -2027,12 +2023,12 @@ class Honeypot(Cog):
     @honeypot.group(invoke_without_command=True)
     async def joinwatch(self, ctx: commands.Context) -> None:
         """Configure young-account join monitoring."""
-        return await self._send_group_overview(ctx, joinwatch.config_joinwatch)
+        return await self._send_group_overview(ctx, joinwatch_commands.config_joinwatch)
 
     @joinwatch.command(name="toggle")
     async def joinwatch_toggle(self, ctx: commands.Context, value: bool = None) -> None:
         """Enable or disable young-account join monitoring."""
-        return await joinwatch.joinwatch_toggle(self, ctx, value)
+        return await joinwatch_commands.joinwatch_toggle(self, ctx, value)
 
     @joinwatch.command()
     async def channel(self, ctx: commands.Context, target: discord.TextChannel | discord.Thread = None) -> None:
@@ -2042,73 +2038,77 @@ class Honeypot(Cog):
     @joinwatch.group(name="alert", invoke_without_command=True)
     async def joinwatch_alert(self, ctx: commands.Context) -> None:
         """Configure joinwatch alert delivery."""
-        return await self._send_group_overview(ctx, joinwatch.config_joinwatch)
+        return await self._send_group_overview(ctx, joinwatch_commands.config_joinwatch)
 
     @joinwatch_alert.command(name="toggle")
     async def joinwatch_alert_toggle(self, ctx: commands.Context, value: bool = None) -> None:
         """Enable or disable joinwatch alert messages."""
-        return await joinwatch.joinwatch_alert_toggle(self, ctx, value)
+        return await joinwatch_commands.joinwatch_alert_toggle(self, ctx, value)
 
     @joinwatch.command(name="max_age")
     async def max_age(self, ctx: commands.Context, hours: int = None) -> None:
         """Set the maximum account age for joinwatch alerts."""
-        return await joinwatch.max_age(self, ctx, hours)
+        return await joinwatch_commands.max_age(self, ctx, hours)
 
     @joinwatch.group(name="autorole", invoke_without_command=True)
     async def joinwatch_autorole(self, ctx: commands.Context) -> None:
         """Configure temporary roles for young accounts."""
-        return await self._send_group_overview(ctx, joinwatch.config_joinwatch)
+        return await self._send_group_overview(ctx, joinwatch_commands.config_joinwatch)
 
     @joinwatch_autorole.command(name="toggle")
     async def joinwatch_autorole_toggle(self, ctx: commands.Context, value: bool = None) -> None:
         """Enable or disable joinwatch auto-role handling."""
-        return await joinwatch.joinwatch_autorole_toggle(self, ctx, value)
+        return await joinwatch_commands.joinwatch_autorole_toggle(self, ctx, value)
 
     @joinwatch_autorole.command(name="role")
     async def joinwatch_autorole_role(self, ctx: commands.Context, role: discord.Role = None) -> None:
         """Set the temporary role for young accounts."""
-        return await joinwatch.joinwatch_autorole_role(self, ctx, role)
+        return await joinwatch_commands.joinwatch_autorole_role(self, ctx, role)
 
     @joinwatch_autorole.command(name="timer")
     async def joinwatch_autorole_timer(self, ctx: commands.Context, minutes: int = None) -> None:
         """Set how long the temporary role may remain."""
-        return await joinwatch.joinwatch_autorole_timer(self, ctx, minutes)
+        return await joinwatch_commands.joinwatch_autorole_timer(self, ctx, minutes)
 
     @joinwatch_autorole.command(name="action")
     async def joinwatch_autorole_action(self, ctx: commands.Context, value: str = None) -> None:
         """Set the action when the temporary role is not removed in time."""
-        return await joinwatch.joinwatch_autorole_action(self, ctx, value)
+        return await joinwatch_commands.joinwatch_autorole_action(self, ctx, value)
 
     @joinwatch_autorole.command(name="bantimers")
     async def joinwatch_autorole_bantimers(self, ctx: commands.Context) -> None:
         """List active joinwatch auto-role timers."""
-        return await joinwatch.joinwatch_autorole_bantimers(self, ctx)
+        return await joinwatch_commands.joinwatch_autorole_bantimers(self, ctx)
 
     @joinwatch_autorole.group(name="randomize", invoke_without_command=True)
     async def joinwatch_autorole_randomize(self, ctx: commands.Context) -> None:
         """Configure randomized auto-role delay."""
-        return await self._send_group_overview(ctx, joinwatch.config_joinwatch)
+        return await self._send_group_overview(ctx, joinwatch_commands.config_joinwatch)
 
     @joinwatch_autorole_randomize.command(name="toggle")
     async def joinwatch_autorole_randomize_toggle(
         self, ctx: commands.Context, value: bool = None
     ) -> None:
         """Enable or disable randomized auto-role delay."""
-        return await joinwatch.joinwatch_autorole_randomize_toggle(self, ctx, value)
+        return await joinwatch_commands.joinwatch_autorole_randomize_toggle(self, ctx, value)
 
     @joinwatch_autorole_randomize.command(name="min_time")
     async def joinwatch_autorole_randomize_min_time(
         self, ctx: commands.Context, minutes: int = None
     ) -> None:
         """Set the minimum randomized auto-role delay."""
-        return await joinwatch.joinwatch_autorole_randomize_min_time(self, ctx, minutes)
+        return await joinwatch_commands.joinwatch_autorole_randomize_min_time(
+            self, ctx, minutes
+        )
 
     @joinwatch_autorole_randomize.command(name="max_time")
     async def joinwatch_autorole_randomize_max_time(
         self, ctx: commands.Context, minutes: int = None
     ) -> None:
         """Set the maximum randomized auto-role delay."""
-        return await joinwatch.joinwatch_autorole_randomize_max_time(self, ctx, minutes)
+        return await joinwatch_commands.joinwatch_autorole_randomize_max_time(
+            self, ctx, minutes
+        )
 
     # ─── bait role sub-group ──────────────────────────────────────────
 
@@ -2201,7 +2201,7 @@ class Honeypot(Cog):
     @config_dump.command(name="joinwatch")
     async def config_joinwatch(self, ctx: commands.Context) -> None:
         """Show joinwatch settings."""
-        return await joinwatch.config_joinwatch(self, ctx)
+        return await joinwatch_commands.config_joinwatch(self, ctx)
 
     @config_dump.command(name="bait_role")
     async def config_bait(self, ctx: commands.Context) -> None:
