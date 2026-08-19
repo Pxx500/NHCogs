@@ -20,7 +20,9 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = honeypot.Honeypot(_Bot())
                 cog._increment_stat = mock.AsyncMock()
+                cog._record_daily_stat = mock.AsyncMock()
                 guild = SimpleNamespace(id=10)
+                occurred_at = datetime(2026, 8, 19, 20, tzinfo=timezone.utc)
                 signals = (
                     honeypot.DetectionSignal(
                         "firstpost",
@@ -38,7 +40,9 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
 
-                await honeypot.detection._record_detection_stats(cog, guild, signals)
+                await honeypot.detection._record_detection_stats(
+                    cog, guild, signals, occurred_at
+                )
 
                 keys = [call.args[1] for call in cog._increment_stat.await_args_list]
                 self.assertEqual(
@@ -53,6 +57,38 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
                         "spam_bans",
                         "spam_catches",
                     },
+                )
+                cog._record_daily_stat.assert_awaited_once_with(
+                    guild, occurred_at, "detections"
+                )
+
+    async def test_detection_daily_stat_precedes_fallible_lifetime_counter(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog._increment_stat = mock.AsyncMock(
+                    side_effect=RuntimeError("config unavailable")
+                )
+                cog._record_daily_stat = mock.AsyncMock()
+                guild = SimpleNamespace(id=10)
+                occurred_at = datetime(2026, 8, 19, 20, tzinfo=timezone.utc)
+                signals = (
+                    honeypot.DetectionSignal(
+                        "honeypot",
+                        "trap message",
+                        honeypot.ActionIntent.REVIEW,
+                        True,
+                        {},
+                    ),
+                )
+
+                with self.assertRaisesRegex(RuntimeError, "config unavailable"):
+                    await honeypot.detection._record_detection_stats(
+                        cog, guild, signals, occurred_at
+                    )
+
+                cog._record_daily_stat.assert_awaited_once_with(
+                    guild, occurred_at, "detections"
                 )
 
     async def test_whitelist_bypass_only_increments_whitelisted_stat(self):

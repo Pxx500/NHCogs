@@ -22,6 +22,7 @@ Requires `AAA3A_utils`. Red will show the pip install command if missing.
 [p]honeypot channels honeypot create
 [p]honeypot channels errors #your-errors-channel
 [p]honeypot channels review #your-review-channel
+[p]honeypot channels daily-stats #your-public-stats-channel
 [p]honeypot honeypot action ban
 [p]honeypot honeypot toggle true
 ```
@@ -84,6 +85,7 @@ By default, three GIFs from one member inside a rolling 60-second window trigger
 |---------|-------------|
 | `!honeypot channels review [channel]` | Show or set the review destination |
 | `!honeypot channels errors [channel]` | Show or set the shared technical error destination |
+| `!honeypot channels daily-stats [channel]` | Show or set the public daily statistics destination |
 | `!honeypot channels manual-evidence [channel]` | Show or set the private manual evidence destination |
 | `!honeypot channels joinwatch [channel]` | Show or set the JoinWatch destination |
 | `!honeypot channels bait-role [channel]` | Show or set the bait-role destination |
@@ -226,6 +228,7 @@ Detection cases expire 24 hours after the first detection. This lifetime is fixe
 | `!honeypot config bait_role` | Show bait role settings |
 | `!honeypot config stats` | Show stored stats, detection-case operations, and pending timer counts |
 | `!honeypot stats` | Show public-facing stats |
+| `!honeypot stats channel [channel]` | Show or set the public daily statistics destination |
 | `!honeypot modstats` | Show detailed moderator statistics |
 | `!honeypot doctor` | Check config, channels, and permissions |
 | `!consoledump <bot\|honeypot> <1-24> [level]` | Export recent sanitized Python logs to a private text channel (requires Manage Messages) |
@@ -316,6 +319,29 @@ as repeat honeypot activity and forces a ban with the reason `Suspicious Activit
 `stats` shows a compact public-facing summary: messages, bans,
 sent-for-review cases, early catches, auto-roles applied, and auto role
 punishments.
+
+When a daily statistics channel is configured, Honeypot publishes a separate
+summary at `00:05 UTC` for the completed UTC day. The fixed delay normally puts
+it after the general server activity report without creating a dependency on
+NHMisc. An unset destination disables publication.
+
+The public daily summary contains two compact sections:
+
+- `Honeypot`: detections, automated bans, and manual bans
+- `JoinWatch`: shadowbans and bans
+
+Detections count newly persisted detected messages. Automated and manual bans
+are separated at the action source and count only successful Discord bans.
+JoinWatch shadowbans count successful role applications, while JoinWatch bans
+count successful ban actions after the role timer. Failed actions, dry runs,
+kicks, merely scheduled roles, and retry attempts that do not complete an
+effect do not count. JoinWatch bans are not also included in automated bans.
+
+Daily collection is forward-only from the version that introduces it. Existing
+lifetime counters do not contain enough dates or action-source information for
+a reliable historical backfill. An observed day without matching activity
+publishes zeros, while an unobserved date from before deployment or a full
+outage is skipped.
 
 `modstats` is the detailed moderator view. `Total detections` counts every
 non-exempt message caught in the honeypot channel. `Suspicious detections`
