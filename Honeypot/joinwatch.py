@@ -1,470 +1,30 @@
+"""JoinWatch listeners, timer orchestration, and moderation decisions."""
+
 from __future__ import annotations
 
 import logging
 import random
 import typing
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import discord
-from redbot.core import commands, modlog
+from redbot.core import modlog
 from redbot.core.i18n import Translator
-from redbot.core.utils.chat_formatting import box, pagify
+from redbot.core.utils.chat_formatting import box
 
+from . import joinwatch_publication, joinwatch_state
 from .effects import EffectStatus, ModerationOrigin
-from .settings import (
-    BOOL_OPTIONS,
-    JOINWATCH_AUTO_ROLE_ACTION_OPTIONS,
-    GuildSettings,
-    JoinwatchAutoRoleActionOption,
-)
+from .settings import GuildSettings, JoinwatchAutoRoleActionOption
 
 _ = Translator("Honeypot", __file__)
 log = logging.getLogger("red.Honeypot")
 
-JOINWATCH_MAX_ACCOUNT_AGE_HOURS = 1_000_000
-JOINWATCH_RETRY_DELAY_MINUTES = 1
-JOINWATCH_MAX_RETRIES = 5
-
-
-@dataclass(frozen=True, slots=True)
-class JoinwatchSelectedAction:
-    action: typing.Literal[
-        "discard_assignment", "apply_role", "discard_role", "expire_role"
-    ]
-    member_key: str
-    member_id: int | None
-    role_id: int | None
-    due_at: datetime | None
-    data: typing.Any
-
-
-@dataclass(frozen=True, slots=True)
-class JoinwatchSelection:
-    clear_assignments: bool
-    assignment_actions: tuple[JoinwatchSelectedAction, ...]
-    role_actions: tuple[JoinwatchSelectedAction, ...]
-
-
-def select_due_joinwatch_assignments(
-    *,
-    now: datetime,
-    assignments_enabled: bool,
-    pending_assignments: typing.Mapping[str, typing.Any],
-    pending_roles: typing.Mapping[str, typing.Any],
-) -> JoinwatchSelection:
-    assignment_actions: list[JoinwatchSelectedAction] = []
-    if assignments_enabled:
-        for member_key_value, data in pending_assignments.items():
-            member_key = str(member_key_value)
-            try:
-                member_id = int(member_key_value)
-                role_id = int(typing.cast(typing.Any, data["role_id"]))
-                due_at = datetime.fromisoformat(
-                    typing.cast(str, data["apply_at"])
-                )
-            except (KeyError, TypeError, ValueError):
-                assignment_actions.append(
-                    JoinwatchSelectedAction(
-                        "discard_assignment",
-                        member_key,
-                        None,
-                        None,
-                        None,
-                        data,
-                    )
-                )
-                continue
-            if due_at <= now:
-                assignment_actions.append(
-                    JoinwatchSelectedAction(
-                        "apply_role",
-                        member_key,
-                        member_id,
-                        role_id,
-                        due_at,
-                        data,
-                    )
-                )
-
-    role_actions: list[JoinwatchSelectedAction] = []
-    for member_key_value, data in pending_roles.items():
-        member_key = str(member_key_value)
-        try:
-            member_id = int(member_key_value)
-            role_id = int(typing.cast(typing.Any, data["role_id"]))
-            due_at = datetime.fromisoformat(
-                typing.cast(str, data["expires_at"])
-            )
-        except (KeyError, TypeError, ValueError):
-            role_actions.append(
-                JoinwatchSelectedAction(
-                    "discard_role",
-                    member_key,
-                    None,
-                    None,
-                    None,
-                    data,
-                )
-            )
-            continue
-        if due_at <= now:
-            role_actions.append(
-                JoinwatchSelectedAction(
-                    "expire_role",
-                    member_key,
-                    member_id,
-                    role_id,
-                    due_at,
-                    data,
-                )
-            )
-
-    return JoinwatchSelection(
-        clear_assignments=bool(pending_assignments and not assignments_enabled),
-        assignment_actions=tuple(assignment_actions),
-        role_actions=tuple(role_actions),
-    )
+JOINWATCH_RETRY_DELAY_MINUTES = joinwatch_state.JOINWATCH_RETRY_DELAY_MINUTES
+JOINWATCH_MAX_RETRIES = joinwatch_state.JOINWATCH_MAX_RETRIES
 
 
 def joinwatch_channel_id(settings: GuildSettings) -> int | None:
     return settings.joinwatch_channel
-
-
-def _joinwatch_incident(
-    member: discord.Member,
-    *,
-    now: datetime,
-    expires_at: datetime,
-    account_age_hours: int,
-    existing: typing.Mapping[str, typing.Any] | None = None,
-) -> dict[str, typing.Any]:
-    joined_at = member.joined_at or now
-    incident = dict(existing or {})
-    first_joined_at = incident.get("first_joined_at")
-    if not isinstance(first_joined_at, str):
-        first_joined_at = incident.get("applied_at")
-    if not isinstance(first_joined_at, str):
-        first_joined_at = joined_at.isoformat()
-    try:
-        previous_count = max(0, int(incident.get("join_count", 0)))
-    except (TypeError, ValueError):
-        previous_count = 0
-    if existing is not None and previous_count == 0:
-        previous_count = 1
-    stored_deadline = incident.get("expires_at")
-    if not isinstance(stored_deadline, str):
-        stored_deadline = expires_at.isoformat()
-    incident.update(
-        {
-            "first_joined_at": first_joined_at,
-            "last_joined_at": joined_at.isoformat(),
-            "join_count": previous_count + 1,
-            "expires_at": stored_deadline,
-            "member_label": incident.get("member_label")
-            or f"{member.display_name} ({member})",
-            "member_id": member.id,
-            "member_mention": member.mention,
-            "member_display_name": incident.get("member_display_name")
-            or member.display_name,
-            "member_avatar_url": incident.get("member_avatar_url")
-            or (str(member.display_avatar) if member.display_avatar else None),
-            "account_age_hours": incident.get("account_age_hours")
-            or account_age_hours,
-        }
-    )
-    return incident
-
-
-def _joinwatch_incident_embed(
-    member: discord.Member | None,
-    incident: typing.Mapping[str, typing.Any],
-) -> discord.Embed:
-    member_id = member.id if member is not None else incident.get("member_id")
-    member_mention = (
-        member.mention
-        if member is not None
-        else incident.get("member_mention") or f"<@{member_id}>"
-    )
-    member_display_name = (
-        member.display_name
-        if member is not None
-        else incident.get("member_display_name") or str(member_id)
-    )
-    member_avatar = (
-        member.display_avatar
-        if member is not None
-        else incident.get("member_avatar_url")
-    )
-    try:
-        timestamp = datetime.fromisoformat(
-            typing.cast(str, incident["first_joined_at"])
-        )
-    except (KeyError, TypeError, ValueError):
-        timestamp = (
-            member.joined_at if member is not None else None
-        ) or datetime.now(timezone.utc)
-    embed = discord.Embed(
-        title=_("New account joined"),
-        description=_(
-            "**{member}**\nMention: {mention}\nID: `{id}`\n"
-            "Account is ~{hours} hours old."
-        ).format(
-            member=incident.get("member_label")
-            or member_display_name,
-            mention=member_mention,
-            id=member_id,
-            hours=incident.get("account_age_hours", 1),
-        ),
-        color=discord.Color.orange(),
-        timestamp=timestamp,
-    )
-    embed.set_author(
-        name=f"{incident.get('member_display_name') or member_display_name} ({member_id})",
-        icon_url=incident.get("member_avatar_url") or member_avatar,
-    )
-    embed.set_thumbnail(
-        url=incident.get("member_avatar_url") or member_avatar
-    )
-    try:
-        join_count = max(1, int(incident.get("join_count", 1)))
-    except (TypeError, ValueError):
-        join_count = 1
-    if join_count > 1:
-        latest_join = incident.get("last_joined_at")
-        deadline = incident.get("expires_at")
-        try:
-            latest_join = discord.utils.format_dt(
-                datetime.fromisoformat(typing.cast(str, latest_join)),
-                style="R",
-            )
-        except (TypeError, ValueError):
-            latest_join = _("unknown")
-        try:
-            deadline = discord.utils.format_dt(
-                datetime.fromisoformat(typing.cast(str, deadline)),
-                style="R",
-            )
-        except (TypeError, ValueError):
-            deadline = _("unknown")
-        embed.add_field(
-            name=_("Join activity:"),
-            value=_(
-                "Joins: {joins} ({rejoins} rejoins)\n"
-                "Latest join: {latest}\nOriginal deadline: {deadline}"
-            ).format(
-                joins=join_count,
-                rejoins=join_count - 1,
-                latest=latest_join,
-                deadline=deadline,
-            ),
-            inline=False,
-        )
-    return embed
-
-
-async def _edit_joinwatch_incident_alert(
-    cog,
-    guild: discord.Guild,
-    incident: typing.Mapping[str, typing.Any],
-    embed: discord.Embed,
-) -> None:
-    if incident.get("alert_updates_disabled"):
-        return
-    channel_id = incident.get("alert_channel_id")
-    message_id = incident.get("alert_message_id")
-    if channel_id is None or message_id is None:
-        return
-    channel = cog._get_text_channel_or_thread(guild, channel_id)
-    if channel is None:
-        return
-    try:
-        message = channel.get_partial_message(int(message_id))
-        await message.edit(embed=embed)
-    except (discord.NotFound, discord.Forbidden, TypeError, ValueError) as exc:
-        member_id = incident.get("member_id")
-        if member_id is not None:
-            member_key = str(member_id)
-            guild_config = cog.config.guild(guild)
-            for store_name in (
-                "joinwatch_pending_role_assignments",
-                "joinwatch_pending_roles",
-            ):
-                store = getattr(guild_config, store_name)
-                async with store() as entries:
-                    stored_incident = entries.get(member_key)
-                    if stored_incident is not None:
-                        stored_incident["alert_updates_disabled"] = True
-            if isinstance(incident, dict):
-                incident["alert_updates_disabled"] = True
-        await cog._record_operational_failure(
-            guild.id,
-            "joinwatch_alert_update",
-            f"Could not update joinwatch alert {message_id}: {exc}",
-        )
-    except discord.HTTPException as exc:
-        log.debug(
-            "Failed to edit joinwatch alert message %s in guild %s",
-            message_id,
-            guild.id,
-        )
-        await cog._record_operational_failure(
-            guild.id,
-            "joinwatch_alert_update",
-            f"Could not update joinwatch alert {message_id}: {exc}",
-        )
-
-
-async def _store_joinwatch_pending_role(
-    cog,
-    member: discord.Member,
-    role_id: int,
-    expires_at: datetime,
-    *,
-    applied_at: datetime | None = None,
-    alert_channel_id: int | None = None,
-    alert_message_id: int | None = None,
-    incident: typing.Mapping[str, typing.Any] | None = None,
-) -> None:
-    pending_role = dict(incident or {})
-    pending_role.update({
-        "role_id": role_id,
-        "applied_at": (applied_at or datetime.now(timezone.utc)).isoformat(),
-        "expires_at": expires_at.isoformat(),
-    })
-    if alert_channel_id is not None and alert_message_id is not None:
-        pending_role["alert_channel_id"] = alert_channel_id
-        pending_role["alert_message_id"] = alert_message_id
-    async with cog.config.guild(member.guild).joinwatch_pending_roles() as pending_roles:
-        pending_roles[str(member.id)] = pending_role
-
-
-async def _delete_joinwatch_pending_role(cog, guild: discord.Guild, member_id: int) -> None:
-    async with cog.config.guild(guild).joinwatch_pending_roles() as pending_roles:
-        pending_roles.pop(str(member_id), None)
-
-
-async def _store_joinwatch_pending_role_alert(
-    cog,
-    guild: discord.Guild,
-    member_id: int,
-    channel_id: int,
-    message_id: int,
-) -> None:
-    async with cog.config.guild(guild).joinwatch_pending_roles() as pending_roles:
-        pending_role = pending_roles.get(str(member_id))
-        if pending_role is None:
-            return
-        pending_role["alert_channel_id"] = channel_id
-        pending_role["alert_message_id"] = message_id
-
-
-async def _store_joinwatch_pending_assignment(
-    cog,
-    member: discord.Member,
-    role_id: int,
-    apply_at: datetime,
-    *,
-    expires_at: datetime | None = None,
-    incident: typing.Mapping[str, typing.Any] | None = None,
-) -> None:
-    async with cog.config.guild(member.guild).joinwatch_pending_role_assignments() as pending_assignments:
-        pending_assignment = dict(incident or {})
-        pending_assignment.update({
-            "role_id": role_id,
-            "apply_at": apply_at.isoformat(),
-        })
-        if expires_at is not None:
-            pending_assignment["expires_at"] = expires_at.isoformat()
-        pending_assignments[str(member.id)] = pending_assignment
-
-
-async def _delete_joinwatch_pending_assignment(cog, guild: discord.Guild, member_id: int) -> None:
-    async with cog.config.guild(guild).joinwatch_pending_role_assignments() as pending_assignments:
-        pending_assignments.pop(str(member_id), None)
-
-
-async def _store_joinwatch_pending_assignment_alert(
-    cog,
-    guild: discord.Guild,
-    member_id: int,
-    channel_id: int,
-    message_id: int,
-) -> None:
-    async with cog.config.guild(guild).joinwatch_pending_role_assignments() as pending_assignments:
-        pending_assignment = pending_assignments.get(str(member_id))
-        if pending_assignment is None:
-            return
-        pending_assignment["alert_channel_id"] = channel_id
-        pending_assignment["alert_message_id"] = message_id
-
-
-async def _edit_joinwatch_alert_auto_role(
-    cog,
-    guild: discord.Guild,
-    pending_assignment: dict,
-    value: str,
-) -> None:
-    channel_id = pending_assignment.get("alert_channel_id")
-    message_id = pending_assignment.get("alert_message_id")
-    if channel_id is None or message_id is None:
-        return
-    if pending_assignment.get("member_id") is not None:
-        embed = _joinwatch_incident_embed(None, pending_assignment)
-        embed.add_field(
-            name=_("Auto-role:"),
-            value=value,
-            inline=False,
-        )
-        await _edit_joinwatch_incident_alert(
-            cog,
-            guild,
-            pending_assignment,
-            embed,
-        )
-        return
-    channel = cog._get_text_channel_or_thread(guild, channel_id)
-    if channel is None:
-        return
-    try:
-        message = await channel.fetch_message(int(message_id))
-    except (discord.NotFound, TypeError, ValueError):
-        return
-    except (discord.Forbidden, discord.HTTPException) as exc:
-        await cog._record_operational_failure(
-            guild.id,
-            "joinwatch_alert_update",
-            f"Could not fetch joinwatch alert {message_id}: {exc}",
-        )
-        return
-    if not message.embeds:
-        return
-    embed = discord.Embed.from_dict(message.embeds[0].to_dict())
-    field_name = _("Auto-role:")
-    legacy_field_name = _("Auto role:")
-    for index, field in enumerate(embed.fields):
-        if field.name in (field_name, legacy_field_name):
-            embed.set_field_at(index, name=field_name, value=value, inline=field.inline)
-            break
-    else:
-        embed.add_field(name=field_name, value=value, inline=False)
-    try:
-        await message.edit(embed=embed)
-    except discord.HTTPException as exc:
-        log.debug("Failed to edit joinwatch alert message %s in guild %s", message_id, guild.id)
-        await cog._record_operational_failure(
-            guild.id,
-            "joinwatch_alert_update",
-            f"Could not update joinwatch alert {message_id}: {exc}",
-        )
-
-
-def _joinwatch_next_retry(data: dict) -> int | None:
-    try:
-        retry_count = int(data.get("retry_count", 0)) + 1
-    except (TypeError, ValueError):
-        retry_count = 1
-    return retry_count if retry_count <= JOINWATCH_MAX_RETRIES else None
 
 
 async def _reschedule_joinwatch_assignment_retry(
@@ -476,39 +36,37 @@ async def _reschedule_joinwatch_assignment_retry(
     *,
     failure: str,
 ) -> bool:
-    retry_count = _joinwatch_next_retry(data)
+    transition = await joinwatch_state.reschedule_assignment_retry(
+        cog,
+        guild,
+        member_id_str,
+        data,
+        now,
+    )
     await cog._record_operational_failure(
         guild.id,
         "joinwatch_role_assignment",
         failure,
-        attempts=JOINWATCH_MAX_RETRIES + 1 if retry_count is None else retry_count,
-        terminal=retry_count is None,
+        attempts=transition.attempts,
+        terminal=transition.terminal,
     )
-    if retry_count is None:
-        await _edit_joinwatch_alert_auto_role(
+    if transition.terminal:
+        await joinwatch_publication.publish_joinwatch_incident(
             cog,
             guild,
             data,
             _("Failed: {reason}\nNo more automatic retries.").format(reason=failure),
         )
-        async with cog.config.guild(guild).joinwatch_pending_role_assignments() as pending_assignments:
-            pending_assignments.pop(member_id_str, None)
         return False
-    retry_at = now + timedelta(minutes=JOINWATCH_RETRY_DELAY_MINUTES)
-    async with cog.config.guild(guild).joinwatch_pending_role_assignments() as pending_assignments:
-        if member_id_str in pending_assignments:
-            pending_assignments[member_id_str]["apply_at"] = retry_at.isoformat()
-            pending_assignments[member_id_str]["retry_count"] = retry_count
-    data["apply_at"] = retry_at.isoformat()
-    data["retry_count"] = retry_count
-    await _edit_joinwatch_alert_auto_role(
+    retry_at = typing.cast(datetime, transition.retry_at)
+    await joinwatch_publication.publish_joinwatch_incident(
         cog,
         guild,
         data,
         _("Failed: {reason}\nRetrying {time} ({count}/{max}).").format(
             reason=failure,
             time=discord.utils.format_dt(retry_at, style="R"),
-            count=retry_count,
+            count=transition.attempts,
             max=JOINWATCH_MAX_RETRIES,
         ),
     )
@@ -524,83 +82,41 @@ async def _reschedule_joinwatch_role_retry(
     *,
     failure: str,
 ) -> bool:
-    retry_count = _joinwatch_next_retry(data)
+    transition = await joinwatch_state.reschedule_role_retry(
+        cog,
+        guild,
+        member_id_str,
+        data,
+        now,
+    )
     await cog._record_operational_failure(
         guild.id,
         "joinwatch_role_action",
         failure,
-        attempts=JOINWATCH_MAX_RETRIES + 1 if retry_count is None else retry_count,
-        terminal=retry_count is None,
+        attempts=transition.attempts,
+        terminal=transition.terminal,
     )
-    if retry_count is None:
-        await _edit_joinwatch_alert_auto_role(
+    if transition.terminal:
+        await joinwatch_publication.publish_joinwatch_incident(
             cog,
             guild,
             data,
             _("Failed: {reason}\nNo more automatic retries.").format(reason=failure),
         )
-        async with cog.config.guild(guild).joinwatch_pending_roles() as pending_roles:
-            pending_roles.pop(member_id_str, None)
         return False
-    retry_at = now + timedelta(minutes=JOINWATCH_RETRY_DELAY_MINUTES)
-    async with cog.config.guild(guild).joinwatch_pending_roles() as pending_roles:
-        if member_id_str in pending_roles:
-            pending_roles[member_id_str]["expires_at"] = retry_at.isoformat()
-            pending_roles[member_id_str]["retry_count"] = retry_count
-    data["expires_at"] = retry_at.isoformat()
-    data["retry_count"] = retry_count
-    await _edit_joinwatch_alert_auto_role(
+    retry_at = typing.cast(datetime, transition.retry_at)
+    await joinwatch_publication.publish_joinwatch_incident(
         cog,
         guild,
         data,
         _("Failed: {reason}\nRetrying {time} ({count}/{max}).").format(
             reason=failure,
             time=discord.utils.format_dt(retry_at, style="R"),
-            count=retry_count,
+            count=transition.attempts,
             max=JOINWATCH_MAX_RETRIES,
         ),
     )
     return True
-
-
-async def _reschedule_joinwatch_pending_roles(
-    cog,
-    guild: discord.Guild,
-    old_timer_minutes: int,
-    new_timer_minutes: int,
-) -> int:
-    alert_updates: list[tuple[dict, int, datetime]] = []
-    updated = 0
-    async with cog.config.guild(guild).joinwatch_pending_roles() as pending_roles:
-        for data in pending_roles.values():
-            try:
-                role_id = int(data["role_id"])
-                if data.get("applied_at") is not None:
-                    applied_at = datetime.fromisoformat(data["applied_at"])
-                else:
-                    old_expires_at = datetime.fromisoformat(data["expires_at"])
-                    applied_at = old_expires_at - timedelta(minutes=old_timer_minutes)
-            except (KeyError, TypeError, ValueError):
-                continue
-            expires_at = applied_at + timedelta(minutes=new_timer_minutes)
-            data["applied_at"] = applied_at.isoformat()
-            data["expires_at"] = expires_at.isoformat()
-            alert_updates.append((dict(data), role_id, expires_at))
-            updated += 1
-    for data, role_id, expires_at in alert_updates:
-        role = guild.get_role(role_id)
-        if role is None:
-            continue
-        await _edit_joinwatch_alert_auto_role(
-            cog,
-            guild,
-            data,
-            _("{role} applied until {time}.").format(
-                role=role.mention,
-                time=discord.utils.format_dt(expires_at, style="R"),
-            ),
-        )
-    return updated
 
 
 def _joinwatch_kick_status_value(action_label: str | None, default: str) -> str:
@@ -681,15 +197,18 @@ async def _apply_joinwatch_assignment_actions(
     cog,
     guild,
     guild_settings: GuildSettings,
-    actions: tuple[JoinwatchSelectedAction, ...],
+    actions: tuple[joinwatch_state.JoinwatchSelectedAction, ...],
     now: datetime,
     *,
     joinwatch_channel: discord.TextChannel | discord.Thread | None,
 ) -> None:
     for selected_action in actions:
         if selected_action.action == "discard_assignment":
-            async with cog.config.guild(guild).joinwatch_pending_role_assignments() as stored_assignments:
-                stored_assignments.pop(selected_action.member_key, None)
+            await joinwatch_state.delete_pending_assignment(
+                cog,
+                guild,
+                selected_action.member_key,
+            )
             continue
         member_id_str = selected_action.member_key
         data = typing.cast(dict, selected_action.data)
@@ -720,64 +239,55 @@ async def _apply_joinwatch_assignment_actions(
                 guild_settings.joinwatch_auto_role_action
                 is JoinwatchAutoRoleActionOption.BAN
             ):
-                await _edit_joinwatch_alert_auto_role(cog, guild, data, _("Banned."))
+                status = _("Banned.")
             elif (
                 guild_settings.joinwatch_auto_role_action
                 is JoinwatchAutoRoleActionOption.KICK
             ):
-                await _edit_joinwatch_alert_auto_role(
-                    cog,
-                    guild,
-                    data,
-                    _joinwatch_kick_status_value(action_label, _("Left server.")),
+                status = _joinwatch_kick_status_value(
+                    action_label,
+                    _("Left server."),
                 )
             else:
-                await _edit_joinwatch_alert_auto_role(cog, guild, data, _("Auto-role timer expired."))
-            await _delete_joinwatch_pending_assignment(cog, guild, member_id)
-            if joinwatch_channel is not None and data.get("member_id") is None:
-                embed = discord.Embed(
+                status = _("Auto-role timer expired.")
+            await joinwatch_state.delete_pending_assignment(cog, guild, member_id)
+            await joinwatch_publication.publish_joinwatch_incident(
+                cog,
+                guild,
+                data,
+                status,
+            )
+            if data.get("member_id") is None:
+                await joinwatch_publication.publish_legacy_timer_result(
+                    cog,
+                    guild,
+                    joinwatch_channel,
+                    member_id=member_id,
                     title=_("Joinwatch auto-role timer expired"),
                     description=_("{mention} ({id}) left before the scheduled role could be applied.").format(
                         mention=f"<@{member_id}>",
                         id=member_id,
                     ),
-                    color=discord.Color.dark_red() if failed else discord.Color.orange(),
-                    timestamp=now,
+                    action=action_label,
+                    failed=False,
+                    occurred_at=now,
                 )
-                embed.add_field(
-                    name=_("Action:"),
-                    value=failed if failed else action_label,
-                    inline=False,
-                )
-                try:
-                    await joinwatch_channel.send(embed=embed)
-                except discord.HTTPException as exc:
-                    log.debug(
-                        "Failed to send joinwatch missing-member log for user %s in guild %s",
-                        member_id,
-                        guild.id,
-                    )
-                    await cog._record_operational_failure(
-                        guild.id,
-                        "joinwatch_timer_alert",
-                        f"Could not publish timer result for user {member_id}: {exc}",
-                    )
             continue
         if role is None:
-            await _delete_joinwatch_pending_assignment(cog, guild, member_id)
+            await joinwatch_state.delete_pending_assignment(cog, guild, member_id)
             continue
         if await cog._is_protected_member(member):
-            await _delete_joinwatch_pending_assignment(cog, guild, member_id)
+            await joinwatch_state.delete_pending_assignment(cog, guild, member_id)
             continue
         if role not in member.roles:
             if not await cog._punitive_effect_allowed(guild):
-                await _edit_joinwatch_alert_auto_role(
+                await joinwatch_state.delete_pending_assignment(cog, guild, member_id)
+                await joinwatch_publication.publish_joinwatch_incident(
                     cog,
                     guild,
                     data,
                     _("{role} planned (dry run).").format(role=role.mention),
                 )
-                await _delete_joinwatch_pending_assignment(cog, guild, member_id)
                 continue
             role_permission_error = cog._missing_role_assignment_permission(guild, role)
             if role_permission_error is not None:
@@ -818,7 +328,7 @@ async def _apply_joinwatch_assignment_actions(
             expires_at = now + timedelta(
                 minutes=guild_settings.joinwatch_auto_role_timer_minutes
             )
-        await _store_joinwatch_pending_role(
+        await joinwatch_state.store_pending_role(
             cog,
             member,
             role.id,
@@ -832,7 +342,8 @@ async def _apply_joinwatch_assignment_actions(
             ),
             incident=data,
         )
-        await _edit_joinwatch_alert_auto_role(
+        await joinwatch_state.delete_pending_assignment(cog, guild, member_id)
+        await joinwatch_publication.publish_joinwatch_incident(
             cog,
             guild,
             data,
@@ -841,22 +352,24 @@ async def _apply_joinwatch_assignment_actions(
                 time=discord.utils.format_dt(expires_at, style="R"),
             ),
         )
-        await _delete_joinwatch_pending_assignment(cog, guild, member_id)
 
 
 async def _apply_joinwatch_role_actions(
     cog,
     guild,
     guild_settings: GuildSettings,
-    actions: tuple[JoinwatchSelectedAction, ...],
+    actions: tuple[joinwatch_state.JoinwatchSelectedAction, ...],
     now: datetime,
     *,
     joinwatch_channel: discord.TextChannel | discord.Thread | None,
 ) -> None:
     for selected_action in actions:
         if selected_action.action == "discard_role":
-            async with cog.config.guild(guild).joinwatch_pending_roles() as stored_pending_roles:
-                stored_pending_roles.pop(selected_action.member_key, None)
+            await joinwatch_state.delete_pending_role(
+                cog,
+                guild,
+                selected_action.member_key,
+            )
             continue
         member_id_str = selected_action.member_key
         data = typing.cast(dict, selected_action.data)
@@ -887,64 +400,55 @@ async def _apply_joinwatch_role_actions(
                     guild_settings.joinwatch_auto_role_action
                     is JoinwatchAutoRoleActionOption.BAN
                 ):
-                    await _edit_joinwatch_alert_auto_role(cog, guild, data, _("Banned."))
+                    status = _("Banned.")
                 elif (
                     guild_settings.joinwatch_auto_role_action
                     is JoinwatchAutoRoleActionOption.KICK
                 ):
-                    await _edit_joinwatch_alert_auto_role(
-                        cog,
-                        guild,
-                        data,
-                        _joinwatch_kick_status_value(action_label, _("Left server.")),
+                    status = _joinwatch_kick_status_value(
+                        action_label,
+                        _("Left server."),
                     )
                 else:
-                    await _edit_joinwatch_alert_auto_role(cog, guild, data, _("Auto-role timer expired."))
-                await _delete_joinwatch_pending_role(cog, guild, member_id)
-            if joinwatch_channel is not None and data.get("member_id") is None:
-                embed = discord.Embed(
+                    status = _("Auto-role timer expired.")
+                await joinwatch_state.delete_pending_role(cog, guild, member_id)
+                await joinwatch_publication.publish_joinwatch_incident(
+                    cog,
+                    guild,
+                    data,
+                    status,
+                )
+            if data.get("member_id") is None:
+                await joinwatch_publication.publish_legacy_timer_result(
+                    cog,
+                    guild,
+                    joinwatch_channel,
+                    member_id=member_id,
                     title=_("Joinwatch auto-role timer expired"),
                     description=_("{mention} ({id}) left before the auto-role timer expired.").format(
                         mention=f"<@{member_id}>",
                         id=member_id,
                     ),
-                    color=discord.Color.dark_red() if failed else discord.Color.orange(),
-                    timestamp=now,
+                    action=failed if failed else action_label,
+                    failed=bool(failed),
+                    occurred_at=now,
                 )
-                embed.add_field(
-                    name=_("Action:"),
-                    value=failed if failed else action_label,
-                    inline=False,
-                )
-                try:
-                    await joinwatch_channel.send(embed=embed)
-                except discord.HTTPException as exc:
-                    log.debug(
-                        "Failed to send joinwatch missing-member log for user %s in guild %s",
-                        member_id,
-                        guild.id,
-                    )
-                    await cog._record_operational_failure(
-                        guild.id,
-                        "joinwatch_timer_alert",
-                        f"Could not publish timer result for user {member_id}: {exc}",
-                    )
             continue
         if role is None:
-            await _delete_joinwatch_pending_role(cog, guild, member_id)
+            await joinwatch_state.delete_pending_role(cog, guild, member_id)
             continue
         if role not in member.roles:
-            await _edit_joinwatch_alert_auto_role(
+            await joinwatch_state.delete_pending_role(cog, guild, member_id)
+            await joinwatch_publication.publish_joinwatch_incident(
                 cog,
                 guild,
                 data,
                 _("Role manually removed."),
             )
-            await _delete_joinwatch_pending_role(cog, guild, member_id)
             await cog._increment_stat(guild, "joinwatch_auto_roles_cleared")
             continue
         if await cog._is_protected_member(member):
-            await _delete_joinwatch_pending_role(cog, guild, member_id)
+            await joinwatch_state.delete_pending_role(cog, guild, member_id)
             continue
         action_label, failed = await _execute_joinwatch_action(
             cog,
@@ -968,52 +472,47 @@ async def _apply_joinwatch_role_actions(
                 guild_settings.joinwatch_auto_role_action
                 is JoinwatchAutoRoleActionOption.BAN
             ):
-                await _edit_joinwatch_alert_auto_role(cog, guild, data, _("Banned."))
+                status = _("Banned.")
             elif (
                 guild_settings.joinwatch_auto_role_action
                 is JoinwatchAutoRoleActionOption.KICK
             ):
-                await _edit_joinwatch_alert_auto_role(
-                    cog,
-                    guild,
-                    data,
-                    _joinwatch_kick_status_value(action_label, _("Kicked.")),
+                status = _joinwatch_kick_status_value(
+                    action_label,
+                    _("Kicked."),
                 )
             else:
-                await _edit_joinwatch_alert_auto_role(cog, guild, data, _("Auto-role timer expired."))
-            await _delete_joinwatch_pending_role(cog, guild, member_id)
-        if joinwatch_channel is not None and data.get("member_id") is None:
-            embed = discord.Embed(
+                status = _("Auto-role timer expired.")
+            await joinwatch_state.delete_pending_role(cog, guild, member_id)
+            await joinwatch_publication.publish_joinwatch_incident(
+                cog,
+                guild,
+                data,
+                status,
+            )
+        if data.get("member_id") is None:
+            await joinwatch_publication.publish_legacy_timer_result(
+                cog,
+                guild,
+                joinwatch_channel,
+                member_id=member.id,
                 title=_("Joinwatch auto-role timer expired"),
                 description=_("{mention} ({id}) still had {role} when the timer expired.").format(
                     mention=member.mention,
                     id=member.id,
                     role=role.mention if role is not None else _("the auto-role"),
                 ),
-                color=discord.Color.dark_red() if failed else discord.Color.orange(),
-                timestamp=now,
+                action=failed if failed else action_label,
+                failed=bool(failed),
+                occurred_at=now,
             )
-            embed.add_field(
-                name=_("Action:"),
-                value=failed if failed else action_label,
-                inline=False,
-            )
-            try:
-                await joinwatch_channel.send(embed=embed)
-            except discord.HTTPException as exc:
-                log.debug("Failed to send joinwatch auto-role log for user %s in guild %s", member.id, guild.id)
-                await cog._record_operational_failure(
-                    guild.id,
-                    "joinwatch_timer_alert",
-                    f"Could not publish timer result for user {member.id}: {exc}",
-                )
 
 
 async def _apply_joinwatch_selected_work(
     cog,
     guild,
     guild_settings: GuildSettings,
-    selected: JoinwatchSelection,
+    selected: joinwatch_state.JoinwatchSelection,
     now: datetime,
 ) -> None:
     if (
@@ -1023,8 +522,7 @@ async def _apply_joinwatch_selected_work(
     ):
         try:
             if selected.clear_assignments:
-                async with cog.config.guild(guild).joinwatch_pending_role_assignments() as stored_assignments:
-                    stored_assignments.clear()
+                await joinwatch_state.clear_pending_assignments(cog, guild)
             if not selected.assignment_actions and not selected.role_actions:
                 return
             joinwatch_channel = cog._get_text_channel_or_thread(
@@ -1061,7 +559,7 @@ async def joinwatch_auto_role_loop(cog) -> None:
         try:
             raw_config = await cog.config.guild(guild).all()
             guild_settings = GuildSettings.from_mapping(raw_config)
-            selected = select_due_joinwatch_assignments(
+            selected = joinwatch_state.select_due_joinwatch_assignments(
                 now=now,
                 assignments_enabled=guild_settings.joinwatch_auto_role_enabled,
                 pending_assignments=guild_settings.joinwatch_pending_role_assignments,
@@ -1112,7 +610,7 @@ async def on_member_join(cog, member: discord.Member) -> None:
         default_expires_at = now + timedelta(
             minutes=guild_settings.joinwatch_auto_role_timer_minutes
         )
-        incident = _joinwatch_incident(
+        incident = joinwatch_state.build_incident(
             member,
             now=now,
             expires_at=default_expires_at,
@@ -1126,7 +624,7 @@ async def on_member_join(cog, member: discord.Member) -> None:
         except (KeyError, TypeError, ValueError):
             expires_at = default_expires_at
             incident["expires_at"] = expires_at.isoformat()
-        embed = _joinwatch_incident_embed(member, incident)
+        status = None
         if (
             guild_settings.joinwatch_auto_role_enabled
             and guild_settings.joinwatch_auto_role_id is not None
@@ -1142,11 +640,7 @@ async def on_member_join(cog, member: discord.Member) -> None:
                         role_permission_error,
                         terminal=True,
                     )
-                    embed.add_field(
-                        name=_("Auto-role:"),
-                        value=role_permission_error,
-                        inline=False,
-                    )
+                    status = role_permission_error
                 elif guild_settings.joinwatch_auto_role_random_delay_enabled:
                     existing_assignment = (
                         guild_settings.joinwatch_pending_role_assignments.get(
@@ -1172,7 +666,7 @@ async def on_member_join(cog, member: discord.Member) -> None:
                             member.guild,
                             "joinwatch_auto_roles_scheduled",
                         )
-                    await _store_joinwatch_pending_assignment(
+                    await joinwatch_state.store_pending_assignment(
                         cog,
                         member,
                         role.id,
@@ -1180,21 +674,13 @@ async def on_member_join(cog, member: discord.Member) -> None:
                         expires_at=expires_at,
                         incident=incident,
                     )
-                    embed.add_field(
-                        name=_("Auto-role:"),
-                        value=_("{role} scheduled for {time}.").format(
-                            role=role.mention,
-                            time=discord.utils.format_dt(apply_at, style="R"),
-                        ),
-                        inline=False,
+                    status = _("{role} scheduled for {time}.").format(
+                        role=role.mention,
+                        time=discord.utils.format_dt(apply_at, style="R"),
                     )
                 elif not await cog._punitive_effect_allowed(member.guild):
-                    embed.add_field(
-                        name=_("Auto-role:"),
-                        value=_("{role} planned (dry run).").format(
-                            role=role.mention,
-                        ),
-                        inline=False,
+                    status = _("{role} planned (dry run).").format(
+                        role=role.mention,
                     )
                 else:
                     try:
@@ -1205,7 +691,7 @@ async def on_member_join(cog, member: discord.Member) -> None:
                             "shadowbans",
                         )
                         await cog._increment_stat(member.guild, "joinwatch_auto_roles")
-                        await _store_joinwatch_pending_role(
+                        await joinwatch_state.store_pending_role(
                             cog,
                             member,
                             role.id,
@@ -1213,13 +699,9 @@ async def on_member_join(cog, member: discord.Member) -> None:
                             applied_at=now,
                             incident=incident,
                         )
-                        embed.add_field(
-                            name=_("Auto-role:"),
-                            value=_("{role} applied until {time}.").format(
-                                role=role.mention,
-                                time=discord.utils.format_dt(expires_at, style="R"),
-                            ),
-                            inline=False,
+                        status = _("{role} applied until {time}.").format(
+                            role=role.mention,
+                            time=discord.utils.format_dt(expires_at, style="R"),
                         )
                     except discord.HTTPException as exc:
                         await cog._increment_stat(member.guild, "joinwatch_auto_role_failures")
@@ -1229,46 +711,22 @@ async def on_member_join(cog, member: discord.Member) -> None:
                             f"Could not apply auto-role to user {member.id}: {exc}",
                             terminal=True,
                         )
-                        embed.add_field(
-                            name=_("Auto-role:"),
-                            value=_("I couldn't apply the configured joinwatch auto-role."),
-                            inline=False,
+                        status = _(
+                            "I couldn't apply the configured joinwatch auto-role."
                         )
-        if existing_incident is not None:
-            await _edit_joinwatch_incident_alert(
-                cog,
-                member.guild,
-                incident,
-                embed,
-            )
-            return
-        if guild_settings.joinwatch_alert_enabled and channel is not None:
-            try:
-                alert_message = await channel.send(embed=embed)
-                if guild_settings.joinwatch_auto_role_random_delay_enabled:
-                    await _store_joinwatch_pending_assignment_alert(
-                        cog,
-                        member.guild,
-                        member.id,
-                        alert_message.channel.id,
-                        alert_message.id,
-                    )
-                else:
-                    await _store_joinwatch_pending_role_alert(
-                        cog,
-                        member.guild,
-                        member.id,
-                        alert_message.channel.id,
-                        alert_message.id,
-                    )
-            except discord.HTTPException as exc:
-                log.debug("Failed to send joinwatch alert for user %s in guild %s", member.id, member.guild.id)
-                await cog._record_operational_failure(
-                    member.guild.id,
-                    "joinwatch_alert_publish",
-                    f"Could not publish joinwatch alert for user {member.id}: {exc}",
-                    terminal=True,
-                )
+        destination = (
+            channel
+            if existing_incident is None and guild_settings.joinwatch_alert_enabled
+            else None
+        )
+        await joinwatch_publication.publish_joinwatch_incident(
+            cog,
+            member.guild,
+            incident,
+            status,
+            destination=destination,
+            member=member,
+        )
 
 
 async def on_member_update(cog, before: discord.Member, after: discord.Member) -> None:
@@ -1286,19 +744,19 @@ async def on_member_update(cog, before: discord.Member, after: discord.Member) -
                 typing.cast(typing.Any, pending_role["role_id"])
             )
         except (KeyError, TypeError, ValueError):
-            await _delete_joinwatch_pending_role(cog, after.guild, after.id)
+            await joinwatch_state.delete_pending_role(cog, after.guild, after.id)
         else:
             role_removed = any(role.id == pending_role_id for role in before.roles) and not any(
                 role.id == pending_role_id for role in after.roles
             )
             if role_removed:
-                await _edit_joinwatch_alert_auto_role(
+                await joinwatch_state.delete_pending_role(cog, after.guild, after.id)
+                await joinwatch_publication.publish_joinwatch_incident(
                     cog,
                     after.guild,
                     pending_role,
                     _("Role manually removed."),
                 )
-                await _delete_joinwatch_pending_role(cog, after.guild, after.id)
                 await cog._increment_stat(after.guild, "joinwatch_auto_roles_cleared")
     if not guild_settings.baitrole_enabled or guild_settings.baitrole_id is None:
         return
@@ -1387,271 +845,3 @@ async def on_member_update(cog, before: discord.Member, after: discord.Member) -
                     f"Could not publish bait-role alert for user {after.id}: {exc}",
                     terminal=True,
                 )
-
-
-async def joinwatch_toggle(cog, ctx: commands.Context, value: bool = None) -> None:
-    if value is None:
-        v = await cog.config.guild(ctx.guild).joinwatch_enabled()
-        await ctx.send(
-            _("Current: {value}. Choices: {options}").format(
-                value=str(v).lower(),
-                options=cog._format_options(BOOL_OPTIONS),
-            )
-        )
-    else:
-        await cog.config.guild(ctx.guild).joinwatch_enabled.set(value)
-        await ctx.send(_("✅ Joinwatch enabled set to {value}").format(value=value))
-
-
-async def joinwatch_alert_toggle(cog, ctx: commands.Context, value: bool = None) -> None:
-    if value is None:
-        v = await cog.config.guild(ctx.guild).joinwatch_alert_enabled()
-        await ctx.send(
-            _("Current: {value}. Choices: {options}").format(
-                value=str(v).lower(),
-                options=cog._format_options(BOOL_OPTIONS),
-            )
-        )
-    else:
-        await cog.config.guild(ctx.guild).joinwatch_alert_enabled.set(value)
-        await ctx.send(_("✅ Joinwatch alerts set to {value}").format(value=value))
-
-
-async def max_age(cog, ctx: commands.Context, hours: int = None) -> None:
-    if hours is None:
-        v = await cog.config.guild(ctx.guild).joinwatch_min_age_hours()
-        await ctx.send(_("Joinwatch max age: {value} hours").format(value=v))
-    elif hours < 1 or hours > JOINWATCH_MAX_ACCOUNT_AGE_HOURS:
-        await ctx.send(
-            _("Hours must be between 1 and {maximum}.").format(
-                maximum=JOINWATCH_MAX_ACCOUNT_AGE_HOURS
-            )
-        )
-    else:
-        await cog.config.guild(ctx.guild).joinwatch_min_age_hours.set(hours)
-        await ctx.send(_("✅ Joinwatch max age set to {value} hours").format(value=hours))
-
-
-async def joinwatch_autorole_toggle(cog, ctx: commands.Context, value: bool = None) -> None:
-    if value is None:
-        v = await cog.config.guild(ctx.guild).joinwatch_auto_role_enabled()
-        await ctx.send(
-            _("Current: {value}. Choices: {options}").format(
-                value=str(v).lower(),
-                options=cog._format_options(BOOL_OPTIONS),
-            )
-        )
-    else:
-        await cog.config.guild(ctx.guild).joinwatch_auto_role_enabled.set(value)
-        await ctx.send(_("✅ Joinwatch auto-role set to {value}").format(value=value))
-
-
-async def joinwatch_autorole_role(cog, ctx: commands.Context, role: discord.Role = None) -> None:
-    if role is None:
-        role_id = await cog.config.guild(ctx.guild).joinwatch_auto_role_id()
-        configured_role = ctx.guild.get_role(role_id) if role_id else None
-        await ctx.send(
-            _("Joinwatch auto-role: {role}").format(
-                role=configured_role.mention if configured_role else _("not set"),
-            )
-        )
-    else:
-        role_permission_error = cog._missing_role_assignment_permission(ctx.guild, role)
-        if role_permission_error is not None:
-            raise commands.UserFeedbackCheckFailure(role_permission_error)
-        await cog.config.guild(ctx.guild).joinwatch_auto_role_id.set(role.id)
-        await ctx.send(_("✅ Joinwatch auto-role set to {role.mention}").format(role=role))
-
-
-async def joinwatch_autorole_timer(cog, ctx: commands.Context, minutes: int = None) -> None:
-    if minutes is None:
-        v = await cog.config.guild(ctx.guild).joinwatch_auto_role_timer_minutes()
-        await ctx.send(_("Joinwatch auto-role timer: {value} minutes").format(value=v))
-    elif minutes < 1 or minutes > 10080:
-        await ctx.send(_("Timer must be between 1 and 10080 minutes."))
-    else:
-        old_minutes = await cog.config.guild(ctx.guild).joinwatch_auto_role_timer_minutes()
-        await cog.config.guild(ctx.guild).joinwatch_auto_role_timer_minutes.set(minutes)
-        updated = await _reschedule_joinwatch_pending_roles(cog, ctx.guild, old_minutes, minutes)
-        await ctx.send(
-            _("✅ Joinwatch auto-role timer set to {value} minutes. Updated {count} active timer(s).").format(
-                value=minutes,
-                count=updated,
-            )
-        )
-
-
-async def joinwatch_autorole_action(cog, ctx: commands.Context, value: str = None) -> None:
-    if value is None:
-        v = await cog.config.guild(ctx.guild).joinwatch_auto_role_action()
-        await ctx.send(
-            _("Current: {value}. Choices: {options}").format(
-                value=v,
-                options=cog._format_options(JOINWATCH_AUTO_ROLE_ACTION_OPTIONS),
-            )
-        )
-    elif value not in JOINWATCH_AUTO_ROLE_ACTION_OPTIONS:
-        await ctx.send(_("Choose one of: {options}").format(options=cog._format_options(JOINWATCH_AUTO_ROLE_ACTION_OPTIONS)))
-    else:
-        await cog.config.guild(ctx.guild).joinwatch_auto_role_action.set(value)
-        await ctx.send(_("✅ Joinwatch auto-role action set to {value}").format(value=value))
-
-
-async def joinwatch_autorole_bantimers(cog, ctx: commands.Context) -> None:
-    raw_config = await cog.config.guild(ctx.guild).all()
-    guild_settings = GuildSettings.from_mapping(raw_config)
-    pending_roles = guild_settings.joinwatch_pending_roles
-    if not pending_roles:
-        await ctx.send(_("No active joinwatch punishment timers."))
-        return
-
-    now = datetime.now(timezone.utc)
-    invalid = 0
-    entries: list[tuple[datetime, str]] = []
-    for member_id_str, data in pending_roles.items():
-        try:
-            member_id = int(member_id_str)
-            expires_at = datetime.fromisoformat(
-                typing.cast(str, data["expires_at"])
-            )
-        except (KeyError, TypeError, ValueError):
-            invalid += 1
-            continue
-
-        member = await cog._get_member_or_fetch(ctx.guild, member_id)
-        member_label = (
-            f"{member.display_name} ({member.id})"
-            if member is not None
-            else _("Unknown member ({id})").format(id=member_id)
-        )
-        applied_at = None
-        if data.get("applied_at") is not None:
-            try:
-                applied_at = datetime.fromisoformat(
-                    typing.cast(str, data["applied_at"])
-                )
-            except (TypeError, ValueError):
-                applied_at = None
-        deadline = (
-            _("due now")
-            if expires_at <= now
-            else discord.utils.format_dt(expires_at, style="R")
-        )
-        applied = (
-            discord.utils.format_dt(applied_at, style="R")
-            if applied_at is not None
-            else _("unknown")
-        )
-        entries.append(
-            (
-                expires_at,
-                _(
-                    "{member} | deadline: {deadline} | applied: {applied}"
-                ).format(
-                    member=member_label,
-                    deadline=deadline,
-                    applied=applied,
-                ),
-            )
-        )
-
-    if not entries:
-        await ctx.send(_("No readable joinwatch punishment timers."))
-        return
-
-    entries.sort(key=lambda item: item[0])
-    header = _("Joinwatch active punishment timers: {count}").format(
-        count=len(entries),
-    )
-    if invalid:
-        header += _("\nSkipped invalid entries: {count}").format(count=invalid)
-    lines = [header, ""]
-    lines.extend(f"{index}. {entry}" for index, (_, entry) in enumerate(entries, 1))
-    for page in pagify("\n".join(lines), page_length=1900):
-        await ctx.send(page, allowed_mentions=discord.AllowedMentions.none())
-
-
-async def joinwatch_autorole_randomize_toggle(
-    cog, ctx: commands.Context, value: bool = None
-) -> None:
-    if value is None:
-        v = await cog.config.guild(ctx.guild).joinwatch_auto_role_random_delay_enabled()
-        await ctx.send(
-            _("Current: {value}. Choices: {options}").format(
-                value=str(v).lower(),
-                options=cog._format_options(BOOL_OPTIONS),
-            )
-        )
-    else:
-        await cog.config.guild(ctx.guild).joinwatch_auto_role_random_delay_enabled.set(value)
-        await ctx.send(_("✅ Joinwatch auto-role randomized delay set to {value}").format(value=value))
-
-
-async def joinwatch_autorole_randomize_min_time(
-    cog, ctx: commands.Context, minutes: int = None
-) -> None:
-    if minutes is None:
-        v = await cog.config.guild(ctx.guild).joinwatch_auto_role_random_delay_min_minutes()
-        await ctx.send(_("Joinwatch auto-role randomized minimum: {value} minutes").format(value=v))
-    elif minutes < 1 or minutes > 10080:
-        await ctx.send(_("Minimum delay must be between 1 and 10080 minutes."))
-    else:
-        current_max = await cog.config.guild(ctx.guild).joinwatch_auto_role_random_delay_max_minutes()
-        await cog.config.guild(ctx.guild).joinwatch_auto_role_random_delay_min_minutes.set(minutes)
-        if minutes > current_max:
-            await cog.config.guild(ctx.guild).joinwatch_auto_role_random_delay_max_minutes.set(minutes)
-            await ctx.send(
-                _("✅ Joinwatch randomized delay minimum and maximum set to {value} minutes").format(
-                    value=minutes,
-                )
-            )
-        else:
-            await ctx.send(
-                _("✅ Joinwatch randomized delay minimum set to {value} minutes").format(
-                    value=minutes,
-                )
-            )
-
-
-async def joinwatch_autorole_randomize_max_time(
-    cog, ctx: commands.Context, minutes: int = None
-) -> None:
-    if minutes is None:
-        v = await cog.config.guild(ctx.guild).joinwatch_auto_role_random_delay_max_minutes()
-        await ctx.send(_("Joinwatch auto-role randomized maximum: {value} minutes").format(value=v))
-    elif minutes < 1 or minutes > 10080:
-        await ctx.send(_("Maximum delay must be between 1 and 10080 minutes."))
-    else:
-        current_min = await cog.config.guild(ctx.guild).joinwatch_auto_role_random_delay_min_minutes()
-        if minutes < current_min:
-            await ctx.send(
-                _("Maximum delay must be greater than or equal to the current minimum ({value} minutes).").format(
-                    value=current_min,
-                )
-            )
-            return
-        await cog.config.guild(ctx.guild).joinwatch_auto_role_random_delay_max_minutes.set(minutes)
-        await ctx.send(_("✅ Joinwatch randomized delay maximum set to {value} minutes").format(value=minutes))
-
-
-async def config_joinwatch(cog, ctx: commands.Context) -> None:
-    raw_config = await cog.config.guild(ctx.guild).all()
-    guild_settings = GuildSettings.from_mapping(raw_config)
-    lines = [
-        _("Joinwatch:"),
-        f"  {_('Enabled')}: {cog._format_bool_setting(guild_settings.joinwatch_enabled)}",
-        f"  {_('Alerts')}: {cog._format_bool_setting(guild_settings.joinwatch_alert_enabled)}",
-        f"  {_('Channel')}: {cog._format_channel_setting(ctx.guild, guild_settings.joinwatch_channel)}",
-        f"  {_('Maximum account age')}: {_('{hours} hours').format(hours=guild_settings.joinwatch_min_age_hours)}",
-        "",
-        _("Auto-role:"),
-        f"  {_('Enabled')}: {cog._format_bool_setting(guild_settings.joinwatch_auto_role_enabled)}",
-        f"  {_('Role')}: {cog._format_role_setting(ctx.guild, guild_settings.joinwatch_auto_role_id)}",
-        f"  {_('Timer')}: {_('{minutes} minutes').format(minutes=guild_settings.joinwatch_auto_role_timer_minutes)}",
-        f"  {_('Action')}: {guild_settings.joinwatch_auto_role_action.value}",
-        f"  {_('Randomized delay')}: {cog._format_bool_setting(guild_settings.joinwatch_auto_role_random_delay_enabled)}",
-        f"  {_('Delay range')}: {_('{min} to {max} minutes').format(min=guild_settings.joinwatch_auto_role_random_delay_min_minutes, max=guild_settings.joinwatch_auto_role_random_delay_max_minutes)}",
-        f"  {_('Pending role applications')}: {len(guild_settings.joinwatch_pending_role_assignments)}",
-        f"  {_('Active joinwatch timers')}: {len(guild_settings.joinwatch_pending_roles)}",
-    ]
-    await ctx.send(_("Joinwatch config:\n") + box("\n".join(lines)))

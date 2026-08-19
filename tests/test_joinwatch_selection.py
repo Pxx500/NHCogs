@@ -37,7 +37,7 @@ class JoinwatchSelectionTests(unittest.TestCase):
                     "expires_at": "2026-07-15T12:10:00+00:00",
                 }
 
-                selected = honeypot.select_due_joinwatch_assignments(
+                selected = honeypot.joinwatch_state.select_due_joinwatch_assignments(
                     now=now,
                     assignments_enabled=True,
                     pending_assignments={
@@ -109,7 +109,7 @@ class JoinwatchSelectionTests(unittest.TestCase):
                     "expires_at": "2026-07-15T11:58:00+00:00",
                 }
 
-                selected = honeypot.select_due_joinwatch_assignments(
+                selected = honeypot.joinwatch_state.select_due_joinwatch_assignments(
                     now=now,
                     assignments_enabled=False,
                     pending_assignments={
