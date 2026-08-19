@@ -45,6 +45,7 @@ from .effects import (
     EffectRetryDisposition,
     EffectStatus,
     ModerationEffectResult,
+    ModerationOrigin,
 )
 from .message_registry import MessageRecord
 from .operations import executor_operation_policy
@@ -176,7 +177,10 @@ async def _observe_message(cog, message: discord.Message) -> None:
 
 
 async def _record_detection_stats(
-    cog, guild: discord.Guild, signals: tuple[DetectionSignal, ...]
+    cog,
+    guild: discord.Guild,
+    signals: tuple[DetectionSignal, ...],
+    occurred_at: datetime,
 ) -> None:
     signals = tuple(
         signal
@@ -185,6 +189,7 @@ async def _record_detection_stats(
     )
     if not signals:
         return
+    await cog._record_daily_stat(guild, occurred_at, "detections")
     await cog._increment_stat(guild, "detections")
     if any(signal.decisive for signal in signals):
         await cog._increment_stat(guild, "suspicious")
@@ -1180,7 +1185,12 @@ async def _process_detected_message(
         if item.message_sequence == append.message.sequence
     )
     if append.message_created:
-        await _record_detection_stats(cog, message.guild, persisted_signals)
+        await _record_detection_stats(
+            cog,
+            message.guild,
+            persisted_signals,
+            message.created_at,
+        )
     if append.message_created and any(
         signal.metadata.get("whitelist_bypass") for signal in persisted_signals
     ):
@@ -1641,6 +1651,7 @@ async def _execute_action(
     settings: GuildSettings,
     *,
     reason: str,
+    origin: ModerationOrigin,
     action: str | None = None,
     moderator: discord.Member | discord.User | discord.Object | None = None,
 ) -> ModerationEffectResult:
@@ -1717,6 +1728,16 @@ async def _execute_action(
                     delete_message_seconds=delete_message_seconds,
                 )
             cog._schedule_post_ban_sweep(guild, member.id)
+            daily_metric = (
+                "automated_bans"
+                if origin is ModerationOrigin.AUTOMATIC
+                else "manual_bans"
+            )
+            await cog._record_daily_stat(
+                guild,
+                datetime.now(timezone.utc),
+                daily_metric,
+            )
             await cog._increment_stat(guild, "banned")
     except discord.HTTPException as e:
         cog._deactivate_forward_purge(guild.id, member.id)

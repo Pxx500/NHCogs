@@ -13,6 +13,7 @@ from typing import Any
 import discord
 from redbot.core import modlog
 
+from .effects import ModerationOrigin
 from .settings import GuildSettings
 
 MEMENT_ROLE_ID = 803692340749140008
@@ -933,6 +934,7 @@ class ManualEvidenceController:
             result.source_message.created_at,
             result.settings,
             reason=reason,
+            origin=ModerationOrigin.MANUAL,
             action=action,
             moderator=result.moderator,
         )

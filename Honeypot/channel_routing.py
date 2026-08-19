@@ -65,6 +65,15 @@ CHANNEL_CATEGORIES = (
         central_command="errors",
     ),
     ChannelCategory(
+        "daily_stats",
+        "daily_stats_channel",
+        "Daily stats",
+        "destination",
+        required_permissions=("send_messages", "embed_links"),
+        central_command="daily-stats",
+        module_command="stats channel",
+    ),
+    ChannelCategory(
         "manual_evidence",
         "manual_evidence_channel",
         "Manual evidence",

@@ -19,6 +19,7 @@ from ..effects import (
     EffectRetryDisposition,
     EffectStatus,
     ModerationEffectResult,
+    ModerationOrigin,
 )
 from ..settings import GuildSettings
 from .context import OperationContext, OperationOutcome
@@ -120,6 +121,7 @@ async def _execute_moderator_action(
         effect_started_at,
         guild_settings,
         reason=f"Honeypot review: {action.value.title()}",
+        origin=ModerationOrigin.MANUAL,
         action=action.value,
         moderator=moderator,
     )

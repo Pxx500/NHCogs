@@ -63,7 +63,10 @@ class PunitiveEffectPolicyTests(unittest.IsolatedAsyncioTestCase):
     async def _assert_current_dry_run_plans(self, action: str) -> None:
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                from Honeypot.effects import EffectStatus  # noqa: PLC0415
+                from Honeypot.effects import (  # noqa: PLC0415
+                    EffectStatus,
+                    ModerationOrigin,
+                )
 
                 cog = honeypot.Honeypot(_Bot())
                 current_config = SimpleNamespace(
@@ -99,6 +102,7 @@ class PunitiveEffectPolicyTests(unittest.IsolatedAsyncioTestCase):
                     datetime.now(timezone.utc),
                     stale_settings,
                     reason="Punishment safety test",
+                    origin=ModerationOrigin.AUTOMATIC,
                     action=action,
                 )
 
@@ -113,10 +117,99 @@ class PunitiveEffectPolicyTests(unittest.IsolatedAsyncioTestCase):
     async def test_current_dry_run_blocks_kick_with_stale_settings(self):
         await self._assert_current_dry_run_plans("kick")
 
+    async def test_successful_ban_records_its_declared_daily_origin(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                from Honeypot.effects import (  # noqa: PLC0415
+                    EffectStatus,
+                    ModerationOrigin,
+                )
+
+                cog = honeypot.Honeypot(_Bot())
+                current_config = SimpleNamespace(
+                    all=mock.AsyncMock(return_value={"dry_run": False})
+                )
+                cog.config = SimpleNamespace(
+                    guild=mock.Mock(return_value=current_config)
+                )
+                cog._increment_stat = mock.AsyncMock()
+                cog._record_daily_stat = mock.AsyncMock()
+                cog._missing_action_permission = mock.Mock(return_value=None)
+                cog._schedule_post_ban_sweep = mock.Mock()
+                honeypot.detection._activate_forward_purge = mock.Mock()
+                honeypot.detection.modlog.create_case = mock.AsyncMock()
+                guild = SimpleNamespace(id=10, me=SimpleNamespace(id=11))
+                member = SimpleNamespace(id=20, ban=mock.AsyncMock())
+                settings = honeypot.GuildSettings.from_mapping({"dry_run": False})
+                occurred_at = datetime(2026, 8, 19, 20, tzinfo=timezone.utc)
+
+                for origin, metric in (
+                    (ModerationOrigin.AUTOMATIC, "automated_bans"),
+                    (ModerationOrigin.MANUAL, "manual_bans"),
+                ):
+                    with self.subTest(origin=origin):
+                        cog._record_daily_stat.reset_mock()
+                        result = await cog._execute_action(
+                            guild,
+                            member,
+                            occurred_at,
+                            settings,
+                            reason="Punishment safety test",
+                            action="ban",
+                            origin=origin,
+                        )
+
+                        self.assertEqual(result.status, EffectStatus.SUCCEEDED)
+                        cog._record_daily_stat.assert_awaited_once_with(
+                            guild, mock.ANY, metric
+                        )
+
+    async def test_successful_ban_records_daily_stat_before_lifetime_counter(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                from Honeypot.effects import ModerationOrigin  # noqa: PLC0415
+
+                cog = honeypot.Honeypot(_Bot())
+                current_config = SimpleNamespace(
+                    all=mock.AsyncMock(return_value={"dry_run": False})
+                )
+                cog.config = SimpleNamespace(
+                    guild=mock.Mock(return_value=current_config)
+                )
+                cog._increment_stat = mock.AsyncMock(
+                    side_effect=RuntimeError("config unavailable")
+                )
+                cog._record_daily_stat = mock.AsyncMock()
+                cog._missing_action_permission = mock.Mock(return_value=None)
+                cog._schedule_post_ban_sweep = mock.Mock()
+                honeypot.detection._activate_forward_purge = mock.Mock()
+                guild = SimpleNamespace(id=10, me=SimpleNamespace(id=11))
+                member = SimpleNamespace(id=20, ban=mock.AsyncMock())
+                settings = honeypot.GuildSettings.from_mapping({"dry_run": False})
+
+                with self.assertRaisesRegex(RuntimeError, "config unavailable"):
+                    await cog._execute_action(
+                        guild,
+                        member,
+                        datetime(2026, 8, 19, 20, tzinfo=timezone.utc),
+                        settings,
+                        reason="Punishment safety test",
+                        action="ban",
+                        origin=ModerationOrigin.AUTOMATIC,
+                    )
+
+                member.ban.assert_awaited_once()
+                cog._record_daily_stat.assert_awaited_once_with(
+                    guild, mock.ANY, "automated_bans"
+                )
+
     async def test_successful_kick_fail_warning_keeps_failed_effect_status(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                from Honeypot.effects import EffectStatus  # noqa: PLC0415
+                from Honeypot.effects import (  # noqa: PLC0415
+                    EffectStatus,
+                    ModerationOrigin,
+                )
 
                 cog = honeypot.Honeypot(_Bot())
                 current_config = SimpleNamespace(
@@ -156,6 +249,7 @@ class PunitiveEffectPolicyTests(unittest.IsolatedAsyncioTestCase):
                     datetime.now(timezone.utc),
                     settings,
                     reason="Punishment safety test",
+                    origin=ModerationOrigin.AUTOMATIC,
                     action="kick",
                 )
 

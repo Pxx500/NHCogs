@@ -719,8 +719,10 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
                 await cog.cog_load()
                 restore_task = cog._case_restore_task
+                daily_stats_task = cog._daily_stats_task
                 await asyncio.wait_for(restore_started.wait(), timeout=2)
                 self.assertFalse(restore_task.done())
+                self.assertFalse(daily_stats_task.done())
 
                 try:
                     await cog.cog_unload()
@@ -734,11 +736,18 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     ):
                         self.assertTrue(getattr(cog, loop_name).cancelled, loop_name)
                     self.assertTrue(restore_task.cancelled())
+                    self.assertTrue(daily_stats_task.cancelled())
                     self.assertTrue(restore_cleanup_finished.is_set())
                     self.assertIsNone(cog._case_restore_task)
+                    self.assertIsNone(cog._daily_stats_task)
                 finally:
                     restore_task.cancel()
-                    await asyncio.gather(restore_task, return_exceptions=True)
+                    daily_stats_task.cancel()
+                    await asyncio.gather(
+                        restore_task,
+                        daily_stats_task,
+                        return_exceptions=True,
+                    )
 
     async def test_failed_case_restore_is_logged_and_cleared_on_unload(self):
         with TemporaryDirectory() as directory:
