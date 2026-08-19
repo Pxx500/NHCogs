@@ -11,7 +11,7 @@ from redbot.core import commands, modlog
 from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import box, pagify
 
-from .effects import EffectStatus
+from .effects import EffectStatus, ModerationOrigin
 from .settings import (
     BOOL_OPTIONS,
     JOINWATCH_AUTO_ROLE_ACTION_OPTIONS,
@@ -651,6 +651,11 @@ async def _execute_joinwatch_action(
                 delete_message_seconds=cog._ban_delete_message_seconds(),
             )
             cog._schedule_post_ban_sweep(guild, target.id)
+            await cog._record_daily_stat(
+                guild,
+                datetime.now(timezone.utc),
+                "joinwatch_bans",
+            )
         await cog._increment_stat(guild, "joinwatch_auto_role_punishments")
     except discord.HTTPException as exc:
         await cog._increment_stat(guild, "failed_actions")
@@ -788,6 +793,11 @@ async def _apply_joinwatch_assignment_actions(
                 continue
             try:
                 await member.add_roles(role, reason="Automated account status update.")
+                await cog._record_daily_stat(
+                    guild,
+                    datetime.now(timezone.utc),
+                    "shadowbans",
+                )
                 await cog._increment_stat(guild, "joinwatch_auto_roles")
             except discord.HTTPException:
                 await cog._increment_stat(guild, "joinwatch_auto_role_failures")
@@ -1189,6 +1199,11 @@ async def on_member_join(cog, member: discord.Member) -> None:
                 else:
                     try:
                         await member.add_roles(role, reason="Automated account status update.")
+                        await cog._record_daily_stat(
+                            member.guild,
+                            datetime.now(timezone.utc),
+                            "shadowbans",
+                        )
                         await cog._increment_stat(member.guild, "joinwatch_auto_roles")
                         await _store_joinwatch_pending_role(
                             cog,
@@ -1301,6 +1316,7 @@ async def on_member_update(cog, before: discord.Member, after: discord.Member) -
             datetime.now(timezone.utc),
             guild_settings,
             reason=reason,
+            origin=ModerationOrigin.AUTOMATIC,
             action=action,
             moderator=after.guild.me,
         )

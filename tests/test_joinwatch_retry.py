@@ -186,6 +186,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                 bot.is_admin = mock.AsyncMock(return_value=False)
                 cog = honeypot.Honeypot(bot)
                 cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
+                cog._record_daily_stat = mock.AsyncMock()
 
                 with mock.patch.object(
                     honeypot.discord,
@@ -217,8 +218,17 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(assignments, {})
                 self.assertNotIn("202", roles)
                 self.assertEqual(roles["201"]["role_id"], 501)
-                self.assertEqual(stats["joinwatch_auto_roles"], 1)
-                self.assertEqual(stats["joinwatch_auto_role_punishments"], 1)
+                self.assertEqual(
+                    (
+                        stats["joinwatch_auto_roles"],
+                        stats["joinwatch_auto_role_punishments"],
+                        [
+                            call.args[2]
+                            for call in cog._record_daily_stat.await_args_list
+                        ],
+                    ),
+                    (1, 1, ["shadowbans"]),
+                )
                 assignment_message.edit.assert_awaited_once()
                 expiration_message.edit.assert_awaited_once()
                 self.assertIn(
@@ -228,6 +238,108 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     expiration_message.edit.await_args.kwargs["embed"].fields[0].value,
                     "Kicked.",
+                )
+
+    async def test_successful_joinwatch_ban_records_daily_ban(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                current_config = SimpleNamespace(
+                    all=mock.AsyncMock(return_value={"dry_run": False})
+                )
+                cog.config = SimpleNamespace(
+                    guild=mock.Mock(return_value=current_config)
+                )
+                cog._increment_stat = mock.AsyncMock()
+                cog._record_daily_stat = mock.AsyncMock()
+                cog._missing_action_permission = mock.Mock(return_value=None)
+                cog._schedule_post_ban_sweep = mock.Mock()
+                guild = SimpleNamespace(
+                    id=100,
+                    me=SimpleNamespace(id=101),
+                    ban=mock.AsyncMock(),
+                )
+                member = SimpleNamespace(id=200)
+                settings = honeypot.GuildSettings.from_mapping(
+                    {
+                        "dry_run": False,
+                        "joinwatch_auto_role_action": "ban",
+                    }
+                )
+
+                with mock.patch.object(
+                    honeypot.modlog,
+                    "create_case",
+                    new=mock.AsyncMock(),
+                    create=True,
+                ):
+                    label, failed = await honeypot.joinwatch._execute_joinwatch_action(
+                        cog,
+                        guild,
+                        member,
+                        member.id,
+                        settings,
+                        reason="Suspicious Account",
+                    )
+
+                self.assertIsNotNone(label)
+                self.assertIsNone(failed)
+                guild.ban.assert_awaited_once()
+                cog._record_daily_stat.assert_awaited_once_with(
+                    guild,
+                    mock.ANY,
+                    "joinwatch_bans",
+                )
+
+    async def test_delayed_shadowban_records_daily_stat_before_lifetime_counter(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                now = datetime(2026, 8, 19, 20, tzinfo=timezone.utc)
+                role = SimpleNamespace(id=501, mention="<@&501>")
+                member = SimpleNamespace(
+                    id=200,
+                    roles=[],
+                    add_roles=mock.AsyncMock(),
+                )
+                guild = SimpleNamespace(
+                    id=100,
+                    get_role=mock.Mock(return_value=role),
+                )
+                cog = SimpleNamespace(
+                    _get_member_or_fetch=mock.AsyncMock(return_value=member),
+                    _is_protected_member=mock.AsyncMock(return_value=False),
+                    _punitive_effect_allowed=mock.AsyncMock(return_value=True),
+                    _missing_role_assignment_permission=mock.Mock(return_value=None),
+                    _increment_stat=mock.AsyncMock(
+                        side_effect=RuntimeError("config unavailable")
+                    ),
+                    _record_daily_stat=mock.AsyncMock(),
+                )
+                action = honeypot.joinwatch.JoinwatchSelectedAction(
+                    "apply_role",
+                    str(member.id),
+                    member.id,
+                    role.id,
+                    now,
+                    {"expires_at": (now + timedelta(minutes=30)).isoformat()},
+                )
+                settings = honeypot.GuildSettings.from_mapping(
+                    {"joinwatch_auto_role_timer_minutes": 30}
+                )
+
+                with self.assertRaisesRegex(RuntimeError, "config unavailable"):
+                    await honeypot.joinwatch._apply_joinwatch_assignment_actions(
+                        cog,
+                        guild,
+                        settings,
+                        (action,),
+                        now,
+                        joinwatch_channel=None,
+                    )
+
+                member.add_roles.assert_awaited_once()
+                cog._record_daily_stat.assert_awaited_once_with(
+                    guild, mock.ANY, "shadowbans"
                 )
 
     async def test_assignment_and_role_retries_are_scheduled_one_minute_later(self):

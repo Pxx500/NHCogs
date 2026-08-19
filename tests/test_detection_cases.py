@@ -5,7 +5,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import FrozenInstanceError
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from importlib import util
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -376,9 +376,10 @@ class DetectionCaseStoreTests(unittest.TestCase):
                 )
             }
 
-        self.assertEqual(version, 1)
+        self.assertEqual(version, 2)
         self.assertIn("detection_cases", tables)
         self.assertIn("detection_attachments", tables)
+        self.assertIn("public_daily_stats", tables)
 
     def test_initialize_preserves_current_schema_data_when_backfilling_version(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
@@ -395,7 +396,70 @@ class DetectionCaseStoreTests(unittest.TestCase):
 
         self.assertEqual(snapshot.case.case_id, stored_case.case_id)
         self.assertEqual(snapshot.messages[0].message_id, 40)
-        self.assertEqual(version, 1)
+        self.assertEqual(version, 2)
+
+    def test_daily_stats_record_each_metric_by_guild_and_utc_date(self):
+        occurred_at = datetime(2026, 8, 19, 23, 30, tzinfo=timezone.utc)
+        for metric in (
+            "detections",
+            "automated_bans",
+            "manual_bans",
+            "shadowbans",
+            "joinwatch_bans",
+        ):
+            self.store.record_daily_stat(100, occurred_at, metric)
+        self.store.record_daily_stat(100, occurred_at, "automated_bans")
+
+        snapshot = self.store.get_daily_stats(100, date(2026, 8, 19))
+        empty_guild = self.store.get_daily_stats(200, date(2026, 8, 19))
+        empty_day = self.store.get_daily_stats(100, date(2026, 8, 20))
+
+        self.assertEqual(snapshot.detections, 1)
+        self.assertEqual(snapshot.automated_bans, 2)
+        self.assertEqual(snapshot.manual_bans, 1)
+        self.assertEqual(snapshot.shadowbans, 1)
+        self.assertEqual(snapshot.joinwatch_bans, 1)
+        self.assertEqual(empty_guild.detections, 0)
+        self.assertFalse(empty_guild.observed)
+        self.assertEqual(empty_day.detections, 0)
+        self.assertFalse(empty_day.observed)
+        with self.assertRaisesRegex(ValueError, "unknown daily statistic"):
+            self.store.record_daily_stat(100, occurred_at, "kicks")
+
+    def test_daily_stats_can_observe_a_zero_activity_day(self):
+        report_date = date(2026, 8, 19)
+
+        self.store.observe_daily_stats_day(100, report_date)
+
+        snapshot = self.store.get_daily_stats(100, report_date)
+        self.assertTrue(snapshot.observed)
+        self.assertEqual(
+            (
+                snapshot.detections,
+                snapshot.automated_bans,
+                snapshot.manual_bans,
+                snapshot.shadowbans,
+                snapshot.joinwatch_bans,
+            ),
+            (0, 0, 0, 0, 0),
+        )
+
+    def test_daily_stats_store_successful_publication_metadata(self):
+        report_date = date(2026, 8, 19)
+        published_at = datetime(2026, 8, 20, 0, 5, tzinfo=timezone.utc)
+
+        self.store.record_daily_stats_publication(
+            100,
+            report_date,
+            published_at,
+            channel_id=300,
+            message_id=400,
+        )
+
+        snapshot = self.store.get_daily_stats(100, report_date)
+        self.assertEqual(snapshot.published_at, published_at)
+        self.assertEqual(snapshot.publication_channel_id, 300)
+        self.assertEqual(snapshot.publication_message_id, 400)
 
     def test_case_subject_identity_survives_store_restart(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
@@ -559,7 +623,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertIn("description", columns)
         self.assertIn("spoiler", columns)
         self.assertEqual(row, ("legacy.png", None, 0))
-        self.assertEqual(version, 1)
+        self.assertEqual(version, 2)
 
     def test_projection_endpoint_survives_store_restart(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)

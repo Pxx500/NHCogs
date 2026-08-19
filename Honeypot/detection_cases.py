@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable, Mapping
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
@@ -15,6 +15,10 @@ from uuid import uuid4
 from .storage import apply_migrations, connect
 
 log = logging.getLogger(__name__)
+
+DAILY_STATS_METRICS = frozenset(
+    {"detections", "automated_bans", "manual_bans", "shadowbans", "joinwatch_bans"}
+)
 
 
 def _execute_script(connection: sqlite3.Connection, script: str) -> None:
@@ -365,6 +369,21 @@ class AppendResult:
     case_created: bool
     message_created: bool
     firstpost_claimed: bool = False
+
+
+@dataclass(frozen=True)
+class DailyStatsSnapshot:
+    guild_id: int
+    date_utc: date
+    observed: bool = False
+    detections: int = 0
+    automated_bans: int = 0
+    manual_bans: int = 0
+    shadowbans: int = 0
+    joinwatch_bans: int = 0
+    published_at: datetime | None = None
+    publication_channel_id: int | None = None
+    publication_message_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -728,11 +747,112 @@ class DetectionCaseStore:
                        ADD COLUMN spoiler INTEGER NOT NULL DEFAULT 0"""
                 )
 
+        def migrate_schema_1(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS public_daily_stats (
+                       guild_id INTEGER NOT NULL,
+                       date_utc TEXT NOT NULL,
+                       detections INTEGER NOT NULL DEFAULT 0,
+                       automated_bans INTEGER NOT NULL DEFAULT 0,
+                       manual_bans INTEGER NOT NULL DEFAULT 0,
+                       shadowbans INTEGER NOT NULL DEFAULT 0,
+                       joinwatch_bans INTEGER NOT NULL DEFAULT 0,
+                       published_at INTEGER,
+                       publication_channel_id INTEGER,
+                       publication_message_id INTEGER,
+                       PRIMARY KEY(guild_id, date_utc)
+                   )"""
+            )
+
         with closing(self._connect()) as connection:
             apply_migrations(
                 connection,
-                (migrate_schema_0,),
+                (migrate_schema_0, migrate_schema_1),
                 label="detection case storage",
+            )
+
+    def record_daily_stat(
+        self,
+        guild_id: int,
+        occurred_at: datetime,
+        metric: str,
+    ) -> None:
+        if metric not in DAILY_STATS_METRICS:
+            raise ValueError(f"unknown daily statistic: {metric}")
+        _to_timestamp(occurred_at)
+        date_key = occurred_at.astimezone(timezone.utc).date().isoformat()
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                f"""INSERT INTO public_daily_stats (guild_id, date_utc, {metric})
+                    VALUES (?, ?, 1)
+                    ON CONFLICT(guild_id, date_utc) DO UPDATE SET
+                        {metric} = {metric} + 1""",
+                (guild_id, date_key),
+            )
+
+    def observe_daily_stats_day(self, guild_id: int, date_utc: date) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                """INSERT INTO public_daily_stats (guild_id, date_utc)
+                   VALUES (?, ?)
+                   ON CONFLICT(guild_id, date_utc) DO NOTHING""",
+                (guild_id, date_utc.isoformat()),
+            )
+
+    def get_daily_stats(self, guild_id: int, date_utc: date) -> DailyStatsSnapshot:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """SELECT * FROM public_daily_stats
+                   WHERE guild_id = ? AND date_utc = ?""",
+                (guild_id, date_utc.isoformat()),
+            ).fetchone()
+        if row is None:
+            return DailyStatsSnapshot(guild_id=guild_id, date_utc=date_utc)
+        return DailyStatsSnapshot(
+            guild_id=guild_id,
+            date_utc=date.fromisoformat(row["date_utc"]),
+            observed=True,
+            detections=row["detections"],
+            automated_bans=row["automated_bans"],
+            manual_bans=row["manual_bans"],
+            shadowbans=row["shadowbans"],
+            joinwatch_bans=row["joinwatch_bans"],
+            published_at=(
+                _from_timestamp(row["published_at"])
+                if row["published_at"] is not None
+                else None
+            ),
+            publication_channel_id=row["publication_channel_id"],
+            publication_message_id=row["publication_message_id"],
+        )
+
+    def record_daily_stats_publication(
+        self,
+        guild_id: int,
+        date_utc: date,
+        published_at: datetime,
+        *,
+        channel_id: int,
+        message_id: int,
+    ) -> None:
+        published_timestamp = _to_timestamp(published_at)
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                """INSERT INTO public_daily_stats
+                       (guild_id, date_utc, published_at,
+                        publication_channel_id, publication_message_id)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(guild_id, date_utc) DO UPDATE SET
+                       published_at = excluded.published_at,
+                       publication_channel_id = excluded.publication_channel_id,
+                       publication_message_id = excluded.publication_message_id""",
+                (
+                    guild_id,
+                    date_utc.isoformat(),
+                    published_timestamp,
+                    channel_id,
+                    message_id,
+                ),
             )
 
     @staticmethod

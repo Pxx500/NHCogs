@@ -330,8 +330,12 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Sources and scopes", rendered)
                 self.assertIn("Review: Not configured", rendered)
                 self.assertIn("Errors: Not configured", rendered)
+                self.assertIn("Daily stats: Not configured", rendered)
                 self.assertIn("GIF debug logging: false", rendered)
                 self.assertIn("??honeypot channels review [channel]", rendered)
+                self.assertIn(
+                    "??honeypot channels daily-stats [channel]", rendered
+                )
                 self.assertIn("??honeypot channels gif-debug [channel]", rendered)
                 self.assertIn(
                     "??honeypot channels honeypot add <channel>", rendered

@@ -22,6 +22,11 @@ class EffectRetryDisposition(str, Enum):
     TERMINAL = "terminal"
 
 
+class ModerationOrigin(str, Enum):
+    AUTOMATIC = "automatic"
+    MANUAL = "manual"
+
+
 @dataclass(frozen=True)
 class ModerationEffectResult:
     label: str | None

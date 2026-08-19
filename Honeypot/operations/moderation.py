@@ -16,7 +16,7 @@ from ..detection_cases import (
     ActionIntent,
     effective_action,
 )
-from ..effects import EffectRetryDisposition, EffectStatus
+from ..effects import EffectRetryDisposition, EffectStatus, ModerationOrigin
 from ..settings import GuildSettings
 from .context import OperationContext, OperationOutcome
 
@@ -131,6 +131,7 @@ async def moderation_action_handler(
         source.created_at,
         guild_settings,
         reason=public_reason,
+        origin=ModerationOrigin.AUTOMATIC,
         action=action.value,
     )
     if result.status is EffectStatus.FAILED:

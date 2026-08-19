@@ -1269,6 +1269,7 @@ class ManualEvidencePunishmentTests(unittest.IsolatedAsyncioTestCase):
                     source.created_at,
                     result.settings,
                     reason="repeated abuse",
+                    origin=module.ModerationOrigin.MANUAL,
                     action="kick",
                     moderator=moderator,
                 )

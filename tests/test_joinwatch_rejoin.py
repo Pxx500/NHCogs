@@ -124,6 +124,7 @@ def _make_runtime(honeypot, *, random_delay: bool):
     bot.is_admin = mock.AsyncMock(return_value=False)
     cog = honeypot.Honeypot(bot)
     cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
+    cog._record_daily_stat = mock.AsyncMock()
     return SimpleNamespace(
         role=role,
         partial_message=partial_message,
@@ -137,6 +138,42 @@ def _make_runtime(honeypot, *, random_delay: bool):
 
 
 class JoinwatchRejoinTests(unittest.IsolatedAsyncioTestCase):
+    async def test_immediate_shadowban_records_daily_stat_before_lifetime_counter(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                runtime = _make_runtime(honeypot, random_delay=False)
+                original_increment = runtime.cog._increment_stat
+
+                async def fail_role_counter(guild, key, amount=1):
+                    if key == "joinwatch_auto_roles":
+                        raise RuntimeError("config unavailable")
+                    await original_increment(guild, key, amount)
+
+                runtime.cog._increment_stat = mock.AsyncMock(
+                    side_effect=fail_role_counter
+                )
+                with (
+                    mock.patch.object(honeypot.discord, "Embed", _Embed),
+                    mock.patch.object(
+                        honeypot.discord,
+                        "Color",
+                        SimpleNamespace(orange=mock.Mock(return_value=None)),
+                    ),
+                    mock.patch.object(
+                        honeypot.discord,
+                        "utils",
+                        SimpleNamespace(format_dt=lambda value, style: value.isoformat()),
+                        create=True,
+                    ),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "config unavailable"):
+                        await runtime.cog.on_member_join(runtime.member)
+
+                runtime.member.add_roles.assert_awaited_once()
+                runtime.cog._record_daily_stat.assert_awaited_once_with(
+                    runtime.guild, mock.ANY, "shadowbans"
+                )
+
     async def test_rejoin_reuses_alert_and_preserves_original_deadline(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -307,6 +344,11 @@ class JoinwatchRejoinTests(unittest.IsolatedAsyncioTestCase):
                 ]
                 self.assertEqual(len(status_fields), 1)
                 self.assertEqual(status_fields[0].value, "Banned.")
+                runtime.cog._record_daily_stat.assert_awaited_once_with(
+                    runtime.guild,
+                    mock.ANY,
+                    "shadowbans",
+                )
 
     async def test_missing_alert_disables_later_edits_without_weakening_role(self):
         with TemporaryDirectory() as directory:

@@ -26,6 +26,7 @@ EXPECTED_GUILD_DEFAULTS = {
     "fallback_action": "review",
     "dry_run": False,
     "errors_channel": None,
+    "daily_stats_channel": None,
     "maintainer_id": None,
     "manual_evidence_channel": None,
     "manual_evidence_memes_channel": None,
@@ -716,6 +717,7 @@ class _Bot:
     def __init__(self, ready=True):
         self.ready = asyncio.Event()
         self.tree = _AppCommandTree()
+        self.guilds = []
         if ready:
             self.ready.set()
 

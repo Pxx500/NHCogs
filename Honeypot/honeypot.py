@@ -16,6 +16,7 @@ from redbot.core.i18n import Translator, cog_i18n
 from . import (
     channel_routing,
     cleanup,
+    daily_stats,
     detection,
     detection_runtime,
     diagnostics,
@@ -47,7 +48,7 @@ from .detection_cases import (
     OperationStatus,  # noqa: F401 - public module re-export
     OperationType,
 )
-from .effects import ModerationEffectResult, punitive_effect_allowed
+from .effects import ModerationEffectResult, ModerationOrigin, punitive_effect_allowed
 from .firstpost_store import FirstPostStore
 from .image_detector import ImageSample
 from .imagescan_store import ImageScanStore
@@ -200,6 +201,7 @@ class Honeypot(Cog):
         self._case_review_service = CaseReviewService(self._case_store)
         self._case_views: dict[str, object] = {}
         self._case_restore_task: asyncio.Task | None = None
+        self._daily_stats_task: asyncio.Task | None = None
         self._initial_image_scan_tasks: set[asyncio.Task] = set()
         self._initial_image_scan_batches: dict[
             tuple[int, int], dict[int, asyncio.Task]
@@ -324,6 +326,26 @@ class Honeypot(Cog):
         async with guild_config(guild).stats() as stats:
             stats.setdefault(key, 0)
             stats[key] += amount
+
+    async def _record_daily_stat(
+        self,
+        guild: discord.Guild,
+        occurred_at: datetime,
+        metric: str,
+    ) -> None:
+        try:
+            await asyncio.to_thread(
+                self._case_store.record_daily_stat,
+                guild.id,
+                occurred_at,
+                metric,
+            )
+        except Exception:
+            log.exception(
+                "Failed to record daily statistic %s for guild %s",
+                metric,
+                guild.id,
+            )
 
     # Detection seam: another cog module or a test reaches these through
     # `self`, so the cog keeps a one-line delegation while the implementation
@@ -523,6 +545,7 @@ class Honeypot(Cog):
         settings: GuildSettings,
         *,
         reason: str,
+        origin: ModerationOrigin,
         action: str | None = None,
         moderator: discord.Member | discord.User | discord.Object | None = None,
     ) -> ModerationEffectResult:
@@ -533,6 +556,7 @@ class Honeypot(Cog):
             created_at,
             settings,
             reason=reason,
+            origin=origin,
             action=action,
             moderator=moderator,
         )
@@ -922,6 +946,10 @@ class Honeypot(Cog):
         self._case_restore_task.add_done_callback(
             lambda task: self._observe_background_task(task, "detection case view restoration")
         )
+        self._daily_stats_task = asyncio.create_task(daily_stats.publisher_loop(self))
+        self._daily_stats_task.add_done_callback(
+            lambda task: self._observe_background_task(task, "daily statistics publisher")
+        )
         self._install_console_log_buffer()
         self._manual_evidence.register()
 
@@ -965,6 +993,10 @@ class Honeypot(Cog):
             await self._cancel_owned_task(self._case_restore_task)
         finally:
             self._case_restore_task = None
+        try:
+            await self._cancel_owned_task(self._daily_stats_task)
+        finally:
+            self._daily_stats_task = None
         pending_gif_tasks = tuple(self._gif_detector_tasks)
         for task in pending_gif_tasks:
             task.cancel()
@@ -1706,6 +1738,12 @@ class Honeypot(Cog):
     ) -> None:
         return await channel_routing.configure_single(self, ctx, "errors", target)
 
+    @channels.command(name="daily-stats")
+    async def channels_daily_stats(
+        self, ctx: commands.Context, target: discord.TextChannel | discord.Thread = None
+    ) -> None:
+        return await channel_routing.configure_single(self, ctx, "daily_stats", target)
+
     @channels.command(name="manual-evidence")
     async def channels_manual_evidence(
         self, ctx: commands.Context, target: discord.TextChannel = None
@@ -2211,10 +2249,17 @@ class Honeypot(Cog):
         """Show detailed moderation statistics."""
         return await diagnostics.honeypot_mod_stats(self, ctx)
 
-    @honeypot.command(name="stats")
+    @honeypot.group(name="stats", invoke_without_command=True)
     async def honeypot_stats(self, ctx: commands.Context) -> None:
         """Show public server safety statistics."""
         return await diagnostics.honeypot_stats(self, ctx)
+
+    @honeypot_stats.command(name="channel")
+    async def honeypot_stats_channel(
+        self, ctx: commands.Context, target: discord.TextChannel | discord.Thread = None
+    ) -> None:
+        """Set the destination for daily public Honeypot statistics."""
+        return await channel_routing.configure_single(self, ctx, "daily_stats", target)
 
     @debug.command(name="resetstats")
     @commands.permissions_check(lambda ctx: ctx.author.id == ctx.guild.owner_id or ctx.author.id in ctx.bot.owner_ids)
