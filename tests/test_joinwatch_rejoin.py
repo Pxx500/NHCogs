@@ -287,8 +287,8 @@ class JoinwatchRejoinTests(unittest.IsolatedAsyncioTestCase):
 
                 with (
                     mock.patch.object(
-                        honeypot.joinwatch,
-                        "_edit_joinwatch_alert_auto_role",
+                        honeypot.joinwatch.joinwatch_publication,
+                        "publish_joinwatch_incident",
                         mock.AsyncMock(),
                     ),
                     mock.patch.object(
@@ -328,7 +328,7 @@ class JoinwatchRejoinTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     await runtime.cog.on_member_join(runtime.member)
                     incident = runtime.pending_roles[str(runtime.member.id)]
-                    await honeypot.joinwatch._edit_joinwatch_alert_auto_role(
+                    await honeypot.joinwatch.joinwatch_publication.publish_joinwatch_incident(
                         runtime.cog,
                         runtime.guild,
                         incident,
@@ -385,6 +385,74 @@ class JoinwatchRejoinTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(runtime.partial_message.edit.await_count, 1)
                 self.assertEqual(runtime.member.add_roles.await_count, 3)
                 self.assertEqual(runtime.alert_channel.send.await_count, 1)
+                runtime.cog._record_operational_failure.assert_awaited_once()
+
+    async def test_transient_alert_failure_keeps_later_updates_enabled(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                runtime = _make_runtime(honeypot, random_delay=False)
+                runtime.cog._record_operational_failure = mock.AsyncMock()
+                with (
+                    mock.patch.object(honeypot.discord, "Embed", _Embed),
+                    mock.patch.object(
+                        honeypot.discord,
+                        "Color",
+                        SimpleNamespace(orange=mock.Mock(return_value=None)),
+                    ),
+                    mock.patch.object(
+                        honeypot.discord,
+                        "utils",
+                        SimpleNamespace(format_dt=lambda value, style: value.isoformat()),
+                        create=True,
+                    ),
+                ):
+                    await runtime.cog.on_member_join(runtime.member)
+                    runtime.partial_message.edit.side_effect = (
+                        honeypot.discord.HTTPException("temporary failure")
+                    )
+                    incident = runtime.pending_roles[str(runtime.member.id)]
+                    await honeypot.joinwatch.joinwatch_publication.publish_joinwatch_incident(
+                        runtime.cog,
+                        runtime.guild,
+                        incident,
+                        "Retrying later.",
+                    )
+
+                self.assertFalse(incident.get("alert_updates_disabled", False))
+                runtime.cog._record_operational_failure.assert_awaited_once()
+
+    async def test_missing_alert_channel_disables_later_updates(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                runtime = _make_runtime(honeypot, random_delay=False)
+                runtime.cog._record_operational_failure = mock.AsyncMock()
+                with (
+                    mock.patch.object(honeypot.discord, "Embed", _Embed),
+                    mock.patch.object(
+                        honeypot.discord,
+                        "Color",
+                        SimpleNamespace(orange=mock.Mock(return_value=None)),
+                    ),
+                    mock.patch.object(
+                        honeypot.discord,
+                        "utils",
+                        SimpleNamespace(format_dt=lambda value, style: value.isoformat()),
+                        create=True,
+                    ),
+                ):
+                    await runtime.cog.on_member_join(runtime.member)
+                    incident = runtime.pending_roles[str(runtime.member.id)]
+                    runtime.guild.get_channel = lambda _channel_id: None
+                    runtime.cog.bot.get_channel = mock.Mock(return_value=None)
+                    await honeypot.joinwatch.joinwatch_publication.publish_joinwatch_incident(
+                        runtime.cog,
+                        runtime.guild,
+                        incident,
+                        "Role manually removed.",
+                    )
+
+                self.assertTrue(incident.get("alert_updates_disabled", False))
+                runtime.partial_message.edit.assert_not_awaited()
                 runtime.cog._record_operational_failure.assert_awaited_once()
 
     async def test_terminal_timer_settles_in_original_alert_without_new_message(self):
@@ -463,8 +531,8 @@ class JoinwatchRejoinTests(unittest.IsolatedAsyncioTestCase):
                     ).isoformat()
 
                     with mock.patch.object(
-                        honeypot.joinwatch,
-                        "_edit_joinwatch_alert_auto_role",
+                        honeypot.joinwatch.joinwatch_publication,
+                        "publish_joinwatch_incident",
                         mock.AsyncMock(),
                     ):
                         await honeypot.joinwatch.joinwatch_auto_role_loop(runtime.cog)

@@ -256,7 +256,8 @@ class CogAssemblyContractTests(unittest.TestCase):
             "diagnostics": 12,
             "gif_detector": 9,
             "imagescan": 21,
-            "joinwatch": 15,
+            "joinwatch": 3,
+            "joinwatch_commands": 12,
             "review_publication": 13,
         }
         tree = ast.parse((PACKAGE_DIR / "honeypot.py").read_text(encoding="utf-8"))
