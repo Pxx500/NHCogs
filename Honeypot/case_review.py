@@ -470,12 +470,12 @@ def render_timeline(snapshot: CaseSnapshot) -> CaseTimelineProjection:
 
 def _resolution_label(resolution: str) -> str:
     labels = {
-        "ignore": "Ignored",
-        "kick": "Kicked",
-        "ban": "Banned",
-        "images:tp": "Images marked true positive",
-        "images:fp": "Images marked false positive",
-        "images:ignore": "Images ignored",
+        "ignore": "Ignore",
+        "kick": "Kick",
+        "ban": "Ban",
+        "images:tp": "All TP",
+        "images:fp": "All FP",
+        "images:ignore": "All ignored",
     }
     return labels.get(resolution, resolution.replace("_", " ").capitalize())
 
@@ -561,29 +561,108 @@ def _moderation_state(
     return moderation_status, moderation_actions, moderation_completed
 
 
-def _case_resolution_lines(
-    snapshot: CaseSnapshot, moderation_operations: tuple[OperationRecord, ...]
-) -> tuple[str, ...]:
-    """Render how and by whom the case was closed."""
-    resolution_lines: tuple[str, ...] = ()
-    automatic_resolution = False
-    if snapshot.case.resolution is not None:
-        automatic_resolution = any(
-            operation.operation_type == OperationType.MODERATION_ACTION
-            and operation.status is OperationStatus.SUCCEEDED
-            and operation.result == snapshot.case.resolution
-            for operation in moderation_operations
+def _image_resolution_line(
+    feedback_items: tuple[CaseFeedbackItem, ...],
+    attachments: tuple[AttachmentRecord, ...],
+    fallback_resolution: str | None,
+    fallback_reviewer_id: int | None,
+) -> str | None:
+    decision_labels = {
+        "true_positive": "TP",
+        "false_positive": "FP",
+        "ignored": "ignored",
+    }
+    reviewed = tuple(
+        item for item in feedback_items if item.decision in decision_labels
+    )
+    if reviewed:
+        counts = {
+            decision: sum(item.decision == decision for item in reviewed)
+            for decision in decision_labels
+        }
+        present = tuple(
+            (decision, count) for decision, count in counts.items() if count
         )
-        resolution_label = _resolution_label(snapshot.case.resolution)
-        if automatic_resolution:
-            resolution_label += " automatically"
-        resolution_lines += (resolution_label,)
-    if snapshot.case.moderator_id is not None and not automatic_resolution:
-        reviewer = f"<@{snapshot.case.moderator_id}>"
-        if snapshot.case.resolved_at is not None:
-            reviewer += f" • <t:{int(snapshot.case.resolved_at.timestamp())}:F>"
-        resolution_lines += (reviewer,)
-    return resolution_lines
+        if len(present) == 1:
+            summary = f"All {decision_labels[present[0][0]]}"
+        else:
+            summary = ", ".join(
+                f"{count} {decision_labels[decision]}"
+                for decision, count in present
+            )
+        reviewer_by_key = {}
+        for attachment in attachments:
+            reviewer_id = attachment.learning_metadata.get("moderator_id")
+            if type(reviewer_id) is int:
+                reviewer_by_key[attachment.key] = reviewer_id
+        reviewer_ids = tuple(
+            dict.fromkeys(
+                reviewer_by_key[item.key]
+                for item in reviewed
+                if item.key in reviewer_by_key
+            )
+        )
+    elif fallback_resolution in {"images:tp", "images:fp", "images:ignore"}:
+        summary = _resolution_label(fallback_resolution)
+        reviewer_ids = (
+            (fallback_reviewer_id,) if fallback_reviewer_id is not None else ()
+        )
+    else:
+        return None
+    if reviewer_ids:
+        visible = reviewer_ids[:3]
+        reviewers = ", ".join(f"<@{reviewer_id}>" for reviewer_id in visible)
+        if len(reviewer_ids) > len(visible):
+            reviewers += f", +{len(reviewer_ids) - len(visible)} more"
+        summary += f" ({reviewers})"
+    return summary
+
+
+def _case_resolution_lines(
+    snapshot: CaseSnapshot,
+    moderation_operations: tuple[OperationRecord, ...],
+    feedback_items: tuple[CaseFeedbackItem, ...],
+) -> tuple[str, ...]:
+    """Render the terminal moderation and image-review outcomes."""
+    resolution = snapshot.case.resolution
+    if resolution is None:
+        return ()
+    action_line = None
+    if resolution in {"ban", "kick", "ignore", "planned_ban", "planned_kick"}:
+        action = resolution.removeprefix("planned_")
+        operation = next(
+            (
+                item
+                for item in reversed(moderation_operations)
+                if item.status is OperationStatus.SUCCEEDED
+                and item.result == resolution
+            ),
+            None,
+        )
+        action_line = _resolution_label(action)
+        if resolution.startswith("planned_"):
+            action_line += " (dry run)"
+        elif operation is not None and operation.operation_type == OperationType.MODERATION_ACTION:
+            action_line += " (automatically)"
+        else:
+            actor_id = (
+                operation.actor_id
+                if operation is not None and operation.actor_id is not None
+                else snapshot.case.moderator_id
+            )
+            if actor_id is not None:
+                action_line += f" (<@{actor_id}>)"
+    image_line = _image_resolution_line(
+        feedback_items,
+        snapshot.attachments,
+        resolution,
+        snapshot.case.moderator_id,
+    )
+    if action_line is not None or image_line is not None:
+        return tuple(line for line in (action_line, image_line) if line is not None)
+    if resolution == "expired":
+        return ("Expired automatically",)
+    return (_resolution_label(resolution),)
 
 
 def _summary_signal_lines(
@@ -620,13 +699,14 @@ def _optional_summary_fields(
     feedback_items: tuple[CaseFeedbackItem, ...],
     *,
     moderation_status: str,
+    include_moderation: bool,
     incomplete_evidence: bool,
     needs_attention: bool,
     warning_lines: tuple[str, ...],
 ) -> tuple[CaseReviewField, ...]:
     """Build the summary embed fields that only appear when they have something to say."""
     optional_fields: list[CaseReviewField] = []
-    if moderation_status != "none":
+    if include_moderation and moderation_status != "none":
         optional_fields.append(CaseReviewField("Moderation:", moderation_status))
     if sum(item.decision is None for item in feedback_items) > 25:
         optional_fields.append(CaseReviewField(
@@ -771,7 +851,11 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
     )
     title = "Detection case"
     subject = snapshot.subject
-    resolution_lines = _case_resolution_lines(snapshot, moderation_operations)
+    resolution_lines = _case_resolution_lines(
+        snapshot,
+        moderation_operations,
+        feedback_items,
+    )
     summary_signal_lines = _summary_signal_lines(sorted_messages, reasons_by_message)
     summary_publication_warnings = tuple(
         line[:300] for line in publication_warning_lines[:3]
@@ -783,6 +867,10 @@ def render_case(snapshot: CaseSnapshot) -> CaseReviewProjection:
     optional_fields = _optional_summary_fields(
         feedback_items,
         moderation_status=moderation_status,
+        include_moderation=snapshot.case.status not in {
+            CaseStatus.RESOLVED,
+            CaseStatus.EXPIRED,
+        },
         incomplete_evidence=incomplete_evidence,
         needs_attention=needs_attention,
         warning_lines=summary_publication_warnings + summary_operation_warnings,
