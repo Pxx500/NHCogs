@@ -1,6 +1,6 @@
 {
-  "command_count": 143,
-  "command_structure_sha256": "65aa96db35b4995e9f086a7556bdd48a7f486386469f31537958490eff50cfdf",
+  "command_count": 150,
+  "command_structure_sha256": "d85e57a48310488c96105c19fcefa55f1bb4d309faf601eb1a41585ef3d0d43b",
   "intentionally_undocumented_debug_commands": [
     "honeypot debug imagescan cleanup_events",
     "honeypot debug imagescan dump",
@@ -11,6 +11,7 @@
   "listeners": [
     "on_guild_channel_delete",
     "on_guild_remove",
+    "on_guild_role_delete",
     "on_member_join",
     "on_member_update",
     "on_message",
@@ -27,11 +28,9 @@
     "purge_cache_cleanup_loop"
   ],
   "readme": {
-    "leaf_count": 112,
-    "row_count": 108,
-    "rows_without_command": [
-      "honeypot stats"
-    ],
+    "leaf_count": 118,
+    "row_count": 113,
+    "rows_without_command": [],
     "undocumented_commands": [
       "honeypot debug imagescan cleanup_events",
       "honeypot debug imagescan dump",

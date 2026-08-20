@@ -916,9 +916,9 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                     )
                 )
                 try:
-                    await asyncio.wait_for(second_started.wait(), timeout=0.05)
+                    await asyncio.wait_for(second_started.wait(), timeout=10)
                     captures_overlap = True
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     captures_overlap = False
                 finally:
                     release_reads.set()

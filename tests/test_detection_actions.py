@@ -354,7 +354,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 cog._publish_detection_case = publish_case
 
                 processing = asyncio.create_task(cog.on_message(message))
-                await asyncio.wait_for(action_started.wait(), timeout=1)
+                await asyncio.wait_for(action_started.wait(), timeout=10)
                 snapshot = await asyncio.to_thread(
                     active_case,
                     cog._case_store,

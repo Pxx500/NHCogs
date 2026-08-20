@@ -29,8 +29,7 @@ EXPECTED_GUILD_DEFAULTS = {
     "daily_stats_channel": None,
     "maintainer_id": None,
     "manual_evidence_channel": None,
-    "manual_evidence_memes_channel": None,
-    "manual_evidence_mement_notification_channel": None,
+    "manual_punishment_roles": {},
     "honeypot_channels": [],
     "mute_role": None,
     "purge_backward_seconds": 60,
@@ -606,6 +605,7 @@ def _isolated_honeypot_modules(data_path: Path):
     commands = SimpleNamespace(
         Cog=_Cog,
         Context=object,
+        Greedy=list,
         Group=_GroupStub,
         UserFeedbackCheckFailure=Exception,
         group=lambda *args, **kwargs: _command_decorator("group", **kwargs),
