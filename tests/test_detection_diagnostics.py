@@ -255,6 +255,33 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("mute role", report.lower())
                 self.assertNotIn("❌", collision_line)
 
+    async def test_doctor_reports_missing_role_nt_role_and_channel(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                cog.config = SimpleNamespace(
+                    guild=lambda guild: SimpleNamespace(
+                        all=mock.AsyncMock(
+                            return_value=self._doctor_config(
+                                manual_punishment_roles={
+                                    "500": {
+                                        "source_channel_ids": [100],
+                                        "notification_channel_id": 101,
+                                    }
+                                }
+                            )
+                        )
+                    )
+                )
+                ctx = self._doctor_context()
+
+                await cog.honeypot_doctor(ctx)
+
+                report = "\n".join(call.args[0] for call in ctx.send.await_args_list)
+                self.assertIn("Role n’t role is missing", report)
+                self.assertIn("Role n’t source channel is missing", report)
+                self.assertIn("Role n’t notification channel is missing", report)
+
     async def test_doctor_warns_when_bait_role_is_the_joinwatch_auto_role(self):
         role_id = 42
         with TemporaryDirectory() as directory:

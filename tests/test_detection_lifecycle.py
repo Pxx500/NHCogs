@@ -110,6 +110,8 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     forget_channel=mock.AsyncMock(),
                 )
                 honeypot.channel_routing.clear_deleted_channel = mock.AsyncMock()
+                honeypot.manual_punishment.clear_deleted_channel = mock.AsyncMock()
+                honeypot.manual_punishment.clear_deleted_role = mock.AsyncMock()
 
                 await cog.on_raw_message_delete(SimpleNamespace(message_id=10))
                 await cog.on_raw_bulk_message_delete(
@@ -120,6 +122,8 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 )
                 channel = SimpleNamespace(id=14, guild=SimpleNamespace(id=15))
                 await cog.on_guild_channel_delete(channel)
+                role = SimpleNamespace(id=16, guild=channel.guild)
+                await cog.on_guild_role_delete(role)
 
                 cog._message_registry.forget.assert_awaited_once_with(10)
                 cog._message_registry.forget_many.assert_awaited_once_with({11, 12})
@@ -127,6 +131,12 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 cog._message_registry.forget_channel.assert_awaited_once_with(15, 14)
                 honeypot.channel_routing.clear_deleted_channel.assert_awaited_once_with(
                     cog, channel
+                )
+                honeypot.manual_punishment.clear_deleted_channel.assert_awaited_once_with(
+                    cog, channel
+                )
+                honeypot.manual_punishment.clear_deleted_role.assert_awaited_once_with(
+                    cog, role
                 )
 
     def test_fallback_keeps_diagnostic_commands_on_cog_and_exposes_implementations(self):

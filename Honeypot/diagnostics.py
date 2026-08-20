@@ -27,7 +27,12 @@ from . import channel_routing
 from .console_dump import build_log_dump
 from .detection_cases import OperationType
 from .remote_media import media_decoder_support
-from .settings import CORE_ACTION_OPTIONS, DEFAULT_STATS, GuildSettings
+from .settings import (
+    CORE_ACTION_OPTIONS,
+    DEFAULT_STATS,
+    MAX_MANUAL_PUNISHMENT_ROLES_PER_CHANNEL,
+    GuildSettings,
+)
 
 _ = Translator("Honeypot", __file__)
 log = logging.getLogger("red.Honeypot")
@@ -474,21 +479,9 @@ async def honeypot_errors_clear(cog, ctx: commands.Context) -> None:
     await ctx.send(_("Acknowledged {count} Honeypot errors.").format(count=count))
 
 
-async def honeypot_errors_maintainer(
-    cog,
-    ctx: commands.Context,
-    member: discord.Member | None = None,
-) -> None:
-    """Show or set the person pinged for Honeypot operational failures."""
+async def honeypot_errors_maintainer_show(cog, ctx: commands.Context) -> None:
+    """Show the person pinged for Honeypot operational failures."""
     setting = cog.config.guild(ctx.guild).maintainer_id
-    if member is not None:
-        await setting.set(member.id)
-        await ctx.send(
-            _("✅ Error maintainer set to {member.mention}").format(member=member),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-        return
-
     maintainer_id = await setting()
     maintainer = ctx.guild.get_member(maintainer_id) if maintainer_id else None
     if maintainer is not None:
@@ -501,9 +494,22 @@ async def honeypot_errors_maintainer(
     await ctx.send(
         _(
             "Error maintainer: {maintainer}\n"
-            "Set: `{prefix}honeypot errors maintainer <member>`\n"
+            "Set: `{prefix}honeypot errors maintainer set <member>`\n"
             "Clear: `{prefix}honeypot errors maintainer clear`"
         ).format(maintainer=label, prefix=prefix),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+async def honeypot_errors_maintainer_set(
+    cog,
+    ctx: commands.Context,
+    member: discord.Member,
+) -> None:
+    """Set the person pinged for Honeypot operational failures."""
+    await cog.config.guild(ctx.guild).maintainer_id.set(member.id)
+    await ctx.send(
+        _("✅ Error maintainer set to {member.mention}").format(member=member),
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
@@ -906,6 +912,69 @@ async def _doctor_configuration_checks(
                     "Move bot role above mute role.",
                 )
             )
+    role_nt_channel_counts: dict[int, int] = {}
+    for entry in guild_settings.manual_punishment_roles.values():
+        role = guild.get_role(entry.role_id)
+        if role is None:
+            results.append(
+                DoctorResult(
+                    f"Role n’t role is missing: {entry.role_id}",
+                    "failed",
+                    "Remove or reconfigure the Role n’t entry.",
+                )
+            )
+        elif getattr(role, "managed", False) or not me.top_role > role:
+            results.append(
+                DoctorResult(
+                    f"Role n’t role is not manageable: {getattr(role, 'name', entry.role_id)}",
+                    "failed",
+                    "Use a role below the bot's top role.",
+                )
+            )
+        for channel_id in entry.source_channel_ids:
+            role_nt_channel_counts[channel_id] = (
+                role_nt_channel_counts.get(channel_id, 0) + 1
+            )
+            if guild.get_channel(channel_id) is None:
+                results.append(
+                    DoctorResult(
+                        f"Role n’t source channel is missing: {channel_id}",
+                        "failed",
+                        "Remove the missing source channel from the Role n’t entry.",
+                    )
+                )
+        notification_channel_id = entry.notification_channel_id
+        if (
+            notification_channel_id is not None
+            and guild.get_channel(notification_channel_id) is None
+        ):
+            results.append(
+                DoctorResult(
+                    f"Role n’t notification channel is missing: {notification_channel_id}",
+                    "failed",
+                    "Clear or replace the Role n’t notification channel.",
+                )
+            )
+    for channel_id, role_count in role_nt_channel_counts.items():
+        if role_count > MAX_MANUAL_PUNISHMENT_ROLES_PER_CHANNEL:
+            results.append(
+                DoctorResult(
+                    f"Role n’t source channel {channel_id} has {role_count} options",
+                    "failed",
+                    "Keep at most 25 Role n’t options per source channel.",
+                )
+            )
+    if (
+        guild_settings.manual_evidence_channel is not None
+        and cog.bot.get_cog("Mutes") is None
+    ):
+        results.append(
+            DoctorResult(
+                "Mutes cog is unavailable for manual punishments",
+                "warning",
+                "Load and configure the core Mutes cog before using Mute.",
+            )
+        )
     if guild_settings.joinwatch_auto_role_enabled:
         auto_role_id = guild_settings.joinwatch_auto_role_id
         auto_role = guild.get_role(auto_role_id) if auto_role_id else None

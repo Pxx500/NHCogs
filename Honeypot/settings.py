@@ -121,6 +121,7 @@ DEFAULT_STATS = {
 }
 PURGE_BACKWARD_DEFAULT_SECONDS = 60
 PURGE_FORWARD_DEFAULT_SECONDS = 10
+MAX_MANUAL_PUNISHMENT_ROLES_PER_CHANNEL = 25
 SCAM_KEYWORDS = [
     "free nitro",
     "giveaway",
@@ -153,8 +154,7 @@ DEFAULTS: Mapping[str, object] = MappingProxyType(
         "daily_stats_channel": None,
         "maintainer_id": None,
         "manual_evidence_channel": None,
-        "manual_evidence_memes_channel": None,
-        "manual_evidence_mement_notification_channel": None,
+        "manual_punishment_roles": {},
         "honeypot_channels": [],
         "mute_role": None,
         "purge_backward_seconds": PURGE_BACKWARD_DEFAULT_SECONDS,
@@ -293,6 +293,70 @@ def _nested_dict(raw: Mapping[str, object], key: str) -> dict[str, dict[str, obj
     return {}
 
 
+@dataclass(frozen=True)
+class ManualPunishmentRoleSettings:
+    role_id: int
+    source_channel_ids: tuple[int, ...]
+    notification_channel_id: int | None
+
+
+def _manual_punishment_roles(
+    raw: Mapping[str, object],
+) -> dict[int, ManualPunishmentRoleSettings]:
+    value = raw.get("manual_punishment_roles", DEFAULTS["manual_punishment_roles"])
+    if not isinstance(value, Mapping):
+        log.warning(
+            "Invalid guild setting manual_punishment_roles=%r; using default {}",
+            value,
+        )
+        return {}
+
+    parsed: dict[int, ManualPunishmentRoleSettings] = {}
+    for raw_role_id, raw_entry in value.items():
+        try:
+            role_id = int(raw_role_id)
+        except (TypeError, ValueError):
+            role_id = 0
+        if role_id <= 0 or isinstance(raw_role_id, bool) or not isinstance(raw_entry, Mapping):
+            log.warning("Ignoring invalid manual punishment role entry %r", raw_role_id)
+            continue
+
+        raw_channel_ids = raw_entry.get("source_channel_ids")
+        if not isinstance(raw_channel_ids, (list, tuple, set, frozenset)):
+            log.warning("Ignoring invalid manual punishment role entry %r", raw_role_id)
+            continue
+        channel_ids: list[int] = []
+        valid_channels = True
+        for channel_id in raw_channel_ids:
+            if (
+                not isinstance(channel_id, int)
+                or isinstance(channel_id, bool)
+                or channel_id <= 0
+            ):
+                valid_channels = False
+                break
+            if channel_id not in channel_ids:
+                channel_ids.append(channel_id)
+        if not valid_channels or not channel_ids:
+            log.warning("Ignoring invalid manual punishment role entry %r", raw_role_id)
+            continue
+
+        notification_channel_id = raw_entry.get("notification_channel_id")
+        if notification_channel_id is not None and (
+            not isinstance(notification_channel_id, int)
+            or isinstance(notification_channel_id, bool)
+            or notification_channel_id <= 0
+        ):
+            log.warning("Ignoring invalid manual punishment role entry %r", raw_role_id)
+            continue
+        parsed[role_id] = ManualPunishmentRoleSettings(
+            role_id=role_id,
+            source_channel_ids=tuple(channel_ids),
+            notification_channel_id=notification_channel_id,
+        )
+    return parsed
+
+
 def _enum(
     raw: Mapping[str, object], key: str, enum_type: type[_EnumT], default: _EnumT
 ) -> _EnumT:
@@ -327,8 +391,7 @@ class GuildSettings:
     daily_stats_channel: int | None
     maintainer_id: int | None
     manual_evidence_channel: int | None
-    manual_evidence_memes_channel: int | None
-    manual_evidence_mement_notification_channel: int | None
+    manual_punishment_roles: dict[int, ManualPunishmentRoleSettings]
     honeypot_channels: list[int]
     mute_role: int | None
     purge_backward_seconds: int
@@ -396,12 +459,7 @@ class GuildSettings:
             daily_stats_channel=_optional_int(raw, "daily_stats_channel"),
             maintainer_id=_optional_int(raw, "maintainer_id"),
             manual_evidence_channel=_optional_int(raw, "manual_evidence_channel"),
-            manual_evidence_memes_channel=_optional_int(
-                raw, "manual_evidence_memes_channel"
-            ),
-            manual_evidence_mement_notification_channel=_optional_int(
-                raw, "manual_evidence_mement_notification_channel"
-            ),
+            manual_punishment_roles=_manual_punishment_roles(raw),
             honeypot_channels=_list(raw, "honeypot_channels", int),
             mute_role=_optional_int(raw, "mute_role"),
             purge_backward_seconds=_int(raw, "purge_backward_seconds"),
