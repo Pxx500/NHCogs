@@ -7,6 +7,7 @@ import unittest
 from types import ModuleType, SimpleNamespace
 from unittest import mock
 
+from tests.test_gate_proof_flow import _load_achievement_views
 from tests.test_gatecount import nhmisc
 
 
@@ -66,6 +67,26 @@ class AchievementProfileRenderingTests(unittest.TestCase):
         )
 
         self.assertEqual(embed.description, "No achievements recorded")
+
+
+class AchievementGrantViewTests(unittest.TestCase):
+    def test_achievements_start_unselected(self):
+        views, _fake_select = _load_achievement_views()
+        candidates = (SimpleNamespace(id=10, display_name="Player"),)
+        definitions = (nhmisc.SOLO_GATER_DEFINITION,)
+
+        view = views.AchievementGrantView(
+            SimpleNamespace(),
+            SimpleNamespace(jump_url="https://discord.com/channels/1/2/3"),
+            99,
+            candidates,
+            definitions,
+        )
+
+        self.assertEqual(view.selected_user_ids, {10})
+        self.assertEqual(view.selected_keys, set())
+        self.assertTrue(view.confirm.disabled)
+        self.assertFalse(view.achievement_select.options[0].default)
 
 
 class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
@@ -1596,6 +1617,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             get_member=lambda user_id: member if user_id == member.id else None,
             get_role=lambda role_id: solo_role if role_id == solo_role.id else default_role,
         )
+        result_message = SimpleNamespace(id=31)
         source = SimpleNamespace(
             id=30,
             channel=SimpleNamespace(id=20),
@@ -1603,24 +1625,45 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             webhook_id=None,
             author=member,
             raw_mentions=(),
+            reply=mock.AsyncMock(return_value=result_message),
+        )
+        definition_type = type(nhmisc.SOLO_GATER_DEFINITION)
+        unbound_definition = definition_type(
+            key="all_quests",
+            display_name="All Quests",
+            kind=nhmisc.SOLO_GATER_DEFINITION.kind,
+            display_order=100,
+        )
+        existing_definition = definition_type(
+            key="speedrun",
+            display_name="Speedrun",
+            kind=nhmisc.SOLO_GATER_DEFINITION.kind,
+            display_order=101,
+        )
+        definitions = (
+            nhmisc.SOLO_GATER_DEFINITION,
+            unbound_definition,
+            existing_definition,
         )
         view = SimpleNamespace(
             source_message=source,
             selected_user_ids={member.id},
-            selected_keys={"solo_gater"},
-            definitions=(nhmisc.SOLO_GATER_DEFINITION,),
+            selected_keys={definition.key for definition in definitions},
+            definitions=definitions,
             candidate_ids=(member.id,),
             stop=mock.Mock(),
             render_embed=mock.Mock(),
         )
         store = SimpleNamespace(
             grant_boolean=mock.AsyncMock(
-                return_value=SimpleNamespace(created=True)
+                side_effect=(
+                    SimpleNamespace(created=True),
+                    SimpleNamespace(created=True),
+                    SimpleNamespace(created=False),
+                )
             ),
             revoke_booleans=mock.AsyncMock(),
-            list_definitions=mock.AsyncMock(
-                return_value=(nhmisc.SOLO_GATER_DEFINITION,)
-            ),
+            list_definitions=mock.AsyncMock(return_value=definitions),
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._achievement_store = store
@@ -1628,14 +1671,16 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         cog._send_moderation_log = mock.AsyncMock(return_value=True)
         interaction = self._interaction(guild)
 
-        await cog._confirm_achievement_grant(interaction, view)
+        with mock.patch.object(
+            nhmisc.discord,
+            "AllowedMentions",
+            side_effect=SimpleNamespace,
+        ):
+            await cog._confirm_achievement_grant(interaction, view)
 
-        store.grant_boolean.assert_awaited_once_with(
-            guild.id,
-            member.id,
-            "solo_gater",
-            source_channel_id=source.channel.id,
-            source_message_id=source.id,
+        self.assertEqual(
+            tuple(call.args[2] for call in store.grant_boolean.await_args_list),
+            ("solo_gater", "all_quests", "speedrun"),
         )
         self.assertEqual(
             {role.id for role in member.edit.await_args.kwargs["roles"]},
@@ -1647,6 +1692,17 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Achievements granted", audit)
         self.assertIn("Recipients: <@10>", audit)
         self.assertIn("https://discord.com/channels/1/20/30", audit)
+        self.assertEqual(
+            source.reply.await_args.args[0],
+            "🎉 **Congratulations!**\n"
+            f"<@10> <@&{solo_role.id}>, All Quests",
+        )
+        allowed_mentions = source.reply.await_args.kwargs["allowed_mentions"]
+        self.assertTrue(allowed_mentions.users)
+        self.assertFalse(allowed_mentions.roles)
+        self.assertFalse(allowed_mentions.everyone)
+        self.assertFalse(allowed_mentions.replied_user)
+        self.assertNotIn("Speedrun", source.reply.await_args.args[0])
 
     async def test_grant_rejects_a_role_binding_changed_during_review(self):
         member = SimpleNamespace(id=10, display_name="Player", bot=False)
