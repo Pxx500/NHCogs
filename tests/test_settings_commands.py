@@ -96,6 +96,90 @@ class _ScalarSetting:
         self.value = value
 
 
+class RoleNtSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_add_registers_one_role_for_multiple_source_channels(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                configured = _ScalarSetting({})
+                cog.config = SimpleNamespace(
+                    guild=lambda guild: SimpleNamespace(
+                        manual_punishment_roles=configured,
+                    )
+                )
+                cog._missing_role_assignment_permission = mock.Mock(
+                    return_value=None
+                )
+                role = SimpleNamespace(id=500, name="French-n’t", mention="@French-n’t")
+                channels = [
+                    SimpleNamespace(id=100, name="french"),
+                    SimpleNamespace(id=101, name="french-help"),
+                ]
+                ctx = SimpleNamespace(
+                    guild=SimpleNamespace(id=1),
+                    send=mock.AsyncMock(),
+                )
+
+                await cog.punishment_role_nt_add(ctx, role, channels)
+
+                self.assertEqual(
+                    configured.value,
+                    {
+                        "500": {
+                            "source_channel_ids": [100, 101],
+                            "notification_channel_id": None,
+                        }
+                    },
+                )
+                rendered = ctx.send.await_args.args[0]
+                self.assertIn("French-n’t", rendered)
+                self.assertIn("#french", rendered)
+                self.assertIn("#french-help", rendered)
+
+    async def test_list_paginates_large_role_nt_configuration(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                configured = _ScalarSetting(
+                    {
+                        str(role_id): {
+                            "source_channel_ids": list(range(100, 125)),
+                            "notification_channel_id": None,
+                        }
+                        for role_id in range(500, 525)
+                    }
+                )
+                cog.config = SimpleNamespace(
+                    guild=lambda guild: SimpleNamespace(
+                        manual_punishment_roles=configured,
+                    )
+                )
+                guild = SimpleNamespace(
+                    get_role=lambda role_id: SimpleNamespace(
+                        id=role_id,
+                        name=f"role-{role_id}-{'x' * 80}",
+                    ),
+                    get_channel=lambda channel_id: (
+                        SimpleNamespace(
+                            id=channel_id,
+                            name=f"channel-{channel_id}-{'y' * 60}",
+                        )
+                        if channel_id is not None
+                        else None
+                    ),
+                )
+                ctx = SimpleNamespace(guild=guild, send=mock.AsyncMock())
+
+                await cog.punishment_role_nt_list(ctx)
+
+                pages = [call.args[0] for call in ctx.send.await_args_list]
+                self.assertGreater(len(pages), 1)
+                self.assertTrue(all(len(page) <= 2_000 for page in pages))
+                rendered = "\n".join(pages)
+                self.assertIn("role-500-", rendered)
+                self.assertIn("role-524-", rendered)
+
+
 class ImageScanSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_threshold_defaults_in_public_threshold_query(self):
         with TemporaryDirectory() as directory:
@@ -783,7 +867,7 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
 
                 with (
                     mock.patch.object(
-                        honeypot.manual_evidence,
+                        honeypot.manual_punishment,
                         "show_status",
                         new=mock.AsyncMock(),
                     ) as evidence_status,

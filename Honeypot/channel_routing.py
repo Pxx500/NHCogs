@@ -115,15 +115,6 @@ CHANNEL_CATEGORIES = (
         module_command="gifdetector debug channel",
     ),
     ChannelCategory(
-        "mement_notifications",
-        "manual_evidence_mement_notification_channel",
-        "Memen't notifications",
-        "destination",
-        allow_threads=False,
-        central_command="mement-notifications",
-        module_command="evidence mement_notification_channel",
-    ),
-    ChannelCategory(
         "honeypot_scope",
         "honeypot_channels",
         "Honeypot scope",
@@ -143,15 +134,6 @@ CHANNEL_CATEGORIES = (
         required_permissions=("send_messages", "send_in_threads", "manage_messages"),
         central_command="gif-detector",
         module_command="gifdetector channel",
-    ),
-    ChannelCategory(
-        "memes_source",
-        "manual_evidence_memes_channel",
-        "Memes source",
-        "scope",
-        allow_threads=False,
-        central_command="memes",
-        module_command="evidence memes_channel",
     ),
 )
 

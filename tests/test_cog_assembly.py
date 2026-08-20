@@ -79,7 +79,6 @@ class CogAssemblyContractTests(unittest.TestCase):
             "joinwatch",
             "bait-role",
             "gif-debug",
-            "mement-notifications",
         ):
             with self.subTest(category=category):
                 self.assertIn(f"honeypot channels {category}", command_names)
@@ -251,7 +250,7 @@ class CogAssemblyContractTests(unittest.TestCase):
         a new split row updates them deliberately.
         """
         expected_counts = {
-            "channel_routing": 27,
+            "channel_routing": 23,
             "detection": 73,
             "diagnostics": 13,
             "gif_detector": 9,

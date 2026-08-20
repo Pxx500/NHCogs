@@ -25,7 +25,7 @@ from . import (
     joinwatch,
     joinwatch_commands,
     joinwatch_state,
-    manual_evidence,
+    manual_punishment,
     review_publication,
     settings,
 )
@@ -159,7 +159,7 @@ class Honeypot(Cog):
             force_registration=True,
         )
         self.config.register_guild(**settings.DEFAULTS)
-        self._manual_evidence = manual_evidence.ManualEvidenceController(self)
+        self._manual_punishment = manual_punishment.ManualPunishmentController(self)
 
         self._console_log_buffer = ReadOnlyLogBuffer()
         self._post_ban_sweep_tasks: set[asyncio.Task] = set()
@@ -285,11 +285,17 @@ class Honeypot(Cog):
     async def on_guild_channel_delete(self, channel: typing.Any) -> None:
         await self._message_registry.forget_channel(channel.guild.id, channel.id)
         await channel_routing.clear_deleted_channel(self, channel)
+        await manual_punishment.clear_deleted_channel(self, channel)
 
     @commands.Cog.listener()
     async def on_thread_delete(self, thread: typing.Any) -> None:
         await self._message_registry.forget_channel(thread.guild.id, thread.id)
         await channel_routing.clear_deleted_channel(self, thread)
+        await manual_punishment.clear_deleted_channel(self, thread)
+
+    @commands.Cog.listener()
+    async def on_guild_role_delete(self, role: typing.Any) -> None:
+        await manual_punishment.clear_deleted_role(self, role)
 
     async def cog_after_invoke(self, ctx: commands.Context) -> commands.Context | None:
         """Finish command cleanup without AAA3A_utils' redundant success reaction."""
@@ -987,7 +993,7 @@ class Honeypot(Cog):
             lambda task: self._observe_background_task(task, "daily statistics publisher")
         )
         self._install_console_log_buffer()
-        self._manual_evidence.register()
+        self._manual_punishment.register()
 
     @staticmethod
     def _observe_background_task(task: asyncio.Task, label: str) -> None:
@@ -1019,7 +1025,7 @@ class Honeypot(Cog):
 
     async def cog_unload(self) -> None:
         self._remove_console_log_buffer()
-        await self._manual_evidence.shutdown()
+        await self._manual_punishment.shutdown()
         self.joinwatch_auto_role_loop.cancel()
         self.purge_cache_cleanup_loop.cancel()
         self.firstpost_seen_flush_loop.cancel()
@@ -1453,15 +1459,6 @@ class Honeypot(Cog):
         """Configure manual evidence collection and punishments."""
         return await self._send_group_overview(ctx)
 
-    @manual_evidence_settings.command(name="memes_channel")
-    async def manual_evidence_memes_channel(
-        self,
-        ctx: commands.Context,
-        target: discord.TextChannel = None,
-    ) -> None:
-        """Set the channel where the memen't action is available."""
-        return await channel_routing.configure_single(self, ctx, "memes_source", target)
-
     @manual_evidence_settings.command(name="channel")
     async def manual_evidence_channel(
         self,
@@ -1473,21 +1470,10 @@ class Honeypot(Cog):
             self, ctx, "manual_evidence", target
         )
 
-    @manual_evidence_settings.command(name="mement_notification_channel")
-    async def manual_evidence_mement_notification_channel(
-        self,
-        ctx: commands.Context,
-        target: discord.TextChannel = None,
-    ) -> None:
-        """Set the channel used for memen't notifications."""
-        return await channel_routing.configure_single(
-            self, ctx, "mement_notifications", target
-        )
-
     @manual_evidence_settings.command(name="status")
     async def manual_evidence_status(self, ctx: commands.Context) -> None:
         """Show manual evidence configuration."""
-        return await manual_evidence.show_status(self, ctx)
+        return await manual_punishment.show_status(self, ctx)
 
     @honeypot.group(name="debug", invoke_without_command=True)
     async def debug(self, ctx: commands.Context) -> None:
@@ -1805,20 +1791,6 @@ class Honeypot(Cog):
     ) -> None:
         return await channel_routing.configure_single(self, ctx, "gif_debug", target)
 
-    @channels.command(name="mement-notifications")
-    async def channels_mement_notifications(
-        self, ctx: commands.Context, target: discord.TextChannel = None
-    ) -> None:
-        return await channel_routing.configure_single(
-            self, ctx, "mement_notifications", target
-        )
-
-    @channels.command(name="memes")
-    async def channels_memes(
-        self, ctx: commands.Context, target: discord.TextChannel = None
-    ) -> None:
-        return await channel_routing.configure_single(self, ctx, "memes_source", target)
-
     # ─── punishment sub-group ─────────────────────────────────────────
 
     @honeypot.group(invoke_without_command=True)
@@ -1830,6 +1802,70 @@ class Honeypot(Cog):
     async def punishment_mute_role(self, ctx: commands.Context, role: discord.Role = None) -> None:
         """Set the temporary mute role for pending reviews."""
         return await detection.punishment_mute_role(self, ctx, role)
+
+    @punishment.group(name="role-nt", invoke_without_command=True)
+    async def punishment_role_nt(self, ctx: commands.Context) -> None:
+        """Configure channel-scoped Role n’t punishments."""
+        return await self._send_group_overview(ctx, manual_punishment.role_nt_list)
+
+    @punishment_role_nt.command(name="add")
+    async def punishment_role_nt_add(
+        self,
+        ctx: commands.Context,
+        role: discord.Role,
+        channels: commands.Greedy[discord.TextChannel],
+    ) -> None:
+        """Add source channels to a Role n’t punishment."""
+        return await manual_punishment.role_nt_add(self, ctx, role, channels)
+
+    @punishment_role_nt.command(name="remove-channel")
+    async def punishment_role_nt_remove_channel(
+        self,
+        ctx: commands.Context,
+        role: discord.Role,
+        channels: commands.Greedy[discord.TextChannel],
+    ) -> None:
+        """Remove source channels from a Role n’t punishment."""
+        return await manual_punishment.role_nt_remove_channels(
+            self, ctx, role, channels
+        )
+
+    @punishment_role_nt.command(name="notification")
+    async def punishment_role_nt_notification(
+        self,
+        ctx: commands.Context,
+        role: discord.Role,
+        channel: discord.TextChannel = None,
+    ) -> None:
+        """Show or set the notification channel for a Role n’t."""
+        return await manual_punishment.role_nt_notification(
+            self, ctx, role, channel
+        )
+
+    @punishment_role_nt.command(name="notification-clear")
+    async def punishment_role_nt_notification_clear(
+        self,
+        ctx: commands.Context,
+        role: discord.Role,
+    ) -> None:
+        """Restore source-channel notifications for a Role n’t."""
+        return await manual_punishment.role_nt_notification_clear(
+            self, ctx, role
+        )
+
+    @punishment_role_nt.command(name="remove")
+    async def punishment_role_nt_remove(
+        self,
+        ctx: commands.Context,
+        role: discord.Role,
+    ) -> None:
+        """Remove a Role n’t punishment."""
+        return await manual_punishment.role_nt_remove(self, ctx, role)
+
+    @punishment_role_nt.command(name="list")
+    async def punishment_role_nt_list(self, ctx: commands.Context) -> None:
+        """List configured Role n’t punishments."""
+        return await manual_punishment.role_nt_list(self, ctx)
 
     # ─── purge sub-group ───────────────────────────────────────────────
 

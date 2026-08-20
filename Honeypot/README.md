@@ -31,18 +31,22 @@ Requires `AAA3A_utils`. Red will show the pip install command if missing.
 
 By default, only the server owner can use `!honeypot` and all subcommands. Red Permissions rules can allow other users or roles.
 
-### Manual evidence
+### Manual punishment
 
-Moderators with Manage Messages can use the `Add evidence` message context action. It copies the message and its attachments to the dedicated private manual evidence channel, then deletes the source after the copy succeeds. Manual evidence never borrows another channel category. The action can also apply `memen't`, mute, kick, or ban. Mute uses Red's core `Mutes` cog, while kick and ban use Honeypot's existing moderation path.
+Moderators with Manage Messages can use the `Punish` message context action. It can save the message and its attachments to the private manual evidence channel, then deletes the source after the private audit is created. The audit is always written, even when evidence saving is disabled. The action can apply mute, kick, ban, or any configured Role n’t that covers the source channel. Mute uses Red's core `Mutes` cog, while kick and ban use Honeypot's existing moderation path.
 
-`Memen't` is available only in the configured memes channel and uses role ID `803692340749140008`. Mute, kick, and ban are mutually exclusive dropdown choices, while `memen't` can be combined with mute. The moderator enters punishment reasons and mute duration in a modal while evidence publication runs in the background. If the modal is closed, the preliminary result provides an `Enter punishment details` button for the remainder of the five-minute deadline. Mute durations use `30m`, `2h`, `3d`, or `1w` format and may not exceed 28 days.
+All punishments start unselected and saving evidence starts enabled. Kick and ban exclude every other punishment. Mute and multiple Role n’t roles can be combined. The moderator enters one shared reason and, when needed, a mute duration. Mute durations use `30m`, `2h`, `3d`, or `1w` format and may not exceed 28 days.
 
 | Command | Description |
 |---|---|
 | `!honeypot evidence status` | Show the private manual evidence configuration |
 | `!honeypot evidence channel <channel>` | Set the private destination for manual evidence |
-| `!honeypot evidence memes_channel <channel>` | Set the channel where `memen't` is available |
-| `!honeypot evidence mement_notification_channel <channel>` | Set the channel for successful `memen't` notifications |
+| `!honeypot punishment role-nt add <role> <channel> [channels...]` | Add source channels to a Role n’t punishment |
+| `!honeypot punishment role-nt remove-channel <role> <channel> [channels...]` | Remove source channels from a Role n’t punishment |
+| `!honeypot punishment role-nt notification <role> [channel]` | Show or set its notification channel |
+| `!honeypot punishment role-nt notification-clear <role>` | Restore source-channel notifications |
+| `!honeypot punishment role-nt remove <role>` | Remove a Role n’t punishment |
+| `!honeypot punishment role-nt list` | List configured Role n’t punishments |
 
 ### honeypot
 
@@ -90,8 +94,6 @@ By default, three GIFs from one member inside a rolling 60-second window trigger
 | `!honeypot channels joinwatch [channel]` | Show or set the JoinWatch destination |
 | `!honeypot channels bait-role [channel]` | Show or set the bait-role destination |
 | `!honeypot channels gif-debug [channel]` | Show or set the GIF diagnostics destination |
-| `!honeypot channels mement-notifications [channel]` | Show or set the memen't notification destination |
-| `!honeypot channels memes [channel]` | Show or set the memes source channel |
 | `!honeypot channels honeypot create` | Create and add a new `#honeypot` channel at position 0 |
 | `!honeypot channels honeypot add <channel>` | Add an existing honeypot source |
 | `!honeypot channels honeypot remove <channel>` | Remove a honeypot source |
