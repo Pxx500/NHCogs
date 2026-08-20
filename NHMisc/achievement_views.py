@@ -85,7 +85,7 @@ class AchievementGrantView(discord.ui.View):
         self.candidates = candidates
         self.definitions = definitions
         self.selected_user_ids = {member.id for member in candidates}
-        self.selected_keys = {definition.key for definition in definitions}
+        self.selected_keys: set[str] = set()
         self.message: discord.Message | None = None
         self._configure_selects()
 

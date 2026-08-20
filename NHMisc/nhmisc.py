@@ -22,6 +22,7 @@ from .achievement_definitions import (
     SOLO_GATER_KEY,
 )
 from .achievement_store import (
+    AchievementDefinition,
     AchievementProfile,
     AchievementStore,
     GateProofConflict,
@@ -2061,19 +2062,21 @@ class NHMisc(commands.Cog):
             )
             return
 
-        created_count = 0
+        created_grants: list[tuple[int, tuple[str, ...]]] = []
         already_count = 0
         failed_members = 0
         for member in selected_members:
-            created, already, failed = await self._grant_achievements_to_member(
+            created_keys, already, failed = await self._grant_achievements_to_member(
                 source_message,
                 member,
                 selected_definitions,
                 projected_roles,
             )
-            created_count += created
+            if created_keys:
+                created_grants.append((member.id, created_keys))
             already_count += already
             failed_members += int(failed)
+        created_count = sum(len(keys) for _, keys in created_grants)
         moderation_log_delivered = True
         if created_count:
             achievements = ", ".join(
@@ -2098,6 +2101,11 @@ class NHMisc(commands.Cog):
                 f"Source: {source_url}",
                 log_failure=False,
             )
+        congratulations_published = await self._publish_achievement_grant_result(
+            source_message,
+            tuple(created_grants),
+            current_definitions,
+        )
         if failed_members:
             await self._send_maintenance_log(
                 source_message.guild,
@@ -2112,6 +2120,9 @@ class NHMisc(commands.Cog):
             f"{failed_members} users could not be updated" if failed_members else "",
             "the moderation log could not be sent"
             if not moderation_log_delivered
+            else "",
+            "the congratulations message could not be sent"
+            if not congratulations_published
             else "",
         )
 
@@ -2446,7 +2457,7 @@ class NHMisc(commands.Cog):
         member: discord.Member,
         definitions: tuple,
         projected_roles: tuple,
-    ) -> tuple[int, int, bool]:
+    ) -> tuple[tuple[str, ...], int, bool]:
         created_keys = []
         already_count = 0
         for definition in definitions:
@@ -2462,7 +2473,7 @@ class NHMisc(commands.Cog):
             else:
                 already_count += 1
         if not projected_roles:
-            return len(created_keys), already_count, False
+            return tuple(created_keys), already_count, False
         try:
             await self._edit_achievement_roles(
                 source_message.guild,
@@ -2476,8 +2487,45 @@ class NHMisc(commands.Cog):
                 (member.id,),
                 tuple(created_keys),
             )
-            return 0, already_count, True
-        return len(created_keys), already_count, False
+            return (), already_count, True
+        return tuple(created_keys), already_count, False
+
+    @staticmethod
+    async def _publish_achievement_grant_result(
+        source_message: discord.Message,
+        created_grants: tuple[tuple[int, tuple[str, ...]], ...],
+        definitions: dict[str, AchievementDefinition],
+    ) -> bool:
+        lines = []
+        for user_id, keys in created_grants:
+            labels = []
+            for key in keys:
+                definition = definitions[key]
+                labels.append(
+                    f"<@&{definition.role_id}>"
+                    if definition.role_id is not None
+                    else definition.display_name
+                )
+            lines.append(f"<@{user_id}> {', '.join(labels)}")
+        if not lines:
+            return True
+        try:
+            await source_message.reply(
+                "🎉 **Congratulations!**\n" + "\n".join(lines),
+                allowed_mentions=discord.AllowedMentions(
+                    users=True,
+                    roles=False,
+                    everyone=False,
+                    replied_user=False,
+                ),
+            )
+        except discord.HTTPException:
+            log.exception(
+                "Failed to publish achievement grant result for message %s",
+                source_message.id,
+            )
+            return False
+        return True
 
     async def _confirm_achievement_role_bind(self, interaction, view) -> None:
         await interaction.response.defer()
@@ -4559,6 +4607,11 @@ class NHMisc(commands.Cog):
             return True
         lines = [
             f"<@{member.user_id}> <@&{member.target_role_id}>"
+            + (
+                f" <@&{SINGLEPLAYER_GATE_COMPLETED_ROLE_ID}>"
+                if member.grant_solo
+                else ""
+            )
             for member in snapshot.members
             if member.state is MemberState.COMPLETED
             and member.user_id is not None
