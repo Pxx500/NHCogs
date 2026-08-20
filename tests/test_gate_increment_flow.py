@@ -447,7 +447,14 @@ class GateIncrementExecutionTests(unittest.IsolatedAsyncioTestCase):
         await self.store.claim(
             key,
             123,
-            (nhmisc.GateIncrementMemberPlan(124, (), target_role_id),),
+            (
+                nhmisc.GateIncrementMemberPlan(
+                    124,
+                    (),
+                    target_role_id,
+                    grant_solo=True,
+                ),
+            ),
         )
         await self.store.mark_member_completed(key, 0)
         snapshot = await self.store.finalize_operation(key)
@@ -471,7 +478,9 @@ class GateIncrementExecutionTests(unittest.IsolatedAsyncioTestCase):
         allowed_mentions = source.reply.await_args.kwargs["allowed_mentions"]
         self.assertEqual(
             content,
-            f"🎉 **Congratulations!**\n<@124> <@&{target_role_id}>",
+            f"🎉 **Congratulations!**\n"
+            f"<@124> <@&{target_role_id}> "
+            f"<@&{nhmisc.SINGLEPLAYER_GATE_COMPLETED_ROLE_ID}>",
         )
         self.assertTrue(allowed_mentions.users)
         self.assertFalse(allowed_mentions.roles)
