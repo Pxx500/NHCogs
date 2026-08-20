@@ -251,9 +251,9 @@ class CogAssemblyContractTests(unittest.TestCase):
         a new split row updates them deliberately.
         """
         expected_counts = {
-            "channel_routing": 29,
+            "channel_routing": 27,
             "detection": 73,
-            "diagnostics": 12,
+            "diagnostics": 13,
             "gif_detector": 9,
             "imagescan": 21,
             "joinwatch": 3,

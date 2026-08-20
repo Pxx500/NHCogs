@@ -202,11 +202,14 @@ Detection cases expire 24 hours after the first detection. This lifetime is fixe
 
 ### errors
 
-`!honeypot errors` on its own lists unacknowledged operational failures. Use `!honeypot errors maintainer @user` to show or set the person pinged for new failures.
+`!honeypot errors` and `!honeypot errors maintainer` show their available subcommands.
 
 | Command | Description |
 |---------|-------------|
+| `!honeypot errors list` | List unacknowledged operational failures |
 | `!honeypot errors clear` | Acknowledge all currently visible operational failures |
+| `!honeypot errors maintainer show` | Show the configured error maintainer |
+| `!honeypot errors maintainer set <member>` | Set the person pinged for new failures |
 | `!honeypot errors maintainer clear` | Stop pinging the configured maintainer |
 
 ### other
@@ -227,7 +230,7 @@ Detection cases expire 24 hours after the first detection. This lifetime is fixe
 | `!honeypot config joinwatch` | Show joinwatch and joinwatch auto-role settings |
 | `!honeypot config bait_role` | Show bait role settings |
 | `!honeypot config stats` | Show stored stats, detection-case operations, and pending timer counts |
-| `!honeypot stats` | Show public-facing stats |
+| `!honeypot stats show` | Show public-facing stats |
 | `!honeypot stats channel [channel]` | Show or set the public daily statistics destination |
 | `!honeypot modstats` | Show detailed moderator statistics |
 | `!honeypot doctor` | Check config, channels, and permissions |

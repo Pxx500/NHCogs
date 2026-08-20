@@ -784,42 +784,79 @@ class Honeypot(Cog):
             return False
         return not bool(getattr(permissions, "view_channel", True))
 
+    @staticmethod
+    def _group_overview_commands(
+        parent: commands.Group,
+    ) -> typing.Iterator[typing.Any]:
+        for child in getattr(parent, "commands", ()):
+            descendants = getattr(child, "commands", ())
+            if descendants:
+                yield from Honeypot._group_overview_commands(child)
+            else:
+                yield child
+
+    @staticmethod
+    def _group_overview_embeds(
+        title: str,
+        description: str,
+        fields: list[tuple[str, str]],
+    ) -> list[discord.Embed]:
+        max_fields = 25
+        max_embed_text = 6000
+        embeds: list[discord.Embed] = []
+        field_index = 0
+        while field_index < len(fields) or not embeds:
+            embed = discord.Embed(
+                title=title,
+                description=description if not embeds else None,
+            )
+            text_length = len(title) + (len(description) if not embeds else 0)
+            field_count = 0
+            while field_index < len(fields):
+                field_name, field_value = fields[field_index]
+                field_length = len(field_name) + len(field_value)
+                if field_count and (
+                    field_count >= max_fields
+                    or text_length + field_length > max_embed_text
+                ):
+                    break
+                embed.add_field(
+                    name=field_name,
+                    value=field_value,
+                    inline=False,
+                )
+                field_index += 1
+                field_count += 1
+                text_length += field_length
+            embeds.append(embed)
+        return embeds
+
     async def _send_group_overview(
         self,
         ctx: commands.Context,
         config_sender: typing.Callable[..., typing.Awaitable[None]] | None = None,
-        *,
-        include_descendants: bool = False,
     ) -> None:
         private = self._group_overview_is_private(ctx)
         if private and config_sender is not None:
             await config_sender(self, ctx)
 
         command = ctx.command
-        embed = discord.Embed(
-            title=command.name.replace("_", " ").title(),
-            description=command.short_doc,
-        )
+        title = command.name.replace("_", " ").title()
+        description = command.short_doc
+        fields: list[tuple[str, str]] = []
         if not private and config_sender is not None:
-            embed.add_field(
-                name=_("Current configuration"),
-                value=_(
+            fields.append(
+                (
+                    _("Current configuration"),
+                    _(
                     "Current values are hidden in channels visible to regular members. "
                     "Run this command in a private moderator channel to view them."
-                ),
-                inline=False,
+                    ),
+                )
             )
 
-        def visible_commands(parent: commands.Group) -> typing.Iterator[typing.Any]:
-            for child in getattr(parent, "commands", ()):
-                descendants = getattr(child, "commands", ())
-                if include_descendants and descendants:
-                    yield from visible_commands(child)
-                else:
-                    yield child
-
         command_lines = []
-        for child in visible_commands(command):
+        for child in self._group_overview_commands(command):
             usage = f"{ctx.clean_prefix}{child.qualified_name}"
             if child.signature:
                 usage = f"{usage} {child.signature}"
@@ -838,15 +875,18 @@ class Honeypot(Cog):
             chunks.append("\n".join(current))
 
         for index, chunk in enumerate(chunks):
-            embed.add_field(
-                name=_("Commands") if index == 0 else _("Commands (continued)"),
-                value=chunk,
-                inline=False,
+            fields.append(
+                (
+                    _("Commands") if index == 0 else _("Commands (continued)"),
+                    chunk,
+                )
             )
-        await ctx.send(
-            embed=embed,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+
+        for embed in self._group_overview_embeds(title, description, fields):
+            await ctx.send(
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
     async def _is_protected_member(
         self,
@@ -1411,7 +1451,7 @@ class Honeypot(Cog):
     @honeypot.group(name="evidence", invoke_without_command=True)
     async def manual_evidence_settings(self, ctx: commands.Context) -> None:
         """Configure manual evidence collection and punishments."""
-        return await manual_evidence.show_status(self, ctx)
+        return await self._send_group_overview(ctx)
 
     @manual_evidence_settings.command(name="memes_channel")
     async def manual_evidence_memes_channel(
@@ -1549,7 +1589,6 @@ class Honeypot(Cog):
         return await self._send_group_overview(
             ctx,
             gif_detector.config_gif_detector,
-            include_descendants=True,
         )
 
     @gif_detector.command(name="toggle", usage="<true|false>")
@@ -1670,7 +1709,7 @@ class Honeypot(Cog):
     @channels.group(name="honeypot", invoke_without_command=True)
     async def channels_honeypot(self, ctx: commands.Context) -> None:
         """Configure channels used as honeypot detection sources."""
-        return await channel_routing.list_multiple(self, ctx, "honeypot_scope")
+        return await self._send_group_overview(ctx)
 
     @commands.bot_has_guild_permissions(manage_channels=True)
     @channels_honeypot.command()
@@ -1696,7 +1735,7 @@ class Honeypot(Cog):
     @channels.group(name="gif-detector", invoke_without_command=True)
     async def channels_gif_detector(self, ctx: commands.Context) -> None:
         """Configure channels monitored for GIFs."""
-        return await channel_routing.list_multiple(self, ctx, "gif_detector_scope")
+        return await self._send_group_overview(ctx)
 
     @channels_gif_detector.command(name="add")
     async def channels_gif_detector_add(
@@ -2219,25 +2258,40 @@ class Honeypot(Cog):
         return await detection.config_all(self, ctx)
 
     @honeypot.group(name="errors", invoke_without_command=True)
+    async def honeypot_errors_group(self, ctx: commands.Context) -> None:
+        """Inspect and acknowledge Honeypot operational failures."""
+        return await self._send_group_overview(ctx)
+
+    @honeypot_errors_group.command(name="list")
     async def honeypot_errors(self, ctx: commands.Context) -> None:
         """Show unacknowledged Honeypot operational failures."""
         return await diagnostics.honeypot_errors(self, ctx)
 
-    @honeypot_errors.command(name="clear")
+    @honeypot_errors_group.command(name="clear")
     async def honeypot_errors_clear(self, ctx: commands.Context) -> None:
         """Acknowledge all currently visible Honeypot operational failures."""
         return await diagnostics.honeypot_errors_clear(self, ctx)
 
-    @honeypot_errors.group(name="maintainer", invoke_without_command=True)
-    async def honeypot_errors_maintainer(
+    @honeypot_errors_group.group(name="maintainer", invoke_without_command=True)
+    async def honeypot_errors_maintainer_group(self, ctx: commands.Context) -> None:
+        """Configure the person pinged for operational failures."""
+        return await self._send_group_overview(ctx)
+
+    @honeypot_errors_maintainer_group.command(name="show")
+    async def honeypot_errors_maintainer_show(self, ctx: commands.Context) -> None:
+        """Show the person pinged for operational failures."""
+        return await diagnostics.honeypot_errors_maintainer_show(self, ctx)
+
+    @honeypot_errors_maintainer_group.command(name="set")
+    async def honeypot_errors_maintainer_set(
         self,
         ctx: commands.Context,
-        member: discord.Member = None,
+        member: discord.Member,
     ) -> None:
-        """Show or set the person pinged for operational failures."""
-        return await diagnostics.honeypot_errors_maintainer(self, ctx, member)
+        """Set the person pinged for operational failures."""
+        return await diagnostics.honeypot_errors_maintainer_set(self, ctx, member)
 
-    @honeypot_errors_maintainer.command(name="clear")
+    @honeypot_errors_maintainer_group.command(name="clear")
     async def honeypot_errors_maintainer_clear(self, ctx: commands.Context) -> None:
         """Stop pinging a maintainer for operational failures."""
         return await diagnostics.honeypot_errors_maintainer_clear(self, ctx)
@@ -2250,11 +2304,16 @@ class Honeypot(Cog):
         return await diagnostics.honeypot_mod_stats(self, ctx)
 
     @honeypot.group(name="stats", invoke_without_command=True)
+    async def honeypot_stats_group(self, ctx: commands.Context) -> None:
+        """Inspect public server safety statistics and publication settings."""
+        return await self._send_group_overview(ctx)
+
+    @honeypot_stats_group.command(name="show")
     async def honeypot_stats(self, ctx: commands.Context) -> None:
         """Show public server safety statistics."""
         return await diagnostics.honeypot_stats(self, ctx)
 
-    @honeypot_stats.command(name="channel")
+    @honeypot_stats_group.command(name="channel")
     async def honeypot_stats_channel(
         self, ctx: commands.Context, target: discord.TextChannel | discord.Thread = None
     ) -> None:

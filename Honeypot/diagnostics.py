@@ -474,21 +474,9 @@ async def honeypot_errors_clear(cog, ctx: commands.Context) -> None:
     await ctx.send(_("Acknowledged {count} Honeypot errors.").format(count=count))
 
 
-async def honeypot_errors_maintainer(
-    cog,
-    ctx: commands.Context,
-    member: discord.Member | None = None,
-) -> None:
-    """Show or set the person pinged for Honeypot operational failures."""
+async def honeypot_errors_maintainer_show(cog, ctx: commands.Context) -> None:
+    """Show the person pinged for Honeypot operational failures."""
     setting = cog.config.guild(ctx.guild).maintainer_id
-    if member is not None:
-        await setting.set(member.id)
-        await ctx.send(
-            _("✅ Error maintainer set to {member.mention}").format(member=member),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-        return
-
     maintainer_id = await setting()
     maintainer = ctx.guild.get_member(maintainer_id) if maintainer_id else None
     if maintainer is not None:
@@ -501,9 +489,22 @@ async def honeypot_errors_maintainer(
     await ctx.send(
         _(
             "Error maintainer: {maintainer}\n"
-            "Set: `{prefix}honeypot errors maintainer <member>`\n"
+            "Set: `{prefix}honeypot errors maintainer set <member>`\n"
             "Clear: `{prefix}honeypot errors maintainer clear`"
         ).format(maintainer=label, prefix=prefix),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+async def honeypot_errors_maintainer_set(
+    cog,
+    ctx: commands.Context,
+    member: discord.Member,
+) -> None:
+    """Set the person pinged for Honeypot operational failures."""
+    await cog.config.guild(ctx.guild).maintainer_id.set(member.id)
+    await ctx.send(
+        _("✅ Error maintainer set to {member.mention}").format(member=member),
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
