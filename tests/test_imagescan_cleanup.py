@@ -111,6 +111,7 @@ def _install_redbot_stubs() -> None:
     commands = types.SimpleNamespace(
         Cog=_DummyCog,
         Context=object,
+        Group=object,
         UserFeedbackCheckFailure=Exception,
         group=_decorator,
         command=_decorator,
