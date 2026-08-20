@@ -605,6 +605,7 @@ def _isolated_honeypot_modules(data_path: Path):
     commands = SimpleNamespace(
         Cog=_Cog,
         Context=object,
+        Greedy=list,
         Group=_GroupStub,
         UserFeedbackCheckFailure=Exception,
         group=lambda *args, **kwargs: _command_decorator("group", **kwargs),
