@@ -52,7 +52,7 @@ class ReviewUpdateHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 try:
-                    handler_module = import_module("Honeypot.operations.review_update")
+                    handler_module = import_module("NHCogs.honeypot.operations.review_update")
                 except ModuleNotFoundError:
                     self.fail("review_update has no dedicated handler module")
                 now = datetime.now(timezone.utc)
@@ -92,7 +92,7 @@ class ReviewUpdateHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_registry_routes_review_update_to_concrete_handler(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                handler_module = import_module("Honeypot.operations.review_update")
+                handler_module = import_module("NHCogs.honeypot.operations.review_update")
                 cog = honeypot.Honeypot(_Bot())
 
                 registered = cog._detection_operation_handlers.resolve(

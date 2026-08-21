@@ -52,7 +52,7 @@ class ManualPunishmentSelectionTests(unittest.TestCase):
     def test_defaults_and_exclusive_actions_match_the_panel_contract(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                module = import_module("Honeypot.manual_punishment")
+                module = import_module("NHCogs.honeypot.manual_punishment")
 
                 selection = module.PunishmentSelection()
                 self.assertTrue(selection.capture_evidence)
@@ -79,7 +79,7 @@ class ManualPunishmentSelectionTests(unittest.TestCase):
     def test_modal_uses_one_reason_and_only_adds_mute_duration_when_needed(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                module = import_module("Honeypot.manual_punishment")
+                module = import_module("NHCogs.honeypot.manual_punishment")
                 source = _source_message()
                 controller = SimpleNamespace()
 
@@ -106,7 +106,7 @@ class ManualPunishmentSelectionTests(unittest.TestCase):
     def test_mute_duration_keeps_the_existing_compact_contract(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                module = import_module("Honeypot.manual_punishment")
+                module = import_module("NHCogs.honeypot.manual_punishment")
 
                 self.assertEqual(module.parse_mute_duration("30m"), 30 * 60)
                 self.assertEqual(module.parse_mute_duration("2h"), 2 * 60 * 60)
@@ -120,7 +120,7 @@ class ManualPunishmentSettingsTests(unittest.TestCase):
     def test_role_nt_settings_are_typed_and_normalized(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                settings = import_module("Honeypot.settings")
+                settings = import_module("NHCogs.honeypot.settings")
 
                 configured = settings.GuildSettings.from_mapping(
                     {
@@ -147,8 +147,8 @@ class ManualPunishmentPublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_evidence_audit_never_copies_source_content_or_attachments(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                module = import_module("Honeypot.manual_punishment")
-                publication = import_module("Honeypot.manual_punishment_publication")
+                module = import_module("NHCogs.honeypot.manual_punishment")
+                publication = import_module("NHCogs.honeypot.manual_punishment_publication")
                 attachment = SimpleNamespace(to_file=mock.AsyncMock())
                 source = _source_message(attachments=(attachment,))
                 primary = SimpleNamespace(edit=mock.AsyncMock(), jump_url="audit-url")
@@ -176,8 +176,8 @@ class ManualPunishmentPublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_one_unavailable_attachment_keeps_the_other_evidence(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                module = import_module("Honeypot.manual_punishment")
-                publication = import_module("Honeypot.manual_punishment_publication")
+                module = import_module("NHCogs.honeypot.manual_punishment")
+                publication = import_module("NHCogs.honeypot.manual_punishment_publication")
                 good_file = object()
                 good = SimpleNamespace(
                     filename="good.png",
@@ -210,7 +210,7 @@ class ManualPunishmentPublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_publication_combines_successes_and_prioritizes_source_channel(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                publication = import_module("Honeypot.manual_punishment_publication")
+                publication = import_module("NHCogs.honeypot.manual_punishment_publication")
                 source_channel = SimpleNamespace(id=100, send=mock.AsyncMock())
                 alternate = SimpleNamespace(id=200, send=mock.AsyncMock())
                 guild = SimpleNamespace(
@@ -252,8 +252,8 @@ class ManualPunishmentPublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_large_role_set_stays_within_discord_message_limits(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                module = import_module("Honeypot.manual_punishment")
-                publication = import_module("Honeypot.manual_punishment_publication")
+                module = import_module("NHCogs.honeypot.manual_punishment")
+                publication = import_module("NHCogs.honeypot.manual_punishment_publication")
                 role_names = tuple(
                     f"role-{index}-{'x' * 90}" for index in range(25)
                 )
@@ -349,7 +349,7 @@ class ManualPunishmentControllerTests(unittest.IsolatedAsyncioTestCase):
     def test_context_action_is_registered_only_as_punish(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                module = import_module("Honeypot.manual_punishment")
+                module = import_module("NHCogs.honeypot.manual_punishment")
                 tree = _CommandTree()
                 controller = module.ManualPunishmentController(
                     SimpleNamespace(bot=SimpleNamespace(tree=tree))
@@ -366,8 +366,8 @@ class ManualPunishmentControllerTests(unittest.IsolatedAsyncioTestCase):
     async def test_combined_dry_run_checks_once_and_applies_no_effects(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                module = import_module("Honeypot.manual_punishment")
-                publication = import_module("Honeypot.manual_punishment_publication")
+                module = import_module("NHCogs.honeypot.manual_punishment")
+                publication = import_module("NHCogs.honeypot.manual_punishment_publication")
                 roles = {
                     500: SimpleNamespace(
                         id=500,
@@ -478,8 +478,8 @@ class ManualPunishmentControllerTests(unittest.IsolatedAsyncioTestCase):
     async def test_kick_delegates_to_the_central_manual_action_path(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                module = import_module("Honeypot.manual_punishment")
-                publication = import_module("Honeypot.manual_punishment_publication")
+                module = import_module("NHCogs.honeypot.manual_punishment")
+                publication = import_module("NHCogs.honeypot.manual_punishment_publication")
                 target = SimpleNamespace(id=20, display_name="target", roles=())
                 evidence_channel = SimpleNamespace(id=900)
                 source_channel = SimpleNamespace(id=100, name="general")
@@ -557,7 +557,7 @@ class ManualPunishmentControllerTests(unittest.IsolatedAsyncioTestCase):
     async def test_execute_rechecks_moderator_permission_and_private_audit_channel(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                module = import_module("Honeypot.manual_punishment")
+                module = import_module("NHCogs.honeypot.manual_punishment")
                 source = _source_message()
                 followup = SimpleNamespace(send=mock.AsyncMock())
                 controller = module.ManualPunishmentController(

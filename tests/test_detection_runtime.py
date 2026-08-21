@@ -39,19 +39,35 @@ def load_module(name: str, path: Path):
 
 @contextmanager
 def isolated_runtime_modules():
-    names = ("discord", "Honeypot", "Honeypot.detection_cases", "Honeypot.detection_runtime")
+    package_name = "NHCogs.honeypot"
+    names = (
+        "discord",
+        "NHCogs",
+        package_name,
+        f"{package_name}.detection_cases",
+        f"{package_name}.detection_runtime",
+    )
     previous = {name: sys.modules.get(name, _MISSING) for name in names}
     discord_stub = ModuleType("discord")
     discord_stub.HTTPException = HTTPException
     discord_stub.NotFound = NotFound
     discord_stub.Forbidden = Forbidden
-    package = ModuleType("Honeypot")
+    suite_package = ModuleType("NHCogs")
+    suite_package.__path__ = [str(PACKAGE_DIR.parent)]
+    package = ModuleType(package_name)
     package.__path__ = [str(PACKAGE_DIR)]
     try:
         sys.modules["discord"] = discord_stub
-        sys.modules["Honeypot"] = package
-        detection_cases = load_module("Honeypot.detection_cases", PACKAGE_DIR / "detection_cases.py")
-        detection_runtime = load_module("Honeypot.detection_runtime", PACKAGE_DIR / "detection_runtime.py")
+        sys.modules["NHCogs"] = suite_package
+        sys.modules[package_name] = package
+        detection_cases = load_module(
+            f"{package_name}.detection_cases",
+            PACKAGE_DIR / "detection_cases.py",
+        )
+        detection_runtime = load_module(
+            f"{package_name}.detection_runtime",
+            PACKAGE_DIR / "detection_runtime.py",
+        )
         yield detection_cases, detection_runtime
     finally:
         for name, module in previous.items():
