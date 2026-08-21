@@ -820,7 +820,7 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                         rendered,
                     )
 
-    async def test_root_overview_lists_every_registered_leaf_command(self):
+    async def test_root_overview_lists_direct_categories_without_deep_commands(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = object.__new__(honeypot.Honeypot)
@@ -845,18 +845,36 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                         "AllowedMentions",
                         _OverviewAllowedMentions,
                     ),
+                    mock.patch.object(
+                        honeypot.detection,
+                        "config_all",
+                        mock.AsyncMock(),
+                    ),
                 ):
-                    await honeypot.Honeypot._send_group_overview(cog, ctx)
+                    await honeypot.Honeypot.honeypot(cog, ctx)
 
                 rendered = "\n".join(
                     field.value
                     for call in ctx.send.await_args_list
                     for field in call.kwargs["embed"].fields
                 )
-                leaf_names = _leaf_command_names(command)
-                self.assertGreater(len(leaf_names), 50)
-                for qualified_name in leaf_names:
+                descriptions = "\n".join(
+                    call.kwargs["embed"].description or ""
+                    for call in ctx.send.await_args_list
+                )
+                direct_names = [child.qualified_name for child in command.commands]
+                deep_names = [
+                    leaf
+                    for child in command.commands
+                    for leaf in _leaf_command_names(child)
+                    if leaf not in direct_names
+                ]
+                self.assertGreater(len(deep_names), 0)
+                for qualified_name in direct_names:
                     self.assertIn(f"!{qualified_name}", rendered)
+                for qualified_name in deep_names:
+                    self.assertNotIn(f"!{qualified_name}", rendered)
+                self.assertIn("Run a category below", descriptions)
 
     async def test_action_bearing_groups_become_namespace_overviews(self):
         with TemporaryDirectory() as directory:
