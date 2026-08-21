@@ -447,16 +447,28 @@ class MigrationCutoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finalized.state, MigrationState.FINALIZED)
         self.assertEqual(tuple(runtime.packages), ("NHCogs", "OtherCog"))
 
-    async def test_restart_verifies_pre_scope_run_with_global_inventory(self):
-        scoped_inventory = SuiteInventory(("command",), ("listener",), (), ())
+    async def test_restart_ignores_unrelated_views_from_pre_scope_run(self):
+        suite_view = "honeypot:case:case-id:moderate:ban"
+        scoped_inventory = SuiteInventory(
+            ("command",),
+            ("listener",),
+            ("app",),
+            (suite_view,),
+        )
+        pre_scope_inventory = SuiteInventory(
+            scoped_inventory.prefix_commands,
+            scoped_inventory.listeners,
+            scoped_inventory.application_commands,
+            (suite_view, *(f"other:view:{index}" for index in range(8))),
+        )
         runtime = FakeRuntime(
             self.paths,
             scoped_inventory,
-            legacy_inventory=self.inventory,
+            legacy_inventory=scoped_inventory,
         )
         plan = replace(self._plan(runtime), inventory=scoped_inventory)
         validations = plan.validations()
-        stored_inventory = self.inventory.as_dict()
+        stored_inventory = pre_scope_inventory.as_dict()
         stored_inventory.pop("scope")
         validations["inventory"] = stored_inventory
         await self.store.create_run(
@@ -479,9 +491,64 @@ class MigrationCutoverTests(unittest.IsolatedAsyncioTestCase):
             process_token="process-b",
         )
 
-        result = await restarted.verify_restart("run-1")
+        with mock.patch.object(
+            controller_module.asyncio,
+            "sleep",
+            new=mock.AsyncMock(),
+        ):
+            result = await restarted.verify_restart("run-1")
 
         self.assertEqual(result.state, MigrationState.RESTART_VERIFIED)
+
+    async def test_restart_still_requires_honeypot_views_from_pre_scope_run(self):
+        suite_view = "honeypot:case:case-id:moderate:ban"
+        scoped_inventory = SuiteInventory(("command",), ("listener",), ("app",), ())
+        pre_scope_inventory = SuiteInventory(
+            scoped_inventory.prefix_commands,
+            scoped_inventory.listeners,
+            scoped_inventory.application_commands,
+            (suite_view,),
+        )
+        runtime = FakeRuntime(
+            self.paths,
+            scoped_inventory,
+            legacy_inventory=scoped_inventory,
+        )
+        plan = replace(self._plan(runtime), inventory=scoped_inventory)
+        validations = plan.validations()
+        stored_inventory = pre_scope_inventory.as_dict()
+        stored_inventory.pop("scope")
+        validations["inventory"] = stored_inventory
+        await self.store.create_run(
+            "run-1",
+            original_packages=plan.original_packages,
+            source_commit=plan.source_commit,
+            validations=validations,
+        )
+        first_process = MigrationController(
+            runtime,
+            self.store,
+            self.backups,
+            process_token="process-a",
+        )
+        await first_process.apply("run-1", plan)
+        restarted = MigrationController(
+            runtime,
+            self.store,
+            self.backups,
+            process_token="process-b",
+        )
+
+        with mock.patch.object(
+            controller_module.asyncio,
+            "sleep",
+            new=mock.AsyncMock(),
+        ):
+            with self.assertRaisesRegex(
+                MigrationApplyError,
+                "persistent_view_custom_ids missing=1 extra=0",
+            ):
+                await restarted.verify_restart("run-1")
 
     async def test_restart_waits_for_suite_inventory_to_settle(self):
         runtime = FakeRuntime(self.paths, self.inventory)

@@ -13,6 +13,7 @@ from .state import MigrationRun, MigrationState, MigrationStateStore
 
 _COG_NAMES = ("NHMisc", "Honeypot")
 _INVENTORY_SETTLE_ATTEMPTS = 30
+_HONEYPOT_VIEW_PREFIX = "honeypot:case:"
 _CONFIG_IDENTIFIERS = {
     "NHMisc": 8597423150612235807,
     "Honeypot": 205192943327321000143939875896557571750,
@@ -160,6 +161,10 @@ class MigrationController:
             raise MigrationApplyError("persisted package authority does not match NHCogs")
         data_directories = _stored_data_directories(run)
         expected_inventory = _stored_inventory(run)
+        comparable_inventory = _comparable_inventory_for_run(
+            run,
+            expected_inventory,
+        )
         expected_guild_counts = _stored_config_guild_counts(run)
         for name in _COG_NAMES:
             cog = self._runtime.loaded_cog(name)
@@ -179,10 +184,13 @@ class MigrationController:
         actual_inventory = await _wait_for_runtime_inventory(
             self._runtime,
             run,
-            expected_inventory,
+            comparable_inventory,
         )
-        if actual_inventory != expected_inventory:
-            differences = _inventory_differences(expected_inventory, actual_inventory)
+        if actual_inventory != comparable_inventory:
+            differences = _inventory_differences(
+                comparable_inventory,
+                actual_inventory,
+            )
             raise MigrationApplyError(
                 "restarted suite inventory differs from preflight: " + differences
             )
@@ -299,10 +307,14 @@ class MigrationController:
                 if self._runtime.extension_key_for_module(name) is None:
                     await self._runtime.load_extension(name)
             expected_inventory = _stored_inventory(run)
+            comparable_inventory = _comparable_inventory_for_run(
+                run,
+                expected_inventory,
+            )
             actual_inventory = _runtime_inventory_for_run(self._runtime, run)
-            if actual_inventory != expected_inventory:
+            if actual_inventory != comparable_inventory:
                 differences = _inventory_differences(
-                    expected_inventory,
+                    comparable_inventory,
                     actual_inventory,
                 )
                 raise MigrationApplyError(
@@ -492,8 +504,43 @@ def _runtime_inventory_for_run(runtime: Any, run: MigrationRun) -> SuiteInventor
         return runtime.suite_inventory(_COG_NAMES)
     legacy_inventory = getattr(runtime, "legacy_global_inventory", None)
     if callable(legacy_inventory):
-        return legacy_inventory(_COG_NAMES)
-    return runtime.suite_inventory(_COG_NAMES)
+        global_inventory = legacy_inventory(_COG_NAMES)
+    else:
+        global_inventory = runtime.suite_inventory(_COG_NAMES)
+    suite_inventory = runtime.suite_inventory(_COG_NAMES)
+    return SuiteInventory(
+        prefix_commands=global_inventory.prefix_commands,
+        listeners=global_inventory.listeners,
+        application_commands=global_inventory.application_commands,
+        persistent_view_custom_ids=_honeypot_view_ids(
+            suite_inventory.persistent_view_custom_ids
+        ),
+    )
+
+
+def _comparable_inventory_for_run(
+    run: MigrationRun,
+    expected: SuiteInventory,
+) -> SuiteInventory:
+    raw = run.validations.get("inventory")
+    if isinstance(raw, dict) and raw.get("scope") == SUITE_INVENTORY_SCOPE:
+        return expected
+    return SuiteInventory(
+        prefix_commands=expected.prefix_commands,
+        listeners=expected.listeners,
+        application_commands=expected.application_commands,
+        persistent_view_custom_ids=_honeypot_view_ids(
+            expected.persistent_view_custom_ids
+        ),
+    )
+
+
+def _honeypot_view_ids(custom_ids: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(
+        custom_id
+        for custom_id in custom_ids
+        if custom_id.startswith(_HONEYPOT_VIEW_PREFIX)
+    )
 
 
 async def _wait_for_runtime_inventory(
