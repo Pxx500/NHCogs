@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+SUITE_INVENTORY_SCOPE = "suite-owned-v1"
+
 
 @dataclass(frozen=True)
 class SuiteInventory:
@@ -11,8 +13,9 @@ class SuiteInventory:
     application_commands: tuple[str, ...]
     persistent_view_custom_ids: tuple[str, ...]
 
-    def as_dict(self) -> dict[str, list[str]]:
+    def as_dict(self) -> dict[str, object]:
         return {
+            "scope": SUITE_INVENTORY_SCOPE,
             "prefix_commands": list(self.prefix_commands),
             "listeners": list(self.listeners),
             "application_commands": list(self.application_commands),
@@ -24,12 +27,31 @@ def snapshot_suite_inventory(
     bot: Any,
     cog_names: tuple[str, ...],
 ) -> SuiteInventory:
+    return _snapshot_inventory(bot, cog_names, include_unowned=False)
+
+
+def snapshot_global_inventory(
+    bot: Any,
+    cog_names: tuple[str, ...],
+) -> SuiteInventory:
+    """Recreate the pre-scope inventory for an in-progress migration run."""
+    return _snapshot_inventory(bot, cog_names, include_unowned=True)
+
+
+def _snapshot_inventory(
+    bot: Any,
+    cog_names: tuple[str, ...],
+    *,
+    include_unowned: bool,
+) -> SuiteInventory:
     prefix_commands: list[str] = []
     listeners: list[str] = []
+    cogs: list[Any] = []
     for cog_name in cog_names:
         cog = bot.get_cog(cog_name)
         if cog is None:
             raise RuntimeError(f"required cog {cog_name} is not loaded")
+        cogs.append(cog)
         for command in cog.walk_commands():
             aliases = ",".join(sorted(str(alias) for alias in command.aliases))
             prefix_commands.append(
@@ -43,10 +65,13 @@ def snapshot_suite_inventory(
         sorted(
             f"{_command_type(command)}:{command.name}"
             for command in bot.tree.get_commands()
+            if include_unowned or _command_belongs_to(command, cogs)
         )
     )
     persistent_ids = []
     for view in getattr(bot, "persistent_views", ()):
+        if not include_unowned and not _owner_belongs_to(view, cogs):
+            continue
         for item in getattr(view, "children", ()):
             custom_id = getattr(item, "custom_id", None)
             if custom_id is not None:
@@ -58,6 +83,18 @@ def snapshot_suite_inventory(
         application_commands=application_commands,
         persistent_view_custom_ids=tuple(sorted(persistent_ids)),
     )
+
+
+def _command_belongs_to(command: Any, cogs: list[Any]) -> bool:
+    callback = getattr(command, "callback", None)
+    return _owner_belongs_to(getattr(callback, "__self__", None), cogs)
+
+
+def _owner_belongs_to(owner: Any, cogs: list[Any]) -> bool:
+    if any(owner is cog for cog in cogs):
+        return True
+    parent_cog = getattr(owner, "cog", None)
+    return any(parent_cog is cog for cog in cogs)
 
 
 def _command_type(command: Any) -> str:

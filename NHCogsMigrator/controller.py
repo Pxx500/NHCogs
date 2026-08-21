@@ -6,12 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from .backup import BackupResult, create_verified_backup, restore_verified_backup
-from .inventory import SuiteInventory
+from .inventory import SUITE_INVENTORY_SCOPE, SuiteInventory
 from .plan import MigrationPreflightPlan
 from .preflight import inspect_persisted_data
 from .state import MigrationRun, MigrationState, MigrationStateStore
 
 _COG_NAMES = ("NHMisc", "Honeypot")
+_INVENTORY_SETTLE_ATTEMPTS = 30
 _CONFIG_IDENTIFIERS = {
     "NHMisc": 8597423150612235807,
     "Honeypot": 205192943327321000143939875896557571750,
@@ -175,8 +176,16 @@ class MigrationController:
                 phase="restart",
             )
         await _require_background_health(self._runtime, phase="restart")
-        if self._runtime.suite_inventory(_COG_NAMES) != expected_inventory:
-            raise MigrationApplyError("restarted suite inventory differs from preflight")
+        actual_inventory = await _wait_for_runtime_inventory(
+            self._runtime,
+            run,
+            expected_inventory,
+        )
+        if actual_inventory != expected_inventory:
+            differences = _inventory_differences(expected_inventory, actual_inventory)
+            raise MigrationApplyError(
+                "restarted suite inventory differs from preflight: " + differences
+            )
         data_report = await inspect_persisted_data(
             data_directories,
             backup_root=self._backup_root,
@@ -289,8 +298,16 @@ class MigrationController:
             for name in _COG_NAMES:
                 if self._runtime.extension_key_for_module(name) is None:
                     await self._runtime.load_extension(name)
-            if self._runtime.suite_inventory(_COG_NAMES) != _stored_inventory(run):
-                raise MigrationApplyError("recovered legacy inventory differs from preflight")
+            expected_inventory = _stored_inventory(run)
+            actual_inventory = _runtime_inventory_for_run(self._runtime, run)
+            if actual_inventory != expected_inventory:
+                differences = _inventory_differences(
+                    expected_inventory,
+                    actual_inventory,
+                )
+                raise MigrationApplyError(
+                    "recovered legacy inventory differs from preflight: " + differences
+                )
             return await self._store.transition(
                 run_id,
                 MigrationState.ROLLING_BACK,
@@ -467,6 +484,50 @@ def _stored_inventory(run: MigrationRun) -> SuiteInventory:
         )
     except (KeyError, TypeError) as error:
         raise MigrationApplyError("migration run inventory is invalid") from error
+
+
+def _runtime_inventory_for_run(runtime: Any, run: MigrationRun) -> SuiteInventory:
+    raw = run.validations.get("inventory")
+    if isinstance(raw, dict) and raw.get("scope") == SUITE_INVENTORY_SCOPE:
+        return runtime.suite_inventory(_COG_NAMES)
+    legacy_inventory = getattr(runtime, "legacy_global_inventory", None)
+    if callable(legacy_inventory):
+        return legacy_inventory(_COG_NAMES)
+    return runtime.suite_inventory(_COG_NAMES)
+
+
+async def _wait_for_runtime_inventory(
+    runtime: Any,
+    run: MigrationRun,
+    expected: SuiteInventory,
+) -> SuiteInventory:
+    actual = _runtime_inventory_for_run(runtime, run)
+    for _ in range(_INVENTORY_SETTLE_ATTEMPTS - 1):
+        if actual == expected:
+            return actual
+        await asyncio.sleep(1)
+        actual = _runtime_inventory_for_run(runtime, run)
+    return actual
+
+
+def _inventory_differences(
+    expected: SuiteInventory,
+    actual: SuiteInventory,
+) -> str:
+    differences = []
+    for field in (
+        "prefix_commands",
+        "listeners",
+        "application_commands",
+        "persistent_view_custom_ids",
+    ):
+        expected_values = set(getattr(expected, field))
+        actual_values = set(getattr(actual, field))
+        missing = len(expected_values - actual_values)
+        extra = len(actual_values - expected_values)
+        if missing or extra:
+            differences.append(f"{field} missing={missing} extra={extra}")
+    return ", ".join(differences) or "ordering differs"
 
 
 def _stored_config_guild_counts(run: MigrationRun) -> dict[str, int]:
