@@ -1,5 +1,7 @@
+import asyncio
 import hashlib
 import importlib.util
+import inspect
 import sys
 import types
 import unittest
@@ -241,6 +243,43 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
         cog._gate_increment_store = mock.AsyncMock()
         cog._achievement_syncing_guilds = set()
         return cog
+
+    async def test_cog_unload_awaits_owned_tasks(self):
+        stopped = asyncio.Event()
+
+        async def owned_writer():
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)
+                stopped.set()
+
+        writer_task = asyncio.create_task(owned_writer())
+        await asyncio.sleep(0)
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._audit_log_tasks = set()
+        cog._activity_task = writer_task
+        cog._role_analytics_startup_task = None
+        cog._role_analytics_daily_task = None
+        cog._gate_increment_recovery_task = None
+        cog._unregister_gate_increment_context_menu = mock.Mock()
+        cog._unregister_achievement_commands = mock.Mock()
+        cog._role_analytics = types.SimpleNamespace(
+            cancel=mock.Mock(),
+            shutdown=mock.AsyncMock(),
+        )
+
+        result = nhmisc.NHMisc.cog_unload(cog)
+        try:
+            self.assertTrue(inspect.isawaitable(result))
+            await result
+            self.assertTrue(stopped.is_set())
+            self.assertTrue(writer_task.done())
+            cog._role_analytics.shutdown.assert_awaited_once_with()
+        finally:
+            if not writer_task.done():
+                writer_task.cancel()
+                await asyncio.gather(writer_task, return_exceptions=True)
 
     def test_commands_require_manage_messages_and_expected_cooldowns(self):
         for command_name in (

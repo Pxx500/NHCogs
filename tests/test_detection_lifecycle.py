@@ -759,6 +759,54 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         return_exceptions=True,
                     )
 
+    async def test_unload_awaits_cancelled_background_loops(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                loop_started = asyncio.Event()
+                cleanup_started = asyncio.Event()
+                cleanup_release = asyncio.Event()
+                cleanup_finished = asyncio.Event()
+
+                async def loop_until_cancelled():
+                    loop_started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        cleanup_started.set()
+                        await cleanup_release.wait()
+                        cleanup_finished.set()
+
+                cog._init_firstpost_seen_store = _async_noop
+                cog._init_imagescan_store = _async_noop
+                cog._restore_detection_case_views = _async_noop
+                cog._flush_firstpost_seen_authors = _async_noop
+                await cog.cog_load()
+                loop_task = asyncio.create_task(loop_until_cancelled())
+                cog.detection_reconciliation_loop.task = loop_task
+                await asyncio.wait_for(loop_started.wait(), timeout=2)
+                unload_task = asyncio.create_task(cog.cog_unload())
+
+                try:
+                    await asyncio.wait_for(cleanup_started.wait(), timeout=2)
+                    with self.assertRaises(asyncio.TimeoutError):
+                        await asyncio.wait_for(
+                            asyncio.shield(unload_task),
+                            timeout=0.01,
+                        )
+                    cleanup_release.set()
+                    await unload_task
+                    self.assertTrue(loop_task.done())
+                    self.assertTrue(cleanup_finished.is_set())
+                finally:
+                    cleanup_release.set()
+                    loop_task.cancel()
+                    await asyncio.gather(
+                        unload_task,
+                        loop_task,
+                        return_exceptions=True,
+                    )
+
     async def test_failed_case_restore_is_logged_and_cleared_on_unload(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:

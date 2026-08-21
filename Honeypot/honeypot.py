@@ -1025,12 +1025,21 @@ class Honeypot(Cog):
 
     async def cog_unload(self) -> None:
         self._remove_console_log_buffer()
+        loops = (
+            self.joinwatch_auto_role_loop,
+            self.purge_cache_cleanup_loop,
+            self.firstpost_seen_flush_loop,
+            self.detection_case_loop,
+            self.detection_reconciliation_loop,
+        )
+        loop_tasks = tuple(
+            task for loop in loops if (task := loop.get_task()) is not None
+        )
+        for loop in loops:
+            loop.cancel()
         await self._manual_punishment.shutdown()
-        self.joinwatch_auto_role_loop.cancel()
-        self.purge_cache_cleanup_loop.cancel()
-        self.firstpost_seen_flush_loop.cancel()
-        self.detection_case_loop.cancel()
-        self.detection_reconciliation_loop.cancel()
+        if loop_tasks:
+            await asyncio.gather(*loop_tasks, return_exceptions=True)
         try:
             await self._cancel_owned_task(self._case_restore_task)
         finally:

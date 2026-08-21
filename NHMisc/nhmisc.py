@@ -567,20 +567,31 @@ class NHMisc(commands.Cog):
             self._recover_interrupted_gate_increments()
         )
 
-    def cog_unload(self) -> None:
-        for task in self._audit_log_tasks:
-            task.cancel()
-        if self._activity_task is not None:
-            self._activity_task.cancel()
-        if self._role_analytics_startup_task is not None:
-            self._role_analytics_startup_task.cancel()
-        if self._role_analytics_daily_task is not None:
-            self._role_analytics_daily_task.cancel()
-        if self._gate_increment_recovery_task is not None:
-            self._gate_increment_recovery_task.cancel()
+    async def cog_unload(self) -> None:
+        tasks = tuple(
+            task
+            for task in (
+                *self._audit_log_tasks,
+                self._activity_task,
+                self._role_analytics_startup_task,
+                self._role_analytics_daily_task,
+                self._gate_increment_recovery_task,
+            )
+            if task is not None
+        )
         self._unregister_gate_increment_context_menu()
         self._unregister_achievement_commands()
-        self._role_analytics.cancel()
+        for task in tasks:
+            task.cancel()
+        analytics_shutdown = asyncio.create_task(self._role_analytics.shutdown())
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await analytics_shutdown
+        self._audit_log_tasks.clear()
+        self._activity_task = None
+        self._role_analytics_startup_task = None
+        self._role_analytics_daily_task = None
+        self._gate_increment_recovery_task = None
 
     def _register_gate_increment_context_menu(self) -> None:
         command_type = discord.AppCommandType.message

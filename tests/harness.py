@@ -174,6 +174,7 @@ class _BoundLoop:
         self.before = before
         self.started = False
         self.cancelled = False
+        self.task = None
 
     def start(self):
         if self.started:
@@ -182,6 +183,11 @@ class _BoundLoop:
 
     def cancel(self):
         self.cancelled = True
+        if self.task is not None:
+            self.task.cancel()
+
+    def get_task(self):
+        return self.task
 
     async def wait_before_start(self):
         await self.before(self.instance)

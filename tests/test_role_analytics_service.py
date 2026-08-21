@@ -267,6 +267,17 @@ class RoleAnalyticsServiceTests(unittest.IsolatedAsyncioTestCase):
             first.generation,
         )
 
+    async def test_shutdown_awaits_tracked_tasks(self):
+        guild = FakeGuild([FakeMember(1, (123, 10))])
+        service = role_analytics_service.RoleAnalyticsService(FakeBot(), self.store)
+        await service.sync_guild(guild, manual=True)
+        task = await service.schedule_resumed_check([guild], delay=60)
+
+        await service.shutdown()
+
+        self.assertTrue(task.done())
+        self.assertTrue(task.cancelled())
+
     async def test_transient_reconciliation_failure_retries_until_ready(self):
         initial_guild = FakeGuild([FakeMember(1, (123, 10))])
         initial_service = role_analytics_service.RoleAnalyticsService(

@@ -323,6 +323,12 @@ class RoleAnalyticsService:
         self._guild_tasks.clear()
         self._resumed_task = None
 
+    async def shutdown(self) -> None:
+        tasks = tuple(self._tasks)
+        self.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     def _track_task(self, task: asyncio.Task) -> asyncio.Task:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
