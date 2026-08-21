@@ -89,6 +89,17 @@ before applying. Apply unloads the official cog before the final source snapshot
 imports the complete validated catalog, verifies it, removes `customcom` from Red's
 persisted package list, and activates the replacement.
 
+If the plan includes data from a guild the bot has left, remove that complete legacy
+guild scope with:
+
+```ini
+[p]nhcustomcom migrate forgetguild <guild_id> confirm
+```
+
+This permanently deletes every legacy CustomCom command for that guild. It only works
+after a plan exists, rejects guilds the bot is still connected to, and invalidates the
+current plan. Run `[p]nhcustomcom migrate plan` again before applying.
+
 The durable phases are `planned`, `imported_not_active`, and `complete`. A validation or
 import failure restores the official cog without activating the replacement. A cutover
 failure keeps the verified import and restores the official cog where possible. Run the

@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import inspect
 import sys
@@ -220,11 +221,155 @@ class CustomCommandsSurfaceTests(unittest.TestCase):
         migrate = next(command for command in root.commands if command.name == "migrate")
         self.assertEqual(
             {command.name for command in migrate.commands},
-            {"plan", "apply"},
+            {"plan", "apply", "forgetguild"},
         )
 
 
 class CustomCommandsMigrationFlowTests(unittest.IsolatedAsyncioTestCase):
+    def _forgetguild_subject(
+        self,
+        *,
+        guilds,
+        phase=migration_controller.MigrationPhase.PLANNED,
+        connected_guild_ids=(),
+    ):
+        class GuildScope:
+            def __init__(self, guild_id):
+                self.guild_id = guild_id
+
+            async def clear(self):
+                guilds.pop(self.guild_id)
+
+        migration_cog = object.__new__(migration_controller.CustomCommandsMigration)
+        migration_cog._apply_lock = asyncio.Lock()
+        migration_cog._require_private_migration_context = mock.AsyncMock()
+        migration_cog.state_store = types.SimpleNamespace(
+            get=mock.AsyncMock(
+                return_value=migration_controller.MigrationState(
+                    phase,
+                    source_digest="source",
+                    destination_digest="destination",
+                )
+            ),
+            save=mock.AsyncMock(),
+        )
+        migration_cog._legacy_config = types.SimpleNamespace(
+            all_guilds=mock.AsyncMock(return_value=guilds),
+            guild_from_id=mock.Mock(side_effect=GuildScope),
+        )
+        migration_cog.bot = types.SimpleNamespace(
+            get_guild=lambda guild_id: (
+                object() if guild_id in connected_guild_ids else None
+            )
+        )
+        ctx = types.SimpleNamespace(send=mock.AsyncMock(), clean_prefix="!")
+        return migration_cog, ctx
+
+    async def test_forgetguild_clears_only_orphaned_legacy_scope_and_invalidates_plan(self):
+        guilds = {
+            100: {"commands": {"active": {"response": "keep"}}},
+            754: {
+                "commands": {
+                    "first": {"response": "remove"},
+                    "second": {"response": "remove"},
+                }
+            },
+        }
+        migration_cog, ctx = self._forgetguild_subject(
+            guilds=guilds,
+            connected_guild_ids={100},
+        )
+        command = migration_controller.CustomCommandsMigration.nhcustomcom_migrate_forgetguild
+
+        await command.callback(migration_cog, ctx, 754, "confirm")
+
+        self.assertEqual(tuple(guilds), (100,))
+        migration_cog.state_store.save.assert_awaited_once_with(
+            migration_controller.MigrationPhase.NOT_PLANNED,
+            source_digest=None,
+            destination_digest=None,
+        )
+        self.assertIn("Forgot 2 legacy CustomCom commands", ctx.send.await_args.args[0])
+        self.assertIn("migrate plan", ctx.send.await_args.args[0])
+
+    async def test_forgetguild_rejects_a_guild_the_bot_is_still_connected_to(self):
+        guilds = {754: {"commands": {"first": {"response": "keep"}}}}
+        migration_cog, ctx = self._forgetguild_subject(
+            guilds=guilds,
+            connected_guild_ids={754},
+        )
+        command = migration_controller.CustomCommandsMigration.nhcustomcom_migrate_forgetguild
+
+        with self.assertRaisesRegex(
+            migration_controller.commands.UserFeedbackCheckFailure,
+            "still connected",
+        ):
+            await command.callback(migration_cog, ctx, 754, "confirm")
+
+        self.assertIn(754, guilds)
+        migration_cog._legacy_config.guild_from_id.assert_not_called()
+        migration_cog.state_store.save.assert_not_awaited()
+
+    async def test_forgetguild_requires_a_current_migration_plan(self):
+        guilds = {754: {"commands": {"first": {"response": "keep"}}}}
+        migration_cog, ctx = self._forgetguild_subject(
+            guilds=guilds,
+            phase=migration_controller.MigrationPhase.NOT_PLANNED,
+        )
+        command = migration_controller.CustomCommandsMigration.nhcustomcom_migrate_forgetguild
+
+        with self.assertRaisesRegex(
+            migration_controller.commands.UserFeedbackCheckFailure,
+            "Run the migration plan",
+        ):
+            await command.callback(migration_cog, ctx, 754, "confirm")
+
+        self.assertIn(754, guilds)
+        migration_cog._legacy_config.all_guilds.assert_not_awaited()
+        migration_cog.state_store.save.assert_not_awaited()
+
+    async def test_forgetguild_rejects_missing_or_empty_legacy_guild_data(self):
+        command = migration_controller.CustomCommandsMigration.nhcustomcom_migrate_forgetguild
+        for guilds in ({}, {754: {"commands": {}}}):
+            with self.subTest(guilds=guilds):
+                migration_cog, ctx = self._forgetguild_subject(guilds=guilds)
+
+                with self.assertRaisesRegex(
+                    migration_controller.commands.UserFeedbackCheckFailure,
+                    "no active legacy CustomCom commands",
+                ):
+                    await command.callback(migration_cog, ctx, 754, "confirm")
+
+                migration_cog._legacy_config.guild_from_id.assert_not_called()
+                migration_cog.state_store.save.assert_not_awaited()
+
+    async def test_forgetguild_requires_exact_confirmation(self):
+        guilds = {754: {"commands": {"first": {"response": "keep"}}}}
+        migration_cog, ctx = self._forgetguild_subject(guilds=guilds)
+        command = migration_controller.CustomCommandsMigration.nhcustomcom_migrate_forgetguild
+
+        with self.assertRaisesRegex(
+            migration_controller.commands.UserFeedbackCheckFailure,
+            "confirm",
+        ):
+            await command.callback(migration_cog, ctx, 754, "yes")
+
+        self.assertIn(754, guilds)
+        migration_cog.state_store.get.assert_not_awaited()
+        migration_cog._legacy_config.all_guilds.assert_not_awaited()
+
+    async def test_forgetguild_does_not_delete_when_plan_invalidation_fails(self):
+        guilds = {754: {"commands": {"first": {"response": "keep"}}}}
+        migration_cog, ctx = self._forgetguild_subject(guilds=guilds)
+        migration_cog.state_store.save.side_effect = OSError("storage unavailable")
+        command = migration_controller.CustomCommandsMigration.nhcustomcom_migrate_forgetguild
+
+        with self.assertRaisesRegex(OSError, "storage unavailable"):
+            await command.callback(migration_cog, ctx, 754, "confirm")
+
+        self.assertIn(754, guilds)
+        migration_cog._legacy_config.guild_from_id.assert_not_called()
+
     async def test_migration_mode_participates_in_user_data_deletion(self):
         migration_cog = object.__new__(migration_controller.CustomCommandsMigration)
         migration_cog.catalog = object()
