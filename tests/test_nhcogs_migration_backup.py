@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import sqlite3
@@ -30,6 +31,55 @@ class VerifiedBackupTests(unittest.IsolatedAsyncioTestCase):
         self.nhmisc.mkdir()
         self.honeypot.mkdir()
         self.backups.mkdir()
+
+    async def test_backup_uses_sqlite_snapshot_without_transient_sidecars(self):
+        database = self.honeypot / "message_registry.sqlite"
+        connection = sqlite3.connect(database)
+        try:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY)")
+            connection.execute("INSERT INTO messages DEFAULT VALUES")
+            connection.commit()
+            wal_exists, shm_exists = await asyncio.to_thread(
+                lambda: (
+                    Path(f"{database}-wal").is_file(),
+                    Path(f"{database}-shm").is_file(),
+                )
+            )
+            self.assertTrue(wal_exists)
+            self.assertTrue(shm_exists)
+
+            result = await create_verified_backup(
+                "run-wal",
+                data_directories={
+                    "NHMisc": self.nhmisc,
+                    "Honeypot": self.honeypot,
+                },
+                backup_root=self.backups,
+                config_exports={},
+                metadata={},
+            )
+        finally:
+            connection.close()
+
+        data_database = result.path / "data/Honeypot/message_registry.sqlite"
+        data_exists, wal_exists, shm_exists = await asyncio.to_thread(
+            lambda: (
+                data_database.is_file(),
+                Path(f"{data_database}-wal").exists(),
+                Path(f"{data_database}-shm").exists(),
+            )
+        )
+        self.assertTrue(data_exists)
+        self.assertFalse(wal_exists)
+        self.assertFalse(shm_exists)
+        sqlite_database = result.path / "sqlite/Honeypot/message_registry.sqlite"
+        with closing(sqlite3.connect(sqlite_database)) as restored:
+            self.assertEqual(restored.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 1)
+        manifest = json.loads((result.path / "manifest.json").read_text("utf-8"))
+        self.assertFalse(
+            any(path.endswith(("-wal", "-shm", "-journal")) for path in manifest["files"])
+        )
 
     async def test_backup_copies_data_and_verifies_sqlite_and_manifest(self):
         database = self.nhmisc / "achievements.sqlite"
