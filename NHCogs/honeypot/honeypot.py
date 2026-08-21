@@ -1866,7 +1866,7 @@ class Honeypot(Cog):
         self,
         ctx: commands.Context,
         role: discord.Role,
-        channels: commands.Greedy[discord.TextChannel],
+        channels: commands.Greedy[discord.TextChannel | discord.ForumChannel],
     ) -> None:
         """Add source channels to a Role n’t punishment."""
         return await manual_punishment.role_nt_add(self, ctx, role, channels)
@@ -1876,7 +1876,7 @@ class Honeypot(Cog):
         self,
         ctx: commands.Context,
         role: discord.Role,
-        channels: commands.Greedy[discord.TextChannel],
+        channels: commands.Greedy[discord.TextChannel | discord.ForumChannel],
     ) -> None:
         """Remove source channels from a Role n’t punishment."""
         return await manual_punishment.role_nt_remove_channels(

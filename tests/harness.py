@@ -483,6 +483,7 @@ def _isolated_honeypot_modules(data_path: Path):
         "User",
     ):
         setattr(discord, name, object)
+    discord.ForumChannel = type("ForumChannel", (), {})
     discord.Forbidden = type("Forbidden", (Exception,), {})
     discord.HTTPException = type("HTTPException", (Exception,), {})
     discord.NotFound = type("NotFound", (discord.HTTPException,), {})
