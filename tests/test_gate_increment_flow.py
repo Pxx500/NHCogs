@@ -21,7 +21,7 @@ StoredGateIncrementMember = nhmisc.GateIncrementStore._get_operation_sync.__glob
 
 def _load_gate_increment_views():
     achievement_views, _fake_select = _load_achievement_views()
-    path = Path(__file__).resolve().parents[1] / "NHMisc" / "gate_increment_views.py"
+    path = Path(__file__).resolve().parents[1] / "NHCogs" / "nhmisc" / "gate_increment_views.py"
     spec = importlib.util.spec_from_file_location("_gate_increment_views", path)
     module = importlib.util.module_from_spec(spec)
     with mock.patch.dict(sys.modules, {"discord": achievement_views.discord}):
@@ -872,9 +872,9 @@ class GateIncrementPrivacyTests(unittest.IsolatedAsyncioTestCase):
 class GateIncrementDocumentationTests(unittest.TestCase):
     def test_supported_entry_points_and_storage_are_disclosed(self):
         root = Path(__file__).resolve().parents[1]
-        readme = (root / "NHMisc" / "README.md").read_text(encoding="utf-8")
+        readme = (root / "NHCogs" / "nhmisc" / "README.md").read_text(encoding="utf-8")
         info = json.loads(
-            (root / "NHMisc" / "info.json").read_text(encoding="utf-8-sig")
+            (root / "NHCogs" / "nhmisc" / "info.json").read_text(encoding="utf-8-sig")
         )
 
         self.assertNotIn("[p]gateincrement", readme)

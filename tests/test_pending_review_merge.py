@@ -13,7 +13,7 @@ from tests.test_detection_cases import detection_cases_under_test as cases
 def _load_case_review():
     package_name = cases.__package__
     name = f"{package_name}.case_review"
-    path = Path(__file__).parents[1] / "Honeypot" / "case_review.py"
+    path = Path(__file__).parents[1] / "NHCogs" / "honeypot" / "case_review.py"
     sys.modules[f"{package_name}.detection_cases"] = cases
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)

@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from tests.detection_case_fixtures import capture_attachment, publish_primary
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "Honeypot" / "detection_cases.py"
+MODULE_PATH = Path(__file__).resolve().parents[1] / "NHCogs" / "honeypot" / "detection_cases.py"
 PACKAGE_NAME = "_honeypot_detection_cases_tests"
 package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(MODULE_PATH.parent)]

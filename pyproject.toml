@@ -259,7 +259,7 @@ ignore = [
 "tests/test_joinwatch_retry.py" = ["PLW0108"]
 
 [tool.mypy]
-files = ["Honeypot", "NHMisc"]
+files = ["NHCogs", "NHCogsMigrator"]
 python_version = "3.10"
 exclude = "(^|/)(\\.worktrees|local-data)/"
 ignore_missing_imports = true

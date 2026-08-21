@@ -5,7 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "NHMisc" / "achievement_sync.py"
+MODULE_PATH = Path(__file__).resolve().parents[1] / "NHCogs" / "nhmisc" / "achievement_sync.py"
 SPEC = importlib.util.spec_from_file_location("_achievement_sync", MODULE_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("Unable to load achievement sync")

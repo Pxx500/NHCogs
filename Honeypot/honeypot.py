@@ -140,6 +140,8 @@ IMAGE_ATTACHMENT_EXTENSIONS = imagescan.IMAGE_ATTACHMENT_EXTENSIONS
 class Honeypot(Cog):
     """Detect and review suspicious activity with honeypot channels, image scanning, and join monitoring."""
 
+    QUIESCENT_UNLOAD_VERSION = 1
+
     def format_help_for_context(self, ctx: commands.Context) -> str:
         help_text = commands.Cog.format_help_for_context(self, ctx)
         return (

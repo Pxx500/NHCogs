@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 PACKAGE_NAME = "nhmisc_role_analytics_service_test_package"
-PACKAGE_PATH = Path(__file__).parents[1] / "NHMisc"
+PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs" / "nhmisc"
 package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(PACKAGE_PATH)]
 sys.modules[PACKAGE_NAME] = package

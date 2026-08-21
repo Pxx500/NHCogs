@@ -17,7 +17,7 @@ from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
 from unittest import mock
 
-PACKAGE_DIR = Path(__file__).resolve().parents[1] / "Honeypot"
+PACKAGE_DIR = Path(__file__).resolve().parents[1] / "NHCogs" / "honeypot"
 _MISSING = object()
 
 EXPECTED_GUILD_DEFAULTS = {

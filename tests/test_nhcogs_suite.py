@@ -12,6 +12,7 @@ _MISSING = object()
 
 class StubNHMisc:
     qualified_name = "NHMisc"
+    CONFIG_IDENTIFIER = 8597423150612235807
 
     def __init__(self, bot):
         self.bot = bot
@@ -19,6 +20,7 @@ class StubNHMisc:
 
 class StubHoneypot:
     qualified_name = "Honeypot"
+    CONFIG_IDENTIFIER = 205192943327321000143939875896557571750
 
     def __init__(self, bot):
         self.bot = bot
@@ -104,6 +106,13 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
             bot = FakeBot()
 
             await suite.setup(bot)
+
+            self.assertEqual(suite.NHMisc.__name__, "StubNHMisc")
+            self.assertEqual(suite.NHMisc.CONFIG_IDENTIFIER, 8597423150612235807)
+            self.assertEqual(
+                suite.Honeypot.CONFIG_IDENTIFIER,
+                205192943327321000143939875896557571750,
+            )
 
         self.assertEqual(bot.added, ["NHMisc", "Honeypot"])
         self.assertEqual(set(bot.cogs), {"NHMisc", "Honeypot"})

@@ -23,6 +23,42 @@ from tests.harness import (
 
 
 class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_health_reports_a_stopped_required_loop(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                pending_task = asyncio.create_task(asyncio.Event().wait())
+
+                class Loop:
+                    def __init__(self, *, running=True):
+                        self.running = running
+
+                    def is_running(self):
+                        return self.running
+
+                    def failed(self):
+                        return False
+
+                    def get_task(self):
+                        return pending_task
+
+                cog = SimpleNamespace(
+                    joinwatch_auto_role_loop=Loop(running=False),
+                    purge_cache_cleanup_loop=Loop(),
+                    firstpost_seen_flush_loop=Loop(),
+                    detection_case_loop=Loop(),
+                    detection_reconciliation_loop=Loop(),
+                    _daily_stats_task=pending_task,
+                )
+
+                try:
+                    self.assertEqual(
+                        honeypot.Honeypot.runtime_health_issues(cog),
+                        ("joinwatch auto role loop is not running",),
+                    )
+                finally:
+                    pending_task.cancel()
+                    await asyncio.gather(pending_task, return_exceptions=True)
+
     async def test_load_prunes_unknown_guild_config_keys(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:

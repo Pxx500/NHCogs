@@ -24,7 +24,7 @@ class Forbidden(HTTPException):
     pass
 
 
-PACKAGE_DIR = Path(__file__).resolve().parents[1] / "Honeypot"
+PACKAGE_DIR = Path(__file__).resolve().parents[1] / "NHCogs" / "honeypot"
 _MISSING = object()
 
 

@@ -67,6 +67,7 @@ from .operations.context import (
     OperationOutcome,  # noqa: F401 - public module re-export
 )
 from .remote_media import RemoteMediaInspector
+from .runtime_health import task_health_issue
 from .settings import (
     BAIT_ACTION_OPTIONS,  # noqa: F401 - public module re-export
     CORE_ACTION_OPTIONS,  # noqa: F401 - public module re-export
@@ -140,6 +141,10 @@ IMAGE_ATTACHMENT_EXTENSIONS = imagescan.IMAGE_ATTACHMENT_EXTENSIONS
 class Honeypot(Cog):
     """Detect and review suspicious activity with honeypot channels, image scanning, and join monitoring."""
 
+    CONFIG_IDENTIFIER = 205192943327321000143939875896557571750
+    QUIESCENT_UNLOAD_VERSION = 1
+    RUNTIME_HEALTH_VERSION = 1
+
     def format_help_for_context(self, ctx: commands.Context) -> str:
         help_text = commands.Cog.format_help_for_context(self, ctx)
         return (
@@ -155,7 +160,7 @@ class Honeypot(Cog):
 
         self.config: Config = Config.get_conf(
             self,
-            identifier=205192943327321000143939875896557571750,
+            identifier=self.CONFIG_IDENTIFIER,
             force_registration=True,
         )
         self.config.register_guild(**settings.DEFAULTS)
@@ -994,6 +999,29 @@ class Honeypot(Cog):
         )
         self._install_console_log_buffer()
         self._manual_punishment.register()
+
+    def runtime_health_issues(self) -> tuple[str, ...]:
+        issues = []
+        loops = (
+            (self.joinwatch_auto_role_loop, "joinwatch auto role loop"),
+            (self.purge_cache_cleanup_loop, "purge cache cleanup loop"),
+            (self.firstpost_seen_flush_loop, "firstpost seen flush loop"),
+            (self.detection_case_loop, "detection case loop"),
+            (self.detection_reconciliation_loop, "detection reconciliation loop"),
+        )
+        for loop, label in loops:
+            task = loop.get_task()
+            if not loop.is_running() or loop.failed():
+                issues.append(f"{label} is not running")
+            elif (issue := task_health_issue(task, label)) is not None:
+                issues.append(issue)
+        daily_issue = task_health_issue(
+            self._daily_stats_task,
+            "daily statistics publisher",
+        )
+        if daily_issue is not None:
+            issues.append(daily_issue)
+        return tuple(issues)
 
     @staticmethod
     def _observe_background_task(task: asyncio.Task, label: str) -> None:

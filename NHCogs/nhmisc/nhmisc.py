@@ -91,6 +91,7 @@ from .role_expression import (
     render_role_expression,
     role_ids,
 )
+from .runtime_health import task_health_issue
 from .sticky_roles import StickyRoleStore
 from .voice_activity import VoiceChannelVisitTracker
 
@@ -445,12 +446,16 @@ def _plan_gate_revoke_roles(guild, member, current_count: int) -> tuple:
 class NHMisc(commands.Cog):
     """Miscellaneous small utilities for Red-DiscordBot."""
 
+    CONFIG_IDENTIFIER = 8597423150612235807
+    QUIESCENT_UNLOAD_VERSION = 1
+    RUNTIME_HEALTH_VERSION = 1
+
     def __init__(self, bot):
         super().__init__()
         self.bot = bot
         self.config = Config.get_conf(
             self,
-            identifier=8597423150612235807,
+            identifier=self.CONFIG_IDENTIFIER,
             force_registration=True,
         )
         self.config.register_guild(
@@ -565,6 +570,17 @@ class NHMisc(commands.Cog):
         )
         self._gate_increment_recovery_task = asyncio.create_task(
             self._recover_interrupted_gate_increments()
+        )
+
+    def runtime_health_issues(self) -> tuple[str, ...]:
+        required_tasks = (
+            (self._activity_task, "activity midnight task"),
+            (self._role_analytics_daily_task, "role analytics daily task"),
+        )
+        return tuple(
+            issue
+            for task, label in required_tasks
+            if (issue := task_health_issue(task, label)) is not None
         )
 
     async def cog_unload(self) -> None:

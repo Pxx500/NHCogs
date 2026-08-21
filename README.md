@@ -23,14 +23,15 @@ the nested packages under `NHCogs/` during this release.
 [p]repo add NHCogs https://github.com/Pxx500/NHCogs
 ```
 
-Install either or both cogs:
+For the consolidation release, install the combined suite and temporary
+migrator. Keep the currently loaded legacy cogs active until the migration plan
+is applied.
 
 ```ini
-[p]cog install NHCogs Honeypot
-[p]cog install NHCogs NHMisc
-[p]load Honeypot
-[p]load NHMisc
+[p]cog install NHCogs NHMisc Honeypot NHCogs NHCogsMigrator
+[p]reload NHMisc Honeypot
+[p]load NHCogsMigrator
 ```
 
-Each cog keeps its own requirements, metadata, documentation, and end-user data
-statement in its directory.
+Follow [`NHCogsMigrator/README.md`](NHCogsMigrator/README.md) for plan, apply,
+restart verification, finalization, and recovery instructions.

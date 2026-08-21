@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 PACKAGE_NAME = "nhmisc_role_analytics_commands_test_package"
-PACKAGE_PATH = Path(__file__).parents[1] / "NHMisc"
+PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs" / "nhmisc"
 
 
 class UserFeedbackCheckFailure(Exception):

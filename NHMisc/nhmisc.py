@@ -445,6 +445,8 @@ def _plan_gate_revoke_roles(guild, member, current_count: int) -> tuple:
 class NHMisc(commands.Cog):
     """Miscellaneous small utilities for Red-DiscordBot."""
 
+    QUIESCENT_UNLOAD_VERSION = 1
+
     def __init__(self, bot):
         super().__init__()
         self.bot = bot
