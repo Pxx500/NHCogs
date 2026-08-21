@@ -500,7 +500,7 @@ class MigrationCutoverTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.state, MigrationState.RESTART_VERIFIED)
 
-    async def test_restart_still_requires_honeypot_views_from_pre_scope_run(self):
+    async def test_restart_ignores_views_from_pre_scope_run(self):
         suite_view = "honeypot:case:case-id:moderate:ban"
         scoped_inventory = SuiteInventory(("command",), ("listener",), ("app",), ())
         pre_scope_inventory = SuiteInventory(
@@ -544,11 +544,9 @@ class MigrationCutoverTests(unittest.IsolatedAsyncioTestCase):
             "sleep",
             new=mock.AsyncMock(),
         ):
-            with self.assertRaisesRegex(
-                MigrationApplyError,
-                "persistent_view_custom_ids missing=1 extra=0",
-            ):
-                await restarted.verify_restart("run-1")
+            result = await restarted.verify_restart("run-1")
+
+        self.assertEqual(result.state, MigrationState.RESTART_VERIFIED)
 
     async def test_restart_waits_for_suite_inventory_to_settle(self):
         runtime = FakeRuntime(self.paths, self.inventory)
