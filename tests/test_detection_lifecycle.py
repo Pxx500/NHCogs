@@ -194,7 +194,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 for name in implementation_names:
                     with self.subTest(command=name):
                         command = getattr(honeypot.Honeypot, name)
-                        self.assertEqual(command.callback.__module__, "Honeypot.honeypot")
+                        self.assertEqual(command.callback.__module__, "NHCogs.honeypot.honeypot")
                         self.assertTrue(callable(getattr(diagnostics, name, None)))
 
     async def test_cog_after_invoke_keeps_group_cleanup_override(self):
@@ -490,7 +490,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(observed, EXPECTED_GUILD_DEFAULTS)
 
     async def test_isolation_removes_new_nested_honeypot_module(self):
-        module_name = "Honeypot.operations.source_delete"
+        module_name = "NHCogs.honeypot.operations.source_delete"
         sys.modules.pop(module_name, None)
         try:
             with TemporaryDirectory() as directory:
@@ -502,7 +502,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
             sys.modules.pop(module_name, None)
 
     async def test_isolation_restores_preexisting_nested_honeypot_module(self):
-        module_name = "Honeypot.operations.source_delete"
+        module_name = "NHCogs.honeypot.operations.source_delete"
         previous = sys.modules.get(module_name, _MISSING)
         sentinel = ModuleType(module_name)
         sys.modules[module_name] = sentinel
@@ -519,7 +519,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 sys.modules[module_name] = previous
 
     async def test_each_isolated_load_owns_one_detection_view_identity(self):
-        module_name = "Honeypot.views"
+        module_name = "NHCogs.honeypot.views"
         previous = sys.modules.get(module_name, _MISSING)
 
         with TemporaryDirectory() as directory:
@@ -561,7 +561,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     with self.subTest(symbol=symbol):
                         owners = {}
                         for name, module in list(sys.modules.items()):
-                            if not name.startswith("Honeypot."):
+                            if not name.startswith("NHCogs.honeypot."):
                                 continue
                             value = getattr(module, symbol, None)
                             if value is not None:

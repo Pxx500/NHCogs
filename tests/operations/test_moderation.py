@@ -109,7 +109,7 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def _handler(honeypot):
-        operations = import_module("Honeypot.operations")
+        operations = import_module("NHCogs.honeypot.operations")
         return operations.OperationHandlerRegistry().resolve(
             honeypot.OperationType.MODERATION_ACTION
         )

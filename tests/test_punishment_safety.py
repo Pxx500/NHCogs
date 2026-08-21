@@ -63,7 +63,7 @@ class PunitiveEffectPolicyTests(unittest.IsolatedAsyncioTestCase):
     async def _assert_current_dry_run_plans(self, action: str) -> None:
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                from Honeypot.effects import (  # noqa: PLC0415
+                from NHCogs.honeypot.effects import (  # noqa: PLC0415
                     EffectStatus,
                     ModerationOrigin,
                 )
@@ -120,7 +120,7 @@ class PunitiveEffectPolicyTests(unittest.IsolatedAsyncioTestCase):
     async def test_successful_ban_records_its_declared_daily_origin(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                from Honeypot.effects import (  # noqa: PLC0415
+                from NHCogs.honeypot.effects import (  # noqa: PLC0415
                     EffectStatus,
                     ModerationOrigin,
                 )
@@ -167,7 +167,7 @@ class PunitiveEffectPolicyTests(unittest.IsolatedAsyncioTestCase):
     async def test_successful_ban_records_daily_stat_before_lifetime_counter(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                from Honeypot.effects import ModerationOrigin  # noqa: PLC0415
+                from NHCogs.honeypot.effects import ModerationOrigin  # noqa: PLC0415
 
                 cog = honeypot.Honeypot(_Bot())
                 current_config = SimpleNamespace(
@@ -206,7 +206,7 @@ class PunitiveEffectPolicyTests(unittest.IsolatedAsyncioTestCase):
     async def test_successful_kick_fail_warning_keeps_failed_effect_status(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                from Honeypot.effects import (  # noqa: PLC0415
+                from NHCogs.honeypot.effects import (  # noqa: PLC0415
                     EffectStatus,
                     ModerationOrigin,
                 )
@@ -336,7 +336,7 @@ class UnknownKickRecoveryTests(unittest.IsolatedAsyncioTestCase):
             now=now,
         )
         handler = import_module(
-            "Honeypot.operations"
+            "NHCogs.honeypot.operations"
         ).OperationHandlerRegistry().resolve(operation_type)
 
         with mock.patch.object(

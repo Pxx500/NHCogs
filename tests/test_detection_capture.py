@@ -569,7 +569,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 cog._scan_all_case_message_images = mock.AsyncMock()
                 cog._publish_detection_case = mock.AsyncMock()
                 message_process = import_module(
-                    "Honeypot.operations.message_process"
+                    "NHCogs.honeypot.operations.message_process"
                 )
 
                 with mock.patch.object(
@@ -647,7 +647,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 cog = honeypot.Honeypot(_Bot())
                 try:
                     handler_module = import_module(
-                        "Honeypot.operations.message_process"
+                        "NHCogs.honeypot.operations.message_process"
                     )
                 except ModuleNotFoundError:
                     self.fail("message_process has no dedicated handler module")

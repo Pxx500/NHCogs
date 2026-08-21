@@ -196,7 +196,7 @@ class LogDumpTests(unittest.TestCase):
                     "discord.client",
                     "/venv/discord/client.py",
                     logging.ERROR,
-                    'File "/srv/cogs/Honeypot/honeypot.py", line 5962',
+                    'File "/srv/cogs/NHCogs/honeypot/honeypot.py", line 5962',
                 ),
                 make_entry(
                     now,

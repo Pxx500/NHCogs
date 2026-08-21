@@ -30,7 +30,7 @@ class SourceDeleteHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 try:
-                    handler_module = import_module("Honeypot.operations.source_delete")
+                    handler_module = import_module("NHCogs.honeypot.operations.source_delete")
                 except ModuleNotFoundError:
                     self.fail("source_delete has no dedicated handler module")
                 now = datetime.now(timezone.utc)
@@ -105,7 +105,7 @@ class SourceDeleteHandlerTests(unittest.IsolatedAsyncioTestCase):
                 TemporaryDirectory() as directory,
             ):
                 with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                    handler_module = import_module("Honeypot.operations.source_delete")
+                    handler_module = import_module("NHCogs.honeypot.operations.source_delete")
                     now = datetime.now(timezone.utc)
 
                     async def fetch_missing_message(message_id):
@@ -193,7 +193,7 @@ class SourceDeleteHandlerTests(unittest.IsolatedAsyncioTestCase):
                 TemporaryDirectory() as directory,
             ):
                 with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                    import_module("Honeypot.operations.source_delete")
+                    import_module("NHCogs.honeypot.operations.source_delete")
                     now = datetime.now(timezone.utc)
                     exception_type = getattr(honeypot.discord, exception_name)
 
@@ -269,7 +269,7 @@ class SourceDeleteHandlerTests(unittest.IsolatedAsyncioTestCase):
                 TemporaryDirectory() as directory,
             ):
                 with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                    handler_module = import_module("Honeypot.operations.source_delete")
+                    handler_module = import_module("NHCogs.honeypot.operations.source_delete")
                     now = datetime.now(timezone.utc)
 
                     async def delete_message():
@@ -378,7 +378,7 @@ class SourceDeleteHandlerTests(unittest.IsolatedAsyncioTestCase):
                 TemporaryDirectory() as directory,
             ):
                 with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                    handler_module = import_module("Honeypot.operations.source_delete")
+                    handler_module = import_module("NHCogs.honeypot.operations.source_delete")
                     now = datetime.now(timezone.utc)
                     forward_signal = honeypot.DetectionSignal(
                         detector="forward_purge",
@@ -526,7 +526,7 @@ class SourceDeleteHandlerTests(unittest.IsolatedAsyncioTestCase):
                 TemporaryDirectory() as directory,
             ):
                 with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                    handler_module = import_module("Honeypot.operations.source_delete")
+                    handler_module = import_module("NHCogs.honeypot.operations.source_delete")
                     now = datetime.now(timezone.utc)
                     bot = _Bot()
                     bot.get_guild = lambda guild_id: guild

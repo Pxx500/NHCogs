@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "NHCogs" / "honeypot" / "honeypot.py"
-spec = util.spec_from_file_location("Honeypot.honeypot", MODULE_PATH)
+spec = util.spec_from_file_location("NHCogs.honeypot.honeypot", MODULE_PATH)
 honeypot = util.module_from_spec(spec)
 
 
@@ -154,9 +154,12 @@ _install_redbot_stubs()
 import sys
 import types
 
-package = types.ModuleType("Honeypot")
+suite_package = types.ModuleType("NHCogs")
+suite_package.__path__ = [str(MODULE_PATH.parents[1])]
+package = types.ModuleType("NHCogs.honeypot")
 package.__path__ = [str(MODULE_PATH.parent)]
-sys.modules["Honeypot"] = package
+sys.modules["NHCogs"] = suite_package
+sys.modules["NHCogs.honeypot"] = package
 sys.modules[spec.name] = honeypot
 assert spec.loader is not None
 spec.loader.exec_module(honeypot)

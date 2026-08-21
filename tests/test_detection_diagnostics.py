@@ -27,7 +27,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
                 diagnostics = __import__(
-                    "Honeypot.diagnostics", fromlist=["_doctor_gif_detector_checks"]
+                    "NHCogs.honeypot.diagnostics", fromlist=["_doctor_gif_detector_checks"]
                 )
                 configured = diagnostics.GuildSettings.from_mapping(
                     self._doctor_config(gif_detector_enabled=True)

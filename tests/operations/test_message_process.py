@@ -74,7 +74,7 @@ class MessageProcessHandlerSeamTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 try:
-                    handler_module = import_module("Honeypot.operations.message_process")
+                    handler_module = import_module("NHCogs.honeypot.operations.message_process")
                 except ModuleNotFoundError:
                     self.fail("message_process has no dedicated handler module")
                 cog = honeypot.Honeypot(_Bot())
@@ -88,7 +88,7 @@ class MessageProcessHandlerSeamTests(unittest.IsolatedAsyncioTestCase):
     async def test_terminal_case_short_circuits_and_fails_pending_captures(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                handler_module = import_module("Honeypot.operations.message_process")
+                handler_module = import_module("NHCogs.honeypot.operations.message_process")
                 now = datetime.now(timezone.utc)
                 cog = honeypot.Honeypot(_Bot())
                 appended = self._append_case_with_attachment(
@@ -124,7 +124,7 @@ class MessageProcessHandlerSeamTests(unittest.IsolatedAsyncioTestCase):
     async def test_terminal_case_without_sequence_leaves_captures_untouched(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                handler_module = import_module("Honeypot.operations.message_process")
+                handler_module = import_module("NHCogs.honeypot.operations.message_process")
                 now = datetime.now(timezone.utc)
                 cog = honeypot.Honeypot(_Bot())
                 appended = self._append_case_with_attachment(

@@ -108,7 +108,7 @@ class ModeratorDecisionHandlerTests(unittest.IsolatedAsyncioTestCase):
                     honeypot, cog, appended, "ban", 777, now
                 )
                 registry = import_module(
-                    "Honeypot.operations"
+                    "NHCogs.honeypot.operations"
                 ).OperationHandlerRegistry()
                 handler = registry.resolve(honeypot.OperationType.MODERATOR_BAN)
 
@@ -235,7 +235,7 @@ class ModeratorIgnoreTests(unittest.IsolatedAsyncioTestCase):
                     honeypot, cog, now, pending_attachment=True
                 )
                 module = import_module(
-                    "Honeypot.operations.moderator_decision"
+                    "NHCogs.honeypot.operations.moderator_decision"
                 )
                 apply_ignore = getattr(module, "apply_moderator_ignore", None)
 

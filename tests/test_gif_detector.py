@@ -36,7 +36,7 @@ class GifDetectorClassificationTests(unittest.TestCase):
     def test_malformed_embed_and_attachment_collections_are_ignored(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
 
                 for field in ("embeds", "attachments"):
                     with self.subTest(field=field):
@@ -45,7 +45,7 @@ class GifDetectorClassificationTests(unittest.TestCase):
     def test_supported_gif_evidence_is_detected_without_matching_ordinary_mp4(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
 
                 positive_cases = {
                     "gifv embed": {"embeds": [{"type": "gifv"}]},
@@ -120,7 +120,7 @@ class GifDetectorClassificationTests(unittest.TestCase):
     def test_thread_scope_uses_its_parent_channel(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
 
                 self.assertEqual(
                     gif_detector.channel_scope_id(
@@ -140,7 +140,7 @@ class GifDetectorAnimationTests(unittest.TestCase):
     def test_animation_uses_a_fixed_horizontal_track(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
 
                 expected_frames = [
                     "🚀──────────🎯 @User's GIF",
@@ -163,7 +163,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_webp_fallback_is_scheduled_after_main_detection(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 message = SimpleNamespace(
                     embeds=[],
@@ -198,7 +198,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_local_gif_evidence_skips_webp_fallback(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 message = SimpleNamespace(
                     embeds=[SimpleNamespace(type="gifv")],
@@ -231,7 +231,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_animated_avif_url_uses_remote_admission_path(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
@@ -281,7 +281,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_animated_webp_fallback_reuses_existing_admission_path(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
@@ -341,7 +341,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_webp_fallback_prioritizes_signed_discord_candidate(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
@@ -412,7 +412,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_webp_fallback_accepts_refreshed_signature_for_same_attachment(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
@@ -485,7 +485,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_webp_fallback_rejects_different_discord_attachment_path(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
@@ -551,7 +551,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def test_discord_webp_identity_only_ignores_signature_query_fields(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 original = (
                     "https://media.discordapp.net/a/anim.webp"
                     "?format=webp&width=320&ex=old&is=old&hm=old"
@@ -579,7 +579,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_static_webp_does_not_enter_admission_path(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
@@ -621,7 +621,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_webp_removed_during_inspection_is_not_admitted(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
@@ -671,7 +671,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_webp_deleted_during_inspection_is_not_admitted_or_reported(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
@@ -724,7 +724,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_ineligible_webp_message_is_rejected_before_remote_inspection(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
@@ -754,7 +754,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_webp_events_share_one_remote_inspection(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
@@ -798,7 +798,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_new_hit_prunes_expired_rate_state_for_its_guild(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 configured = honeypot.GuildSettings.from_mapping({})
                 cog._gif_detector_hits[(1, 90)] = deque([0.0])
@@ -819,7 +819,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_third_gif_in_default_window_requests_one_hour_role_mute(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
@@ -914,7 +914,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_core_mute_role_records_failure_without_calling_mute_service(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog._record_operational_failure = mock.AsyncMock()
                 guild = SimpleNamespace(
@@ -947,7 +947,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_successful_core_mute_resolves_member_and_creates_modlog_case(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog._record_operational_failure = mock.AsyncMock()
                 user = SimpleNamespace(id=20)
@@ -1010,7 +1010,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_modlog_failure_keeps_successful_mute_tracked_and_reports_failure(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog._record_operational_failure = mock.AsyncMock()
                 user = SimpleNamespace(id=20)
@@ -1063,7 +1063,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_zero_retention_deletes_static_gif_and_keeps_warning_for_five_seconds(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
@@ -1139,7 +1139,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_enabled_debug_logging_updates_one_record_for_an_admitted_shot(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
@@ -1204,7 +1204,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_first_gif_ends_with_three_second_impact_frame(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
@@ -1300,7 +1300,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_short_animated_retention_impacts_at_source_deadline(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 events = []
                 clock = 100.0
@@ -1366,7 +1366,7 @@ class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_retention_command_stores_a_bounded_source_deadline(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 retention = mock.AsyncMock(return_value=5)
                 retention.set = mock.AsyncMock()
                 guild_config = SimpleNamespace(
@@ -1401,7 +1401,7 @@ class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_rate_commands_store_bounded_threshold_window_and_mute_duration(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 threshold = SimpleNamespace(set=mock.AsyncMock())
                 window = SimpleNamespace(set=mock.AsyncMock())
                 duration = SimpleNamespace(set=mock.AsyncMock())
@@ -1439,7 +1439,7 @@ class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = object.__new__(honeypot.Honeypot)
                 configure = mock.AsyncMock()
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 gif_detector.config_gif_detector = configure
                 channel_group = SimpleNamespace(
                     qualified_name="honeypot gifdetector channel",
@@ -1518,7 +1518,7 @@ class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_configuration_summary_shows_current_values_and_channels(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
@@ -1619,8 +1619,8 @@ class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_channel_and_message_commands_update_normalized_configuration(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
-                gif_detector = import_module("Honeypot.gif_detector")
-                channel_routing = import_module("Honeypot.channel_routing")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
+                channel_routing = import_module("NHCogs.honeypot.channel_routing")
                 channel_ids = []
 
                 class ChannelList:
@@ -1677,7 +1677,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_late_raw_webp_embed_schedules_remote_fallback(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 message = SimpleNamespace(
                     id=30,
@@ -1717,7 +1717,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_late_raw_webp_attachment_uses_its_cdn_url_as_candidate(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 message = SimpleNamespace(
                     id=30,
@@ -1758,7 +1758,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
     ):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 message = SimpleNamespace(
                     id=30,
@@ -1808,7 +1808,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_late_raw_gifv_embed_uses_updated_message_without_fetching(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
@@ -1855,7 +1855,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_positive_uncached_raw_update_fetches_and_handles_source_message(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
@@ -1971,7 +1971,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_static_retention_cleans_up_source_and_warning(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 started = asyncio.Event()
 
@@ -2008,7 +2008,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_second_gif_uses_static_path_while_guild_animation_is_active(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
@@ -2097,7 +2097,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_deleted_animation_warning_does_not_shorten_source_deadline(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                gif_detector = import_module("Honeypot.gif_detector")
+                gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,

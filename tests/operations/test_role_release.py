@@ -90,10 +90,10 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 try:
-                    handler_module = import_module("Honeypot.operations.role_release")
+                    handler_module = import_module("NHCogs.honeypot.operations.role_release")
                 except ModuleNotFoundError:
                     self.fail("role_release has no dedicated handler module")
-                operations = import_module("Honeypot.operations")
+                operations = import_module("NHCogs.honeypot.operations")
                 now = datetime.now(timezone.utc)
                 role = SimpleNamespace(id=55)
                 member = SimpleNamespace(id=20, roles=[role], removals=[])

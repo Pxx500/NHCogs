@@ -94,7 +94,7 @@ class WebPAnimationClassificationTests(unittest.TestCase):
         self.modules = _isolated_honeypot_modules(Path(self.directory.name))
         self.modules.__enter__()
         self.classify = import_module(
-            "Honeypot.remote_media"
+            "NHCogs.honeypot.remote_media"
         ).classify_webp_animation
 
     def tearDown(self):
@@ -310,7 +310,7 @@ class DecodedAnimationClassificationTests(unittest.TestCase):
         self.directory = TemporaryDirectory()
         self.modules = _isolated_honeypot_modules(Path(self.directory.name))
         self.modules.__enter__()
-        self.remote_media = import_module("Honeypot.remote_media")
+        self.remote_media = import_module("NHCogs.honeypot.remote_media")
 
     def tearDown(self):
         self.modules.__exit__(None, None, None)
@@ -380,7 +380,7 @@ class RemoteMediaInspectionTests(unittest.IsolatedAsyncioTestCase):
         self.directory = TemporaryDirectory()
         self.modules = _isolated_honeypot_modules(Path(self.directory.name))
         self.modules.__enter__()
-        self.remote_media = import_module("Honeypot.remote_media")
+        self.remote_media = import_module("NHCogs.honeypot.remote_media")
 
     async def asyncTearDown(self):
         self.modules.__exit__(None, None, None)
