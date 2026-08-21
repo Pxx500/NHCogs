@@ -22,6 +22,12 @@ from .settings import GuildSettings
 _ = Translator("Honeypot", __file__)
 
 
+def channel_scope_id(channel: Any) -> int:
+    """Return the configured parent-channel scope for a channel or thread."""
+
+    return getattr(channel, "parent_id", None) or channel.id
+
+
 @dataclass(frozen=True)
 class ChannelCategory:
     key: str

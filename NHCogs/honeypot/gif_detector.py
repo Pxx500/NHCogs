@@ -18,6 +18,7 @@ from redbot.core import commands, modlog
 from redbot.core.i18n import Translator
 
 from . import settings
+from .channel_routing import channel_scope_id
 from .settings import GuildSettings
 
 log = logging.getLogger("red.Honeypot")
@@ -294,12 +295,6 @@ def gif_evidence_source(
     if any(_embed_has_gif_evidence(embed) for embed in _collection(embeds)):
         return "embed"
     return None
-
-
-def channel_scope_id(channel: Any) -> int:
-    """Return the configured parent-channel scope for a channel or thread."""
-
-    return getattr(channel, "parent_id", None) or channel.id
 
 
 def render_icbm_frame(author_mention: str, *, rocket_position: int) -> str:

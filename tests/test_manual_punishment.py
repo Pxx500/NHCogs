@@ -363,6 +363,62 @@ class ManualPunishmentControllerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(tree.add_count, 1)
                 self.assertEqual(tree.remove_count, 1)
 
+    async def test_forum_thread_uses_parent_role_nt_configuration(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)):
+                module = import_module("NHCogs.honeypot.manual_punishment")
+                role = SimpleNamespace(id=500, name="Development-n’t", position=10)
+                evidence_channel = SimpleNamespace(id=900)
+                source_channel = SimpleNamespace(
+                    id=101,
+                    parent_id=100,
+                    name="feature-request",
+                    mention="#feature-request",
+                )
+                guild = SimpleNamespace(
+                    id=1,
+                    get_role=lambda role_id: role if role_id == role.id else None,
+                    get_channel=lambda channel_id: (
+                        evidence_channel if channel_id == 900 else None
+                    ),
+                )
+                source = _source_message(channel=source_channel, guild=guild)
+                cog = SimpleNamespace(
+                    bot=SimpleNamespace(tree=_CommandTree()),
+                    config=SimpleNamespace(
+                        guild=lambda guild: SimpleNamespace(
+                            all=mock.AsyncMock(
+                                return_value={
+                                    "manual_evidence_channel": 900,
+                                    "manual_punishment_roles": {
+                                        "500": {
+                                            "source_channel_ids": [100],
+                                            "notification_channel_id": None,
+                                        }
+                                    },
+                                }
+                            )
+                        )
+                    ),
+                    _channel_is_private=mock.Mock(return_value=True),
+                    _missing_channel_permissions=mock.Mock(return_value=None),
+                )
+                response = SimpleNamespace(send_message=mock.AsyncMock())
+                interaction = SimpleNamespace(
+                    guild=guild,
+                    permissions=SimpleNamespace(manage_messages=True),
+                    user=SimpleNamespace(id=10),
+                    response=response,
+                )
+
+                await module.ManualPunishmentController(cog).open(
+                    interaction,
+                    source,
+                )
+
+                view = response.send_message.await_args.kwargs["view"]
+                self.assertEqual(view.roles, (role,))
+
     async def test_combined_dry_run_checks_once_and_applies_no_effects(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
@@ -389,7 +445,11 @@ class ManualPunishmentControllerTests(unittest.IsolatedAsyncioTestCase):
                     add_roles=mock.AsyncMock(),
                 )
                 evidence_channel = SimpleNamespace(id=900)
-                source_channel = SimpleNamespace(id=100, name="french")
+                source_channel = SimpleNamespace(
+                    id=101,
+                    parent_id=100,
+                    name="french",
+                )
                 guild = SimpleNamespace(
                     id=1,
                     get_member=lambda member_id: target,

@@ -13,6 +13,7 @@ from redbot.core import commands, modlog
 from redbot.core.utils.chat_formatting import pagify
 
 from . import manual_punishment_publication as publication
+from .channel_routing import channel_scope_id
 from .effects import EffectStatus, ModerationOrigin
 from .settings import (
     MAX_MANUAL_PUNISHMENT_ROLES_PER_CHANNEL,
@@ -416,7 +417,7 @@ class ManualPunishmentController:
             await interaction.response.send_message(missing, ephemeral=True)
             return
 
-        roles = self._applicable_roles(guild, source_message.channel.id, settings)
+        roles = self._applicable_roles(guild, source_message.channel, settings)
         preview = source_message.content or "[No text content]"
         if len(preview) > PREVIEW_LENGTH:
             preview = f"{preview[: PREVIEW_LENGTH - 3]}..."
@@ -442,9 +443,10 @@ class ManualPunishmentController:
     @staticmethod
     def _applicable_roles(
         guild: Any,
-        channel_id: int,
+        channel: Any,
         settings: GuildSettings,
     ) -> tuple[tuple[Any, ManualPunishmentRoleSettings], ...]:
+        channel_id = channel_scope_id(channel)
         applicable = []
         for entry in settings.manual_punishment_roles.values():
             if channel_id not in entry.source_channel_ids:
@@ -534,7 +536,7 @@ class ManualPunishmentController:
                 return None
 
         applicable_roles = self._applicable_roles(
-            guild, source_message.channel.id, settings
+            guild, source_message.channel, settings
         )
         applicable = {role.id: (role, entry) for role, entry in applicable_roles}
         selected_ids = set(selection.role_ids)

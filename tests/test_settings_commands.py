@@ -5,6 +5,7 @@ they are grouped here rather than given a module apiece.
 """
 
 import logging
+import typing
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -97,6 +98,23 @@ class _ScalarSetting:
 
 
 class RoleNtSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
+    def test_role_nt_channel_commands_accept_forum_channels(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                for command in (
+                    honeypot.Honeypot.punishment_role_nt_add,
+                    honeypot.Honeypot.punishment_role_nt_remove_channel,
+                ):
+                    annotation = typing.get_type_hints(
+                        command.callback,
+                        globalns=vars(honeypot),
+                    )["channels"]
+                    converter = typing.get_args(annotation)[0]
+                    accepted_types = set(typing.get_args(converter) or (converter,))
+
+                    self.assertIn(honeypot.discord.TextChannel, accepted_types)
+                    self.assertIn(honeypot.discord.ForumChannel, accepted_types)
+
     async def test_add_registers_one_role_for_multiple_source_channels(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:

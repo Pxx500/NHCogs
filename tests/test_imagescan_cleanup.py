@@ -22,6 +22,7 @@ def _install_redbot_stubs() -> None:
     discord.Message = object
     discord.NotFound = Exception
     discord.TextChannel = object
+    discord.ForumChannel = object
     discord.Thread = object
     discord.File = object
     discord.Guild = object
