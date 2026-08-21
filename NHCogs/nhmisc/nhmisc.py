@@ -67,6 +67,7 @@ from .gate_roles import (
     build_role_ids_for_target,
     plan_gate_transition,
 )
+from .operational_errors import OperationalErrorReporter, OperationalFailure
 from .role_analytics_service import (
     FullMemberRequestCooldownError,
     MemberIntentRequiredError,
@@ -463,6 +464,8 @@ class NHMisc(commands.Cog):
             alert_channel=None,
             maintenance_channel=None,
             moderation_log_channel=None,
+            error_channel=None,
+            error_maintainer_id=None,
             vcjumping_visit_count=DEFAULT_VCJUMPING_VISIT_COUNT,
             vcjumping_window_seconds=DEFAULT_VCJUMPING_WINDOW_SECONDS,
             activity_channel=None,
@@ -470,6 +473,12 @@ class NHMisc(commands.Cog):
             activity_history_retention_days=DEFAULT_ACTIVITY_HISTORY_RETENTION_DAYS,
             sticky_debug_logging_enabled=False,
             forum_autopin_channel_ids=[],
+        )
+        self._operational_errors = OperationalErrorReporter(
+            self.bot,
+            self.config,
+            cog_data_path(self) / "operational_errors.sqlite",
+            logger=log,
         )
         self._voice_visits = VoiceChannelVisitTracker()
         self._audit_log_tasks: set[asyncio.Task] = set()
@@ -554,6 +563,7 @@ class NHMisc(commands.Cog):
         self._achievement_commands_registered = False
 
     async def cog_load(self) -> None:
+        await self._operational_errors.initialize()
         await self._activity_store.initialize()
         await self._sticky_roles.initialize()
         await self._role_analytics_store.initialize()
@@ -571,6 +581,85 @@ class NHMisc(commands.Cog):
         self._gate_increment_recovery_task = asyncio.create_task(
             self._recover_interrupted_gate_increments()
         )
+
+    @property
+    def operational_errors(self) -> OperationalErrorReporter:
+        return self._operational_errors
+
+    async def report_operational_error(
+        self,
+        *,
+        guild_id: int,
+        source: str,
+        action: str,
+        error: BaseException,
+        channel_id: int | None = None,
+        thread_id: int | None = None,
+        message_id: int | None = None,
+    ) -> OperationalFailure | None:
+        try:
+            return await self._operational_errors.report(
+                guild_id=guild_id,
+                source=source,
+                action=action,
+                error=error,
+                channel_id=channel_id,
+                thread_id=thread_id,
+                message_id=message_id,
+            )
+        except Exception:
+            log.exception(
+                "Failed to persist NH operational error for guild %s",
+                guild_id,
+            )
+            return None
+
+    async def cog_command_error(
+        self,
+        ctx: commands.Context,
+        error: commands.CommandError,
+    ) -> None:
+        expected_types = tuple(
+            error_type
+            for name in (
+                "UserFeedbackCheckFailure",
+                "CheckFailure",
+                "BadArgument",
+                "MissingRequiredArgument",
+                "CommandOnCooldown",
+                "DisabledCommand",
+            )
+            if isinstance((error_type := getattr(commands, name, None)), type)
+        )
+        original = getattr(error, "original", error)
+        if isinstance(error, expected_types) or isinstance(original, expected_types):
+            return
+        guild = getattr(ctx, "guild", None)
+        if guild is None:
+            return
+        command = getattr(ctx, "command", None)
+        action = getattr(command, "qualified_name", None) or "unknown command"
+        await self.report_operational_error(
+            guild_id=guild.id,
+            source="NHMisc",
+            action=action,
+            error=original,
+            channel_id=getattr(getattr(ctx, "channel", None), "id", None),
+            message_id=getattr(getattr(ctx, "message", None), "id", None),
+        )
+
+    async def _report_operational_error_for_guilds(
+        self,
+        action: str,
+        error: BaseException,
+    ) -> None:
+        for guild in tuple(self.bot.guilds):
+            await self.report_operational_error(
+                guild_id=guild.id,
+                source="NHMisc",
+                action=action,
+                error=error,
+            )
 
     def runtime_health_issues(self) -> tuple[str, ...]:
         required_tasks = (
@@ -969,8 +1058,12 @@ class NHMisc(commands.Cog):
                     )
                     continue
                 await self._reconcile_achievement_roles_for_guild(guild)
-        except Exception:
+        except Exception as error:
             log.exception("Failed to reconcile role analytics on startup")
+            await self._report_operational_error_for_guilds(
+                "startup role reconciliation",
+                error,
+            )
 
     async def _role_analytics_daily_loop(self) -> None:
         await self.bot.wait_until_ready()
@@ -983,8 +1076,12 @@ class NHMisc(commands.Cog):
                 for guild in self.bot.guilds:
                     if await self._achievement_store.is_bootstrapped(guild.id):
                         await self._reconcile_achievement_roles_for_guild(guild)
-            except Exception:
+            except Exception as error:
                 log.exception("Failed to run daily role analytics reconciliation")
+                await self._report_operational_error_for_guilds(
+                    "daily role reconciliation",
+                    error,
+                )
 
     @commands.Cog.listener()
     async def on_resumed(self) -> None:
@@ -993,8 +1090,12 @@ class NHMisc(commands.Cog):
             for guild in self.bot.guilds:
                 if await self._achievement_store.is_bootstrapped(guild.id):
                     await self._reconcile_achievement_roles_for_guild(guild)
-        except Exception:
+        except Exception as error:
             log.exception("Failed to reconcile achievement roles after resume")
+            await self._report_operational_error_for_guilds(
+                "resume role reconciliation",
+                error,
+            )
 
     async def red_delete_data_for_user(self, *, requester, user_id: int) -> None:
         await self._activity_store.delete_user_everywhere(user_id)
@@ -1002,6 +1103,9 @@ class NHMisc(commands.Cog):
         await self._role_analytics_store.delete_user_everywhere(user_id)
         await self._achievement_store.delete_user_everywhere(user_id)
         await self._gate_increment_store.redact_user_data(user_id)
+        for guild_id, guild_data in (await self.config.all_guilds()).items():
+            if guild_data.get("error_maintainer_id") == user_id:
+                await self.config.guild_from_id(guild_id).error_maintainer_id.clear()
 
     @staticmethod
     async def _defer_achievement_interaction(
@@ -1060,7 +1164,7 @@ class NHMisc(commands.Cog):
                 message,
                 public_defer=public_defer,
             )
-        except Exception:
+        except Exception as feedback_error:
             log.exception(
                 "Achievement interaction failed and its Discord error could not be "
                 "sent: action=%s guild=%s user=%s original_error=%r",
@@ -1068,6 +1172,24 @@ class NHMisc(commands.Cog):
                 getattr(interaction.guild, "id", None),
                 getattr(interaction.user, "id", None),
                 error,
+            )
+            guild_id = getattr(interaction.guild, "id", None)
+            if guild_id is not None:
+                await self.report_operational_error(
+                    guild_id=guild_id,
+                    source="NHMisc",
+                    action=f"send failure feedback for {action}",
+                    error=feedback_error,
+                    channel_id=getattr(interaction, "channel_id", None),
+                )
+        guild_id = getattr(interaction.guild, "id", None)
+        if guild_id is not None:
+            await self.report_operational_error(
+                guild_id=guild_id,
+                source="NHMisc",
+                action=action,
+                error=error,
+                channel_id=getattr(interaction, "channel_id", None),
             )
 
     @staticmethod
@@ -3153,6 +3275,14 @@ class NHMisc(commands.Cog):
             ) from error
         except Exception as error:
             log.exception("Role synchronization failed for guild %s", ctx.guild.id)
+            await self.report_operational_error(
+                guild_id=ctx.guild.id,
+                source="NHMisc",
+                action="synchronize role analytics",
+                error=error,
+                channel_id=ctx.channel.id,
+                message_id=ctx.message.id,
+            )
             raise commands.UserFeedbackCheckFailure(
                 "Role synchronization failed"
             ) from error
@@ -3609,6 +3739,7 @@ class NHMisc(commands.Cog):
                 ctx,
                 preferred_order=(
                     "log",
+                    "errors",
                     "vcjumping",
                     "forumautopin",
                     "stickyroles",
@@ -3624,6 +3755,108 @@ class NHMisc(commands.Cog):
             inline=False,
         )
         await ctx.send(embed=embed)
+
+    @nhmisc.group(name="errors", invoke_without_command=True)
+    async def nhmisc_errors(self, ctx: commands.Context) -> None:
+        """Configure private operational error reporting."""
+        guild_config = self.config.guild(ctx.guild)
+        channel_id = await guild_config.error_channel()
+        maintainer_id = await guild_config.error_maintainer_id()
+        active_failures = await self._operational_errors.active_count(ctx.guild.id)
+        if self._channel_is_public(ctx):
+            channel_label = "Run this command in a channel hidden from @everyone."
+            maintainer_label = channel_label
+            failure_label = channel_label
+        else:
+            channel_label = self._configured_channel_label(ctx.guild, channel_id)
+            maintainer = (
+                ctx.guild.get_member(maintainer_id)
+                if maintainer_id is not None
+                else None
+            )
+            maintainer_label = (
+                maintainer.mention if maintainer is not None else "Not configured"
+            )
+            failure_label = str(active_failures)
+        embed = self._configuration_embed(
+            ctx=ctx,
+            title="Operational errors",
+            current=(
+                f"Channel: {channel_label}",
+                f"Maintainer: {maintainer_label}",
+                f"Active failures: {failure_label}",
+            ),
+        )
+        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+    @nhmisc_errors.group(name="channel", invoke_without_command=True)
+    async def nhmisc_errors_channel(
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        """Show or set the private operational error channel."""
+        if channel is None:
+            await self._show_log_destination(
+                ctx,
+                title="Operational error channel",
+                config_key="error_channel",
+            )
+            return
+        missing_permissions = self._missing_log_permissions(
+            ctx.guild,
+            channel,
+            require_attach_files=True,
+        )
+        if missing_permissions is not None:
+            raise commands.UserFeedbackCheckFailure(missing_permissions)
+        if self._channel_allows_everyone(channel, ctx.guild):
+            raise commands.UserFeedbackCheckFailure(
+                "Configure a channel that is private from @everyone"
+            )
+        await self.config.guild(ctx.guild).error_channel.set(channel.id)
+        await ctx.send(f"Operational error channel set to {channel.mention}.")
+
+    @nhmisc_errors_channel.command(name="clear")
+    async def nhmisc_errors_channel_clear(self, ctx: commands.Context) -> None:
+        """Clear the operational error channel."""
+        await self.config.guild(ctx.guild).error_channel.clear()
+        await ctx.send("Operational error channel cleared.")
+
+    @nhmisc_errors.group(name="maintainer", invoke_without_command=True)
+    async def nhmisc_errors_maintainer(
+        self,
+        ctx: commands.Context,
+        member: discord.Member | None = None,
+    ) -> None:
+        """Show or set the maintainer pinged for operational errors."""
+        setting = self.config.guild(ctx.guild).error_maintainer_id
+        if member is not None:
+            await setting.set(member.id)
+            await ctx.send(
+                f"Operational error maintainer set to {member.mention}.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        maintainer_id = await setting()
+        if self._channel_is_public(ctx):
+            value = "Run this command in a channel hidden from @everyone."
+        else:
+            maintainer = (
+                ctx.guild.get_member(maintainer_id)
+                if maintainer_id is not None
+                else None
+            )
+            value = maintainer.mention if maintainer is not None else "Not configured"
+        embed = discord.Embed(title="Operational error maintainer")
+        embed.add_field(name="Current configuration", value=value, inline=False)
+        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+    @nhmisc_errors_maintainer.command(name="clear")
+    async def nhmisc_errors_maintainer_clear(self, ctx: commands.Context) -> None:
+        """Clear the operational error maintainer."""
+        await self.config.guild(ctx.guild).error_maintainer_id.clear()
+        await ctx.send("Operational error maintainer cleared.")
 
     def _loaded_honeypot(self):
         honeypot = self.bot.get_cog("Honeypot")
@@ -3649,9 +3882,17 @@ class NHMisc(commands.Cog):
             return
         try:
             result = await honeypot.cleanup_channel(ctx, count)
-        except Exception:
+        except Exception as error:
             log.exception("Honeypot channel cleanup failed")
-            await ctx.send("Cleanup failed. Check the bot logs and try again.")
+            await self.report_operational_error(
+                guild_id=ctx.guild.id,
+                source="NHMisc",
+                action="clean up Honeypot channel",
+                error=error,
+                channel_id=ctx.channel.id,
+                message_id=ctx.message.id,
+            )
+            await ctx.send("Cleanup failed. Check the private error channel and try again.")
             return
         await ctx.send(
             result.public_message,
@@ -3678,9 +3919,17 @@ class NHMisc(commands.Cog):
             return
         try:
             result = await honeypot.cleanup_user(ctx, user_id, count)
-        except Exception:
+        except Exception as error:
             log.exception("Honeypot user cleanup failed")
-            await ctx.send("Cleanup failed. Check the bot logs and try again.")
+            await self.report_operational_error(
+                guild_id=ctx.guild.id,
+                source="NHMisc",
+                action="clean up Honeypot user messages",
+                error=error,
+                channel_id=ctx.channel.id,
+                message_id=ctx.message.id,
+            )
+            await ctx.send("Cleanup failed. Check the private error channel and try again.")
             return
         await ctx.send(
             result.public_message,
@@ -4750,7 +4999,19 @@ class NHMisc(commands.Cog):
             ) from error
 
     async def _recover_interrupted_gate_increments(self) -> None:
-        interrupted = await self._gate_increment_store.list_interrupted_operations()
+        try:
+            interrupted = await self._gate_increment_store.list_interrupted_operations()
+        except Exception as error:
+            log.exception("Failed to read interrupted Gate increments")
+            guilds = tuple(getattr(self.bot, "guilds", ()))
+            if guilds:
+                await self.report_operational_error(
+                    guild_id=guilds[0].id,
+                    source="NHMisc",
+                    action="read interrupted Gate increments",
+                    error=error,
+                )
+            return
         for snapshot in interrupted:
             try:
                 source_message = await self._fetch_gate_increment_source(
@@ -4764,10 +5025,18 @@ class NHMisc(commands.Cog):
                     source_message,
                     recovered,
                 )
-            except Exception:
+            except Exception as error:
                 log.exception(
                     "Failed to recover Gate increment for message %s",
                     snapshot.operation.key.message_id,
+                )
+                await self.report_operational_error(
+                    guild_id=snapshot.operation.key.guild_id,
+                    source="NHMisc",
+                    action="recover interrupted Gate increment",
+                    error=error,
+                    channel_id=snapshot.operation.key.channel_id,
+                    message_id=snapshot.operation.key.message_id,
                 )
 
     @commands.command(name="tierdistribution")
@@ -5854,6 +6123,17 @@ class NHMisc(commands.Cog):
             "alert",
         )
 
+    async def require_private_error_channel(
+        self,
+        guild: discord.Guild,
+    ) -> discord.TextChannel:
+        """Return the configured private operational error channel."""
+        return await self._require_private_log_channel(
+            guild,
+            "error_channel",
+            "operational error",
+        )
+
     async def _require_private_moderation_log_channel(
         self,
         guild: discord.Guild,
@@ -5959,6 +6239,14 @@ class NHMisc(commands.Cog):
             log_failure=log_failure,
         )
 
+    async def send_moderation_log(
+        self,
+        guild: discord.Guild,
+        content: str,
+    ) -> bool:
+        """Publish an NHCogs moderator action without allowing mentions."""
+        return await self._send_moderation_log(guild, content)
+
     def _schedule_audit_log_edit(
         self,
         message: discord.Message,
@@ -6010,8 +6298,16 @@ class NHMisc(commands.Cog):
                 await message.edit(
                     content=edited_content,
                 )
-            except discord.HTTPException:
+            except discord.HTTPException as error:
                 log.exception("Failed to edit voice move log message %s", message.id)
+                await self.report_operational_error(
+                    guild_id=guild.id,
+                    source="NHMisc",
+                    action="edit voice move log",
+                    error=error,
+                    channel_id=getattr(message.channel, "id", None),
+                    message_id=message.id,
+                )
             return
 
     async def _get_voice_move_moderator(
@@ -6053,8 +6349,14 @@ class NHMisc(commands.Cog):
                     return entry.user
         except discord.Forbidden:
             return None
-        except discord.HTTPException:
+        except discord.HTTPException as error:
             log.exception("Failed to read audit log for voice move in guild %s", guild.id)
+            await self.report_operational_error(
+                guild_id=guild.id,
+                source="NHMisc",
+                action="read voice move audit log",
+                error=error,
+            )
         return None
 
     def _format_user_label(self, user: discord.User | discord.Member) -> str:
@@ -6073,9 +6375,16 @@ class NHMisc(commands.Cog):
             allowed_mentions = discord.AllowedMentions.none()
         try:
             return await channel.send(content, allowed_mentions=allowed_mentions)
-        except discord.HTTPException:
+        except discord.HTTPException as error:
             if log_failure:
                 log.exception("Failed to send voice log message to channel %s", channel.id)
+                await self.report_operational_error(
+                    guild_id=channel.guild.id,
+                    source="NHMisc",
+                    action="send configured log",
+                    error=error,
+                    channel_id=channel.id,
+                )
         return None
 
     async def _activity_midnight_loop(self) -> None:
@@ -6083,8 +6392,12 @@ class NHMisc(commands.Cog):
         while True:
             try:
                 await self._close_stale_activity_days_for_all_guilds(send_reports=True)
-            except Exception:
+            except Exception as error:
                 log.exception("Failed to close stale activity days")
+                await self._report_operational_error_for_guilds(
+                    "close stale activity days",
+                    error,
+                )
             try:
                 now = datetime.now(timezone.utc)
                 next_midnight = datetime.combine(

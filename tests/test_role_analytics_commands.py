@@ -242,6 +242,7 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
         cog._upload_achievement_sync_backup = mock.AsyncMock()
         cog._gate_increment_store = mock.AsyncMock()
         cog._achievement_syncing_guilds = set()
+        cog.report_operational_error = mock.AsyncMock()
         return cog
 
     async def test_cog_unload_awaits_owned_tasks(self):
@@ -360,6 +361,26 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         cog._reconcile_achievement_roles_for_guild.assert_awaited_once_with(
             ctx.guild
+        )
+
+    async def test_rolesync_operational_failure_reaches_private_reporter(self):
+        cog = self.make_cog()
+        cog._role_analytics.is_syncing.return_value = False
+        failure = RuntimeError("sync failed")
+        cog._role_analytics.sync_guild = mock.AsyncMock(side_effect=failure)
+        ctx = make_context(FakeGuild(public=True))
+        ctx.message = types.SimpleNamespace(id=300)
+
+        with self.assertRaises(UserFeedbackCheckFailure):
+            await nhmisc.NHMisc.rolesync.callback(cog, ctx)
+
+        cog.report_operational_error.assert_awaited_once_with(
+            guild_id=ctx.guild.id,
+            source="NHMisc",
+            action="synchronize role analytics",
+            error=failure,
+            channel_id=ctx.channel.id,
+            message_id=300,
         )
 
     async def test_multi_role_lookup_returns_each_holder_set(self):
@@ -879,6 +900,7 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_data_deletion_removes_user_from_all_guilds(self):
         cog = self.make_cog()
+        cog.config = types.SimpleNamespace(all_guilds=mock.AsyncMock(return_value={}))
 
         await cog.red_delete_data_for_user(requester="discord_deleted_user", user_id=42)
 
