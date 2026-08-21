@@ -1,3 +1,4 @@
+import asyncio
 import sqlite3
 import unittest
 from contextlib import closing
@@ -19,6 +20,34 @@ class PersistedDataPreflightTests(unittest.IsolatedAsyncioTestCase):
         self.nhmisc.mkdir()
         self.honeypot.mkdir()
         self.backups.mkdir()
+
+    async def test_sqlite_wal_and_shared_memory_are_not_persisted_files(self):
+        database = self.honeypot / "message_registry.sqlite"
+        connection = sqlite3.connect(database)
+        try:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY)")
+            connection.execute("INSERT INTO messages DEFAULT VALUES")
+            connection.commit()
+            wal_exists, shm_exists = await asyncio.to_thread(
+                lambda: (
+                    Path(f"{database}-wal").is_file(),
+                    Path(f"{database}-shm").is_file(),
+                )
+            )
+            self.assertTrue(wal_exists)
+            self.assertTrue(shm_exists)
+
+            report = await inspect_persisted_data(
+                {"NHMisc": self.nhmisc, "Honeypot": self.honeypot},
+                backup_root=self.backups,
+            )
+        finally:
+            connection.close()
+
+        self.assertEqual(report.blocking_issues, ())
+        self.assertEqual(report.database_count, 1)
+        self.assertEqual(report.file_count, 1)
 
     async def test_inspection_reports_sqlite_tables_files_and_space(self):
         database = self.nhmisc / "achievements.sqlite"

@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
+from .sqlite_files import is_transient_sqlite_sidecar
+
 _RUN_ID = re.compile(r"[A-Za-z0-9_-]+")
 
 
@@ -103,7 +105,12 @@ def _create_verified_backup_sync(
             if not source.is_dir():
                 raise BackupError(f"data directory is missing: {source}")
             destination = data_root / name
-            shutil.copytree(source, destination, copy_function=_copy_file)
+            shutil.copytree(
+                source,
+                destination,
+                copy_function=_copy_file,
+                ignore=_ignore_transient_sqlite_sidecars,
+            )
             for database in sorted(source.rglob("*.sqlite"), key=str):
                 relative = database.relative_to(source)
                 sqlite_destination = sqlite_root / name / relative
@@ -140,6 +147,18 @@ def _create_verified_backup_sync(
         if isinstance(error, BackupError):
             raise
         raise BackupError(f"backup creation failed: {error}") from error
+
+
+def _ignore_transient_sqlite_sidecars(
+    directory: str,
+    names: list[str],
+) -> set[str]:
+    root = Path(directory)
+    return {
+        name
+        for name in names
+        if is_transient_sqlite_sidecar(root / name)
+    }
 
 
 def _restore_verified_backup_sync(
