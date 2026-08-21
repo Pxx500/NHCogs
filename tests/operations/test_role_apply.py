@@ -158,7 +158,7 @@ class RoleApplyHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_registry_includes_automatic_moderation_handler(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                operations = import_module("Honeypot.operations")
+                operations = import_module("NHCogs.honeypot.operations")
                 cog = honeypot.Honeypot(_Bot())
                 expected_types = {
                     honeypot.OperationType.MESSAGE_PROCESS,
@@ -298,7 +298,7 @@ class RoleApplyHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_current_dry_run_plans_role_apply_created_while_live(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                role_apply = import_module("Honeypot.operations.role_apply")
+                role_apply = import_module("NHCogs.honeypot.operations.role_apply")
                 now = datetime.now(timezone.utc)
                 role = SimpleNamespace(id=55)
                 member = SimpleNamespace(

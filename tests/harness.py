@@ -436,10 +436,11 @@ def _honeypot_module_layout() -> tuple[
 def _isolated_honeypot_modules(data_path: Path):
     module_path_items, load_order = _honeypot_module_layout()
     module_paths = dict(module_path_items)
+    package_name = "NHCogs.honeypot"
     preexisting_honeypot_names = tuple(
         name
         for name in sys.modules
-        if name == "Honeypot" or name.startswith("Honeypot.")
+        if name == package_name or name.startswith(f"{package_name}.")
     )
     names = tuple(dict.fromkeys((
         "discord",
@@ -454,8 +455,9 @@ def _isolated_honeypot_modules(data_path: Path):
         "redbot.core.utils",
         "redbot.core.utils.chat_formatting",
         "AAA3A_utils",
-        "Honeypot",
-        *(f"Honeypot.{name}" for name in (*load_order, "honeypot")),
+        "NHCogs",
+        package_name,
+        *(f"{package_name}.{name}" for name in (*load_order, "honeypot")),
         *preexisting_honeypot_names,
     )))
     previous = {name: sys.modules.get(name, _MISSING) for name in names}
@@ -654,7 +656,9 @@ def _isolated_honeypot_modules(data_path: Path):
     redbot.core.utils.chat_formatting = formatting
     aaa3a_utils = ModuleType("AAA3A_utils")
     aaa3a_utils.Cog = _AAA3ACog
-    package = ModuleType("Honeypot")
+    suite_package = ModuleType("NHCogs")
+    suite_package.__path__ = [str(PACKAGE_DIR.parent)]
+    package = ModuleType(package_name)
     package.__path__ = [str(PACKAGE_DIR)]
 
     try:
@@ -674,11 +678,12 @@ def _isolated_honeypot_modules(data_path: Path):
                 "redbot.core.utils": redbot.core.utils,
                 "redbot.core.utils.chat_formatting": formatting,
                 "AAA3A_utils": aaa3a_utils,
-                "Honeypot": package,
+                "NHCogs": suite_package,
+                package_name: package,
             }
         )
         loaded = {
-            name: _load_module(f"Honeypot.{name}", module_paths[name])
+            name: _load_module(f"{package_name}.{name}", module_paths[name])
             for name in load_order
         }
         runtime = loaded["detection_runtime"]
@@ -688,13 +693,13 @@ def _isolated_honeypot_modules(data_path: Path):
             return data[: max_bytes + 1]
 
         runtime.read_attachment_bounded = test_bounded_reader
-        yield _load_module("Honeypot.honeypot", module_paths["honeypot"])
+        yield _load_module(f"{package_name}.honeypot", module_paths["honeypot"])
     finally:
         touched_names = set(previous)
         touched_names.update(
             name
             for name in sys.modules
-            if name == "Honeypot" or name.startswith("Honeypot.")
+            if name == package_name or name.startswith(f"{package_name}.")
         )
         for name in touched_names:
             module = previous.get(name, _MISSING)

@@ -167,7 +167,7 @@ class CogAssemblyContractTests(unittest.TestCase):
                 )
                 for command in registered:
                     with self.subTest(command=command.qualified_name):
-                        self.assertEqual(command.callback.__module__, "Honeypot.honeypot")
+                        self.assertEqual(command.callback.__module__, "NHCogs.honeypot.honeypot")
                         self.assertTrue(
                             command.callback.__qualname__.startswith("Honeypot.")
                         )

@@ -54,25 +54,25 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 try:
-                    handler_module = import_module("Honeypot.operations.cached_purge")
+                    handler_module = import_module("NHCogs.honeypot.operations.cached_purge")
                 except ModuleNotFoundError:
                     self.fail("cached_purge has no dedicated handler module")
-                operations = import_module("Honeypot.operations")
+                operations = import_module("NHCogs.honeypot.operations")
                 evidence_cleanup = import_module(
-                    "Honeypot.operations.evidence_cleanup"
+                    "NHCogs.honeypot.operations.evidence_cleanup"
                 )
-                moderation = import_module("Honeypot.operations.moderation")
+                moderation = import_module("NHCogs.honeypot.operations.moderation")
                 moderator_decision = import_module(
-                    "Honeypot.operations.moderator_decision"
+                    "NHCogs.honeypot.operations.moderator_decision"
                 )
                 message_process = import_module(
-                    "Honeypot.operations.message_process"
+                    "NHCogs.honeypot.operations.message_process"
                 )
-                review_publish = import_module("Honeypot.operations.review_publish")
-                review_update = import_module("Honeypot.operations.review_update")
-                role_apply = import_module("Honeypot.operations.role_apply")
-                role_release = import_module("Honeypot.operations.role_release")
-                source_delete = import_module("Honeypot.operations.source_delete")
+                review_publish = import_module("NHCogs.honeypot.operations.review_publish")
+                review_update = import_module("NHCogs.honeypot.operations.review_update")
+                role_apply = import_module("NHCogs.honeypot.operations.role_apply")
+                role_release = import_module("NHCogs.honeypot.operations.role_release")
+                source_delete = import_module("NHCogs.honeypot.operations.source_delete")
                 now = datetime.now(timezone.utc)
                 resolved_message_ids = []
                 deleted_message_ids = []
@@ -179,7 +179,7 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
         for channel, expected_result, expected_error in cases:
             with self.subTest(result=expected_result), TemporaryDirectory() as directory:
                 with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                    handler_module = import_module("Honeypot.operations.cached_purge")
+                    handler_module = import_module("NHCogs.honeypot.operations.cached_purge")
                     guild = SimpleNamespace(
                         get_channel=lambda channel_id: channel,
                         get_thread=lambda channel_id: None,
@@ -222,7 +222,7 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
         for exception_name, exception_message, expected_result, expected_error in cases:
             with self.subTest(result=expected_result), TemporaryDirectory() as directory:
                 with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                    handler_module = import_module("Honeypot.operations.cached_purge")
+                    handler_module = import_module("NHCogs.honeypot.operations.cached_purge")
                     exception_type = getattr(honeypot.discord, exception_name)
 
                     async def delete_message():
@@ -284,7 +284,7 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
         for name, guild, idempotency_key, expected_type, expected_message in cases:
             with self.subTest(case=name), TemporaryDirectory() as directory:
                 with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                    handler_module = import_module("Honeypot.operations.cached_purge")
+                    handler_module = import_module("NHCogs.honeypot.operations.cached_purge")
                     bot = _Bot()
                     bot.get_guild = lambda guild_id: guild
                     cog = honeypot.Honeypot(bot)

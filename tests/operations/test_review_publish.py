@@ -85,26 +85,26 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 try:
                     handler_module = import_module(
-                        "Honeypot.operations.review_publish"
+                        "NHCogs.honeypot.operations.review_publish"
                     )
                 except ModuleNotFoundError:
                     self.fail("review_publish has no dedicated handler module")
-                operations = import_module("Honeypot.operations")
-                cached_purge = import_module("Honeypot.operations.cached_purge")
+                operations = import_module("NHCogs.honeypot.operations")
+                cached_purge = import_module("NHCogs.honeypot.operations.cached_purge")
                 evidence_cleanup = import_module(
-                    "Honeypot.operations.evidence_cleanup"
+                    "NHCogs.honeypot.operations.evidence_cleanup"
                 )
                 message_process = import_module(
-                    "Honeypot.operations.message_process"
+                    "NHCogs.honeypot.operations.message_process"
                 )
-                moderation = import_module("Honeypot.operations.moderation")
+                moderation = import_module("NHCogs.honeypot.operations.moderation")
                 moderator_decision = import_module(
-                    "Honeypot.operations.moderator_decision"
+                    "NHCogs.honeypot.operations.moderator_decision"
                 )
-                review_update = import_module("Honeypot.operations.review_update")
-                role_apply = import_module("Honeypot.operations.role_apply")
-                role_release = import_module("Honeypot.operations.role_release")
-                source_delete = import_module("Honeypot.operations.source_delete")
+                review_update = import_module("NHCogs.honeypot.operations.review_update")
+                role_apply = import_module("NHCogs.honeypot.operations.role_apply")
+                role_release = import_module("NHCogs.honeypot.operations.role_release")
+                source_delete = import_module("NHCogs.honeypot.operations.source_delete")
                 now = datetime.now(timezone.utc)
                 guild = object()
                 bot = _Bot()
@@ -214,7 +214,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_configured_review_channel_is_used(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                handler_module = import_module("Honeypot.operations.review_publish")
+                handler_module = import_module("NHCogs.honeypot.operations.review_publish")
                 now = datetime.now(timezone.utc)
                 cog = honeypot.Honeypot(_Bot())
                 appended, _operation, _claimed, context = (
@@ -243,7 +243,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_errors_channel_is_not_a_review_publication_fallback(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                handler_module = import_module("Honeypot.operations.review_publish")
+                handler_module = import_module("NHCogs.honeypot.operations.review_publish")
                 now = datetime.now(timezone.utc)
                 cog = honeypot.Honeypot(_Bot())
                 appended, _operation, _claimed, context = (
@@ -276,7 +276,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_guild_unavailable_still_uses_configured_review_channel_id(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                handler_module = import_module("Honeypot.operations.review_publish")
+                handler_module = import_module("NHCogs.honeypot.operations.review_publish")
                 now = datetime.now(timezone.utc)
                 cog = honeypot.Honeypot(_Bot())
                 appended, _operation, _claimed, context = (
@@ -305,7 +305,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
     ):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                handler_module = import_module("Honeypot.operations.review_publish")
+                handler_module = import_module("NHCogs.honeypot.operations.review_publish")
                 now = datetime.now(timezone.utc)
                 cog = honeypot.Honeypot(_Bot())
                 appended, operation, claimed, context = (
@@ -350,7 +350,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
     ):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                operations = import_module("Honeypot.operations")
+                operations = import_module("NHCogs.honeypot.operations")
                 now = datetime.now(timezone.utc)
                 cog = honeypot.Honeypot(_Bot())
                 appended, operation, claimed, _context = (
