@@ -293,6 +293,60 @@ class CleanupCommandAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("Honeypot", ctx.send.await_args.args[0])
 
+    async def test_cleanup_operational_failure_reaches_private_reporter(self):
+        failure = RuntimeError("cleanup failed")
+        honeypot = SimpleNamespace(
+            cleanup_channel=mock.AsyncMock(side_effect=failure),
+            cleanup_user=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc_module.NHMisc)
+        cog.bot = SimpleNamespace(get_cog=lambda name: honeypot)
+        cog.report_operational_error = mock.AsyncMock()
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=100),
+            channel=SimpleNamespace(id=200),
+            message=SimpleNamespace(id=300),
+            send=mock.AsyncMock(),
+        )
+
+        await nhmisc_module.NHMisc.nhmisc_cleanup(cog, ctx, 10)
+
+        cog.report_operational_error.assert_awaited_once_with(
+            guild_id=100,
+            source="NHMisc",
+            action="clean up Honeypot channel",
+            error=failure,
+            channel_id=200,
+            message_id=300,
+        )
+
+    async def test_user_cleanup_operational_failure_reaches_private_reporter(self):
+        failure = RuntimeError("cleanup failed")
+        honeypot = SimpleNamespace(
+            cleanup_channel=mock.AsyncMock(),
+            cleanup_user=mock.AsyncMock(side_effect=failure),
+        )
+        cog = object.__new__(nhmisc_module.NHMisc)
+        cog.bot = SimpleNamespace(get_cog=lambda name: honeypot)
+        cog.report_operational_error = mock.AsyncMock()
+        ctx = SimpleNamespace(
+            guild=SimpleNamespace(id=100),
+            channel=SimpleNamespace(id=200),
+            message=SimpleNamespace(id=300),
+            send=mock.AsyncMock(),
+        )
+
+        await nhmisc_module.NHMisc.nhmisc_cleanup_user(cog, ctx, "42", 10)
+
+        cog.report_operational_error.assert_awaited_once_with(
+            guild_id=100,
+            source="NHMisc",
+            action="clean up Honeypot user messages",
+            error=failure,
+            channel_id=200,
+            message_id=300,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

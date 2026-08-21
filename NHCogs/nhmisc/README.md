@@ -611,6 +611,24 @@ permissions described above.
 `[p]selfchart` is available to regular guild users because it only returns the caller's
 own activity.
 
+## Operational errors
+
+NHMisc and Custom Commands share one private operational error destination. Configure it
+with:
+
+```ini
+[p]nhmisc errors
+[p]nhmisc errors channel [channel]
+[p]nhmisc errors channel clear
+[p]nhmisc errors maintainer [member]
+[p]nhmisc errors maintainer clear
+```
+
+The channel must be hidden from `@everyone`, and the bot needs View Channel, Send
+Messages, and Attach Files there. Alerts include a short summary and a traceback file.
+Only the configured maintainer can be pinged. If the alert itself cannot be sent, the
+error remains in SQLite and the failure is written to the bot console.
+
 ## Stored Data
 
 The cog stores Discord user IDs with passively collected message-count aggregates for
@@ -637,3 +655,8 @@ definition and all associated award records.
 
 The cleanup commands do not add an NHMisc database. They delegate to Honeypot,
 which owns its 14-day Gateway-observed message registry and its privacy deletion.
+
+Operational error records store the guild, source, action, bounded error summary,
+exception type, first and last occurrence times, occurrence count, failure fingerprint,
+recovery state, and optional channel, thread, and message IDs. Tracebacks are attached to
+the private Discord alert and are not stored in SQLite.

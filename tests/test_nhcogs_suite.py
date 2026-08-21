@@ -26,6 +26,16 @@ class StubHoneypot:
         self.bot = bot
 
 
+class StubCustomCommandsMigration:
+    qualified_name = "CustomCommandsMigration"
+
+    def __init__(self, bot):
+        self.bot = bot
+
+
+StubCustomCommandsMigration.__module__ = "NHCogs.custom_commands.migration_controller"
+
+
 @contextmanager
 def load_suite_module():
     names = (
@@ -36,6 +46,7 @@ def load_suite_module():
         "NHCogs",
         "NHCogs.nhmisc",
         "NHCogs.honeypot",
+        "NHCogs.custom_commands",
     )
     previous = {name: sys.modules.get(name, _MISSING) for name in names}
     redbot = types.ModuleType("redbot")
@@ -48,6 +59,13 @@ def load_suite_module():
     nhmisc.NHMisc = StubNHMisc
     honeypot = types.ModuleType("NHCogs.honeypot")
     honeypot.Honeypot = StubHoneypot
+    custom_commands = types.ModuleType("NHCogs.custom_commands")
+
+    async def build_custom_commands_component(bot, _nhmisc):
+        return StubCustomCommandsMigration(bot)
+
+    custom_commands.build_custom_commands_component = build_custom_commands_component
+    custom_commands.CustomCommands = StubCustomCommandsMigration
     spec = importlib.util.spec_from_file_location(
         "NHCogs",
         PACKAGE_PATH / "__init__.py",
@@ -67,6 +85,7 @@ def load_suite_module():
                 "NHCogs": module,
                 "NHCogs.nhmisc": nhmisc,
                 "NHCogs.honeypot": honeypot,
+                "NHCogs.custom_commands": custom_commands,
             }
         )
         spec.loader.exec_module(module)
@@ -99,9 +118,12 @@ class FakeBot:
         self.removed.append(name)
         return self.cogs.pop(name, None)
 
+    def get_cog(self, name):
+        return self.cogs.get(name)
+
 
 class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
-    async def test_setup_registers_nhmisc_then_honeypot(self):
+    async def test_setup_registers_the_complete_nhcogs_suite(self):
         with load_suite_module() as suite:
             bot = FakeBot()
 
@@ -114,8 +136,14 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
                 205192943327321000143939875896557571750,
             )
 
-        self.assertEqual(bot.added, ["NHMisc", "Honeypot"])
-        self.assertEqual(set(bot.cogs), {"NHMisc", "Honeypot"})
+        self.assertEqual(
+            bot.added,
+            ["NHMisc", "Honeypot", "CustomCommandsMigration"],
+        )
+        self.assertEqual(
+            set(bot.cogs),
+            {"NHMisc", "Honeypot", "CustomCommandsMigration"},
+        )
         self.assertEqual(bot.removed, [])
 
     async def test_setup_compensates_every_add_failure(self):
@@ -124,6 +152,8 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
             ("NHMisc", "after"),
             ("Honeypot", "before"),
             ("Honeypot", "after"),
+            ("CustomCommandsMigration", "before"),
+            ("CustomCommandsMigration", "after"),
         )
         for failure in failures:
             with self.subTest(failure=failure):
@@ -155,3 +185,15 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
         statement = metadata["end_user_data_statement"]
         self.assertIn("Activity tracking stores user IDs", statement)
         self.assertIn("moderation case metadata", statement)
+        self.assertIn("Custom Commands stores guild IDs", statement)
+        self.assertIn("Operational error records store the guild", statement)
+
+    async def test_teardown_removes_late_registered_replacement_cog(self):
+        with load_suite_module() as suite:
+            bot = FakeBot()
+            await suite.setup(bot)
+
+            await suite.teardown(bot)
+
+        self.assertIn("CustomCommandsMigration", bot.removed)
+        self.assertNotIn("CustomCommandsMigration", bot.cogs)

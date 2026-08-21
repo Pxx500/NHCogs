@@ -220,6 +220,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         cog._achievement_store = SimpleNamespace(
             is_bootstrapped=mock.AsyncMock(side_effect=blocked_is_bootstrapped)
         )
+        cog.report_operational_error = mock.AsyncMock()
         task = asyncio.create_task(callback(cog, interaction))
         try:
             await asyncio.wait_for(deferred.wait(), timeout=0.1)
@@ -457,6 +458,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         cog._achievement_store = SimpleNamespace(
             is_bootstrapped=mock.AsyncMock(side_effect=blocked_is_bootstrapped)
         )
+        cog.report_operational_error = mock.AsyncMock()
 
         with (
             mock.patch.object(
@@ -482,6 +484,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         cog._send_achievement_interaction_error = mock.AsyncMock(
             side_effect=RuntimeError("Discord unavailable")
         )
+        cog.report_operational_error = mock.AsyncMock()
 
         with mock.patch.object(nhmisc.log, "error") as log_error:
             await cog._handle_achievement_interaction_failure(
