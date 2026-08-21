@@ -9,7 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 PACKAGE_NAME = "_honeypot_message_registry_tests"
-PACKAGE_PATH = Path(__file__).resolve().parents[1] / "Honeypot"
+PACKAGE_PATH = Path(__file__).resolve().parents[1] / "NHCogs" / "honeypot"
 
 
 def load_message_registry_module():

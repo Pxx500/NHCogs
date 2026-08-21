@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
-NHMISC_PATH = Path(__file__).resolve().parents[1] / "NHMisc" / "nhmisc.py"
+NHMISC_PATH = Path(__file__).resolve().parents[1] / "NHCogs" / "nhmisc" / "nhmisc.py"
 
 
 class _Color:

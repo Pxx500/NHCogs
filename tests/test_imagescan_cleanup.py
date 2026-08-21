@@ -5,7 +5,7 @@ from importlib import util
 from pathlib import Path
 from types import SimpleNamespace
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "Honeypot" / "honeypot.py"
+MODULE_PATH = Path(__file__).resolve().parents[1] / "NHCogs" / "honeypot" / "honeypot.py"
 spec = util.spec_from_file_location("Honeypot.honeypot", MODULE_PATH)
 honeypot = util.module_from_spec(spec)
 
