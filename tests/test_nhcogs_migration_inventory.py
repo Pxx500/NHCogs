@@ -1,7 +1,9 @@
-import types
 import unittest
 
-from NHCogsMigrator.inventory import snapshot_suite_inventory
+from NHCogsMigrator.inventory import (
+    snapshot_global_inventory,
+    snapshot_suite_inventory,
+)
 
 
 class FakeCommand:
@@ -20,6 +22,35 @@ class FakeCog:
 
     def get_listeners(self):
         return list(self._listeners)
+
+    def application_callback(self):
+        return None
+
+
+class FakeController:
+    def __init__(self, cog):
+        self.cog = cog
+
+    def application_callback(self):
+        return None
+
+
+class FakeApplicationCommand:
+    def __init__(self, name, command_type, callback):
+        self.name = name
+        self.type = command_type
+        self.callback = callback
+
+
+class FakeView:
+    def __init__(self, cog, custom_id):
+        self.cog = cog
+        self.children = [FakeViewItem(custom_id), FakeViewItem(None)]
+
+
+class FakeViewItem:
+    def __init__(self, custom_id):
+        self.custom_id = custom_id
 
 
 class FakeTree:
@@ -45,19 +76,30 @@ class FakeBot:
                 [("on_message", lambda: None)],
             ),
         }
+        honeypot_controller = FakeController(self.cogs["Honeypot"])
+        unrelated_cog = FakeCog([], [])
         self.tree = FakeTree(
             [
-                types.SimpleNamespace(name="View Achievements", type=2),
-                types.SimpleNamespace(name="Punish", type=3),
+                FakeApplicationCommand(
+                    "View Achievements",
+                    2,
+                    self.cogs["NHMisc"].application_callback,
+                ),
+                FakeApplicationCommand(
+                    "Punish",
+                    3,
+                    honeypot_controller.application_callback,
+                ),
+                FakeApplicationCommand(
+                    "Unrelated command",
+                    1,
+                    unrelated_cog.application_callback,
+                ),
             ]
         )
         self.persistent_views = [
-            types.SimpleNamespace(
-                children=[
-                    types.SimpleNamespace(custom_id="case:resolve"),
-                    types.SimpleNamespace(custom_id=None),
-                ]
-            )
+            FakeView(self.cogs["Honeypot"], "case:resolve"),
+            FakeView(unrelated_cog, "unrelated:view"),
         ]
 
     def get_cog(self, name):
@@ -82,6 +124,29 @@ class SuiteInventoryTests(unittest.TestCase):
             ("2:View Achievements", "3:Punish"),
         )
         self.assertEqual(first.persistent_view_custom_ids, ("case:resolve",))
+
+    def test_unrelated_application_commands_and_views_do_not_change_inventory(self):
+        bot = FakeBot()
+        before = snapshot_suite_inventory(bot, ("NHMisc", "Honeypot"))
+        unrelated_cog = FakeCog([], [])
+        bot.tree._commands.append(
+            FakeApplicationCommand(
+                "Another unrelated command",
+                1,
+                unrelated_cog.application_callback,
+            )
+        )
+        bot.persistent_views.append(FakeView(unrelated_cog, "unrelated:second"))
+
+        after = snapshot_suite_inventory(bot, ("NHMisc", "Honeypot"))
+
+        self.assertEqual(after, before)
+
+    def test_global_snapshot_preserves_pre_scope_inventory_format(self):
+        inventory = snapshot_global_inventory(FakeBot(), ("NHMisc", "Honeypot"))
+
+        self.assertIn("1:Unrelated command", inventory.application_commands)
+        self.assertIn("unrelated:view", inventory.persistent_view_custom_ids)
 
     def test_missing_target_cog_is_blocking(self):
         bot = FakeBot()

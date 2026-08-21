@@ -71,6 +71,7 @@ class FakeRuntime:
         lose_config=False,
         lose_database=None,
         unhealthy=False,
+        legacy_inventory=None,
     ):
         self.paths = paths
         self.expected_inventory = inventory
@@ -79,6 +80,7 @@ class FakeRuntime:
         self.lose_config = lose_config
         self.lose_database = lose_database
         self.unhealthy = unhealthy
+        self.legacy_inventory = legacy_inventory
         self.packages = ["NHMisc", "OtherCog", "Honeypot", "NHCogsMigrator"]
         self.configs = {
             "NHMisc": FakeConfig({1: {"enabled": True}}),
@@ -147,6 +149,9 @@ class FakeRuntime:
         if self.fail_validation and "NHCogs" in self.extensions:
             return SuiteInventory(("wrong",), (), (), ())
         return self.expected_inventory
+
+    def legacy_global_inventory(self, _names):
+        return self.legacy_inventory or self.expected_inventory
 
     def background_health_issues(self, _names):
         if self.unhealthy:
@@ -441,6 +446,81 @@ class MigrationCutoverTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(finalized.state, MigrationState.FINALIZED)
         self.assertEqual(tuple(runtime.packages), ("NHCogs", "OtherCog"))
+
+    async def test_restart_verifies_pre_scope_run_with_global_inventory(self):
+        scoped_inventory = SuiteInventory(("command",), ("listener",), (), ())
+        runtime = FakeRuntime(
+            self.paths,
+            scoped_inventory,
+            legacy_inventory=self.inventory,
+        )
+        plan = replace(self._plan(runtime), inventory=scoped_inventory)
+        validations = plan.validations()
+        stored_inventory = self.inventory.as_dict()
+        stored_inventory.pop("scope")
+        validations["inventory"] = stored_inventory
+        await self.store.create_run(
+            "run-1",
+            original_packages=plan.original_packages,
+            source_commit=plan.source_commit,
+            validations=validations,
+        )
+        first_process = MigrationController(
+            runtime,
+            self.store,
+            self.backups,
+            process_token="process-a",
+        )
+        await first_process.apply("run-1", plan)
+        restarted = MigrationController(
+            runtime,
+            self.store,
+            self.backups,
+            process_token="process-b",
+        )
+
+        result = await restarted.verify_restart("run-1")
+
+        self.assertEqual(result.state, MigrationState.RESTART_VERIFIED)
+
+    async def test_restart_waits_for_suite_inventory_to_settle(self):
+        runtime = FakeRuntime(self.paths, self.inventory)
+        plan = self._plan(runtime)
+        await self.store.create_run(
+            "run-1",
+            original_packages=plan.original_packages,
+            source_commit=plan.source_commit,
+            validations=plan.validations(),
+        )
+        first_process = MigrationController(
+            runtime,
+            self.store,
+            self.backups,
+            process_token="process-a",
+        )
+        await first_process.apply("run-1", plan)
+        restarted = MigrationController(
+            runtime,
+            self.store,
+            self.backups,
+            process_token="process-b",
+        )
+        runtime.suite_inventory = mock.Mock(
+            side_effect=[
+                SuiteInventory(("command",), ("listener",), (), ()),
+                self.inventory,
+            ]
+        )
+
+        with mock.patch.object(
+            controller_module.asyncio,
+            "sleep",
+            new=mock.AsyncMock(),
+        ) as sleep:
+            result = await restarted.verify_restart("run-1")
+
+        self.assertEqual(result.state, MigrationState.RESTART_VERIFIED)
+        self.assertEqual(sleep.await_args_list.count(mock.call(1)), 1)
 
     async def test_finalization_intent_survives_package_update_failure(self):
         runtime = FakeRuntime(self.paths, self.inventory)
