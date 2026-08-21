@@ -1,3 +1,4 @@
+import asyncio
 import types
 import unittest
 from unittest import mock
@@ -92,6 +93,24 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         )
         self.cog = object.__new__(nhmisc.NHMisc)
         self.cog.bot = types.SimpleNamespace(is_admin=mock.AsyncMock(return_value=False))
+
+    async def test_runtime_health_reports_a_stopped_required_task(self):
+        pending_task = asyncio.create_task(asyncio.Event().wait())
+        stopped_task = asyncio.create_task(asyncio.sleep(0))
+        await stopped_task
+        cog = types.SimpleNamespace(
+            _activity_task=pending_task,
+            _role_analytics_daily_task=stopped_task,
+        )
+
+        try:
+            self.assertEqual(
+                nhmisc.NHMisc.runtime_health_issues(cog),
+                ("role analytics daily task stopped unexpectedly",),
+            )
+        finally:
+            pending_task.cancel()
+            await asyncio.gather(pending_task, return_exceptions=True)
 
     async def test_private_logs_stop_if_configured_channel_becomes_public(self):
         for config_key, sender_name in (

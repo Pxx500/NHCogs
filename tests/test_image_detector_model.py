@@ -4,7 +4,7 @@ from importlib import util
 from io import BytesIO
 from pathlib import Path
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "Honeypot" / "image_detector.py"
+MODULE_PATH = Path(__file__).resolve().parents[1] / "NHCogs" / "honeypot" / "image_detector.py"
 spec = util.spec_from_file_location("honeypot_image_detector", MODULE_PATH)
 image_detector = util.module_from_spec(spec)
 assert spec.loader is not None

@@ -1,0 +1,22 @@
+{
+  "author": [
+    "Pxx500"
+  ],
+  "name": "NHCogsMigrator",
+  "install_msg": "Temporary migration helper for consolidating NHMisc and Honeypot into NHCogs.",
+  "short": "Temporary verified migration helper for NHCogs.",
+  "description": "Creates a verified migration plan and backup, performs the NHCogs cutover, restores legacy cogs on failure, and verifies one normal restart before finalization.",
+  "tags": [
+    "migration",
+    "utility",
+    "redbot"
+  ],
+  "hidden": true,
+  "min_bot_version": "3.5.23",
+  "min_python_version": [
+    3,
+    10,
+    0
+  ],
+  "end_user_data_statement": "This temporary migration helper stores migration run IDs, Discord guild and channel IDs used for moderator reports, the ordered Red package list, source commit, validation results, local artifact paths, checksums, and migration state. It also creates local backups of existing NHMisc and Honeypot data and Config values. Finalization does not delete those backups."
+}

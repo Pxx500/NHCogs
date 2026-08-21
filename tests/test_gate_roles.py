@@ -5,7 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "NHMisc" / "gate_roles.py"
+MODULE_PATH = Path(__file__).resolve().parents[1] / "NHCogs" / "nhmisc" / "gate_roles.py"
 SPEC = importlib.util.spec_from_file_location("_gate_roles", MODULE_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("Unable to load Gate role module")

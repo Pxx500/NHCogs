@@ -9,7 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 MODULE_PATH = (
-    Path(__file__).resolve().parents[1] / "NHMisc" / "gate_increment_store.py"
+    Path(__file__).resolve().parents[1] / "NHCogs" / "nhmisc" / "gate_increment_store.py"
 )
 SPEC = importlib.util.spec_from_file_location("_gate_increment_store", MODULE_PATH)
 if SPEC is None or SPEC.loader is None:

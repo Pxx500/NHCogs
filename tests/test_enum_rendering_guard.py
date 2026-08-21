@@ -24,7 +24,7 @@ import ast
 import unittest
 from pathlib import Path
 
-PACKAGE_DIR = Path(__file__).resolve().parent.parent / "Honeypot"
+PACKAGE_DIR = Path(__file__).resolve().parent.parent / "NHCogs" / "honeypot"
 
 
 def _source_files() -> list[Path]:

@@ -12,7 +12,7 @@ from matplotlib.figure import Figure
 from PIL import Image
 
 PACKAGE_NAME = "nhmisc_chatchart_test_package"
-PACKAGE_PATH = Path(__file__).parents[1] / "NHMisc"
+PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs" / "nhmisc"
 
 
 class UserFeedbackCheckFailure(Exception):

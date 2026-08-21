@@ -254,7 +254,7 @@ def _load_achievement_views():
     discord.Message = object
     discord.Role = object
 
-    path = Path(__file__).resolve().parents[1] / "NHMisc" / "achievement_views.py"
+    path = Path(__file__).resolve().parents[1] / "NHCogs" / "nhmisc" / "achievement_views.py"
     spec = importlib.util.spec_from_file_location("_gate_proof_views", path)
     module = importlib.util.module_from_spec(spec)
     with mock.patch.dict(sys.modules, {"discord": discord}):

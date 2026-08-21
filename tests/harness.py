@@ -17,7 +17,7 @@ from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
 from unittest import mock
 
-PACKAGE_DIR = Path(__file__).resolve().parents[1] / "Honeypot"
+PACKAGE_DIR = Path(__file__).resolve().parents[1] / "NHCogs" / "honeypot"
 _MISSING = object()
 
 EXPECTED_GUILD_DEFAULTS = {
@@ -174,6 +174,7 @@ class _BoundLoop:
         self.before = before
         self.started = False
         self.cancelled = False
+        self.task = None
 
     def start(self):
         if self.started:
@@ -182,6 +183,11 @@ class _BoundLoop:
 
     def cancel(self):
         self.cancelled = True
+        if self.task is not None:
+            self.task.cancel()
+
+    def get_task(self):
+        return self.task
 
     async def wait_before_start(self):
         await self.before(self.instance)

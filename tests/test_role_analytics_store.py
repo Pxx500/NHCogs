@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-MODULE_PATH = Path(__file__).parents[1] / "NHMisc" / "role_analytics_store.py"
+MODULE_PATH = Path(__file__).parents[1] / "NHCogs" / "nhmisc" / "role_analytics_store.py"
 SPEC = importlib.util.spec_from_file_location(
     "nhmisc_role_analytics_store_test", MODULE_PATH
 )
@@ -13,7 +13,7 @@ sys.modules[SPEC.name] = role_analytics_store
 SPEC.loader.exec_module(role_analytics_store)
 
 EXPRESSION_MODULE_PATH = (
-    Path(__file__).parents[1] / "NHMisc" / "role_expression.py"
+    Path(__file__).parents[1] / "NHCogs" / "nhmisc" / "role_expression.py"
 )
 EXPRESSION_SPEC = importlib.util.spec_from_file_location(
     "nhmisc_role_expression_for_store_test", EXPRESSION_MODULE_PATH

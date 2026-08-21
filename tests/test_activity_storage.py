@@ -5,7 +5,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-MODULE_PATH = Path(__file__).parents[1] / "NHMisc" / "activity_storage.py"
+MODULE_PATH = Path(__file__).parents[1] / "NHCogs" / "nhmisc" / "activity_storage.py"
 SPEC = importlib.util.spec_from_file_location("nhmisc_activity_storage_test", MODULE_PATH)
 activity_storage = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = activity_storage

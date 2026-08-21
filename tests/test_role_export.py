@@ -5,7 +5,7 @@ from io import BytesIO
 from pathlib import Path
 from zipfile import ZipFile
 
-MODULE_PATH = Path(__file__).parents[1] / "NHMisc" / "role_export.py"
+MODULE_PATH = Path(__file__).parents[1] / "NHCogs" / "nhmisc" / "role_export.py"
 SPEC = importlib.util.spec_from_file_location("nhmisc_role_export_test", MODULE_PATH)
 role_export = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = role_export

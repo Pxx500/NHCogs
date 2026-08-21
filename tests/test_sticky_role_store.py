@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-MODULE_PATH = Path(__file__).parents[1] / "NHMisc" / "sticky_roles.py"
+MODULE_PATH = Path(__file__).parents[1] / "NHCogs" / "nhmisc" / "sticky_roles.py"
 SPEC = importlib.util.spec_from_file_location("nhmisc_sticky_role_store_test", MODULE_PATH)
 sticky_roles = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = sticky_roles

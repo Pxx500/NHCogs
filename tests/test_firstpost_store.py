@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 PACKAGE_NAME = "_honeypot_firstpost_store_tests"
-PACKAGE_PATH = Path(__file__).resolve().parents[1] / "Honeypot"
+PACKAGE_PATH = Path(__file__).resolve().parents[1] / "NHCogs" / "honeypot"
 
 
 def load_firstpost_store_module():
