@@ -46,61 +46,73 @@ ignore = [
 # E402: the redbot/Red imports must run after the AAA3A_utils availability
 # check and reload loop above them; hoisting them breaks cog loading.
 "Honeypot/__init__.py" = ["E402"]
+"NHCogs/honeypot/__init__.py" = ["E402"]
 
 # PLR2004: Discord's select-menu option limit and the summary message preview
 # count. Naming the menu limit needs a home shared with review_publication.py.
 # PLR0911: `_cached_purge_status` is a flat guard-clause chain over purge
 # states; collapsing it would hide the state table.
 "Honeypot/case_review.py" = ["PLR0911", "PLR2004"]
+"NHCogs/honeypot/case_review.py" = ["PLR0911", "PLR2004"]
 
 # PLR2004: the 24-hour window in a console retention comparison.
 "Honeypot/console_dump.py" = ["PLR2004"]
+"NHCogs/honeypot/console_dump.py" = ["PLR2004"]
 
 # PLR2004: keyword/attachment scoring thresholds that are local tuning values,
 # each used once. PLR0911/PLR0912/PLR0915: `on_message`, `_process_detected_message`
 # and `_public_moderation_reason` are the live detection path, explicitly
 # deferred by the plan until rail-4 verification on a real bot exists.
 "Honeypot/detection.py" = ["PLR0911", "PLR0912", "PLR0915", "PLR2004"]
+"NHCogs/honeypot/detection.py" = ["PLR0911", "PLR0912", "PLR0915", "PLR2004"]
 
 # PLR0912: `append_message` is the single durable write path for a case; it is
 # not in the plan's approved decomposition set.
 "Honeypot/detection_cases.py" = ["PLR0912"]
+"NHCogs/honeypot/detection_cases.py" = ["PLR0912"]
 
 # PLR2004: a retry-attempt comparison local to one reader.
 # TRY004: raising `RuntimeError` instead of `TypeError` for a non-callable
 # download interface is the established validation contract; swapping the type
 # is a behaviour change on a validation path.
 "Honeypot/detection_runtime.py" = ["PLR2004", "TRY004"]
+"NHCogs/honeypot/detection_runtime.py" = ["PLR2004", "TRY004"]
 
 # PLR2004: doctor thresholds (24h, 30 days) used once each.
 # PLR0912/PLR0917: `_doctor_configuration_checks` was skipped in round B with a
 # reason; it is a flat checklist, and its parameters are the checklist inputs.
 "Honeypot/diagnostics.py" = ["PLR0912", "PLR0917", "PLR2004"]
+"NHCogs/honeypot/diagnostics.py" = ["PLR0912", "PLR0917", "PLR2004"]
 
 # PLR2004: the 1024 in a byte-size formatter, which is the unit base, not a
 # limit. PLR0911: `_is_protected_member` and `_missing_channel_permissions` are
 # guard-clause chains. PLR0917: `_scan_case_message_images` was skipped in
 # round B with a reason. TRY004: same validation contract as detection_runtime.
 "Honeypot/honeypot.py" = ["PLR0911", "PLR0917", "PLR2004", "TRY004"]
+"NHCogs/honeypot/honeypot.py" = ["PLR0911", "PLR0917", "PLR2004", "TRY004"]
 
 # PLR0912/PLR0915/PLR0917: `imagescan_add`, `imagescan_import_tp_zip`,
 # `_imagescan_add_attachment_sample`, `_imagescan_add_bytes_sample` and
 # `_scan_image_attachments` are in the plan's `< 40%` coverage band or its
 # deferred set. PLR2004: local batch sizes.
 "Honeypot/imagescan.py" = ["PLR0912", "PLR0915", "PLR0917", "PLR2004"]
+"NHCogs/honeypot/imagescan.py" = ["PLR0912", "PLR0915", "PLR0917", "PLR2004"]
 
 # PLR0911/PLR0912/PLR0915: `on_member_join` (11%), `on_member_update` (0%),
 # `_apply_joinwatch_role_actions` (33%) and `_apply_joinwatch_assignment_actions`
 # (39%) are the plan's whole `< 40%` band - measured, and not to be touched.
 # PLR2004: the 10080-minute (7 day) joinwatch window, used once per branch.
 "Honeypot/joinwatch.py" = ["PLR0911", "PLR0912", "PLR0915", "PLR2004"]
+"NHCogs/honeypot/joinwatch.py" = ["PLR0911", "PLR0912", "PLR0915", "PLR2004"]
 
 # PLC0415: `from ..honeypot import case_evidence_root` is deferred to call time
 # to break the cog <-> handler import cycle.
 "Honeypot/operations/evidence_cleanup.py" = ["PLC0415"]
+"NHCogs/honeypot/operations/evidence_cleanup.py" = ["PLC0415"]
 
 # PLR0912: `_delete_source_message` is in the plan's deferred set.
 "Honeypot/operations/message_process.py" = ["PLR0912"]
+"NHCogs/honeypot/operations/message_process.py" = ["PLR0912"]
 
 # PLR0912/PLR0915: `_capture_case_attachments_unlocked`, `_publish_case_timeline`,
 # `_publish_detection_case_serial` and `_case_review_moderation_interaction` are
@@ -112,10 +124,12 @@ ignore = [
 # diagnostics.py and case_review.py, so naming them needs a shared home module -
 # recorded as follow-up rather than done here.
 "Honeypot/review_publication.py" = ["PLR0912", "PLR0915", "PLR2004"]
+"NHCogs/honeypot/review_publication.py" = ["PLR0912", "PLR0915", "PLR2004"]
 
 # PLR0917: NHMisc is outside this plan's scope and has no coverage in this
 # suite; the positional parameters are a stable storage signature.
 "NHMisc/activity_storage.py" = ["PLR0917"]
+"NHCogs/nhmisc/activity_storage.py" = ["PLR0917"]
 
 # PLC0415: matplotlib and other optional dependencies are imported lazily so a
 # missing extra degrades one command instead of failing cog load.
@@ -123,6 +137,7 @@ ignore = [
 # explicit statement that cancellation must not be swallowed there.
 # PLR0917/PLR2004: NHMisc is outside this plan's scope and untested here.
 "NHMisc/nhmisc.py" = ["PLC0415", "PLR0917", "PLR2004", "TRY203"]
+"NHCogs/nhmisc/nhmisc.py" = ["PLC0415", "PLR0917", "PLR2004", "TRY203"]
 
 # PLR0917: the fixture builder mirrors the store signature it wraps.
 "tests/detection_case_fixtures.py" = ["PLR0917"]
