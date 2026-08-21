@@ -1,5 +1,9 @@
+import asyncio
+import sys
 import types
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import mock
 
 from NHCogsMigrator.red_runtime import RedRuntime, RedRuntimeError
@@ -57,6 +61,66 @@ class FakeBot:
 
 
 class RedRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_downloader_false_ready_error_is_not_an_exception_cause(self):
+        bot = FakeBot()
+        runtime = RedRuntime(bot)
+        ready = asyncio.Event()
+        ready.set()
+        installed = types.SimpleNamespace(commit="abc123")
+        bot.cogs["Downloader"] = types.SimpleNamespace(
+            _ready=ready,
+            _ready_raised=False,
+            is_installed=mock.AsyncMock(return_value=(True, installed)),
+        )
+
+        observed = await runtime.installed_module("NHMisc")
+
+        self.assertIs(observed, installed)
+
+    async def test_import_probe_inherits_red_runtime_dependency_paths(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            package_parent = root / "packages"
+            package = package_parent / "NHCogs"
+            dependency_root = root / "dependencies"
+            package.mkdir(parents=True)
+            dependency_root.mkdir()
+            (dependency_root / "probe_dependency.py").write_text(
+                "VALUE = 1\n",
+                encoding="utf-8",
+            )
+            (package / "__init__.py").write_text(
+                """import probe_dependency
+
+class NHMisc:
+    CONFIG_IDENTIFIER = 8597423150612235807
+    QUIESCENT_UNLOAD_VERSION = 1
+    RUNTIME_HEALTH_VERSION = 1
+
+class Honeypot:
+    CONFIG_IDENTIFIER = 205192943327321000143939875896557571750
+    QUIESCENT_UNLOAD_VERSION = 1
+    RUNTIME_HEALTH_VERSION = 1
+
+NHMisc.__module__ = "NHCogs.nhmisc.nhmisc"
+Honeypot.__module__ = "NHCogs.honeypot.honeypot"
+""",
+                encoding="utf-8",
+            )
+            bot = FakeBot()
+            runtime = RedRuntime(bot)
+            runtime.find_extension_spec = mock.AsyncMock(
+                return_value=types.SimpleNamespace(origin=str(package / "__init__.py"))
+            )
+            sys.path.insert(0, str(dependency_root))
+            try:
+                observed = await runtime.probe_suite_identity()
+            finally:
+                sys.path.remove(str(dependency_root))
+
+        self.assertEqual(observed["NHMisc"]["class_name"], "NHMisc")
+        self.assertEqual(observed["Honeypot"]["class_name"], "Honeypot")
+
     async def test_config_handle_does_not_require_a_loaded_cog(self):
         bot = FakeBot()
         runtime = RedRuntime(bot)

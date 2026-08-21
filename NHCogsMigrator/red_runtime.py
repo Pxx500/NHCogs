@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -65,6 +66,12 @@ class RedRuntime:
         package_parent = await asyncio.to_thread(
             lambda: str(Path(origin).resolve().parent.parent)
         )
+        environment = os.environ.copy()
+        python_paths = [str(path) for path in sys.path if path]
+        configured_python_path = environment.get("PYTHONPATH")
+        if configured_python_path:
+            python_paths.extend(configured_python_path.split(os.pathsep))
+        environment["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(python_paths))
         script = (
             "import importlib,json,sys;"
             "sys.path.insert(0,sys.argv[1]);"
@@ -88,6 +95,7 @@ class RedRuntime:
             package_parent,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=environment,
         )
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
@@ -174,8 +182,10 @@ class RedRuntime:
         if ready is not None:
             await ready.wait()
         ready_error = getattr(downloader, "_ready_raised", None)
-        if ready_error is not None:
+        if isinstance(ready_error, BaseException):
             raise RedRuntimeError("Downloader initialization failed") from ready_error
+        if ready_error:
+            raise RedRuntimeError("Downloader initialization failed")
         installed, module = await downloader.is_installed(name)
         if not installed or module is None:
             raise RedRuntimeError(f"extension {name} is not Downloader-installed")
