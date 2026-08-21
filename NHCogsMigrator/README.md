@@ -46,6 +46,20 @@ Status performs restart verification. Finalize removes `NHCogsMigrator` from
 the persisted package list and unloads it. It does not delete the backup or the
 legacy installed files.
 
+After finalize reports success, wait for the migrator to unload, then remove
+the temporary installed source packages:
+
+```ini
+[p]cog uninstall NHMisc Honeypot NHCogsMigrator
+```
+
+Only do this after a full external bot backup exists and status reached
+`restart_verified`. Downloader removes the installed source packages but does
+not delete the existing `NHMisc` or `Honeypot` cog data directories. From this
+point, recovery uses the external full-bot backup instead of the legacy
+packages. The later cleanup pull request removes the same temporary sources
+from the repository.
+
 ## Automatic recovery
 
 If Red stops before package authority is committed, the next normal start loads

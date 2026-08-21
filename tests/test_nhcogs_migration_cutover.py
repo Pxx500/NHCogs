@@ -218,30 +218,31 @@ class MigrationCutoverTests(unittest.IsolatedAsyncioTestCase):
             validations=plan.validations(),
         )
         original_latest_run = self.store.latest_run
-        first_reads = 0
-        both_read = asyncio.Event()
+        first_read_started = asyncio.Event()
+        release_first_read = asyncio.Event()
+        read_count = 0
 
-        async def overlap_initial_reads():
-            nonlocal first_reads
-            run = await original_latest_run()
-            if run is not None and run.state is MigrationState.PLANNED:
-                first_reads += 1
-                if first_reads == 2:
-                    both_read.set()
-                try:
-                    await asyncio.wait_for(both_read.wait(), timeout=0.05)
-                except TimeoutError:
-                    pass
-            return run
+        async def block_first_read():
+            nonlocal read_count
+            read_count += 1
+            if read_count == 1:
+                first_read_started.set()
+                await release_first_read.wait()
+            return await original_latest_run()
 
-        self.store.latest_run = overlap_initial_reads
+        self.store.latest_run = block_first_read
         controller = MigrationController(runtime, self.store, self.backups)
 
-        results = await asyncio.gather(
-            controller.apply("run-1", plan),
-            controller.apply("run-1", plan),
-            return_exceptions=True,
-        )
+        first = asyncio.create_task(controller.apply("run-1", plan))
+        await first_read_started.wait()
+        second = asyncio.create_task(controller.apply("run-1", plan))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        try:
+            self.assertEqual(read_count, 1)
+        finally:
+            release_first_read.set()
+            results = await asyncio.gather(first, second, return_exceptions=True)
 
         committed = [
             result
