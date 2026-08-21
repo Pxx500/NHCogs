@@ -7,6 +7,8 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
+from .sqlite_files import is_transient_sqlite_sidecar
+
 _BACKUP_RESERVE_BYTES = 16 * 1024 * 1024
 
 
@@ -64,6 +66,8 @@ def _inspect_persisted_data_sync(
             continue
         for candidate in path.rglob("*"):
             if not candidate.is_file():
+                continue
+            if is_transient_sqlite_sidecar(candidate):
                 continue
             files.append(candidate)
             try:
