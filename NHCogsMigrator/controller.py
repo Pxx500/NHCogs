@@ -13,7 +13,6 @@ from .state import MigrationRun, MigrationState, MigrationStateStore
 
 _COG_NAMES = ("NHMisc", "Honeypot")
 _INVENTORY_SETTLE_ATTEMPTS = 30
-_HONEYPOT_VIEW_PREFIX = "honeypot:case:"
 _CONFIG_IDENTIFIERS = {
     "NHMisc": 8597423150612235807,
     "Honeypot": 205192943327321000143939875896557571750,
@@ -507,14 +506,11 @@ def _runtime_inventory_for_run(runtime: Any, run: MigrationRun) -> SuiteInventor
         global_inventory = legacy_inventory(_COG_NAMES)
     else:
         global_inventory = runtime.suite_inventory(_COG_NAMES)
-    suite_inventory = runtime.suite_inventory(_COG_NAMES)
     return SuiteInventory(
         prefix_commands=global_inventory.prefix_commands,
         listeners=global_inventory.listeners,
         application_commands=global_inventory.application_commands,
-        persistent_view_custom_ids=_honeypot_view_ids(
-            suite_inventory.persistent_view_custom_ids
-        ),
+        persistent_view_custom_ids=(),
     )
 
 
@@ -529,17 +525,7 @@ def _comparable_inventory_for_run(
         prefix_commands=expected.prefix_commands,
         listeners=expected.listeners,
         application_commands=expected.application_commands,
-        persistent_view_custom_ids=_honeypot_view_ids(
-            expected.persistent_view_custom_ids
-        ),
-    )
-
-
-def _honeypot_view_ids(custom_ids: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(
-        custom_id
-        for custom_id in custom_ids
-        if custom_id.startswith(_HONEYPOT_VIEW_PREFIX)
+        persistent_view_custom_ids=(),
     )
 
 
