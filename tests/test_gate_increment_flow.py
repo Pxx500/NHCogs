@@ -859,6 +859,7 @@ class GateIncrementPrivacyTests(unittest.IsolatedAsyncioTestCase):
         cog._gate_increment_store = SimpleNamespace(
             redact_user_data=mock.AsyncMock()
         )
+        cog.config = SimpleNamespace(all_guilds=mock.AsyncMock(return_value={}))
 
         await cog.red_delete_data_for_user(requester="discord_deleted_user", user_id=42)
 
@@ -885,6 +886,26 @@ class GateIncrementDocumentationTests(unittest.TestCase):
         disclosure = info["end_user_data_statement"]
         self.assertIn("Achievements store", disclosure)
         self.assertIn("source message", disclosure)
+
+
+class GateIncrementRecoveryReportingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_interrupted_operation_read_failure_reaches_private_reporter(self):
+        failure = OSError("sqlite failed")
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._gate_increment_store = SimpleNamespace(
+            list_interrupted_operations=mock.AsyncMock(side_effect=failure)
+        )
+        cog.bot = SimpleNamespace(guilds=(SimpleNamespace(id=100),))
+        cog.report_operational_error = mock.AsyncMock()
+
+        await cog._recover_interrupted_gate_increments()
+
+        cog.report_operational_error.assert_awaited_once_with(
+            guild_id=100,
+            source="NHMisc",
+            action="read interrupted Gate increments",
+            error=failure,
+        )
 
 
 async def _async_value(value):

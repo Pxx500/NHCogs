@@ -4,12 +4,14 @@ Red-DiscordBot V3 cogs maintained for the NewHorizons Discord server.
 
 ## Available cogs
 
-The combined `NHCogs` extension loads both maintained cogs:
+The combined `NHCogs` extension loads the maintained cogs:
 
 - [`Honeypot`](NHCogs/honeypot/README.md) detects and reviews suspicious activity,
   captures moderation evidence, and supports automated containment.
 - [`NHMisc`](NHCogs/nhmisc/README.md) provides voice logging, sticky roles, activity
   statistics, and other server utilities.
+- [`CustomCommands`](NHCogs/custom_commands/README.md) provides weighted text commands,
+  Red-compatible placeholders, and thread-based moderator editing.
 
 ## Installation
 

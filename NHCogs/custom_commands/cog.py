@@ -1,0 +1,544 @@
+from __future__ import annotations
+
+import logging
+from typing import Literal
+
+import discord
+import rapidfuzz
+from redbot.core import Config, commands
+from redbot.core.data_manager import cog_data_path
+from redbot.core.utils import menus
+from redbot.core.utils.chat_formatting import pagify
+
+from .catalog import (
+    CatalogError,
+    CustomCommand,
+    CustomCommandCatalog,
+    ResponseDraft,
+    StaleRevision,
+)
+from .migration import (
+    LEGACY_CONFIG_IDENTIFIER,
+    redact_custom_command_user_data,
+)
+from .runtime import CustomCommandRuntime
+from .workflows import WorkflowDraft, WorkflowManager
+
+log = logging.getLogger("red.NHCogs.CustomCommands")
+PREVIEW_LENGTH = 120
+EMBED_PAGE_LENGTH = 3_800
+FUZZY_MATCH_THRESHOLD = 60
+
+
+class DeleteConfirmationView(discord.ui.View):
+    def __init__(
+        self,
+        cog: CustomCommands,
+        *,
+        command: CustomCommand,
+        opener_id: int,
+    ):
+        super().__init__(timeout=120)
+        self._cog = cog
+        self._command = command
+        self._opener_id = opener_id
+        self.message: discord.Message | None = None
+        confirm = discord.ui.Button(label="Delete", style=discord.ButtonStyle.danger)
+        cancel = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
+        confirm.callback = self._confirm
+        cancel.callback = self._cancel
+        self.add_item(confirm)
+        self.add_item(cancel)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self._opener_id:
+            return True
+        await interaction.response.send_message(
+            "Only the moderator who opened this prompt can use it.",
+            ephemeral=True,
+        )
+        return False
+
+    async def _confirm(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        try:
+            await self._cog.catalog.delete(
+                guild_id=self._command.guild_id,
+                name=self._command.name,
+                expected_revision=self._command.revision,
+            )
+        except StaleRevision:
+            await interaction.followup.send(
+                "This command changed after the prompt opened. Start again.",
+                ephemeral=True,
+            )
+            return
+        await self._cog._log_moderation_action(
+            interaction.guild,
+            f"{interaction.user} deleted custom command `{self._command.name}`",
+        )
+        await self._finish("Deleted")
+
+    async def _cancel(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        await self._finish("Cancelled")
+
+    async def _finish(self, status: str) -> None:
+        for item in self.children:
+            item.disabled = True
+        if self.message is not None:
+            embed = discord.Embed(
+                title=f"Custom command deletion: {status}",
+                description=f"`{self._command.name}`",
+            )
+            await self.message.edit(embed=embed, view=self)
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        await self._finish("Timed out")
+
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        _item: discord.ui.Item[DeleteConfirmationView],
+    ) -> None:
+        if interaction.guild is not None:
+            await self._cog.nhmisc.report_operational_error(
+                guild_id=interaction.guild.id,
+                source="CustomCommands",
+                action="delete custom command",
+                error=error,
+                channel_id=getattr(interaction.channel, "id", None),
+                message_id=getattr(interaction.message, "id", None),
+            )
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "Delete failed. Check the private error channel.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Delete failed. Check the private error channel.",
+                    ephemeral=True,
+                )
+        except Exception:
+            log.exception("Failed to send CustomCommands delete error feedback")
+
+
+class CustomCommands(commands.Cog):
+    """Create and run server-owned text commands."""
+
+    def __init__(
+        self,
+        bot,
+        nhmisc,
+        *,
+        catalog: CustomCommandCatalog | None = None,
+    ):
+        super().__init__()
+        self.bot = bot
+        self.nhmisc = nhmisc
+        self._data_root = cog_data_path(raw_name="CustomCommands")
+        self.catalog = catalog or CustomCommandCatalog(
+            self._data_root / "custom_commands.sqlite"
+        )
+        self._legacy_config = Config.get_conf(
+            None,
+            identifier=LEGACY_CONFIG_IDENTIFIER,
+            cog_name="CustomCommands",
+        )
+        self.runtime = CustomCommandRuntime(
+            bot,
+            self.catalog,
+            nhmisc.operational_errors,
+            logger=log,
+        )
+        self.workflows = WorkflowManager(self.catalog, nhmisc, logger=log)
+
+    async def cog_load(self) -> None:
+        await self.catalog.initialize()
+
+    async def cog_unload(self) -> None:
+        await self.workflows.close_all()
+
+    async def red_delete_data_for_user(
+        self,
+        *,
+        requester: Literal["discord_deleted_user", "owner", "user", "user_strict"],
+        user_id: int,
+    ) -> None:
+        if requester == "discord_deleted_user":
+            await redact_custom_command_user_data(
+                self.catalog,
+                self._legacy_config,
+                self._data_root / "migration",
+                user_id,
+            )
+
+    async def cog_command_error(
+        self,
+        ctx: commands.Context,
+        error: commands.CommandError,
+    ) -> None:
+        expected_types = tuple(
+            error_type
+            for name in (
+                "UserFeedbackCheckFailure",
+                "CheckFailure",
+                "BadArgument",
+                "MissingRequiredArgument",
+                "CommandOnCooldown",
+                "DisabledCommand",
+            )
+            if isinstance((error_type := getattr(commands, name, None)), type)
+        )
+        original = getattr(error, "original", error)
+        if isinstance(error, expected_types) or isinstance(original, expected_types):
+            return
+        if ctx.guild is None:
+            return
+        command = getattr(ctx, "command", None)
+        action = getattr(command, "qualified_name", None) or "unknown command"
+        await self.nhmisc.report_operational_error(
+            guild_id=ctx.guild.id,
+            source="CustomCommands",
+            action=action,
+            error=original,
+            channel_id=getattr(ctx.channel, "id", None),
+            message_id=getattr(ctx.message, "id", None),
+        )
+
+    async def _log_moderation_action(self, guild, content: str) -> None:
+        try:
+            await self.nhmisc.send_moderation_log(guild, content)
+        except Exception as error:
+            await self.nhmisc.report_operational_error(
+                guild_id=guild.id,
+                source="CustomCommands",
+                action="publish custom command moderator log",
+                error=error,
+            )
+
+    @commands.group(name="customcom", aliases=["cc"], invoke_without_command=True)
+    @commands.guild_only()
+    async def customcom(self, ctx: commands.Context) -> None:
+        """Manage and inspect custom commands."""
+        embed = discord.Embed(
+            title="Custom Commands",
+            description="Create weighted text commands and inspect existing commands.",
+        )
+        lines = []
+        for command in sorted(self.customcom.commands, key=lambda item: item.name):
+            if command.hidden:
+                continue
+            usage = f"{ctx.clean_prefix}{command.qualified_name}"
+            signature = command.signature.strip()
+            if signature:
+                usage = f"{usage} {signature}"
+            lines.append(f"`{usage}`\n{command.short_doc or 'No description'}")
+        embed.add_field(
+            name="Commands",
+            value="\n".join(lines) or "No commands available",
+            inline=False,
+        )
+        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+    @customcom.command(name="raw")
+    async def cc_raw(self, ctx: commands.Context, command: str) -> None:
+        """Show exact stored responses without triggering mentions."""
+        stored = await self.catalog.get(ctx.guild.id, command)
+        if stored is None:
+            await ctx.send("That command doesn't exist.")
+            return
+        pages = [
+            discord.Embed(
+                title=f"Response {index}/{len(stored.responses)}",
+                description=response.content,
+            )
+            for index, response in enumerate(stored.responses, start=1)
+        ]
+        await menus.menu(
+            ctx,
+            pages,
+            message=None,
+        )
+
+    @customcom.command(name="search")
+    async def cc_search(self, ctx: commands.Context, *, query: str) -> None:
+        """Search custom command names with fuzzy matching."""
+        stored = await self.catalog.list_commands(ctx.guild.id)
+        by_name = {command.name: command for command in stored}
+        matches = rapidfuzz.process.extract(
+            query,
+            tuple(by_name),
+            processor=rapidfuzz.utils.default_process,
+        )
+        accepted = [
+            by_name[name]
+            for name, score, _index in matches
+            if score > FUZZY_MATCH_THRESHOLD
+        ]
+        if not accepted:
+            await ctx.send("No close matches were found.")
+            return
+        await self._send_command_list(ctx, accepted, title="Search results")
+
+    @customcom.command(name="list")
+    async def cc_list(self, ctx: commands.Context) -> None:
+        """List all available custom commands."""
+        stored = await self.catalog.list_commands(ctx.guild.id)
+        if not stored:
+            await ctx.send(
+                f"There are no custom commands. Use "
+                f"`{ctx.clean_prefix}customcom create <name>` to add one."
+            )
+            return
+        await self._send_command_list(ctx, stored, title="Custom Command List")
+
+    async def _send_command_list(
+        self,
+        ctx: commands.Context,
+        stored: list[CustomCommand] | tuple[CustomCommand, ...],
+        *,
+        title: str,
+    ) -> None:
+        lines = []
+        for command in stored:
+            preview = command.responses[0].content.replace("\n", " ")
+            if len(preview) > PREVIEW_LENGTH:
+                preview = preview[: PREVIEW_LENGTH - 3] + "..."
+            kind = "random" if len(command.responses) > 1 else "simple"
+            lines.append(f"**{ctx.clean_prefix}{command.name}** · {kind}\n{preview}")
+        content = "\n\n".join(lines)
+        pages = tuple(pagify(content, page_length=EMBED_PAGE_LENGTH))
+        embeds = []
+        for index, page in enumerate(pages, start=1):
+            embed = discord.Embed(title=title, description=page)
+            if len(pages) > 1:
+                embed.set_footer(text=f"Page {index}/{len(pages)}")
+            embeds.append(embed)
+        await menus.menu(ctx, embeds)
+
+    @customcom.command(name="show")
+    async def cc_show(self, ctx: commands.Context, command_name: str) -> None:
+        """Show responses, weights, cooldowns, and metadata."""
+        command = await self.catalog.get(ctx.guild.id, command_name)
+        if command is None:
+            await ctx.send("I could not find that custom command.")
+            return
+        member = ctx.guild.get_member(command.author_id)
+        author = str(member) if member is not None else command.author_name
+        total_weight = sum(response.weight for response in command.responses)
+        response_lines = []
+        for index, response in enumerate(command.responses, start=1):
+            probability = response.weight / total_weight
+            response_lines.append(
+                f"{index}. weight {response.weight} ({probability:.1%})\n{response.content}"
+            )
+        header = (
+            f"Command: {command.name}\n"
+            f"Author: {author}\n"
+            f"Created: {discord.utils.format_dt(command.created_at)}\n"
+            f"Edited: {self._edited_time_label(command)}\n"
+            f"Revision: {command.revision}\n"
+            f"Cooldowns: {self._cooldown_label(command)}\n\n"
+        )
+        pages = tuple(
+            pagify(
+                header + "\n\n".join(response_lines),
+                page_length=EMBED_PAGE_LENGTH,
+            )
+        )
+        embeds = [
+            discord.Embed(
+                title=f"Custom command: {command.name}",
+                description=page,
+            )
+            for page in pages
+        ]
+        await menus.menu(ctx, embeds)
+
+    @staticmethod
+    def _cooldown_label(command: CustomCommand) -> str:
+        return (
+            ", ".join(
+                f"{scope}: {seconds}s"
+                for scope, seconds in sorted(command.cooldowns.items())
+            )
+            or "none"
+        )
+
+    @staticmethod
+    def _edited_time_label(command: CustomCommand) -> str:
+        if command.edited_at is None:
+            return "never"
+        return discord.utils.format_dt(command.edited_at)
+
+    @customcom.group(
+        name="create",
+        aliases=["add"],
+        invoke_without_command=True,
+    )
+    @commands.mod_or_permissions(manage_messages=True)
+    async def cc_create(
+        self,
+        ctx: commands.Context,
+        command: str,
+        *,
+        text: str | None = None,
+    ) -> None:
+        """Open a thread to create a custom command."""
+        await self._open_create_workflow(ctx, command, text)
+
+    @cc_create.command(name="simple")
+    @commands.mod_or_permissions(manage_messages=True)
+    async def cc_create_simple(
+        self,
+        ctx: commands.Context,
+        command: str,
+        *,
+        text: str | None = None,
+    ) -> None:
+        """Open a creation thread, optionally seeded with one response."""
+        await self._open_create_workflow(ctx, command, text)
+
+    @cc_create.command(name="random")
+    @commands.mod_or_permissions(manage_messages=True)
+    async def cc_create_random(
+        self,
+        ctx: commands.Context,
+        command: str,
+    ) -> None:
+        """Open a creation thread for multiple weighted responses."""
+        await self._open_create_workflow(ctx, command, None)
+
+    async def _open_create_workflow(
+        self,
+        ctx: commands.Context,
+        command: str,
+        text: str | None,
+    ) -> None:
+        try:
+            normalized = self.catalog.normalize_name(command)
+        except CatalogError as error:
+            raise commands.UserFeedbackCheckFailure(str(error)) from error
+        if normalized in (*self.bot.all_commands, *commands.RESERVED_COMMAND_NAMES):
+            await ctx.send("There already exists a bot command with the same name.")
+            return
+        if await self.catalog.get(ctx.guild.id, normalized) is not None:
+            await ctx.send(
+                f"This command already exists. Use "
+                f"`{ctx.clean_prefix}customcom edit {normalized}`."
+            )
+            return
+        draft = WorkflowDraft(name=normalized)
+        if text is not None:
+            draft.responses.append(ResponseDraft(text))
+        await self.workflows.open(ctx, draft)
+
+    @customcom.command(name="edit")
+    @commands.mod_or_permissions(manage_messages=True)
+    async def cc_edit(
+        self,
+        ctx: commands.Context,
+        command: str,
+        *,
+        text: str | None = None,
+    ) -> None:
+        """Open a thread to edit an existing custom command."""
+        stored = await self.catalog.get(ctx.guild.id, command)
+        if stored is None:
+            await ctx.send("That command doesn't exist.")
+            return
+        draft = WorkflowDraft.from_command(stored)
+        if text is not None:
+            response_id = stored.responses[0].response_id if stored.responses else None
+            draft.responses = [ResponseDraft(text, response_id=response_id)]
+        await self.workflows.open(ctx, draft)
+
+    @customcom.command(name="cooldown")
+    @commands.mod_or_permissions(manage_messages=True)
+    async def cc_cooldown(
+        self,
+        ctx: commands.Context,
+        command: str,
+        cooldown: int | None = None,
+        *,
+        per: str = "member",
+    ) -> None:
+        """Show, set, or remove a member, channel, or guild cooldown."""
+        stored = await self.catalog.get(ctx.guild.id, command)
+        if stored is None:
+            await ctx.send("That command doesn't exist.")
+            return
+        if cooldown is None:
+            await ctx.send(f"Cooldowns: {self._cooldown_label(stored)}")
+            return
+        normalized_scope = per.casefold()
+        scope = {"server": "guild", "user": "member"}.get(
+            normalized_scope,
+            normalized_scope,
+        )
+        if scope not in {"member", "channel", "guild"}:
+            await ctx.send("per must be one of member, channel, or guild")
+            return
+        cooldowns = dict(stored.cooldowns)
+        if cooldown <= 0:
+            cooldowns.pop(scope, None)
+        else:
+            cooldowns[scope] = cooldown
+        try:
+            updated = await self.catalog.edit(
+                guild_id=ctx.guild.id,
+                name=stored.name,
+                expected_revision=stored.revision,
+                editor_id=ctx.author.id,
+                editor_name=str(ctx.author),
+                cooldowns=cooldowns,
+            )
+        except StaleRevision as error:
+            raise commands.UserFeedbackCheckFailure(
+                "This command changed while the cooldown was being edited. Try again."
+            ) from error
+        await self._log_moderation_action(
+            ctx.guild,
+            f"{ctx.author} updated cooldowns for custom command `{updated.name}`",
+        )
+
+    @customcom.command(name="delete", aliases=["del", "remove"])
+    @commands.mod_or_permissions(manage_messages=True)
+    async def cc_delete(self, ctx: commands.Context, command: str) -> None:
+        """Review and delete a custom command."""
+        stored = await self.catalog.get(ctx.guild.id, command)
+        if stored is None:
+            await ctx.send("That command doesn't exist.")
+            return
+        embed = discord.Embed(
+            title="Delete custom command?",
+            description=(
+                f"Command: `{stored.name}`\nResponses: {len(stored.responses)}\n"
+                "This cannot be undone."
+            ),
+        )
+        view = DeleteConfirmationView(
+            self,
+            command=stored,
+            opener_id=ctx.author.id,
+        )
+        view.message = await ctx.send(
+            embed=embed,
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @commands.Cog.listener()
+    async def on_message_without_command(self, message: discord.Message) -> None:
+        if message.guild is None:
+            return
+        if await self.bot.cog_disabled_in_guild(self, message.guild):
+            return
+        if await self.workflows.on_message(message):
+            return
+        await self.runtime.handle_message(message)
