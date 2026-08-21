@@ -150,6 +150,56 @@ class CustomCommandsMigration(commands.Cog):
         async with self._apply_lock:
             await self._apply_confirmed(ctx)
 
+    @nhcustomcom_migrate.command(name="forgetguild", hidden=True)
+    async def nhcustomcom_migrate_forgetguild(
+        self,
+        ctx: commands.Context,
+        guild_id: int,
+        confirmation: str,
+    ) -> None:
+        """Delete legacy CustomCom data for a guild the bot has left."""
+        await self._require_private_migration_context(ctx)
+        if confirmation.casefold() != APPLY_CONFIRMATION:
+            raise commands.UserFeedbackCheckFailure(
+                f"Run this command with `{APPLY_CONFIRMATION}` after reviewing the plan"
+            )
+        async with self._apply_lock:
+            state = await self.state_store.get()
+            if state.phase is not MigrationPhase.PLANNED:
+                raise commands.UserFeedbackCheckFailure(
+                    "Run the migration plan before forgetting an orphaned guild"
+                )
+            if self.bot.get_guild(guild_id) is not None:
+                raise commands.UserFeedbackCheckFailure(
+                    "The bot is still connected to that guild"
+                )
+            legacy_guilds = await self._legacy_config.all_guilds()
+            guild_data = legacy_guilds.get(guild_id)
+            commands_data = (
+                guild_data.get("commands") if isinstance(guild_data, dict) else None
+            )
+            active_count = (
+                sum(bool(record) for record in commands_data.values())
+                if isinstance(commands_data, dict)
+                else 0
+            )
+            if active_count == 0:
+                raise commands.UserFeedbackCheckFailure(
+                    "That orphaned guild has no active legacy CustomCom commands"
+                )
+            await self.state_store.save(
+                MigrationPhase.NOT_PLANNED,
+                source_digest=None,
+                destination_digest=None,
+            )
+            await self._legacy_config.guild_from_id(guild_id).clear()
+        noun = "command" if active_count == 1 else "commands"
+        await ctx.send(
+            f"Forgot {active_count} legacy CustomCom {noun} for orphaned guild "
+            f"`{guild_id}`. Run `{ctx.clean_prefix}nhcustomcom migrate plan` again "
+            "before apply."
+        )
+
     async def _apply_confirmed(self, ctx: commands.Context) -> None:
         state = await self.state_store.get()
         if state.phase is MigrationPhase.COMPLETE:
