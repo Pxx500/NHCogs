@@ -8,7 +8,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .inventory import SuiteInventory, snapshot_suite_inventory
+from .inventory import (
+    SuiteInventory,
+    snapshot_global_inventory,
+    snapshot_suite_inventory,
+)
 
 
 class RedRuntimeError(RuntimeError):
@@ -149,6 +153,9 @@ class RedRuntime:
 
     def suite_inventory(self, cog_names: tuple[str, ...]) -> SuiteInventory:
         return snapshot_suite_inventory(self._bot, cog_names)
+
+    def legacy_global_inventory(self, cog_names: tuple[str, ...]) -> SuiteInventory:
+        return snapshot_global_inventory(self._bot, cog_names)
 
     def background_health_issues(self, cog_names: tuple[str, ...]) -> tuple[str, ...]:
         issues = []
