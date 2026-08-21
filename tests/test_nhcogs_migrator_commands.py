@@ -9,6 +9,24 @@ from pathlib import Path
 _MISSING = object()
 
 
+class FakeVersionInfo:
+    def __init__(self, major, minor, micro):
+        self.major = major
+        self.minor = minor
+        self.micro = micro
+
+    @classmethod
+    def from_str(cls, value):
+        return cls(*(int(part) for part in value.split(".")))
+
+    def __lt__(self, other):
+        return (self.major, self.minor, self.micro) < (
+            other.major,
+            other.minor,
+            other.micro,
+        )
+
+
 class FakeCommand:
     def __init__(self, callback, *, name=None, hidden=False, **_kwargs):
         self.callback = callback
@@ -67,9 +85,10 @@ def load_migrator():
         permissions,
     )
     redbot = types.ModuleType("redbot")
+    redbot.VersionInfo = FakeVersionInfo
     core = types.ModuleType("redbot.core")
     core.commands = commands
-    core.version_info = (3, 5, 23)
+    core.version_info = FakeVersionInfo.from_str("3.5.23")
     bot_module = types.ModuleType("redbot.core.bot")
     bot_module.Red = object
     data_manager = types.ModuleType("redbot.core.data_manager")
@@ -135,6 +154,27 @@ class MigratorCommandTests(unittest.TestCase):
 
 
 class MigratorAuthorizationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cog_load_accepts_the_minimum_supported_red_version(self):
+        with load_migrator() as module:
+            initialized = False
+
+            class Store:
+                async def initialize(self):
+                    nonlocal initialized
+                    initialized = True
+
+            async def recover_after_ready():
+                return None
+
+            cog = object.__new__(module.NHCogsMigrator)
+            cog._store = Store()
+            cog._recover_after_ready = recover_after_ready
+
+            await cog.cog_load()
+            await cog._recovery_task
+
+            self.assertTrue(initialized)
+
     async def test_red_moderator_without_manage_messages_is_rejected(self):
         with load_migrator() as module:
             default_role = object()
