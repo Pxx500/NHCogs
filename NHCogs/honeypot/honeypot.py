@@ -846,6 +846,8 @@ class Honeypot(Cog):
         self,
         ctx: commands.Context,
         config_sender: typing.Callable[..., typing.Awaitable[None]] | None = None,
+        *,
+        include_descendants: bool = True,
     ) -> None:
         private = self._group_overview_is_private(ctx)
         if private and config_sender is not None:
@@ -854,6 +856,11 @@ class Honeypot(Cog):
         command = ctx.command
         title = command.name.replace("_", " ").title()
         description = command.short_doc
+        if not include_descendants:
+            description = (
+                f"{description}\n\n"
+                + _("Run a category below to see its complete command list.")
+            )
         fields: list[tuple[str, str]] = []
         if not private and config_sender is not None:
             fields.append(
@@ -867,7 +874,12 @@ class Honeypot(Cog):
             )
 
         command_lines = []
-        for child in self._group_overview_commands(command):
+        children = (
+            self._group_overview_commands(command)
+            if include_descendants
+            else iter(getattr(command, "commands", ()))
+        )
+        for child in children:
             usage = f"{ctx.clean_prefix}{child.qualified_name}"
             if child.signature:
                 usage = f"{usage} {child.signature}"
@@ -1489,7 +1501,11 @@ class Honeypot(Cog):
     @commands.group(invoke_without_command=True)
     async def honeypot(self, ctx: commands.Context) -> None:
         """Configure server safety and honeypot protections."""
-        return await self._send_group_overview(ctx, detection.config_all)
+        return await self._send_group_overview(
+            ctx,
+            detection.config_all,
+            include_descendants=False,
+        )
 
     @honeypot.group(name="evidence", invoke_without_command=True)
     async def manual_evidence_settings(self, ctx: commands.Context) -> None:
