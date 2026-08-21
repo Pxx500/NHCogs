@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import discord
+from redbot import VersionInfo
 from redbot.core import commands, version_info
 from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
@@ -30,6 +31,7 @@ _RECOVERABLE_PRECOMMIT = {
     MigrationState.VALIDATED,
     MigrationState.ROLLING_BACK,
 }
+_MINIMUM_RED_VERSION = VersionInfo.from_str("3.5.23")
 
 
 class NHCogsMigrator(commands.Cog):
@@ -56,7 +58,7 @@ class NHCogsMigrator(commands.Cog):
         self._recovery_task: asyncio.Task[Any] | None = None
 
     async def cog_load(self) -> None:
-        if version_info < (3, 5, 23):
+        if version_info < _MINIMUM_RED_VERSION:
             raise RuntimeError("NHCogsMigrator requires Red 3.5.23 or newer")
         await self._store.initialize()
         self._recovery_task = asyncio.create_task(self._recover_after_ready())
