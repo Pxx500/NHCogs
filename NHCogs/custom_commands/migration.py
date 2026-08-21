@@ -725,4 +725,6 @@ class LegacyMigrationPlanner:
                     last_edited_at=edited_at,
                 )
             )
-        return tuple(unique)
+        return tuple(
+            sorted(unique, key=lambda editor: (editor.first_edited_at, editor.user_id))
+        )

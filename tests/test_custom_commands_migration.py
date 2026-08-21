@@ -119,6 +119,48 @@ class LegacyMigrationPlannerTests(unittest.TestCase):
         self.assertIsNotNone(plan.errors_text)
 
 
+class MigrationImportIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_multiple_legacy_editors_survive_import_read_back(self):
+        legacy = {
+            100: {
+                "commands": {
+                    "editors": {
+                        "author": {"id": 200, "name": "Creator"},
+                        "command": "editors",
+                        "cooldowns": {},
+                        "created_at": "20/08/2026 12:00:00",
+                        "edited_at": "20/08/2026 13:00:00",
+                        "editors": [845186841556418560, 164041088229703680],
+                        "response": "response",
+                    }
+                }
+            }
+        }
+        plan = migration.LegacyMigrationPlanner().plan(legacy)
+
+        with TemporaryDirectory() as directory:
+            database = Path(directory) / "commands.sqlite"
+            command_store = catalog.CustomCommandCatalog(database)
+            state_store = migration_state.MigrationStateStore(database)
+            await command_store.initialize()
+            await state_store.initialize()
+            await state_store.save(
+                migration_state.MigrationPhase.PLANNED,
+                source_digest=plan.source_digest,
+                destination_digest=plan.destination_digest,
+            )
+
+            await command_store.import_migration(
+                plan.commands,
+                source_digest=plan.source_digest,
+                destination_digest=plan.destination_digest,
+            )
+
+            stored = await command_store.list_commands(100)
+
+        self.assertEqual(stored, plan.commands)
+
+
 class LegacyPrivacyTests(unittest.IsolatedAsyncioTestCase):
     async def test_privacy_deletion_redacts_legacy_config_and_artifacts(self):
         legacy = {
