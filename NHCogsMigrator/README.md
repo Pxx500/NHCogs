@@ -10,13 +10,16 @@ unloading the existing cogs.
 
 ```ini
 [p]repo update NHCogs
-[p]cog install NHCogs NHMisc Honeypot NHCogs NHCogsMigrator
+[p]cog update NHMisc Honeypot
+[p]cog install NHCogs NHCogs NHCogsMigrator
 [p]reload NHMisc Honeypot
 [p]load NHCogsMigrator
 ```
 
-Reloading both legacy cogs activates the migration release's quiescent unload.
-Preflight refuses older loaded copies. Do not load `NHCogs` manually.
+`cog install` does not update cogs that Downloader already installed. Update
+both legacy cogs first, then reload them to activate the migration release's
+quiescent unload. Preflight refuses older loaded copies. Do not load `NHCogs`
+manually.
 
 ## Plan and apply
 

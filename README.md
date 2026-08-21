@@ -28,7 +28,8 @@ migrator. Keep the currently loaded legacy cogs active until the migration plan
 is applied.
 
 ```ini
-[p]cog install NHCogs NHMisc Honeypot NHCogs NHCogsMigrator
+[p]cog update NHMisc Honeypot
+[p]cog install NHCogs NHCogs NHCogsMigrator
 [p]reload NHMisc Honeypot
 [p]load NHCogsMigrator
 ```
