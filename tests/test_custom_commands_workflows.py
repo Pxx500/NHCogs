@@ -26,15 +26,61 @@ def load_workflow_modules():
         def add_item(self, item):
             self.children.append(item)
 
+        def clear_items(self):
+            self.children.clear()
+
         def stop(self):
             return None
 
     class Button:
-        def __init__(self, *, label, style):
+        def __init__(self, *, label, style, row=None):
             self.label = label
             self.style = style
+            self.row = row
             self.disabled = False
             self.callback = None
+
+    class Select:
+        def __init__(self, *, placeholder, options, row=None):
+            self.placeholder = placeholder
+            self.options = options
+            self.row = row
+            self.values = []
+            self.disabled = False
+            self.callback = None
+
+    class SelectOption:
+        def __init__(self, *, label, value, default=False):
+            self.label = label
+            self.value = value
+            self.default = default
+
+    class TextInput:
+        def __init__(
+            self,
+            *,
+            label,
+            style=None,
+            default=None,
+            placeholder=None,
+            required=True,
+            max_length=None,
+        ):
+            self.label = label
+            self.style = style
+            self.default = default
+            self.placeholder = placeholder
+            self.required = required
+            self.max_length = max_length
+            self.value = default or ""
+
+    class Modal:
+        def __init__(self, *, title):
+            self.title = title
+            self.children = []
+
+        def add_item(self, item):
+            self.children.append(item)
 
     class Embed:
         def __init__(self, **kwargs):
@@ -44,8 +90,26 @@ def load_workflow_modules():
         def add_field(self, **kwargs):
             self.fields.append(kwargs)
 
-    discord.ui = types.SimpleNamespace(View=View, Button=Button)
-    discord.ButtonStyle = types.SimpleNamespace(green=1, secondary=2)
+    class File:
+        def __init__(self, fp, *, filename):
+            self.fp = fp
+            self.filename = filename
+
+    discord.ui = types.SimpleNamespace(
+        View=View,
+        Button=Button,
+        Select=Select,
+        TextInput=TextInput,
+        Modal=Modal,
+    )
+    discord.SelectOption = SelectOption
+    discord.TextStyle = types.SimpleNamespace(paragraph=1, short=2)
+    discord.ButtonStyle = types.SimpleNamespace(
+        green=1,
+        secondary=2,
+        primary=3,
+        danger=4,
+    )
     discord.AllowedMentions = types.SimpleNamespace(none=lambda: None)
     discord.HTTPException = type("HTTPException", (Exception,), {})
     discord.Interaction = object
@@ -53,6 +117,7 @@ def load_workflow_modules():
     discord.Member = object
     discord.Message = object
     discord.Embed = Embed
+    discord.File = File
     commands = types.ModuleType("redbot.core.commands")
     commands.Parameter = inspect.Parameter
     core = types.ModuleType("redbot.core")
@@ -93,6 +158,25 @@ catalog, workflows = load_workflow_modules()
 
 
 class WorkflowDraftTests(unittest.TestCase):
+    def test_component_operations_share_one_draft_and_preserve_whitespace(self):
+        draft = workflows.WorkflowDraft(
+            "hello",
+            responses=[catalog.ResponseDraft("first", 25, "first-id")],
+        )
+
+        added = draft.add_response("  second   response  \n")
+        draft.set_weight(added, 250)
+        draft.replace_response(added, "  replacement  \n")
+        moved = draft.move_response(added, 0)
+        removed = draft.remove_response(1)
+
+        self.assertEqual(moved, 0)
+        self.assertEqual(removed.response_id, "first-id")
+        self.assertEqual(
+            draft.responses,
+            [catalog.ResponseDraft("  replacement  \n", 250)],
+        )
+
     def test_messages_and_controls_update_one_ordered_draft(self):
         draft = workflows.WorkflowDraft("hello")
 
@@ -123,6 +207,364 @@ class WorkflowDraftTests(unittest.TestCase):
 
 
 class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_add_modal_preserves_content_and_refreshes_the_dashboard(self):
+        manager = SimpleNamespace(
+            catalog=SimpleNamespace(),
+            session_timeout_seconds=workflows.SESSION_TIMEOUT_SECONDS,
+            remove=mock.Mock(),
+            logger=mock.Mock(),
+        )
+        manager.log_moderation_action = mock.AsyncMock()
+        session = workflows.WorkflowSession(
+            manager,
+            thread=SimpleNamespace(id=10),
+            opener=SimpleNamespace(id=200, __str__=lambda self: "Moderator"),
+            draft=workflows.WorkflowDraft("new"),
+        )
+        session.dashboard = SimpleNamespace(edit=mock.AsyncMock())
+        open_interaction = SimpleNamespace(
+            response=SimpleNamespace(send_modal=mock.AsyncMock())
+        )
+        add = next(item for item in session.view.children if item.label == "Add")
+
+        await add.callback(open_interaction)
+
+        modal = open_interaction.response.send_modal.await_args.args[0]
+        modal.content.value = "  exact   response  \n"
+        submit = SimpleNamespace(response=SimpleNamespace(defer=mock.AsyncMock()))
+        await modal.on_submit(submit)
+
+        self.assertEqual(
+            session.draft.responses,
+            [catalog.ResponseDraft("  exact   response  \n")],
+        )
+        self.assertEqual(session.selected_index, 0)
+        session.dashboard.edit.assert_awaited_once()
+
+    async def test_weight_move_and_confirmed_delete_use_the_selected_response(self):
+        manager = SimpleNamespace(
+            catalog=SimpleNamespace(),
+            session_timeout_seconds=workflows.SESSION_TIMEOUT_SECONDS,
+            remove=mock.Mock(),
+            logger=mock.Mock(),
+        )
+        manager.log_moderation_action = mock.AsyncMock()
+        session = workflows.WorkflowSession(
+            manager,
+            thread=SimpleNamespace(id=10),
+            opener=SimpleNamespace(id=200, __str__=lambda self: "Moderator"),
+            draft=workflows.WorkflowDraft(
+                "edit",
+                responses=[
+                    catalog.ResponseDraft("first"),
+                    catalog.ResponseDraft("second"),
+                    catalog.ResponseDraft("third"),
+                ],
+            ),
+        )
+        session.dashboard = SimpleNamespace(edit=mock.AsyncMock())
+        session.select_response(0)
+        session.view.refresh()
+
+        weight = next(
+            item
+            for item in session.view.children
+            if getattr(item, "label", None) == "Weight"
+        )
+        open_weight = SimpleNamespace(
+            response=SimpleNamespace(send_modal=mock.AsyncMock())
+        )
+        await weight.callback(open_weight)
+        weight_modal = open_weight.response.send_modal.await_args.args[0]
+        weight_modal.value.value = "250"
+        await weight_modal.on_submit(
+            SimpleNamespace(response=SimpleNamespace(defer=mock.AsyncMock()))
+        )
+        self.assertEqual(session.draft.responses[0].weight, 250)
+
+        move = next(
+            item
+            for item in session.view.children
+            if getattr(item, "label", None) == "Move"
+        )
+        open_move = SimpleNamespace(response=SimpleNamespace(send_modal=mock.AsyncMock()))
+        await move.callback(open_move)
+        move_modal = open_move.response.send_modal.await_args.args[0]
+        move_modal.value.value = "3"
+        await move_modal.on_submit(
+            SimpleNamespace(response=SimpleNamespace(defer=mock.AsyncMock()))
+        )
+        self.assertEqual(session.selected_index, 2)
+        self.assertEqual(
+            [response.content for response in session.draft.responses],
+            ["second", "third", "first"],
+        )
+
+        delete_interaction = SimpleNamespace(
+            response=SimpleNamespace(edit_message=mock.AsyncMock())
+        )
+        delete = next(
+            item
+            for item in session.view.children
+            if getattr(item, "label", None) == "Delete"
+        )
+        await delete.callback(delete_interaction)
+        self.assertEqual(len(session.draft.responses), 3)
+        confirm = next(
+            item
+            for item in session.view.children
+            if getattr(item, "label", None) == "Confirm delete"
+        )
+        await confirm.callback(delete_interaction)
+        self.assertEqual(
+            [response.content for response in session.draft.responses],
+            ["second", "third"],
+        )
+
+    async def test_view_exact_sends_selected_whitespace_in_a_private_code_block(self):
+        manager = SimpleNamespace(
+            catalog=SimpleNamespace(),
+            session_timeout_seconds=workflows.SESSION_TIMEOUT_SECONDS,
+            remove=mock.Mock(),
+            logger=mock.Mock(),
+        )
+        manager.log_moderation_action = mock.AsyncMock()
+        content = "  left   right\ntrailing  "
+        session = workflows.WorkflowSession(
+            manager,
+            thread=SimpleNamespace(id=10),
+            opener=SimpleNamespace(id=200, __str__=lambda self: "Moderator"),
+            draft=workflows.WorkflowDraft(
+                "edit",
+                responses=[catalog.ResponseDraft(content)],
+            ),
+        )
+        session.select_response(0)
+        session.view.refresh()
+        exact = next(
+            item
+            for item in session.view.children
+            if getattr(item, "label", None) == "View exact"
+        )
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(send_message=mock.AsyncMock())
+        )
+
+        await exact.callback(interaction)
+
+        sent = interaction.response.send_message.await_args.kwargs
+        self.assertTrue(sent["ephemeral"])
+        self.assertEqual(sent["embed"].kwargs["description"], f"```\n{content}\n```")
+
+    async def test_view_exact_attaches_code_fence_content_without_rewriting_it(self):
+        manager = SimpleNamespace(
+            catalog=SimpleNamespace(),
+            session_timeout_seconds=workflows.SESSION_TIMEOUT_SECONDS,
+            remove=mock.Mock(),
+            logger=mock.Mock(),
+            log_moderation_action=mock.AsyncMock(),
+        )
+        content = "  before\n```py\nprint('exact')\n```\nafter  "
+        session = workflows.WorkflowSession(
+            manager,
+            thread=SimpleNamespace(id=10),
+            opener=SimpleNamespace(id=200, __str__=lambda self: "Moderator"),
+            draft=workflows.WorkflowDraft(
+                "edit",
+                responses=[catalog.ResponseDraft(content)],
+            ),
+        )
+        session.select_response(0)
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(send_message=mock.AsyncMock())
+        )
+
+        await session.send_exact_response(interaction)
+
+        sent = interaction.response.send_message.await_args.kwargs
+        self.assertTrue(sent["ephemeral"])
+        self.assertEqual(sent["file"].filename, "edit-response-1.txt")
+        self.assertEqual(sent["file"].fp.getvalue(), content.encode("utf-8"))
+
+    async def test_view_exposes_paged_response_controls_and_selection(self):
+        manager = SimpleNamespace(
+            catalog=SimpleNamespace(),
+            session_timeout_seconds=workflows.SESSION_TIMEOUT_SECONDS,
+            remove=mock.Mock(),
+            logger=mock.Mock(),
+        )
+        manager.log_moderation_action = mock.AsyncMock()
+        session = workflows.WorkflowSession(
+            manager,
+            thread=SimpleNamespace(id=10),
+            opener=SimpleNamespace(id=200, __str__=lambda self: "Moderator"),
+            draft=workflows.WorkflowDraft(
+                "large",
+                responses=[
+                    catalog.ResponseDraft(f"response {index}")
+                    for index in range(7)
+                ],
+            ),
+        )
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(edit_message=mock.AsyncMock())
+        )
+
+        select = session.view.children[0]
+        buttons = {item.label: item for item in session.view.children[1:]}
+        self.assertEqual([option.label for option in select.options], ["#1", "#2", "#3", "#4", "#5"])
+        self.assertEqual({item.row for item in session.view.children}, {0, 1, 2})
+        self.assertEqual(
+            set(buttons),
+            {
+                "Previous",
+                "Next",
+                "Add",
+                "Edit",
+                "Delete",
+                "Weight",
+                "Move",
+                "View exact",
+                "Save",
+                "Cancel",
+            },
+        )
+        for label in ("Edit", "Delete", "Weight", "Move", "View exact"):
+            self.assertTrue(buttons[label].disabled)
+
+        select.values = ["1"]
+        await select.callback(interaction)
+        self.assertEqual(session.selected_index, 1)
+
+        await buttons["Next"].callback(interaction)
+        self.assertEqual(session.page, 1)
+        self.assertIsNone(session.selected_index)
+        refreshed_select = session.view.children[0]
+        self.assertEqual(
+            [option.label for option in refreshed_select.options],
+            ["#6", "#7"],
+        )
+
+    async def test_page_navigation_clears_pending_delete_confirmation(self):
+        manager = SimpleNamespace(
+            catalog=SimpleNamespace(),
+            session_timeout_seconds=workflows.SESSION_TIMEOUT_SECONDS,
+            remove=mock.Mock(),
+            logger=mock.Mock(),
+            log_moderation_action=mock.AsyncMock(),
+        )
+        session = workflows.WorkflowSession(
+            manager,
+            thread=SimpleNamespace(id=10),
+            opener=SimpleNamespace(id=200, __str__=lambda self: "Moderator"),
+            draft=workflows.WorkflowDraft(
+                "large",
+                responses=[
+                    catalog.ResponseDraft(f"response {index}") for index in range(6)
+                ],
+            ),
+        )
+        session.dashboard = SimpleNamespace(edit=mock.AsyncMock())
+        session.select_response(0)
+        session.view.refresh()
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(edit_message=mock.AsyncMock())
+        )
+
+        delete = next(
+            item
+            for item in session.view.children
+            if getattr(item, "label", None) == "Delete"
+        )
+        await delete.callback(interaction)
+        next_button = next(
+            item
+            for item in session.view.children
+            if getattr(item, "label", None) == "Next"
+        )
+        await next_button.callback(interaction)
+
+        self.assertIsNone(session.delete_confirmation_index)
+        self.assertIsNone(session.validation_error)
+        self.assertNotIn("Error", {field["name"] for field in session.render_embed().fields})
+    def test_dashboard_renders_only_the_current_five_response_page(self):
+        manager = SimpleNamespace(
+            catalog=SimpleNamespace(),
+            session_timeout_seconds=workflows.SESSION_TIMEOUT_SECONDS,
+            remove=mock.Mock(),
+            logger=mock.Mock(),
+        )
+        manager.log_moderation_action = mock.AsyncMock()
+        responses = [
+            catalog.ResponseDraft(
+                f"response {index}\nsecond   line",
+                100,
+            )
+            for index in range(12)
+        ]
+        session = workflows.WorkflowSession(
+            manager,
+            thread=SimpleNamespace(id=10),
+            opener=SimpleNamespace(id=200, __str__=lambda self: "Moderator"),
+            draft=workflows.WorkflowDraft("large", responses=responses),
+        )
+        session.set_page(1)
+
+        embed = session.render_embed()
+
+        self.assertEqual(
+            embed.kwargs["description"],
+            "Editing · 12 responses · total weight 1200",
+        )
+        response_field = next(
+            field for field in embed.fields if field["name"].startswith("Responses")
+        )
+        self.assertEqual(response_field["name"], "Responses 6-10 of 12")
+        self.assertIn("#6 · weight 100 · 8.3%", response_field["value"])
+        self.assertIn("#10 · weight 100 · 8.3%", response_field["value"])
+        self.assertIn("response 5 ↵ second   line", response_field["value"])
+        self.assertNotIn("response 4 ", response_field["value"])
+        self.assertNotIn("response 10 ", response_field["value"])
+        self.assertNotIn("Controls", {field["name"] for field in embed.fields})
+
+    def test_page_and_selection_follow_add_move_and_delete(self):
+        manager = SimpleNamespace(
+            catalog=SimpleNamespace(),
+            session_timeout_seconds=workflows.SESSION_TIMEOUT_SECONDS,
+            remove=mock.Mock(),
+            logger=mock.Mock(),
+        )
+        manager.log_moderation_action = mock.AsyncMock()
+        session = workflows.WorkflowSession(
+            manager,
+            thread=SimpleNamespace(id=10),
+            opener=SimpleNamespace(id=200, __str__=lambda self: "Moderator"),
+            draft=workflows.WorkflowDraft(
+                "large",
+                responses=[
+                    catalog.ResponseDraft(f"response {index}")
+                    for index in range(12)
+                ],
+            ),
+        )
+
+        self.assertEqual(session.visible_response_indices, tuple(range(5)))
+        session.set_page(1)
+        session.select_response(7)
+        self.assertEqual(session.visible_response_indices, tuple(range(5, 10)))
+
+        session.move_selected(11)
+        self.assertEqual(session.selected_index, 11)
+        self.assertEqual(session.page, 2)
+        session.remove_selected()
+        self.assertEqual(session.selected_index, 10)
+        self.assertEqual(session.page, 2)
+        added = session.add_response("  exact   spacing  ")
+        self.assertEqual(added, 11)
+        self.assertEqual(session.selected_index, 11)
+        self.assertEqual(session.page, 2)
+        self.assertEqual(session.draft.responses[11].content, "  exact   spacing  ")
+
     async def test_only_opener_messages_change_session_state(self):
         manager = SimpleNamespace(
             catalog=SimpleNamespace(),
@@ -157,6 +599,43 @@ class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
             session.draft.responses,
             [catalog.ResponseDraft("accepted")],
         )
+        self.assertEqual(session.selected_index, 0)
+        self.assertEqual(session.page, 0)
+
+    async def test_ordinary_message_addition_selects_the_new_response_page(self):
+        manager = SimpleNamespace(
+            catalog=SimpleNamespace(),
+            session_timeout_seconds=workflows.SESSION_TIMEOUT_SECONDS,
+            remove=mock.Mock(),
+            logger=mock.Mock(),
+            log_moderation_action=mock.AsyncMock(),
+        )
+        thread = SimpleNamespace(
+            id=10,
+            guild=SimpleNamespace(id=100),
+            mention="#thread",
+            send=mock.AsyncMock(),
+            edit=mock.AsyncMock(),
+        )
+        session = workflows.WorkflowSession(
+            manager,
+            thread=thread,
+            opener=SimpleNamespace(id=200),
+            draft=workflows.WorkflowDraft(
+                "hello",
+                responses=[
+                    catalog.ResponseDraft(f"response {index}") for index in range(5)
+                ],
+            ),
+        )
+
+        await session.handle_message(
+            SimpleNamespace(author=SimpleNamespace(id=200), content="sixth response")
+        )
+
+        self.assertEqual(session.selected_index, 5)
+        self.assertEqual(session.page, 1)
+        self.assertEqual(session.draft.responses[5].content, "sixth response")
 
     async def test_save_uses_one_catalog_operation_and_closes_thread(self):
         stored = SimpleNamespace()

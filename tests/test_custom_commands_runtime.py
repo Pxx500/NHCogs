@@ -5,6 +5,7 @@ import types
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
@@ -105,6 +106,36 @@ def command_with_weights(*weights):
         cooldowns={},
         editors=(),
     )
+
+
+class CustomCommandWhitespaceRoundTripTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sqlite_read_back_and_runtime_keep_response_whitespace_exact(self):
+        content = "  leading   spaces\nsecond line  "
+        with TemporaryDirectory() as directory:
+            store = catalog.CustomCommandCatalog(Path(directory) / "commands.sqlite")
+            await store.initialize()
+            await store.create(
+                guild_id=100,
+                name="spacing",
+                author_id=200,
+                author_name="Creator",
+                responses=(catalog.ResponseDraft(content),),
+                cooldowns={},
+            )
+            stored = await store.get(100, "spacing")
+
+        rendered = runtime.CustomCommandRuntime.render_response(
+            SimpleNamespace(
+                author=SimpleNamespace(),
+                channel=SimpleNamespace(),
+                guild=SimpleNamespace(),
+            ),
+            stored.responses[0].content,
+            (),
+        )
+
+        self.assertEqual(stored.responses[0].content, content)
+        self.assertEqual(rendered, content)
 
 
 class CustomCommandRuntimeTests(unittest.TestCase):

@@ -59,15 +59,54 @@ def load_cog_module():  # noqa: PLR0915
         def add_item(self, item):
             self.children.append(item)
 
+        def clear_items(self):
+            self.children.clear()
+
         def stop(self):
             return None
 
     class Button:
-        def __init__(self, *, label, style):
+        def __init__(self, *, label, style, row=None):
             self.label = label
             self.style = style
+            self.row = row
             self.disabled = False
             self.callback = None
+
+    class Select:
+        def __init__(self, *, placeholder, options, row=None):
+            self.placeholder = placeholder
+            self.options = options
+            self.row = row
+            self.values = []
+            self.disabled = False
+            self.callback = None
+
+    class SelectOption:
+        def __init__(self, *, label, value, default=False):
+            self.label = label
+            self.value = value
+            self.default = default
+
+    class TextInput:
+        def __init__(self, *, default=None, **kwargs):
+            self.default = default
+            self.value = default or ""
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    class Modal:
+        def __init__(self, *, title):
+            self.title = title
+            self.children = []
+
+        def add_item(self, item):
+            self.children.append(item)
+
+    class File:
+        def __init__(self, fp, *, filename):
+            self.fp = fp
+            self.filename = filename
 
     class Embed:
         def __init__(self, *, title=None, description=None, **_kwargs):
@@ -81,11 +120,20 @@ def load_cog_module():  # noqa: PLR0915
         def set_footer(self, *, text):
             self.footer = text
 
-    discord.ui = types.SimpleNamespace(View=View, Button=Button)
+    discord.ui = types.SimpleNamespace(
+        View=View,
+        Button=Button,
+        Select=Select,
+        TextInput=TextInput,
+        Modal=Modal,
+    )
+    discord.SelectOption = SelectOption
+    discord.TextStyle = types.SimpleNamespace(paragraph=1, short=2)
     discord.ButtonStyle = types.SimpleNamespace(
         green=1,
         secondary=2,
         danger=3,
+        primary=4,
     )
     discord.Embed = Embed
     discord.AllowedMentions = types.SimpleNamespace(none=lambda: None)
@@ -95,7 +143,7 @@ def load_cog_module():  # noqa: PLR0915
     discord.Message = object
     discord.Thread = object
     discord.Member = type("Member", (), {})
-    discord.File = object
+    discord.File = File
     discord.utils = types.SimpleNamespace(format_dt=lambda value: value.isoformat())
 
     class Cog:
@@ -113,6 +161,7 @@ def load_cog_module():  # noqa: PLR0915
         (Exception,),
         {},
     )
+    commands.UserInputError = type("UserInputError", (Exception,), {})
     commands.RESERVED_COMMAND_NAMES = set()
     commands.command = lambda **attrs: lambda callback: _Command(callback, **attrs)
     commands.group = commands.command
@@ -128,7 +177,7 @@ def load_cog_module():  # noqa: PLR0915
     data_manager = types.ModuleType("redbot.core.data_manager")
     data_manager.cog_data_path = lambda **_kwargs: Path(".")
     menus = types.ModuleType("redbot.core.utils.menus")
-    menus.menu = lambda *_args, **_kwargs: None
+    menus.menu = mock.AsyncMock()
     utils = types.ModuleType("redbot.core.utils")
     utils.menus = menus
     formatting = types.ModuleType("redbot.core.utils.chat_formatting")
@@ -222,6 +271,179 @@ class CustomCommandsSurfaceTests(unittest.TestCase):
         self.assertEqual(
             {command.name for command in migrate.commands},
             {"plan", "apply", "forgetguild"},
+        )
+
+
+class CustomCommandsCommandErrorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_listener_reports_only_unexpected_errors_from_this_cog(self):
+        listener = getattr(cog.CustomCommands, "on_command_error", None)
+        self.assertIsNotNone(listener)
+
+        subject = object.__new__(cog.CustomCommands)
+        subject.nhmisc = types.SimpleNamespace(
+            report_operational_error=mock.AsyncMock()
+        )
+        command = types.SimpleNamespace(qualified_name="customcom raw")
+        ctx = types.SimpleNamespace(
+            cog=subject,
+            command=command,
+            guild=types.SimpleNamespace(id=100),
+            channel=types.SimpleNamespace(id=200),
+            message=types.SimpleNamespace(id=300),
+        )
+
+        await listener(
+            subject,
+            ctx,
+            cog.commands.UserFeedbackCheckFailure("expected"),
+        )
+        subject.nhmisc.report_operational_error.assert_not_awaited()
+
+        await listener(subject, ctx, cog.commands.UserInputError("invalid input"))
+        subject.nhmisc.report_operational_error.assert_not_awaited()
+
+        failure = RuntimeError("paginator failed")
+        await listener(subject, ctx, types.SimpleNamespace(original=failure))
+        subject.nhmisc.report_operational_error.assert_awaited_once_with(
+            guild_id=100,
+            source="CustomCommands",
+            action="customcom raw",
+            error=failure,
+            channel_id=200,
+            message_id=300,
+        )
+
+        subject.nhmisc.report_operational_error.reset_mock()
+        ctx.cog = object()
+        await listener(subject, ctx, failure)
+        subject.nhmisc.report_operational_error.assert_not_awaited()
+
+
+class CustomCommandsRawTests(unittest.IsolatedAsyncioTestCase):
+    async def test_raw_uses_an_invoker_owned_button_view_and_exact_code_block(self):
+        stored = types.SimpleNamespace(
+            name="ben",
+            responses=(
+                types.SimpleNamespace(content="first   response  "),
+                types.SimpleNamespace(content="second response"),
+            ),
+        )
+        subject = object.__new__(cog.CustomCommands)
+        subject.catalog = types.SimpleNamespace(
+            get=mock.AsyncMock(return_value=stored)
+        )
+        ctx = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=100),
+            author=types.SimpleNamespace(id=200),
+            send=mock.AsyncMock(return_value=types.SimpleNamespace()),
+        )
+
+        await cog.CustomCommands.cc_raw.callback(subject, ctx, "ben")
+
+        ctx.send.assert_awaited_once()
+        call = ctx.send.await_args
+        self.assertEqual(call.kwargs["embed"].description, "```\nfirst   response  \n```")
+        self.assertEqual(
+            [item.label for item in call.kwargs["view"].children],
+            ["Previous", "Next"],
+        )
+        view = call.kwargs["view"]
+        previous, next_button = view.children
+        self.assertTrue(previous.disabled)
+        self.assertFalse(next_button.disabled)
+        interaction = types.SimpleNamespace(
+            response=types.SimpleNamespace(edit_message=mock.AsyncMock())
+        )
+
+        await next_button.callback(interaction)
+
+        edited = interaction.response.edit_message.await_args.kwargs
+        self.assertEqual(edited["embed"].description, "```\nsecond response\n```")
+        self.assertFalse(previous.disabled)
+        self.assertTrue(next_button.disabled)
+
+    async def test_raw_timeout_reports_a_failed_message_edit(self):
+        subject = object.__new__(cog.CustomCommands)
+        subject.nhmisc = types.SimpleNamespace(
+            report_operational_error=mock.AsyncMock()
+        )
+        view = cog.RawResponseView(
+            subject,
+            requester_id=200,
+            pages=(cog.discord.Embed(description="page"),),
+        )
+        failure = RuntimeError("message edit failed")
+        view.message = types.SimpleNamespace(
+            id=300,
+            guild=types.SimpleNamespace(id=100),
+            channel=types.SimpleNamespace(id=200),
+            edit=mock.AsyncMock(side_effect=failure),
+        )
+
+        await view.on_timeout()
+
+        subject.nhmisc.report_operational_error.assert_awaited_once_with(
+            guild_id=100,
+            source="CustomCommands",
+            action="expire raw custom command response browser",
+            error=failure,
+            channel_id=200,
+            message_id=300,
+        )
+
+    async def test_raw_uses_one_exact_transcript_when_a_response_has_a_code_fence(self):
+        responses = (
+            types.SimpleNamespace(content="before  "),
+            types.SimpleNamespace(content="```py\nvalue = 1\n```  "),
+        )
+        stored = types.SimpleNamespace(name="ben", responses=responses)
+        subject = object.__new__(cog.CustomCommands)
+        subject.catalog = types.SimpleNamespace(
+            get=mock.AsyncMock(return_value=stored)
+        )
+        ctx = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=100),
+            author=types.SimpleNamespace(id=200),
+            send=mock.AsyncMock(return_value=types.SimpleNamespace()),
+        )
+
+        await cog.CustomCommands.cc_raw.callback(subject, ctx, "ben")
+
+        sent_file = ctx.send.await_args.kwargs["file"]
+        self.assertEqual(sent_file.filename, "ben-responses.txt")
+        transcript = sent_file.fp.getvalue()
+        for index, response in enumerate(responses, start=1):
+            encoded = response.content.encode()
+            marker = f"===== Response {index}: {len(encoded)} bytes =====\n".encode()
+            start = transcript.index(marker) + len(marker)
+            self.assertEqual(transcript[start : start + len(encoded)], encoded)
+
+
+class CustomCommandsDeleteTimeoutTests(unittest.IsolatedAsyncioTestCase):
+    async def test_delete_timeout_reports_a_failed_message_edit(self):
+        subject = object.__new__(cog.CustomCommands)
+        subject.nhmisc = types.SimpleNamespace(
+            report_operational_error=mock.AsyncMock()
+        )
+        command = types.SimpleNamespace(name="ben")
+        view = cog.DeleteConfirmationView(subject, command=command, opener_id=200)
+        failure = RuntimeError("message edit failed")
+        view.message = types.SimpleNamespace(
+            id=300,
+            guild=types.SimpleNamespace(id=100),
+            channel=types.SimpleNamespace(id=200),
+            edit=mock.AsyncMock(side_effect=failure),
+        )
+
+        await view.on_timeout()
+
+        subject.nhmisc.report_operational_error.assert_awaited_once_with(
+            guild_id=100,
+            source="CustomCommands",
+            action="expire custom command delete prompt",
+            error=failure,
+            channel_id=200,
+            message_id=300,
         )
 
 

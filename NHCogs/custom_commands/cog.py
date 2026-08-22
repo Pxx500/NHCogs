@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from io import BytesIO
 from typing import Literal
 
 import discord
@@ -21,6 +22,7 @@ from .migration import (
     LEGACY_CONFIG_IDENTIFIER,
     redact_custom_command_user_data,
 )
+from .presentation import build_response_transcript, present_exact_response
 from .runtime import CustomCommandRuntime
 from .workflows import WorkflowDraft, WorkflowManager
 
@@ -28,6 +30,93 @@ log = logging.getLogger("red.NHCogs.CustomCommands")
 PREVIEW_LENGTH = 120
 EMBED_PAGE_LENGTH = 3_800
 FUZZY_MATCH_THRESHOLD = 60
+
+
+class RawResponseView(discord.ui.View):
+    def __init__(
+        self,
+        cog: CustomCommands,
+        *,
+        requester_id: int,
+        pages: tuple[discord.Embed, ...],
+    ):
+        super().__init__(timeout=300)
+        self._cog = cog
+        self._requester_id = requester_id
+        self._pages = pages
+        self._page = 0
+        self.message: discord.Message | None = None
+        self._previous_button = discord.ui.Button(
+            label="Previous",
+            style=discord.ButtonStyle.secondary,
+        )
+        self._next_button = discord.ui.Button(
+            label="Next",
+            style=discord.ButtonStyle.secondary,
+        )
+        self._previous_button.callback = self._previous
+        self._next_button.callback = self._next
+        self.add_item(self._previous_button)
+        self.add_item(self._next_button)
+        self._refresh()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self._requester_id:
+            return True
+        await interaction.response.send_message(
+            "Only the person who ran this command can use these controls.",
+            ephemeral=True,
+        )
+        return False
+
+    async def _previous(self, interaction: discord.Interaction) -> None:
+        self._page -= 1
+        self._refresh()
+        await interaction.response.edit_message(
+            embed=self._pages[self._page],
+            view=self,
+        )
+
+    async def _next(self, interaction: discord.Interaction) -> None:
+        self._page += 1
+        self._refresh()
+        await interaction.response.edit_message(
+            embed=self._pages[self._page],
+            view=self,
+        )
+
+    def _refresh(self) -> None:
+        self._previous_button.disabled = self._page == 0
+        self._next_button.disabled = self._page == len(self._pages) - 1
+
+    async def on_timeout(self) -> None:
+        for item in self.children:
+            item.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except Exception as error:
+                await self._cog._report_view_timeout_error(
+                    self.message,
+                    action="expire raw custom command response browser",
+                    error=error,
+                )
+
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        _item: discord.ui.Item[RawResponseView],
+    ) -> None:
+        if interaction.guild is not None:
+            await self._cog.nhmisc.report_operational_error(
+                guild_id=interaction.guild.id,
+                source="CustomCommands",
+                action="browse raw custom command responses",
+                error=error,
+                channel_id=getattr(interaction.channel, "id", None),
+                message_id=getattr(self.message, "id", None),
+            )
 
 
 class DeleteConfirmationView(discord.ui.View):
@@ -95,7 +184,15 @@ class DeleteConfirmationView(discord.ui.View):
         self.stop()
 
     async def on_timeout(self) -> None:
-        await self._finish("Timed out")
+        try:
+            await self._finish("Timed out")
+        except Exception as error:
+            if self.message is not None:
+                await self._cog._report_view_timeout_error(
+                    self.message,
+                    action="expire custom command delete prompt",
+                    error=error,
+                )
 
     async def on_error(
         self,
@@ -177,37 +274,41 @@ class CustomCommands(commands.Cog):
                 user_id,
             )
 
-    async def cog_command_error(
+    @commands.Cog.listener()
+    async def on_command_error(
         self,
         ctx: commands.Context,
         error: commands.CommandError,
     ) -> None:
+        if getattr(ctx, "cog", None) is not self:
+            return
         expected_types = tuple(
             error_type
             for name in (
                 "UserFeedbackCheckFailure",
+                "UserInputError",
                 "CheckFailure",
-                "BadArgument",
-                "MissingRequiredArgument",
                 "CommandOnCooldown",
                 "DisabledCommand",
+                "MaxConcurrencyReached",
             )
             if isinstance((error_type := getattr(commands, name, None)), type)
         )
         original = getattr(error, "original", error)
         if isinstance(error, expected_types) or isinstance(original, expected_types):
             return
-        if ctx.guild is None:
+        guild = getattr(ctx, "guild", None)
+        if guild is None:
             return
         command = getattr(ctx, "command", None)
         action = getattr(command, "qualified_name", None) or "unknown command"
         await self.nhmisc.report_operational_error(
-            guild_id=ctx.guild.id,
+            guild_id=guild.id,
             source="CustomCommands",
             action=action,
             error=original,
-            channel_id=getattr(ctx.channel, "id", None),
-            message_id=getattr(ctx.message, "id", None),
+            channel_id=getattr(getattr(ctx, "channel", None), "id", None),
+            message_id=getattr(getattr(ctx, "message", None), "id", None),
         )
 
     async def _log_moderation_action(self, guild, content: str) -> None:
@@ -220,6 +321,29 @@ class CustomCommands(commands.Cog):
                 action="publish custom command moderator log",
                 error=error,
             )
+
+    async def _report_view_timeout_error(
+        self,
+        message: discord.Message,
+        *,
+        action: str,
+        error: Exception,
+    ) -> None:
+        guild = getattr(message, "guild", None)
+        if guild is None:
+            log.error(
+                "CustomCommands view timeout failed outside a guild",
+                exc_info=(type(error), error, error.__traceback__),
+            )
+            return
+        await self.nhmisc.report_operational_error(
+            guild_id=guild.id,
+            source="CustomCommands",
+            action=action,
+            error=error,
+            channel_id=getattr(getattr(message, "channel", None), "id", None),
+            message_id=getattr(message, "id", None),
+        )
 
     @commands.group(name="customcom", aliases=["cc"], invoke_without_command=True)
     @commands.guild_only()
@@ -252,17 +376,37 @@ class CustomCommands(commands.Cog):
         if stored is None:
             await ctx.send("That command doesn't exist.")
             return
-        pages = [
+        presentations = tuple(
+            present_exact_response(response.content) for response in stored.responses
+        )
+        if any(item.attachment is not None for item in presentations):
+            transcript = build_response_transcript(
+                tuple(response.content for response in stored.responses)
+            )
+            await ctx.send(
+                file=discord.File(
+                    BytesIO(transcript),
+                    filename=f"{stored.name}-responses.txt",
+                ),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        pages = tuple(
             discord.Embed(
                 title=f"Response {index}/{len(stored.responses)}",
-                description=response.content,
+                description=presentation.description,
             )
-            for index, response in enumerate(stored.responses, start=1)
-        ]
-        await menus.menu(
-            ctx,
-            pages,
-            message=None,
+            for index, presentation in enumerate(presentations, start=1)
+        )
+        view = RawResponseView(
+            self,
+            requester_id=ctx.author.id,
+            pages=pages,
+        )
+        view.message = await ctx.send(
+            embed=pages[0],
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
     @customcom.command(name="search")
