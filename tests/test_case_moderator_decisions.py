@@ -991,6 +991,115 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                     any(projection.resolution == "ban" for projection in published)
                 )
 
+    async def test_competing_executor_does_not_report_inflight_moderation_as_failed(
+        self,
+    ):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                action_started = asyncio.Event()
+                release_action = asyncio.Event()
+
+                async def blocked_action(*args, **kwargs):
+                    action_started.set()
+                    await release_action.wait()
+                    return _effect_result(honeypot, "ban")
+
+                member = SimpleNamespace(id=20, roles=[])
+                guild = SimpleNamespace(
+                    id=10,
+                    me=SimpleNamespace(id=1),
+                    get_member=lambda user_id: member,
+                )
+                bot = _Bot()
+                bot.get_guild = lambda guild_id: guild
+                bot.loop = asyncio.get_running_loop()
+                cog = honeypot.Honeypot(bot)
+                cog.config = self._config({"dry_run": False})
+                cog._execute_action = blocked_action
+                appended = self._append_case(
+                    honeypot, cog, datetime.now(timezone.utc)
+                )
+                cog._case_store.update_message_delete(
+                    appended.case.case_id,
+                    appended.message.sequence,
+                    honeypot.DeleteStatus.DELETED,
+                    None,
+                    False,
+                )
+                self.assertTrue(
+                    publish_primary(
+                        cog._case_store,
+                        appended.case.case_id,
+                        50,
+                        60,
+                    )
+                )
+                executor_tasks = []
+                executor_started = False
+
+                async def publish_case(case_id, _config, **kwargs):
+                    nonlocal executor_started
+                    if executor_started:
+                        return True
+                    executor_started = True
+                    snapshot = await asyncio.to_thread(
+                        cog._case_store.get_case, case_id
+                    )
+                    operation = next(
+                        item
+                        for item in snapshot.operations
+                        if item.operation_type.value == "moderator_ban"
+                    )
+                    now = datetime.now(timezone.utc)
+                    claimed = await asyncio.to_thread(
+                        cog._case_store.claim_operation,
+                        operation.operation_id,
+                        now,
+                    )
+                    task = asyncio.create_task(
+                        cog._execute_detection_case_operation(claimed, now)
+                    )
+                    executor_tasks.append(task)
+                    await asyncio.wait_for(action_started.wait(), timeout=1)
+                    return True
+
+                cog._publish_detection_case = publish_case
+                interaction = SimpleNamespace(
+                    user=SimpleNamespace(
+                        id=99,
+                        guild_permissions=SimpleNamespace(
+                            manage_messages=True,
+                            ban_members=True,
+                        ),
+                    ),
+                    response=SimpleNamespace(
+                        defer=mock.AsyncMock(),
+                        is_done=lambda: True,
+                    ),
+                    followup=SimpleNamespace(send=mock.AsyncMock()),
+                )
+
+                try:
+                    accepted = await cog._case_review_moderation_interaction(
+                        interaction,
+                        appended.case.case_id,
+                        "ban",
+                    )
+                finally:
+                    release_action.set()
+                    await asyncio.gather(*executor_tasks)
+
+                final = cog._case_store.get_case(appended.case.case_id)
+                operation = next(
+                    item
+                    for item in final.operations
+                    if item.operation_type.value == "moderator_ban"
+                )
+                self.assertTrue(accepted)
+                interaction.followup.send.assert_not_awaited()
+                self.assertEqual(operation.status.value, "succeeded")
+                self.assertEqual(final.case.status.value, "resolved")
+
     async def test_reconciliation_completes_started_moderator_ban_without_repeating_it(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
