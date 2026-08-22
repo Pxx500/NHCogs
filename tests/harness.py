@@ -501,6 +501,12 @@ def _isolated_honeypot_modules(data_path: Path):
     discord.ButtonStyle = SimpleNamespace(danger=1, secondary=2, success=3, primary=4)
     discord.TextStyle = SimpleNamespace(short=1, paragraph=2)
     discord.Permissions = SimpleNamespace
+    discord.utils = SimpleNamespace(
+        snowflake_time=lambda snowflake_id: datetime.fromtimestamp(
+            ((snowflake_id >> 22) + 1_420_070_400_000) / 1000,
+            timezone.utc,
+        )
+    )
 
     class _File:
         def __init__(self, fp, *, filename):

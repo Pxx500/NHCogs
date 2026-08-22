@@ -33,6 +33,7 @@ GIF_WINDOW_MIN_SECONDS = 5
 GIF_WINDOW_MAX_SECONDS = 3600
 GIF_MUTE_MIN_SECONDS = 60
 GIF_MUTE_MAX_SECONDS = 604800
+RAW_EDIT_MAX_AGE = timedelta(days=30)
 _URL_PATTERN = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 _URL_TRAILING_PUNCTUATION = ".,!?:;'\")]}<>"
 _GIF_PROVIDER_NAMES = frozenset(("giphy", "tenor"))
@@ -327,7 +328,7 @@ async def _delete_message(cog: Any, message: Any, action: str) -> str:
 @dataclass(frozen=True)
 class _ShotDiagnostic:
     cog: Any
-    record: Any
+    channel: Any
     admitted: str
     guild_id: int
 
@@ -344,23 +345,27 @@ class _ShotDiagnostic:
             f"response_cleanup={response_cleanup}"
         )
         try:
-            await self.record.edit(
-                content=content,
+            await self.channel.send(
+                content,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except Exception as error:
-            log.warning("Could not update GIF diagnostic record", exc_info=True)
+            log.warning("Could not publish GIF diagnostic record", exc_info=True)
             try:
                 await self.cog._record_operational_failure(
                     self.guild_id,
                     "gif_debug",
-                    f"Could not update GIF diagnostic record: {type(error).__name__}: {error}",
+                    f"Could not publish GIF diagnostic record: {type(error).__name__}: {error}",
+                    terminal=True,
                 )
             except Exception:
-                log.warning("Could not record GIF diagnostic update failure", exc_info=True)
+                log.warning(
+                    "Could not record GIF diagnostic publication failure",
+                    exc_info=True,
+                )
 
 
-async def _start_diagnostic(
+def _prepare_diagnostic(
     cog: Any,
     message: Any,
     configured: GuildSettings,
@@ -390,43 +395,21 @@ async def _start_diagnostic(
         f"source={event_source} evidence={evidence_source} path={path} "
         f"retention={configured.gif_detector_retention_seconds}s"
     )
-    try:
-        record = await channel.send(
-            f"{admitted}\nstate=admitted",
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-    except Exception as error:
-        log.warning("Could not publish GIF diagnostic record", exc_info=True)
-        try:
-            await cog._record_operational_failure(
-                guild.id,
-                "gif_debug",
-                f"Could not publish GIF diagnostic record: {type(error).__name__}: {error}",
-            )
-        except Exception:
-            log.warning("Could not record GIF diagnostic publication failure", exc_info=True)
-        return None
     return _ShotDiagnostic(
         cog=cog,
-        record=record,
+        channel=channel,
         admitted=admitted,
         guild_id=guild.id,
     )
 
 
 async def _finish_diagnostic(
-    diagnostic: Any,
+    diagnostic: _ShotDiagnostic | None,
     *,
     state: str,
     source_delete: str,
     response_cleanup: str,
 ) -> None:
-    if isinstance(diagnostic, asyncio.Task):
-        try:
-            diagnostic = await diagnostic
-        except Exception:
-            log.warning("GIF diagnostic admission task failed", exc_info=True)
-            return
     if diagnostic is not None:
         await diagnostic.finish(
             state=state,
@@ -684,6 +667,13 @@ def _spawn(cog: Any, coroutine: Any) -> None:
     task.add_done_callback(settled)
 
 
+def _raw_edit_is_historical(message_id: int | None) -> bool:
+    if message_id is None:
+        return True
+    created_at = discord.utils.snowflake_time(message_id)
+    return datetime.now(timezone.utc) - created_at > RAW_EDIT_MAX_AGE
+
+
 async def _record_mute_failure(cog: Any, guild_id: int, summary: str) -> None:
     await cog._record_operational_failure(guild_id, "gif_detector", summary)
 
@@ -857,15 +847,13 @@ async def _admit_message(
         and guild.id not in cog._gif_detector_animated_guilds
     )
     path = "animated" if animated else "secondary"
-    diagnostic = asyncio.create_task(
-        _start_diagnostic(
-            cog,
-            message,
-            configured,
-            event_source=event_source,
-            evidence_source=evidence_source,
-            path=path,
-        )
+    diagnostic = _prepare_diagnostic(
+        cog,
+        message,
+        configured,
+        event_source=event_source,
+        evidence_source=evidence_source,
+        path=path,
     )
     if animated:
         cog._gif_detector_animated_guilds.add(guild.id)
@@ -972,6 +960,10 @@ async def schedule_remote_media_fallback(
 
 
 async def on_raw_message_edit(cog: Any, payload: Any) -> None:
+    message_id = getattr(payload, "message_id", None)
+    if _raw_edit_is_historical(message_id):
+        return
+
     raw_data = payload.data if isinstance(getattr(payload, "data", None), Mapping) else {}
     local_evidence_source = gif_evidence_source(
         embeds=raw_data.get("embeds", ()),
@@ -1008,8 +1000,7 @@ async def on_raw_message_edit(cog: Any, payload: Any) -> None:
         return
 
     channel_id = getattr(payload, "channel_id", None)
-    message_id = getattr(payload, "message_id", None)
-    if channel_id is None or message_id is None:
+    if channel_id is None:
         return
 
     try:
