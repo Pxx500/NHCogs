@@ -3,7 +3,7 @@
 import asyncio
 import unittest
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from importlib import import_module
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,6 +12,13 @@ from unittest import mock
 
 from tests.harness import _Bot, _isolated_honeypot_modules
 from tests.test_settings_commands import _OverviewAllowedMentions, _OverviewEmbed
+
+DISCORD_EPOCH_MILLISECONDS = 1_420_070_400_000
+
+
+def _snowflake_for(created_at: datetime) -> int:
+    unix_milliseconds = int(created_at.timestamp() * 1000)
+    return (unix_milliseconds - DISCORD_EPOCH_MILLISECONDS) << 22
 
 
 class GifDetectorSettingsTests(unittest.TestCase):
@@ -1136,7 +1143,9 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(allowed.everyone)
                 self.assertFalse(allowed.roles)
 
-    async def test_enabled_debug_logging_updates_one_record_for_an_admitted_shot(self):
+    async def test_enabled_debug_logging_publishes_one_final_record_for_an_admitted_shot(
+        self,
+    ):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
@@ -1192,14 +1201,13 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
                 cog._get_text_channel_or_thread.assert_called_once_with(guild, 99)
                 debug_channel.send.assert_awaited_once()
-                debug_record.edit.assert_awaited_once()
-                created = debug_channel.send.await_args.args[0]
-                completed = debug_record.edit.await_args.kwargs["content"]
-                self.assertIn("source=create", created)
-                self.assertIn("evidence=embed", created)
-                self.assertIn("path=secondary", created)
-                self.assertIn("state=completed", completed)
-                self.assertIn("source_delete=deleted", completed)
+                debug_record.edit.assert_not_awaited()
+                diagnostic = debug_channel.send.await_args.args[0]
+                self.assertIn("source=create", diagnostic)
+                self.assertIn("evidence=embed", diagnostic)
+                self.assertIn("path=secondary", diagnostic)
+                self.assertIn("state=completed", diagnostic)
+                self.assertIn("source_delete=deleted", diagnostic)
 
     async def test_first_gif_ends_with_three_second_impact_frame(self):
         with TemporaryDirectory() as directory:
@@ -1674,19 +1682,48 @@ class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
                     await gif_detector.gif_detector_message_set(cog, ctx, text="   ")
 
 class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_historical_raw_gif_update_is_ignored_before_fetching(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                channel = SimpleNamespace(fetch_message=mock.AsyncMock())
+                channel.fetch_message.return_value = SimpleNamespace(
+                    guild=SimpleNamespace(id=1),
+                    channel=channel,
+                    author=SimpleNamespace(bot=True),
+                    webhook_id=None,
+                )
+                cog.bot.get_channel = mock.Mock(return_value=channel)
+                historical_message_id = _snowflake_for(
+                    datetime.now(timezone.utc) - timedelta(days=31)
+                )
+                payload = SimpleNamespace(
+                    guild_id=1,
+                    channel_id=10,
+                    message_id=historical_message_id,
+                    data={"embeds": [{"type": "gifv"}]},
+                    cached_message=None,
+                )
+
+                await cog.on_raw_message_edit(payload)
+
+                cog.bot.get_channel.assert_not_called()
+                self.assertFalse(cog._gif_detector_tasks)
+
     async def test_late_raw_webp_embed_schedules_remote_fallback(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
+                message_id = _snowflake_for(datetime.now(timezone.utc))
                 message = SimpleNamespace(
-                    id=30,
+                    id=message_id,
                     embeds=[],
                     attachments=[],
                     content="",
                 )
                 payload = SimpleNamespace(
-                    message_id=30,
+                    message_id=message_id,
                     data={
                         "embeds": [
                             {
@@ -1719,14 +1756,15 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
+                message_id = _snowflake_for(datetime.now(timezone.utc))
                 message = SimpleNamespace(
-                    id=30,
+                    id=message_id,
                     embeds=[],
                     attachments=[],
                     content="",
                 )
                 payload = SimpleNamespace(
-                    message_id=30,
+                    message_id=message_id,
                     data={
                         "attachments": [
                             {
@@ -1760,8 +1798,9 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot())
+                message_id = _snowflake_for(datetime.now(timezone.utc))
                 message = SimpleNamespace(
-                    id=30,
+                    id=message_id,
                     embeds=[],
                     attachments=[],
                     content="",
@@ -1778,7 +1817,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
                             f"{filename}.bin"
                         )
                         payload = SimpleNamespace(
-                            message_id=30,
+                            message_id=message_id,
                             data={
                                 "attachments": [
                                     {
@@ -1817,6 +1856,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
                 )
                 cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
                 cog._is_protected_member = mock.AsyncMock(return_value=False)
+                message_id = _snowflake_for(datetime.now(timezone.utc))
                 warning = SimpleNamespace(delete=mock.AsyncMock())
                 channel = SimpleNamespace(
                     id=10,
@@ -1826,7 +1866,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
                 )
                 guild = SimpleNamespace(id=1)
                 message = SimpleNamespace(
-                    id=30,
+                    id=message_id,
                     guild=guild,
                     channel=channel,
                     author=SimpleNamespace(id=20, mention="@User", bot=False),
@@ -1835,7 +1875,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
                     delete=mock.AsyncMock(),
                 )
                 payload = SimpleNamespace(
-                    message_id=30,
+                    message_id=message_id,
                     data={"embeds": [{"type": "gifv"}]},
                     message=message,
                 )
@@ -1864,6 +1904,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
                 )
                 cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
                 cog._is_protected_member = mock.AsyncMock(return_value=False)
+                message_id = _snowflake_for(datetime.now(timezone.utc))
                 warning = SimpleNamespace(delete=mock.AsyncMock())
                 channel = SimpleNamespace(
                     id=10,
@@ -1872,7 +1913,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
                     fetch_message=mock.AsyncMock(),
                 )
                 message = SimpleNamespace(
-                    id=30,
+                    id=message_id,
                     guild=SimpleNamespace(id=1),
                     channel=channel,
                     author=SimpleNamespace(id=20, mention="@User", bot=False),
@@ -1887,7 +1928,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
                 payload = SimpleNamespace(
                     guild_id=1,
                     channel_id=10,
-                    message_id=30,
+                    message_id=message_id,
                     data={
                         "embeds": [
                             {
@@ -1908,7 +1949,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
                     await cog.on_raw_message_edit(payload)
                     await asyncio.gather(*tuple(cog._gif_detector_tasks))
 
-                channel.fetch_message.assert_awaited_once_with(30)
+                channel.fetch_message.assert_awaited_once_with(message_id)
                 message.delete.assert_awaited_once()
                 channel.send.assert_awaited_once()
 
