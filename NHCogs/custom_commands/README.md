@@ -16,7 +16,9 @@ These commands are available to regular guild members:
 ```
 
 Lists and previews disable mentions. Running the custom command itself preserves normal
-Discord mention behavior.
+Discord mention behavior. `raw` shows exact whitespace in code blocks with Previous and
+Next buttons. Responses containing a code fence are provided in one exact `.txt`
+transcript instead.
 
 ## Create and edit
 
@@ -30,7 +32,13 @@ These commands require Red moderator status or Manage Messages:
 ```
 
 The bot opens a public thread attached to the moderator's message. Only that moderator
-can change the draft or use its buttons. Messages add responses with weight `100`.
+can change the draft or use its controls. The same editor is used for creation and
+editing. It shows five responses per page and provides a response selector plus Previous,
+Next, Add, Edit, Delete, Weight, Move, View exact, Save, and Cancel controls. View exact
+uses a code block or an exact `.txt` attachment when the response contains a code fence.
+
+Messages still add responses with weight `100`. The existing text controls remain
+available for faster editing:
 
 Thread controls:
 
@@ -43,6 +51,10 @@ move <response number> <new position>
 
 Save validates and writes the complete draft in one transaction. Cancel and the
 30-minute timeout make no changes. Completed threads are locked and archived.
+
+Missing arguments, invalid values, cooldowns, and other expected command failures use
+Red's normal command feedback. Unexpected failures are also reported through NHMisc's
+configured error destination and maintainer ping.
 
 ## Cooldowns and deletion
 
