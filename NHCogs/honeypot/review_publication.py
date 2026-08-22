@@ -1919,7 +1919,11 @@ async def _case_review_moderation_interaction(
             if snapshot.case.status.value in {"resolved", "expired"}:
                 return True
             raise ValueError("moderator action result is unavailable")
-        if persisted.status.value != "succeeded":
+        if persisted.status not in {
+            OperationStatus.PENDING,
+            OperationStatus.RUNNING,
+            OperationStatus.SUCCEEDED,
+        }:
             await _case_review_rerender_safely(cog, case_id)
             raise ValueError(persisted.last_error or "moderator action failed")
         return True
