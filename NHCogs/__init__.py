@@ -1,7 +1,11 @@
 from redbot.core.bot import Red
 from redbot.core.utils import get_end_user_data_statement
 
-from .custom_commands import CustomCommands, build_custom_commands_component
+from .custom_commands import (
+    CustomCommands,
+    assert_safe_to_replace,
+    build_custom_commands_component,
+)
 from .honeypot import Honeypot
 from .nhmisc import NHMisc
 
@@ -11,6 +15,7 @@ __all__ = ("CustomCommands", "Honeypot", "NHMisc")
 
 
 async def setup(bot: Red) -> None:
+    assert_safe_to_replace(bot)
     nhmisc = NHMisc(bot)
     cogs = (nhmisc, Honeypot(bot))
     attempted = []

@@ -16,6 +16,7 @@ class StubNHMisc:
 
     def __init__(self, bot):
         self.bot = bot
+        bot.constructed.append(self.qualified_name)
 
 
 class StubHoneypot:
@@ -24,6 +25,7 @@ class StubHoneypot:
 
     def __init__(self, bot):
         self.bot = bot
+        bot.constructed.append(self.qualified_name)
 
 
 class StubCustomCommandsMigration:
@@ -64,7 +66,13 @@ def load_suite_module():
     async def build_custom_commands_component(bot, _nhmisc):
         return StubCustomCommandsMigration(bot)
 
+    def assert_safe_to_replace(bot):
+        bot.preflight_calls += 1
+        if bot.failure == ("preflight", "before"):
+            raise RuntimeError("custom commands ownership conflict")
+
     custom_commands.build_custom_commands_component = build_custom_commands_component
+    custom_commands.assert_safe_to_replace = assert_safe_to_replace
     custom_commands.CustomCommands = StubCustomCommandsMigration
     spec = importlib.util.spec_from_file_location(
         "NHCogs",
@@ -104,6 +112,8 @@ class FakeBot:
         self.cogs = {}
         self.added = []
         self.removed = []
+        self.constructed = []
+        self.preflight_calls = 0
 
     async def add_cog(self, cog):
         name = cog.qualified_name
@@ -144,6 +154,22 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
             set(bot.cogs),
             {"NHMisc", "Honeypot", "CustomCommandsMigration"},
         )
+        self.assertEqual(bot.removed, [])
+        self.assertEqual(bot.preflight_calls, 1)
+
+    async def test_setup_rejects_custom_commands_conflict_before_suite_effects(self):
+        with load_suite_module() as suite:
+            bot = FakeBot(("preflight", "before"))
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "custom commands ownership conflict",
+            ):
+                await suite.setup(bot)
+
+        self.assertEqual(bot.preflight_calls, 1)
+        self.assertEqual(bot.constructed, [])
+        self.assertEqual(bot.added, [])
         self.assertEqual(bot.removed, [])
 
     async def test_setup_compensates_every_add_failure(self):

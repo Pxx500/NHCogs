@@ -86,41 +86,37 @@ identity with `Deleted User` while preserving the command content.
 
 Cooldown deadlines are kept only in memory and reset when the cog or bot restarts.
 
-## One-time migration from Red CustomCom
+## Permanent replacement and legacy cleanup
 
-The migration commands are hidden and require Manage Messages. Configure a private
-`[p]nhmisc errors` channel first, then run:
+Loading `NHCogs` permanently removes the official `customcom` package from Red's autoload,
+unloads the official extension when present, and activates this replacement from the
+existing SQLite catalog. `NHCogs` also persists its own package name so a later restart
+retries the intended state. An unknown cog that owns the same names stops the complete
+`NHCogs` load and is never removed automatically.
 
-```ini
-[p]nhcustomcom migrate plan
-[p]nhcustomcom migrate apply confirm
-```
-
-Review the plan, attached backup, validation report, counts, and both SHA-256 digests
-before applying. Apply unloads the official cog before the final source snapshot,
-imports the complete validated catalog, verifies it, removes `customcom` from Red's
-persisted package list, and activates the replacement.
-
-If the plan includes data from a guild the bot has left, remove that complete legacy
-guild scope with:
+After updating or reloading `NHCogs`, verify the replacement and inspect the temporary
+legacy cleanup plan:
 
 ```ini
-[p]nhcustomcom migrate forgetguild <guild_id> confirm
+[p]customcom list
+[p]customcom purgelegacy
 ```
 
-This permanently deletes every legacy CustomCom command for that guild. It only works
-after a plan exists, rejects guilds the bot is still connected to, and invalidates the
-current plan. Run `[p]nhcustomcom migrate plan` again before applying.
+`purgelegacy` is hidden, guild-only, and requires Manage Messages. Its first form is
+read-only. It reports the active SQLite command count, old Red Config commands, local
+migration artifact files, and the migration-state table. Review those values before
+running the destructive form:
 
-The durable phases are `planned`, `imported_not_active`, and `complete`. A validation or
-import failure restores the official cog without activating the replacement. A cutover
-failure keeps the verified import and restores the official cog where possible. Run the
-same apply command again to retry. After `complete`, restart or reload `NHCogs` and
-verify that `[p]customcom list` is owned by the replacement. The original Red Config and
-local migration artifacts remain as inactive recovery data and participate in user-data
-redaction.
+```ini
+[p]customcom purgelegacy confirm
+```
 
-Take a full bot backup immediately before apply. There is no partial post-cutover restore
-command. If a rollback is required after `complete`, stop Red, restore that full backup,
-and start Red again. Never load the official and replacement Custom Commands handlers at
-the same time.
+The confirmed command clears only the inactive legacy Red Config, the local
+`CustomCommands/migration/` directory, and `custom_command_migration_state`. It does not
+delete active commands, responses, cooldowns, or editor records. Run the read-only form
+again and require zero legacy commands, zero artifact files, and an absent migration-state
+table before removing the temporary cleanup code.
+
+Migration backups previously uploaded as Discord attachments cannot be deleted
+automatically because their message IDs were not stored. Delete those messages manually
+if the remote copies should also be removed.

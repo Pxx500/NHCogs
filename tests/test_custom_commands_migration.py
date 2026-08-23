@@ -1,11 +1,14 @@
 import importlib.util
 import inspect
 import json
+import sqlite3
 import sys
 import types
 import unittest
+from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs" / "custom_commands"
 
@@ -54,6 +57,144 @@ def load_migration_modules():
 
 
 catalog, migration, migration_state = load_migration_modules()
+
+
+class _LegacyConfig:
+    def __init__(self, guilds):
+        self.guilds = guilds
+        self.clear_all = mock.AsyncMock(side_effect=self._clear)
+
+    async def all_guilds(self):
+        return self.guilds
+
+    def _clear(self):
+        self.guilds = {}
+
+
+class LegacyDataCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_inspection_reports_every_target_without_changing_data(self):
+        with TemporaryDirectory() as directory:
+            data_root = Path(directory)
+            database_path = data_root / "custom_commands.sqlite"
+            store = catalog.CustomCommandCatalog(database_path)
+            await store.initialize()
+            state_store = migration_state.MigrationStateStore(database_path)
+            await state_store.initialize()
+            artifact_root = data_root / "migration" / "digest"
+            artifact_root.mkdir(parents=True)
+            (artifact_root / "legacy-backup.json").write_text(
+                "backup",
+                encoding="utf-8",
+            )
+            (artifact_root / "migration-report.json").write_text(
+                "report",
+                encoding="utf-8",
+            )
+            legacy_config = _LegacyConfig(
+                {
+                    100: {
+                        "commands": {
+                            "first": {"response": "one"},
+                            "second": {"response": "two"},
+                        }
+                    }
+                }
+            )
+
+            status = await migration.inspect_legacy_data(
+                legacy_config,
+                data_root,
+                database_path,
+            )
+
+            self.assertEqual(status.active_command_count, 0)
+            self.assertEqual(status.legacy_command_count, 2)
+            self.assertEqual(status.artifact_file_count, 2)
+            self.assertEqual(status.artifact_bytes, len(b"backup") + len(b"report"))
+            self.assertTrue(status.migration_state_present)
+            legacy_config.clear_all.assert_not_awaited()
+            self.assertTrue((artifact_root / "legacy-backup.json").exists())
+            with closing(sqlite3.connect(database_path)) as connection:
+                table = connection.execute(
+                    """SELECT 1 FROM sqlite_master
+                       WHERE type = 'table' AND name = 'custom_command_migration_state'"""
+                ).fetchone()
+            self.assertIsNotNone(table)
+
+    async def test_confirmed_cleanup_preserves_active_catalog_and_is_idempotent(self):
+        with TemporaryDirectory() as directory:
+            data_root = Path(directory)
+            database_path = data_root / "custom_commands.sqlite"
+            store = catalog.CustomCommandCatalog(database_path)
+            await store.initialize()
+            await store.create(
+                guild_id=100,
+                name="hello",
+                author_id=200,
+                author_name="Creator",
+                responses=[catalog.ResponseDraft("  exact response  ")],
+            )
+            state_store = migration_state.MigrationStateStore(database_path)
+            await state_store.initialize()
+            artifact_root = data_root / "migration" / "digest"
+            artifact_root.mkdir(parents=True)
+            (artifact_root / "legacy-backup.json").write_text(
+                "backup",
+                encoding="utf-8",
+            )
+            legacy_config = _LegacyConfig(
+                {100: {"commands": {"hello": {"response": "old"}}}}
+            )
+
+            first = await migration.purge_legacy_data(
+                legacy_config,
+                data_root,
+                database_path,
+            )
+            second = await migration.purge_legacy_data(
+                legacy_config,
+                data_root,
+                database_path,
+            )
+
+            self.assertEqual(first.legacy_command_count, 0)
+            self.assertEqual(first.artifact_file_count, 0)
+            self.assertFalse(first.migration_state_present)
+            self.assertEqual(second, first)
+            active = await store.get(100, "hello")
+            self.assertIsNotNone(active)
+            self.assertEqual(active.responses[0].content, "  exact response  ")
+            self.assertFalse((data_root / "migration").exists())
+            self.assertEqual(legacy_config.clear_all.await_count, 2)
+
+    async def test_cleanup_refuses_nonempty_legacy_when_active_catalog_is_empty(self):
+        with TemporaryDirectory() as directory:
+            data_root = Path(directory)
+            database_path = data_root / "custom_commands.sqlite"
+            store = catalog.CustomCommandCatalog(database_path)
+            await store.initialize()
+            state_store = migration_state.MigrationStateStore(database_path)
+            await state_store.initialize()
+            artifact_root = data_root / "migration" / "digest"
+            artifact_root.mkdir(parents=True)
+            artifact = artifact_root / "legacy-backup.json"
+            artifact.write_text("backup", encoding="utf-8")
+            legacy_config = _LegacyConfig(
+                {100: {"commands": {"hello": {"response": "old"}}}}
+            )
+
+            with self.assertRaisesRegex(
+                migration.LegacyCleanupPreconditionError,
+                "active catalog is empty",
+            ):
+                await migration.purge_legacy_data(
+                    legacy_config,
+                    data_root,
+                    database_path,
+                )
+
+            legacy_config.clear_all.assert_not_awaited()
+            self.assertTrue(artifact.exists())
 
 
 class LegacyMigrationPlannerTests(unittest.TestCase):
