@@ -20,6 +20,10 @@ from .catalog import (
 )
 from .migration import (
     LEGACY_CONFIG_IDENTIFIER,
+    LegacyCleanupError,
+    LegacyCleanupPreconditionError,
+    inspect_legacy_data,
+    purge_legacy_data,
     redact_custom_command_user_data,
 )
 from .presentation import build_response_transcript, present_exact_response
@@ -368,6 +372,93 @@ class CustomCommands(commands.Cog):
             inline=False,
         )
         await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+    async def _assert_legacy_purge_authority(self) -> None:
+        if self.bot.get_cog("CustomCommands") is not self:
+            raise commands.UserFeedbackCheckFailure(
+                "The managed Custom Commands replacement is not active"
+            )
+        for name in ("customcom", "cc"):
+            command = self.bot.get_command(name)
+            if command is None or command.cog is not self:
+                raise commands.UserFeedbackCheckFailure(
+                    f"The replacement does not own the {name} command"
+                )
+        packages = await self.bot._config.packages()
+        if "customcom" in packages or "customcom" in self.bot.extensions:
+            raise commands.UserFeedbackCheckFailure(
+                "The official CustomCom package is still active or configured"
+            )
+
+    @customcom.command(name="purgelegacy", hidden=True)
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def cc_purgelegacy(
+        self,
+        ctx: commands.Context,
+        confirmation: str | None = None,
+    ) -> None:
+        """Inspect or permanently remove inactive legacy CustomCom data."""
+        await self._assert_legacy_purge_authority()
+        database_path = self._data_root / "custom_commands.sqlite"
+        if confirmation is None:
+            status = await inspect_legacy_data(
+                self._legacy_config,
+                self._data_root,
+                database_path,
+            )
+            state_label = "present" if status.migration_state_present else "absent"
+            if status.is_clean:
+                next_step = "No legacy data remains."
+            else:
+                next_step = (
+                    "This permanently deletes only the legacy surfaces above.\n"
+                    f"Run `{ctx.clean_prefix}customcom purgelegacy confirm` to continue."
+                )
+            embed = discord.Embed(
+                title="Legacy CustomCom cleanup",
+                description=(
+                    f"Active SQLite commands: {status.active_command_count}\n"
+                    f"Legacy Config commands: {status.legacy_command_count}\n"
+                    f"Migration artifact files: {status.artifact_file_count} "
+                    f"({status.artifact_bytes} bytes)\n"
+                    f"Migration state table: {state_label}\n\n"
+                    f"{next_step}"
+                ),
+            )
+            await ctx.send(
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        if confirmation != "confirm":
+            raise commands.UserFeedbackCheckFailure(
+                f"Use `{ctx.clean_prefix}customcom purgelegacy confirm` exactly"
+            )
+        try:
+            await purge_legacy_data(
+                self._legacy_config,
+                self._data_root,
+                database_path,
+            )
+        except LegacyCleanupPreconditionError as error:
+            raise commands.UserFeedbackCheckFailure(str(error)) from error
+        except LegacyCleanupError:
+            raise
+        await self._log_moderation_action(
+            ctx.guild,
+            f"{ctx.author} permanently removed inactive legacy CustomCom data",
+        )
+        await ctx.send(
+            embed=discord.Embed(
+                title="Legacy CustomCom data removed",
+                description=(
+                    "Legacy Config, local migration artifacts, and the migration-state "
+                    "table are gone. Run the command again to verify zero remaining targets."
+                ),
+            ),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @customcom.command(name="raw")
     async def cc_raw(self, ctx: commands.Context, command: str) -> None:

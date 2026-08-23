@@ -17,6 +17,92 @@ OFFICIAL_EXTENSION_MODULE = "redbot.cogs.customcom"
 OFFICIAL_COG_MODULE = "redbot.cogs.customcom.customcom"
 
 
+def assert_safe_to_replace(bot: Any) -> None:
+    """Reject every unknown owner before the suite performs startup effects."""
+    active = bot.get_cog("CustomCommands")
+    if active is not None:
+        module = type(active).__module__
+        if module != OFFICIAL_COG_MODULE and not isinstance(active, CustomCommands):
+            raise MigrationApplyError("Another cog owns the CustomCommands name")
+    extension = bot.extensions.get("customcom")
+    if extension is not None:
+        module_name = getattr(extension, "__name__", None)
+        spec_name = getattr(getattr(extension, "__spec__", None), "name", None)
+        if OFFICIAL_EXTENSION_MODULE not in {module_name, spec_name}:
+            raise MigrationApplyError(
+                "The active customcom extension is not Red's official package"
+            )
+    for name in ("customcom", "cc"):
+        command = bot.get_command(name)
+        if command is not None and command.cog is not active:
+            raise MigrationApplyError(f"Another cog owns the {name} command")
+
+
+class ReplacementActivator:
+    """Make the managed Custom Commands cog the permanent runtime owner."""
+
+    def __init__(self, bot: Any, nhmisc: Any, catalog: CustomCommandCatalog):
+        self.bot = bot
+        self.nhmisc = nhmisc
+        self.catalog = catalog
+        self._activation_lock = asyncio.Lock()
+
+    async def activate(self) -> CustomCommands:
+        async with self._activation_lock:
+            assert_safe_to_replace(self.bot)
+            await self.bot.add_loaded_package("NHCogs")
+            await self.bot.remove_loaded_package("customcom")
+            packages = await self.bot._config.packages()
+            if "customcom" in packages:
+                raise MigrationApplyError("customcom remains in Red's package list")
+            await self.remove_official_extension()
+            active = self.bot.get_cog("CustomCommands")
+            if active is not None:
+                module = type(active).__module__
+                if module == OFFICIAL_COG_MODULE:
+                    raise MigrationApplyError("Official CustomCommands cog is still active")
+                if isinstance(active, CustomCommands):
+                    self.verify_public_commands(active)
+                    return active
+                raise MigrationApplyError("Another cog owns the CustomCommands name")
+            runtime = CustomCommands(self.bot, self.nhmisc, catalog=self.catalog)
+            try:
+                await self.bot.add_cog(runtime)
+                self.verify_public_commands(runtime)
+            except Exception:
+                if self.bot.get_cog("CustomCommands") is runtime:
+                    try:
+                        await self.bot.remove_cog(runtime.qualified_name)
+                    except Exception as cleanup_error:
+                        raise MigrationApplyError(
+                            "Partial Custom Commands replacement could not be removed"
+                        ) from cleanup_error
+                raise
+            return runtime
+
+    async def remove_official_extension(self) -> None:
+        extension = self.bot.extensions.get("customcom")
+        if extension is None:
+            return
+        module_name = getattr(extension, "__name__", None)
+        spec_name = getattr(getattr(extension, "__spec__", None), "name", None)
+        if OFFICIAL_EXTENSION_MODULE not in {module_name, spec_name}:
+            raise MigrationApplyError(
+                "The active customcom extension is not Red's official package"
+            )
+        await self.bot.unload_extension("customcom")
+        if self.bot.extensions.get("customcom") is not None:
+            raise MigrationApplyError("Official customcom extension did not unload")
+
+    def verify_public_commands(self, runtime: CustomCommands) -> None:
+        for name in ("customcom", "cc"):
+            command = self.bot.get_command(name)
+            if command is None or command.cog is not runtime:
+                raise MigrationApplyError(
+                    f"Replacement does not own the {name} command"
+                )
+
+
 class CutoverController:
     """Own the one-way authority switch from Red Config to the SQLite catalog."""
 
@@ -32,6 +118,7 @@ class CutoverController:
         self.catalog = catalog
         self.state_store = state_store
         self._activation_lock = asyncio.Lock()
+        self._runtime = ReplacementActivator(bot, nhmisc, catalog)
 
     async def activate_imported(self) -> CustomCommands:
         async with self._activation_lock:
@@ -61,7 +148,7 @@ class CutoverController:
             return runtime
 
     async def quiesce_official(self) -> None:
-        await self._remove_official_extension()
+        await self._runtime.remove_official_extension()
 
     async def restore_official(self) -> None:
         await self._restore_official_where_possible()
@@ -73,49 +160,13 @@ class CutoverController:
         return await self._activate_runtime()
 
     async def _activate_runtime(self) -> CustomCommands:
-        packages = await self.bot._config.packages()
-        if "NHCogs" not in packages:
-            raise MigrationApplyError("NHCogs is not persisted in Red's package list")
-        await self._remove_official_extension()
-        await self.bot.remove_loaded_package("customcom")
-        packages = await self.bot._config.packages()
-        if "customcom" in packages:
-            raise MigrationApplyError("customcom remains in Red's package list")
-        active = self.bot.get_cog("CustomCommands")
-        if active is not None:
-            module = type(active).__module__
-            if module == OFFICIAL_COG_MODULE:
-                raise MigrationApplyError("Official CustomCommands cog is still active")
-            if isinstance(active, CustomCommands):
-                self._verify_public_commands(active)
-                return active
-            raise MigrationApplyError("Another cog owns the CustomCommands name")
-        runtime = CustomCommands(self.bot, self.nhmisc, catalog=self.catalog)
-        await self.bot.add_cog(runtime)
-        self._verify_public_commands(runtime)
-        return runtime
+        return await self._runtime.activate()
 
     async def _remove_official_extension(self) -> None:
-        extension = self.bot.extensions.get("customcom")
-        if extension is None:
-            return
-        module_name = getattr(extension, "__name__", None)
-        spec_name = getattr(getattr(extension, "__spec__", None), "name", None)
-        if OFFICIAL_EXTENSION_MODULE not in {module_name, spec_name}:
-            raise MigrationApplyError(
-                "The active customcom extension is not Red's official package"
-            )
-        await self.bot.unload_extension("customcom")
-        if self.bot.extensions.get("customcom") is not None:
-            raise MigrationApplyError("Official customcom extension did not unload")
+        await self._runtime.remove_official_extension()
 
     def _verify_public_commands(self, runtime: CustomCommands) -> None:
-        for name in ("customcom", "cc"):
-            command = self.bot.get_command(name)
-            if command is None or command.cog is not runtime:
-                raise MigrationApplyError(
-                    f"Replacement does not own the {name} command"
-                )
+        self._runtime.verify_public_commands(runtime)
 
     async def _restore_official_where_possible(self) -> None:
         active = self.bot.get_cog("CustomCommands")

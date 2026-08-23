@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import shutil
+import sqlite3
 from collections.abc import Iterable, Mapping
+from contextlib import closing
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -27,6 +30,144 @@ LEGACY_DATETIME_FORMAT = "%d/%m/%Y %H:%M:%S"
 LEGACY_RESPONSE_WEIGHT = 100
 COOLDOWN_SCOPE_ALIASES = {"server": "guild", "user": "member"}
 LEGACY_CONFIG_IDENTIFIER = 414589031223512
+
+
+class LegacyCleanupError(RuntimeError):
+    pass
+
+
+class LegacyCleanupIncomplete(LegacyCleanupError):
+    pass
+
+
+class LegacyCleanupPreconditionError(LegacyCleanupError):
+    pass
+
+
+@dataclass(frozen=True)
+class LegacyDataStatus:
+    active_command_count: int
+    legacy_command_count: int
+    artifact_file_count: int
+    artifact_bytes: int
+    migration_state_present: bool
+
+    @property
+    def is_clean(self) -> bool:
+        return (
+            self.legacy_command_count == 0
+            and self.artifact_file_count == 0
+            and not self.migration_state_present
+        )
+
+
+def _legacy_command_count(guilds: Any) -> int:
+    if not isinstance(guilds, Mapping):
+        return 0
+    count = 0
+    for guild_data in guilds.values():
+        if not isinstance(guild_data, Mapping):
+            continue
+        commands = guild_data.get("commands")
+        if isinstance(commands, Mapping):
+            count += len(commands)
+    return count
+
+
+def _migration_root(data_root: Path) -> Path:
+    resolved_data_root = Path(data_root).resolve()
+    resolved_migration_root = (resolved_data_root / "migration").resolve()
+    if (
+        resolved_migration_root.parent != resolved_data_root
+        or resolved_migration_root.name != "migration"
+    ):
+        raise LegacyCleanupError("Migration artifact path escaped the Custom Commands data root")
+    return resolved_migration_root
+
+
+def _artifact_stats(data_root: Path) -> tuple[int, int]:
+    root = _migration_root(data_root)
+    if not root.exists():
+        return 0, 0
+    files = tuple(path for path in root.rglob("*") if path.is_file())
+    return len(files), sum(path.stat().st_size for path in files)
+
+
+def _sqlite_legacy_status(database_path: Path) -> tuple[int, bool]:
+    path = Path(database_path)
+    if not path.is_file():
+        raise LegacyCleanupError("The active Custom Commands database does not exist")
+    with closing(sqlite3.connect(path)) as connection:
+        integrity = connection.execute("PRAGMA quick_check").fetchone()
+        if integrity is None or integrity[0] != "ok":
+            raise LegacyCleanupError("The active Custom Commands database failed its integrity check")
+        active_count = connection.execute(
+            "SELECT COUNT(*) FROM custom_commands"
+        ).fetchone()[0]
+        migration_state_present = (
+            connection.execute(
+                """SELECT 1 FROM sqlite_master
+                   WHERE type = 'table' AND name = 'custom_command_migration_state'"""
+            ).fetchone()
+            is not None
+        )
+    return int(active_count), migration_state_present
+
+
+async def inspect_legacy_data(
+    legacy_config: Any,
+    data_root: Path,
+    database_path: Path,
+) -> LegacyDataStatus:
+    guilds = await legacy_config.all_guilds()
+    legacy_count = _legacy_command_count(guilds)
+    artifact_count, artifact_bytes = await asyncio.to_thread(
+        _artifact_stats,
+        data_root,
+    )
+    active_count, migration_state_present = await asyncio.to_thread(
+        _sqlite_legacy_status,
+        database_path,
+    )
+    return LegacyDataStatus(
+        active_command_count=active_count,
+        legacy_command_count=legacy_count,
+        artifact_file_count=artifact_count,
+        artifact_bytes=artifact_bytes,
+        migration_state_present=migration_state_present,
+    )
+
+
+def _delete_migration_artifacts(data_root: Path) -> None:
+    root = _migration_root(data_root)
+    if root.exists():
+        shutil.rmtree(root)
+
+
+def _drop_migration_state(database_path: Path) -> None:
+    with closing(sqlite3.connect(database_path)) as connection, connection:
+        connection.execute("DROP TABLE IF EXISTS custom_command_migration_state")
+
+
+async def purge_legacy_data(
+    legacy_config: Any,
+    data_root: Path,
+    database_path: Path,
+) -> LegacyDataStatus:
+    before = await inspect_legacy_data(legacy_config, data_root, database_path)
+    if before.active_command_count == 0 and before.legacy_command_count > 0:
+        raise LegacyCleanupPreconditionError(
+            "The active catalog is empty while legacy CustomCom still contains commands"
+        )
+    await legacy_config.clear_all()
+    await asyncio.to_thread(_delete_migration_artifacts, data_root)
+    await asyncio.to_thread(_drop_migration_state, database_path)
+    after = await inspect_legacy_data(legacy_config, data_root, database_path)
+    if not after.is_clean:
+        raise LegacyCleanupIncomplete(
+            "Legacy CustomCom cleanup did not remove every target"
+        )
+    return after
 
 
 def _redact_legacy_commands(commands: Any, user_id: int) -> int:
