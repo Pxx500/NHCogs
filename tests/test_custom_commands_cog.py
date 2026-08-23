@@ -170,6 +170,10 @@ def load_cog_module():  # noqa: PLR0915
         "required_permissions",
         permissions,
     )
+    commands.has_permissions = lambda **permissions: _tag(
+        "direct_permissions",
+        permissions,
+    )
 
     core = types.ModuleType("redbot.core")
     core.commands = commands
@@ -241,6 +245,101 @@ def load_cog_module():  # noqa: PLR0915
 cog, migration_controller = load_cog_module()
 
 
+class CustomCommandsStartupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_startup_reports_catalog_initialization_failure(self):
+        failure = OSError("database is unavailable")
+        bot = types.SimpleNamespace(guilds=[types.SimpleNamespace(id=100)])
+        nhmisc = types.SimpleNamespace(report_operational_error=mock.AsyncMock())
+        catalog = types.SimpleNamespace(
+            initialize=mock.AsyncMock(side_effect=failure)
+        )
+
+        with mock.patch.object(
+            migration_controller,
+            "CustomCommandCatalog",
+            return_value=catalog,
+        ):
+            with self.assertRaisesRegex(OSError, "database is unavailable"):
+                await migration_controller.build_custom_commands_component(bot, nhmisc)
+
+        nhmisc.report_operational_error.assert_awaited_once_with(
+            guild_id=100,
+            source="CustomCommands",
+            action="activate replacement startup",
+            error=failure,
+        )
+
+    async def test_startup_activates_replacement_without_reading_migration_state(self):
+        bot = types.SimpleNamespace(guilds=[types.SimpleNamespace(id=100)])
+        nhmisc = types.SimpleNamespace(report_operational_error=mock.AsyncMock())
+        catalog = types.SimpleNamespace(initialize=mock.AsyncMock())
+        runtime = object()
+        activator = types.SimpleNamespace(activate=mock.AsyncMock(return_value=runtime))
+
+        with (
+            mock.patch.object(
+                migration_controller,
+                "CustomCommandCatalog",
+                return_value=catalog,
+            ),
+            mock.patch.object(
+                migration_controller,
+                "MigrationStateStore",
+                side_effect=AssertionError("migration state must not be read at startup"),
+            ),
+            mock.patch.object(
+                migration_controller,
+                "ReplacementActivator",
+                return_value=activator,
+                create=True,
+            ),
+        ):
+            result = await migration_controller.build_custom_commands_component(
+                bot,
+                nhmisc,
+            )
+
+        self.assertIs(result, runtime)
+        catalog.initialize.assert_awaited_once()
+        activator.activate.assert_awaited_once()
+        nhmisc.report_operational_error.assert_not_awaited()
+
+    async def test_startup_reports_activation_failure_and_never_returns_migrator(self):
+        failure = RuntimeError("replacement registration failed")
+        bot = types.SimpleNamespace(guilds=[types.SimpleNamespace(id=100)])
+        nhmisc = types.SimpleNamespace(report_operational_error=mock.AsyncMock())
+        catalog = types.SimpleNamespace(initialize=mock.AsyncMock())
+        activator = types.SimpleNamespace(
+            activate=mock.AsyncMock(side_effect=failure)
+        )
+
+        with (
+            mock.patch.object(
+                migration_controller,
+                "CustomCommandCatalog",
+                return_value=catalog,
+            ),
+            mock.patch.object(
+                migration_controller,
+                "ReplacementActivator",
+                return_value=activator,
+                create=True,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "replacement registration failed",
+            ):
+                await migration_controller.build_custom_commands_component(bot, nhmisc)
+
+        nhmisc.report_operational_error.assert_awaited_once_with(
+            guild_id=100,
+            source="CustomCommands",
+            action="activate replacement startup",
+            error=failure,
+        )
+
+
 class CustomCommandsSurfaceTests(unittest.TestCase):
     def test_management_and_read_only_paths_preserve_customcom_interface(self):
         root = cog.CustomCommands.customcom
@@ -249,7 +348,17 @@ class CustomCommandsSurfaceTests(unittest.TestCase):
         children = {command.name: command for command in root.commands}
         self.assertEqual(
             set(children),
-            {"raw", "search", "list", "show", "create", "edit", "cooldown", "delete"},
+            {
+                "raw",
+                "search",
+                "list",
+                "show",
+                "create",
+                "edit",
+                "cooldown",
+                "delete",
+                "purgelegacy",
+            },
         )
         self.assertEqual(
             {command.name for command in children["create"].commands},
@@ -260,6 +369,12 @@ class CustomCommandsSurfaceTests(unittest.TestCase):
                 children[name].callback.required_permissions,
                 {"manage_messages": True},
             )
+        self.assertTrue(children["purgelegacy"].hidden)
+        self.assertTrue(children["purgelegacy"].callback.guild_only)
+        self.assertEqual(
+            children["purgelegacy"].callback.direct_permissions,
+            {"manage_messages": True},
+        )
         for name in ("raw", "search", "list", "show"):
             self.assertFalse(hasattr(children[name].callback, "required_permissions"))
 
@@ -272,6 +387,160 @@ class CustomCommandsSurfaceTests(unittest.TestCase):
             {command.name for command in migrate.commands},
             {"plan", "apply", "forgetguild"},
         )
+
+
+class CustomCommandsLegacyPurgeTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _subject():
+        subject = object.__new__(cog.CustomCommands)
+        subject._data_root = Path("custom-commands-data")
+        subject._legacy_config = object()
+        subject._log_moderation_action = mock.AsyncMock()
+        command = types.SimpleNamespace(cog=subject)
+        bot = types.SimpleNamespace(
+            extensions={},
+            _config=types.SimpleNamespace(
+                packages=mock.AsyncMock(return_value=["NHCogs"])
+            ),
+        )
+        bot.get_cog = lambda name: subject if name == "CustomCommands" else None
+        bot.get_command = lambda name: command if name in {"customcom", "cc"} else None
+        subject.bot = bot
+        return subject
+
+    @staticmethod
+    def _ctx():
+        return types.SimpleNamespace(
+            clean_prefix="!",
+            guild=types.SimpleNamespace(id=100),
+            author=types.SimpleNamespace(id=200, __str__=lambda self: "Moderator"),
+            send=mock.AsyncMock(),
+        )
+
+    async def test_plan_reports_targets_without_purging(self):
+        subject = self._subject()
+        ctx = self._ctx()
+        status = types.SimpleNamespace(
+            active_command_count=12,
+            legacy_command_count=3,
+            artifact_file_count=2,
+            artifact_bytes=1536,
+            migration_state_present=True,
+            is_clean=False,
+        )
+        inspect = mock.AsyncMock(return_value=status)
+        purge = mock.AsyncMock()
+
+        with (
+            mock.patch.object(cog, "inspect_legacy_data", inspect, create=True),
+            mock.patch.object(cog, "purge_legacy_data", purge, create=True),
+        ):
+            await cog.CustomCommands.cc_purgelegacy.callback(subject, ctx, None)
+
+        purge.assert_not_awaited()
+        sent = ctx.send.await_args.kwargs
+        description = sent["embed"].description
+        self.assertIn("Active SQLite commands: 12", description)
+        self.assertIn("Legacy Config commands: 3", description)
+        self.assertIn("Migration artifact files: 2", description)
+        self.assertIn("Migration state table: present", description)
+        self.assertIn("!customcom purgelegacy confirm", description)
+
+    async def test_confirmation_purges_and_logs_only_after_exact_token(self):
+        subject = self._subject()
+        ctx = self._ctx()
+        clean = types.SimpleNamespace(
+            active_command_count=12,
+            legacy_command_count=0,
+            artifact_file_count=0,
+            artifact_bytes=0,
+            migration_state_present=False,
+            is_clean=True,
+        )
+        purge = mock.AsyncMock(return_value=clean)
+
+        with mock.patch.object(cog, "purge_legacy_data", purge, create=True):
+            with self.assertRaises(cog.commands.UserFeedbackCheckFailure):
+                await cog.CustomCommands.cc_purgelegacy.callback(
+                    subject,
+                    ctx,
+                    "CONFIRM",
+                )
+            await cog.CustomCommands.cc_purgelegacy.callback(
+                subject,
+                ctx,
+                "confirm",
+            )
+
+        purge.assert_awaited_once_with(
+            subject._legacy_config,
+            subject._data_root,
+            subject._data_root / "custom_commands.sqlite",
+        )
+        subject._log_moderation_action.assert_awaited_once()
+        self.assertEqual(ctx.send.await_count, 1)
+        self.assertEqual(
+            ctx.send.await_args.kwargs["embed"].title,
+            "Legacy CustomCom data removed",
+        )
+
+    async def test_confirmation_exposes_only_safety_refusal_as_user_feedback(self):
+        subject = self._subject()
+        ctx = self._ctx()
+        safety_refusal = cog.LegacyCleanupPreconditionError(
+            "active catalog is empty"
+        )
+        operational_failure = cog.LegacyCleanupError(
+            "database failed its integrity check"
+        )
+
+        with mock.patch.object(
+            cog,
+            "purge_legacy_data",
+            mock.AsyncMock(side_effect=safety_refusal),
+            create=True,
+        ):
+            with self.assertRaisesRegex(
+                cog.commands.UserFeedbackCheckFailure,
+                "active catalog is empty",
+            ):
+                await cog.CustomCommands.cc_purgelegacy.callback(
+                    subject,
+                    ctx,
+                    "confirm",
+                )
+
+        with mock.patch.object(
+            cog,
+            "purge_legacy_data",
+            mock.AsyncMock(side_effect=operational_failure),
+            create=True,
+        ):
+            with self.assertRaises(cog.LegacyCleanupError) as raised:
+                await cog.CustomCommands.cc_purgelegacy.callback(
+                    subject,
+                    ctx,
+                    "confirm",
+                )
+
+        self.assertIs(raised.exception, operational_failure)
+
+    async def test_plan_refuses_when_replacement_does_not_own_both_commands(self):
+        subject = self._subject()
+        ctx = self._ctx()
+        subject.bot.get_command = lambda name: types.SimpleNamespace(
+            cog=subject if name == "customcom" else object()
+        )
+        inspect = mock.AsyncMock()
+
+        with mock.patch.object(cog, "inspect_legacy_data", inspect, create=True):
+            with self.assertRaisesRegex(
+                cog.commands.UserFeedbackCheckFailure,
+                "does not own the cc command",
+            ):
+                await cog.CustomCommands.cc_purgelegacy.callback(subject, ctx, None)
+
+        inspect.assert_not_awaited()
 
 
 class CustomCommandsCommandErrorTests(unittest.IsolatedAsyncioTestCase):

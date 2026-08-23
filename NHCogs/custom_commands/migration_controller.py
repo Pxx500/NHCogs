@@ -11,7 +11,7 @@ from redbot.core import Config, commands
 from redbot.core.data_manager import cog_data_path
 
 from .catalog import CustomCommand, CustomCommandCatalog
-from .lifecycle import CutoverController
+from .lifecycle import CutoverController, ReplacementActivator
 from .migration import (
     LEGACY_CONFIG_IDENTIFIER,
     LegacyMigrationPlanner,
@@ -354,27 +354,22 @@ class CustomCommandsMigration(commands.Cog):
 
 
 async def build_custom_commands_component(bot: Any, nhmisc: Any):
-    database_path = (
-        cog_data_path(raw_name="CustomCommands") / "custom_commands.sqlite"
-    )
-    catalog = CustomCommandCatalog(database_path)
-    state_store = MigrationStateStore(database_path)
-    await catalog.initialize()
-    await state_store.initialize()
-    state = await state_store.get()
-    if state.phase is MigrationPhase.COMPLETE:
-        controller = CutoverController(bot, nhmisc, catalog, state_store)
-        try:
-            return await controller.activate_completed()
-        except Exception as error:
-            log.exception("Custom Commands startup invariant check failed")
-            guilds = tuple(bot.guilds)
-            if guilds:
-                await nhmisc.report_operational_error(
-                    guild_id=guilds[0].id,
-                    source="CustomCommands",
-                    action="verify replacement startup",
-                    error=error,
-                )
-            return CustomCommandsMigration(bot, nhmisc, catalog, state_store)
-    return CustomCommandsMigration(bot, nhmisc, catalog, state_store)
+    try:
+        database_path = (
+            cog_data_path(raw_name="CustomCommands") / "custom_commands.sqlite"
+        )
+        catalog = CustomCommandCatalog(database_path)
+        await catalog.initialize()
+        activator = ReplacementActivator(bot, nhmisc, catalog)
+        return await activator.activate()
+    except Exception as error:
+        log.exception("Custom Commands replacement startup failed")
+        guilds = tuple(bot.guilds)
+        if guilds:
+            await nhmisc.report_operational_error(
+                guild_id=guilds[0].id,
+                source="CustomCommands",
+                action="activate replacement startup",
+                error=error,
+            )
+        raise

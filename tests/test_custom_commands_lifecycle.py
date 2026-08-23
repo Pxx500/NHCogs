@@ -74,11 +74,15 @@ class _Bot:
         self.extensions = {"customcom": official}
         official_cog_type = type("OfficialCustomCommands", (), {})
         official_cog_type.__module__ = "redbot.cogs.customcom.customcom"
-        self.cogs = {"CustomCommands": official_cog_type()}
+        official_cog = official_cog_type()
+        self.cogs = {"CustomCommands": official_cog}
         self.packages = ["NHCogs", "customcom"]
         self._config = _PackageConfig(self.packages)
         self.events = []
-        self.commands = {}
+        self.commands = {
+            "customcom": SimpleNamespace(cog=official_cog),
+            "cc": SimpleNamespace(cog=official_cog),
+        }
         self._cog_mgr = SimpleNamespace(
             find_cog=mock.AsyncMock(
                 return_value=SimpleNamespace(name="redbot.cogs.customcom")
@@ -89,6 +93,7 @@ class _Bot:
         self.events.append(("unload", name))
         self.extensions.pop(name, None)
         self.cogs.pop("CustomCommands", None)
+        self.commands.clear()
 
     async def remove_loaded_package(self, name):
         self.events.append(("remove package", name))
@@ -110,7 +115,9 @@ class _Bot:
         self.events.append(("load", spec))
 
     async def add_loaded_package(self, name):
-        self.packages.append(name)
+        self.events.append(("add package", name))
+        if name not in self.packages:
+            self.packages.append(name)
 
     def get_cog(self, name):
         return self.cogs.get(name)
@@ -145,8 +152,9 @@ class CutoverControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             bot.events,
             [
-                ("unload", "customcom"),
+                ("add package", "NHCogs"),
                 ("remove package", "customcom"),
+                ("unload", "customcom"),
                 ("add cog", "CustomCommands"),
             ],
         )
@@ -243,6 +251,111 @@ class CutoverControllerTests(unittest.IsolatedAsyncioTestCase):
             migration_state.MigrationPhase.COMPLETE,
         )
         self.assertNotIn("customcom", bot.packages)
+
+
+class ReplacementActivatorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_activation_repairs_missing_nhcogs_package_and_replaces_official(self):
+        bot = _Bot()
+        bot.packages.remove("NHCogs")
+        activator = lifecycle.ReplacementActivator(bot, object(), object())
+
+        runtime = await activator.activate()
+
+        self.assertIsInstance(runtime, cog.CustomCommands)
+        self.assertIn("NHCogs", bot.packages)
+        self.assertNotIn("customcom", bot.packages)
+        self.assertIs(bot.get_cog("CustomCommands"), runtime)
+        self.assertIs(bot.get_command("customcom").cog, runtime)
+        self.assertIs(bot.get_command("cc").cog, runtime)
+        self.assertEqual(
+            bot.events,
+            [
+                ("add package", "NHCogs"),
+                ("remove package", "customcom"),
+                ("unload", "customcom"),
+                ("add cog", "CustomCommands"),
+            ],
+        )
+
+    async def test_activation_is_idempotent_after_replacement_owns_commands(self):
+        bot = _Bot()
+        activator = lifecycle.ReplacementActivator(bot, object(), object())
+
+        first = await activator.activate()
+        second = await activator.activate()
+
+        self.assertIs(second, first)
+        self.assertIs(bot.get_command("customcom").cog, first)
+        self.assertIs(bot.get_command("cc").cog, first)
+
+    async def test_activation_refuses_to_remove_an_unknown_custom_commands_owner(self):
+        bot = _Bot()
+        bot.extensions.clear()
+        unknown = object()
+        bot.cogs["CustomCommands"] = unknown
+        activator = lifecycle.ReplacementActivator(bot, object(), object())
+
+        with self.assertRaisesRegex(
+            migration_state.MigrationApplyError,
+            "Another cog owns the CustomCommands name",
+        ):
+            await activator.activate()
+
+        self.assertIs(bot.get_cog("CustomCommands"), unknown)
+        self.assertEqual(bot.packages, ["NHCogs", "customcom"])
+        self.assertEqual(bot.events, [])
+
+    async def test_activation_refuses_unknown_command_owner_before_cutover(self):
+        bot = _Bot()
+        bot.extensions.clear()
+        bot.cogs.clear()
+        unknown = object()
+        bot.commands["customcom"] = SimpleNamespace(cog=unknown)
+        activator = lifecycle.ReplacementActivator(bot, object(), object())
+
+        with self.assertRaisesRegex(
+            migration_state.MigrationApplyError,
+            "Another cog owns the customcom command",
+        ):
+            await activator.activate()
+
+        self.assertIs(bot.get_command("customcom").cog, unknown)
+        self.assertEqual(bot.packages, ["NHCogs", "customcom"])
+        self.assertEqual(bot.events, [])
+
+    async def test_activation_refuses_unknown_extension_before_cutover(self):
+        bot = _Bot()
+        unknown = types.ModuleType("third_party.customcom")
+        bot.extensions["customcom"] = unknown
+        activator = lifecycle.ReplacementActivator(bot, object(), object())
+
+        with self.assertRaisesRegex(
+            migration_state.MigrationApplyError,
+            "not Red's official package",
+        ):
+            await activator.activate()
+
+        self.assertIs(bot.extensions["customcom"], unknown)
+        self.assertEqual(bot.packages, ["NHCogs", "customcom"])
+        self.assertEqual(bot.events, [])
+
+    async def test_failed_command_registration_removes_partial_replacement(self):
+        bot = _Bot()
+
+        async def add_without_commands(runtime):
+            bot.events.append(("add cog", runtime.qualified_name))
+            bot.cogs[runtime.qualified_name] = runtime
+
+        bot.add_cog = add_without_commands
+        activator = lifecycle.ReplacementActivator(bot, object(), object())
+
+        with self.assertRaisesRegex(
+            migration_state.MigrationApplyError,
+            "Replacement does not own the customcom command",
+        ):
+            await activator.activate()
+
+        self.assertIsNone(bot.get_cog("CustomCommands"))
 
 
 if __name__ == "__main__":
