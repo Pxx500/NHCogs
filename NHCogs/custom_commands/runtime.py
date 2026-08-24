@@ -118,6 +118,7 @@ class CustomCommandRuntime:
                         value
                         for name, value in vars(discord).items()
                         if name.casefold() == converter_name
+                        and isinstance(value, type)
                     ),
                     Parameter.empty,
                 )
