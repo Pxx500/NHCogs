@@ -18,6 +18,7 @@ def load_runtime_modules():
     package.__path__ = [str(PACKAGE_PATH)]
     sys.modules[package_name] = package
     discord = types.ModuleType("discord")
+    discord.member = types.ModuleType("discord.member")
     discord.Member = type("Member", (), {})
     discord.PartialMessageable = type("PartialMessageable", (), {})
     commands = types.ModuleType("redbot.core.commands")
@@ -139,6 +140,12 @@ class CustomCommandWhitespaceRoundTripTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CustomCommandRuntimeTests(unittest.TestCase):
+    def test_prepare_args_prefers_member_class_over_lowercase_module(self):
+        parameters = runtime.CustomCommandRuntime.prepare_args("{1:Member}")
+
+        self.assertEqual(tuple(parameters), ("member_final",))
+        self.assertIs(parameters["member_final"].annotation, runtime.discord.Member)
+
     def test_weighted_selection_uses_exact_integer_boundaries(self):
         command = command_with_weights(99, 1)
 
