@@ -6,7 +6,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .storage import Migrations, apply_migrations, connect
+from NHCogs.storage import Migrations, apply_migrations, connect
 
 
 def _create_schema(connection: sqlite3.Connection) -> None:

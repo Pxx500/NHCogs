@@ -12,7 +12,7 @@ from pathlib import Path
 from types import MappingProxyType
 from uuid import uuid4
 
-from .storage import apply_migrations, connect
+from NHCogs.storage import apply_migrations, connect
 
 log = logging.getLogger(__name__)
 

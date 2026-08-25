@@ -456,6 +456,7 @@ def _isolated_honeypot_modules(data_path: Path):
         "redbot.core.utils.chat_formatting",
         "AAA3A_utils",
         "NHCogs",
+        "NHCogs.storage",
         package_name,
         *(f"{package_name}.{name}" for name in (*load_order, "honeypot")),
         *preexisting_honeypot_names,
@@ -689,6 +690,7 @@ def _isolated_honeypot_modules(data_path: Path):
                 package_name: package,
             }
         )
+        _load_module("NHCogs.storage", PACKAGE_DIR.parent / "storage.py")
         loaded = {
             name: _load_module(f"{package_name}.{name}", module_paths[name])
             for name in load_order

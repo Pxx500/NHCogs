@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from NHCogs.storage import Migrations, apply_migrations, connect
+
 from .image_detector import ImageSample, rebuild_model_state
-from .storage import Migrations, apply_migrations, connect
 
 IMAGE_SCAN_PROFILE_COLUMNS = (
     "messages_scanned",
