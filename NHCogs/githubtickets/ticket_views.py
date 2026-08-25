@@ -48,12 +48,12 @@ class TicketControls(discord.ui.View):
             )
 
             async def callback(interaction, selected_action=action):
+                await interaction.response.defer()
                 actor = self._actor_factory(interaction)
                 result = await selected_action(self.ticket_id, actor)
                 if result.success:
-                    await interaction.response.defer()
                     return
-                await interaction.response.send_message(result.response, ephemeral=True)
+                await interaction.followup.send(result.response, ephemeral=True)
 
             button.callback = callback
             self.add_item(button)

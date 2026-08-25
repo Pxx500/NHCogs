@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 import discord
 
@@ -11,7 +12,7 @@ from .presentation import (
     thread_name,
     ticket_message,
 )
-from .projection import ProjectionNotFound
+from .projection import ProjectionNotFound, ProjectionUnavailable
 
 
 class DiscordTicketProjection:
@@ -22,7 +23,7 @@ class DiscordTicketProjection:
     ) -> None:
         self._bot = bot
         self._view_factory = view_factory
-        self._sent_messages: dict[int, object] = {}
+        self._sent_messages: dict[int, Any] = {}
 
     async def send_ticket(self, ticket: Ticket) -> int:
         channel = self._cached_channel(ticket.channel_id)
@@ -43,7 +44,9 @@ class DiscordTicketProjection:
             channel = self._cached_channel(ticket.channel_id)
             partial_message = getattr(channel, "get_partial_message", None)
             if not callable(partial_message):
-                raise ProjectionNotFound
+                raise ProjectionUnavailable(
+                    "Discord channel cannot create partial messages"
+                )
             message = partial_message(message_id)
         try:
             thread = await message.create_thread(name=thread_name(ticket.pr_title))
@@ -107,14 +110,14 @@ class DiscordTicketProjection:
     def _cached_channel(self, channel_id: int):
         channel = self._bot.get_channel(channel_id)
         if channel is None:
-            raise ProjectionNotFound
+            raise ProjectionUnavailable("Discord channel is not cached")
         return channel
 
     def _partial_message(self, channel_id: int, message_id: int):
         channel = self._cached_channel(channel_id)
         get_partial_message = getattr(channel, "get_partial_message", None)
         if not callable(get_partial_message):
-            raise ProjectionNotFound
+            raise ProjectionUnavailable("Discord channel cannot create partial messages")
         return get_partial_message(message_id)
 
     def _ticket_view(self, ticket: Ticket) -> discord.ui.View:

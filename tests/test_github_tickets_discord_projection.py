@@ -356,15 +356,15 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(projection_module.ProjectionNotFound):
                         await adapter.delete_thread(thread.id)
 
-    async def test_cache_miss_raises_without_rest_lookup(self):
+    async def test_cache_miss_is_retryable_without_rest_lookup(self):
         bot = FakeBot({})
         adapter = adapter_module.DiscordTicketProjection(bot, lambda _ticket_id, _claimed: object())
 
-        with self.assertRaises(projection_module.ProjectionNotFound):
+        with self.assertRaises(projection_module.ProjectionUnavailable):
             await adapter.send_ticket(ticket())
-        with self.assertRaises(projection_module.ProjectionNotFound):
+        with self.assertRaises(projection_module.ProjectionUnavailable):
             await adapter.ping_reviewer(66, 41, True)
-        with self.assertRaises(projection_module.ProjectionNotFound):
+        with self.assertRaises(projection_module.ProjectionUnavailable):
             await adapter.delete_thread(66)
 
         self.assertEqual(bot.fetch_calls, 0)

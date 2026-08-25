@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import asyncio
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 import discord
 from redbot.core import Config, commands
@@ -8,8 +11,24 @@ from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
 
 from . import presentation, settings
-from .models import CategoryAlreadyExists, CategoryLimitReached, InvalidCategoryName
+from .coordinator import TicketActor, TicketCoordinator
+from .dashboard import GitHubTicketsDashboard, send_developer_profile
+from .discord_projection import DiscordTicketProjection
+from .models import (
+    CategoryAlreadyExists,
+    CategoryLimitReached,
+    InvalidCategoryName,
+    PresenceTier,
+    Ticket,
+    TicketState,
+)
+from .projection import ProjectionNotFound
+from .routing import CandidateFacts
+from .scheduler import DeadlineScheduler
 from .store import MAX_CATEGORY_NAME_LENGTH, GitHubTicketsStore
+from .ticket_views import TicketControls
+
+log = logging.getLogger(__name__)
 
 
 class GitHubTickets(commands.Cog):
@@ -26,9 +45,340 @@ class GitHubTickets(commands.Cog):
         )
         self.config.register_guild(**settings.DEFAULTS)
         self.store = GitHubTicketsStore(cog_data_path(self) / "githubtickets.sqlite")
+        self._participant_roles: dict[int, frozenset[int]] = {}
+        self.projection = DiscordTicketProjection(bot, self._ticket_view)
+        self.coordinator = TicketCoordinator(
+            self.store,
+            self.projection,
+            get_settings=self._get_guild_settings,
+            get_candidates=self._get_candidates,
+            wake_deadlines=self._wake_deadlines,
+        )
+        self.scheduler = DeadlineScheduler(self.store, self._process_due_deadline)
+        self._startup_task: asyncio.Task[None] | None = None
+        self._dashboard_command = discord.app_commands.Command(
+            name="github-tickets",
+            description=presentation.SLASH_DESCRIPTION,
+            callback=self._open_dashboard,
+        )
+        self._developer_profile_command = discord.app_commands.ContextMenu(
+            name=presentation.DEVELOPER_PROFILE_COMMAND,
+            callback=self._open_developer_profile,
+        )
+        self._application_commands_registered = False
 
     async def cog_load(self) -> None:
         await self.store.initialize()
+        await self._refresh_participant_roles()
+        self._register_application_commands()
+        if self._startup_task is None or self._startup_task.done():
+            self._startup_task = asyncio.create_task(
+                self._restore_runtime(),
+                name="github-tickets-startup",
+            )
+            self._startup_task.add_done_callback(self._observe_startup_task)
+
+    async def cog_unload(self) -> None:
+        self._unregister_application_commands()
+        startup_task = self._startup_task
+        self._startup_task = None
+        if startup_task is not None:
+            startup_task.cancel()
+            try:
+                await startup_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+        await self.scheduler.close()
+
+    async def _restore_runtime(self) -> None:
+        await self.bot.wait_until_red_ready()
+        await self._refresh_participant_roles()
+        for ticket in await self.store.list_projection_cleanup_tickets():
+            await self.coordinator.recover_projection_cleanup(ticket.ticket_id)
+        for ticket in await self.store.list_active_tickets():
+            if ticket.message_id is None:
+                continue
+            self.bot.add_view(
+                self._ticket_view(
+                    ticket.ticket_id,
+                    ticket.state is TicketState.CLAIMED,
+                ),
+                message_id=ticket.message_id,
+            )
+        now = datetime.now(timezone.utc)
+        for ticket_id in await self.store.due_ticket_ids(now):
+            await self.coordinator.process_due(ticket_id)
+        self.scheduler.start()
+
+    @staticmethod
+    def _observe_startup_task(task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None:
+            log.error(
+                "GitHub Tickets startup failed",
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    def _register_application_commands(self) -> None:
+        if self._application_commands_registered:
+            return
+        self.bot.tree.add_command(self._dashboard_command, override=True)
+        self.bot.tree.add_command(self._developer_profile_command, override=True)
+        self._application_commands_registered = True
+
+    def _unregister_application_commands(self) -> None:
+        if not self._application_commands_registered:
+            return
+        for command in (self._dashboard_command, self._developer_profile_command):
+            command_type = command.type
+            existing = self.bot.tree.get_command(command.name, type=command_type)
+            if existing is command:
+                self.bot.tree.remove_command(command.name, type=command_type)
+        self._application_commands_registered = False
+
+    @discord.app_commands.guild_only()
+    async def _open_dashboard(self, interaction: discord.Interaction) -> None:
+        guild_id = self._interaction_guild_id(interaction)
+        actor = self._actor_from_interaction(interaction)
+        if guild_id is None or not actor.can_participate:
+            await interaction.response.send_message(
+                presentation.CANNOT_USE_ACTION,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        await GitHubTicketsDashboard(
+            self.store,
+            guild_id=guild_id,
+            create_ticket=self.coordinator.create_ticket,
+            actor_factory=self._actor_from_interaction,
+        ).send(interaction)
+
+    @discord.app_commands.guild_only()
+    async def _open_developer_profile(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+    ) -> None:
+        guild_id = self._interaction_guild_id(interaction)
+        actor = self._actor_from_interaction(interaction)
+        if guild_id is None or not actor.can_participate:
+            await interaction.response.send_message(
+                presentation.CANNOT_USE_ACTION,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        await send_developer_profile(
+            interaction,
+            self.store,
+            guild_id=guild_id,
+            user_id=member.id,
+        )
+
+    @staticmethod
+    def _interaction_guild_id(interaction: discord.Interaction) -> int | None:
+        guild_id = getattr(interaction, "guild_id", None)
+        if guild_id is not None:
+            return int(guild_id)
+        guild = getattr(interaction, "guild", None)
+        return int(guild.id) if guild is not None else None
+
+    def _actor_from_interaction(self, interaction: discord.Interaction) -> TicketActor:
+        guild_id = self._interaction_guild_id(interaction)
+        user = interaction.user
+        permissions = getattr(user, "guild_permissions", None)
+        can_manage_messages = bool(
+            permissions is not None and permissions.manage_messages
+        )
+        participant_role_ids = self._participant_roles.get(guild_id or 0, frozenset())
+        member_role_ids = {int(role.id) for role in getattr(user, "roles", ())}
+        return TicketActor(
+            user_id=int(user.id),
+            is_participant=bool(participant_role_ids.intersection(member_role_ids)),
+            can_manage_messages=can_manage_messages,
+        )
+
+    def _ticket_view(self, ticket_id: int, claimed: bool) -> TicketControls:
+        return TicketControls(
+            ticket_id,
+            claimed=claimed,
+            actor_factory=self._actor_from_interaction,
+            claim=self.coordinator.claim,
+            decline=self.coordinator.decline,
+            unassign=self.coordinator.unassign,
+            mark_finished=self.coordinator.mark_finished,
+        )
+
+    async def _get_guild_settings(self, guild_id: int) -> settings.GuildSettings:
+        raw = await self.config.guild_from_id(guild_id).all()
+        return settings.GuildSettings.from_mapping(raw)
+
+    async def _refresh_participant_roles(self) -> None:
+        guilds = await self.config.all_guilds()
+        self._participant_roles = {
+            int(guild_id): frozenset(
+                settings.GuildSettings.from_mapping(raw).participant_role_ids
+            )
+            for guild_id, raw in guilds.items()
+        }
+
+    def _wake_deadlines(self) -> None:
+        self.scheduler.wake()
+
+    async def _process_due_deadline(self, ticket_id: int) -> None:
+        await self.coordinator.process_due(ticket_id)
+
+    async def _get_candidates(self, ticket: Ticket) -> tuple[CandidateFacts, ...]:
+        guild = self.bot.get_guild(ticket.guild_id)
+        if guild is None:
+            return ()
+        members = tuple(getattr(guild, "members", ()))
+        histories = await self.store.candidate_history(
+            ticket.ticket_id,
+            (int(member.id) for member in members),
+        )
+        history_by_id = {history.user_id: history for history in histories}
+        participant_role_ids = self._participant_roles.get(ticket.guild_id, frozenset())
+        candidates: list[CandidateFacts] = []
+        for member in members:
+            user_id = int(member.id)
+            history = history_by_id.get(user_id)
+            if history is None:
+                continue
+            member_role_ids = {int(role.id) for role in getattr(member, "roles", ())}
+            permissions = getattr(member, "guild_permissions", None)
+            candidates.append(
+                CandidateFacts(
+                    user_id=user_id,
+                    is_cached_member=True,
+                    has_participant_role=bool(
+                        participant_role_ids.intersection(member_role_ids)
+                    ),
+                    can_manage_messages=bool(
+                        permissions is not None and permissions.manage_messages
+                    ),
+                    has_profile=history.has_profile,
+                    allows_automatic_pings=history.automatic_pings,
+                    matching_category_count=history.matching_category_count,
+                    was_pinged=history.was_pinged,
+                    timed_out=history.timed_out,
+                    declined=history.declined,
+                    unassigned=history.unassigned,
+                    presence_tier=self._presence_tier(member),
+                    active_assignment_count=history.active_assignment_count,
+                    last_ping_at=history.last_ping_at,
+                )
+            )
+        return tuple(candidates)
+
+    @staticmethod
+    def _presence_tier(member: discord.Member) -> PresenceTier:
+        status = getattr(member, "status", None)
+        value = getattr(status, "value", str(status)).lower()
+        if value == "online":
+            return PresenceTier.ONLINE
+        if value == "idle":
+            return PresenceTier.IDLE
+        if value in ("dnd", "do_not_disturb"):
+            return PresenceTier.DO_NOT_DISTURB
+        return PresenceTier.OFFLINE
+
+    @commands.Cog.listener()
+    async def on_raw_message_delete(self, payload) -> None:
+        await self.coordinator.handle_message_deleted(int(payload.message_id))
+
+    @commands.Cog.listener()
+    async def on_raw_bulk_message_delete(self, payload) -> None:
+        for message_id in payload.message_ids:
+            await self.coordinator.handle_message_deleted(int(message_id))
+
+    @commands.Cog.listener()
+    async def on_thread_delete(self, thread: discord.Thread) -> None:
+        await self.coordinator.handle_thread_deleted(int(thread.id))
+
+    @commands.Cog.listener()
+    async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
+        guild_id = int(channel.guild.id)
+        await self.store.delete_tickets_for_channel(guild_id, int(channel.id))
+        guild_config = self.config.guild_from_id(guild_id)
+        configured_channel_id = await guild_config.get_raw(
+            "ticket_channel_id",
+            default=None,
+        )
+        if configured_channel_id == channel.id:
+            await guild_config.clear_raw("ticket_channel_id")
+
+    @commands.Cog.listener()
+    async def on_guild_role_delete(self, role: discord.Role) -> None:
+        guild_id = int(role.guild.id)
+        guild_config = self.config.guild_from_id(guild_id)
+        role_ids = list(await guild_config.get_raw("participant_role_ids", default=[]))
+        if role.id not in role_ids:
+            return
+        role_ids.remove(role.id)
+        await guild_config.set_raw("participant_role_ids", value=role_ids)
+        self._participant_roles[guild_id] = frozenset(role_ids)
+
+    @commands.Cog.listener()
+    async def on_guild_remove(self, guild: discord.Guild) -> None:
+        guild_id = int(guild.id)
+        await self.store.delete_guild_state(guild_id)
+        await self.config.guild_from_id(guild_id).clear()
+        self._participant_roles.pop(guild_id, None)
+
+    async def red_delete_data_for_user(
+        self,
+        *,
+        requester: Literal["discord_deleted_user", "owner", "user", "user_strict"],
+        user_id: int,
+    ) -> None:
+        del requester
+        authored_tickets = await self.store.list_authored_tickets(user_id)
+        for ticket in authored_tickets:
+            await self._delete_projection_best_effort(ticket)
+
+        now = datetime.now(timezone.utc)
+        protection_until_by_guild = {}
+        for guild_id in await self.store.user_reference_guild_ids(user_id):
+            guild_settings = await self._get_guild_settings(guild_id)
+            protection_until_by_guild[guild_id] = now + timedelta(
+                seconds=guild_settings.protection_seconds
+            )
+        affected = await self.store.redact_user(
+            user_id,
+            protection_until_by_guild=protection_until_by_guild,
+            updated_at=now,
+        )
+        for ticket in affected:
+            try:
+                await self.projection.edit_ticket(ticket)
+            except ProjectionNotFound:
+                if ticket.message_id is not None:
+                    await self.coordinator.handle_message_deleted(ticket.message_id)
+            except Exception:
+                pass
+        if any(ticket.next_action_at is not None for ticket in affected):
+            self.scheduler.wake()
+
+    async def _delete_projection_best_effort(self, ticket: Ticket) -> None:
+        if ticket.thread_id is not None:
+            try:
+                await self.projection.delete_thread(ticket.thread_id)
+            except Exception:
+                pass
+        if ticket.message_id is not None:
+            try:
+                await self.projection.delete_message(ticket.channel_id, ticket.message_id)
+            except Exception:
+                pass
 
     @commands.group(name="githubtickets", invoke_without_command=True)
     @commands.guild_only()
@@ -108,6 +458,7 @@ class GitHubTickets(commands.Cog):
             return
         role_ids.append(role.id)
         await guild_config.set_raw("participant_role_ids", value=role_ids)
+        self._participant_roles[ctx.guild.id] = frozenset(role_ids)
         await ctx.send(
             presentation.participant_role_added(role.mention),
             allowed_mentions=discord.AllowedMentions.none(),
@@ -127,6 +478,7 @@ class GitHubTickets(commands.Cog):
             return
         role_ids.remove(role.id)
         await guild_config.set_raw("participant_role_ids", value=role_ids)
+        self._participant_roles[ctx.guild.id] = frozenset(role_ids)
         await ctx.send(
             presentation.participant_role_removed(role.mention),
             allowed_mentions=discord.AllowedMentions.none(),

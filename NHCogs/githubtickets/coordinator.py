@@ -99,20 +99,23 @@ class TicketCoordinator:
             return TicketResult(False, validation_error)
 
         now = self._clock()
-        ticket = await self._store.create_ticket(
-            NewTicket(
-                guild_id=request.guild_id,
-                channel_id=settings.ticket_channel_id,
-                author_id=actor.user_id,
-                pr_title=request.pr_title,
-                pr_url=request.pr_url,
-                category_display=request.category_display,
-                routing_mode=request.routing_mode,
-                direct_target_id=request.direct_target_id,
-                category_ids=request.category_ids,
-                created_at=now,
+        try:
+            ticket = await self._store.create_ticket(
+                NewTicket(
+                    guild_id=request.guild_id,
+                    channel_id=settings.ticket_channel_id,
+                    author_id=actor.user_id,
+                    pr_title=request.pr_title,
+                    pr_url=request.pr_url,
+                    category_display=request.category_display,
+                    routing_mode=request.routing_mode,
+                    direct_target_id=request.direct_target_id,
+                    category_ids=request.category_ids,
+                    created_at=now,
+                )
             )
-        )
+        except Exception:
+            return TicketResult(False, CREATE_FAILED)
         try:
             message_id = await self._projection.send_ticket(ticket)
             if not await self._store.record_ticket_message(
@@ -298,6 +301,7 @@ class TicketCoordinator:
                 await self._delete_remaining_projection(finishing)
             except Exception:
                 return TicketResult(False, ACTION_FAILED)
+            self._locks.pop(ticket_id, None)
             return TicketResult(True)
 
     async def handle_message_deleted(self, message_id: int) -> None:
@@ -308,7 +312,17 @@ class TicketCoordinator:
             current = await self._store.get_ticket(ticket.ticket_id)
             if current is None or current.message_id != message_id:
                 return
-            await self._delete_remaining_projection(current, message_absent=True)
+            if current.state in (TicketState.OPEN, TicketState.CLAIMED):
+                if not await self._store.begin_finishing(current.ticket_id, self._clock()):
+                    return
+                current = await self._store.get_ticket(current.ticket_id)
+                if current is None:
+                    return
+            try:
+                await self._delete_remaining_projection(current, message_absent=True)
+            except Exception:
+                return
+            self._locks.pop(current.ticket_id, None)
 
     async def handle_thread_deleted(self, thread_id: int) -> None:
         ticket = await self._store.get_ticket_by_thread_id(thread_id)
@@ -318,7 +332,31 @@ class TicketCoordinator:
             current = await self._store.get_ticket(ticket.ticket_id)
             if current is None or current.thread_id != thread_id:
                 return
-            await self._delete_remaining_projection(current, thread_absent=True)
+            if current.state in (TicketState.OPEN, TicketState.CLAIMED):
+                if not await self._store.begin_finishing(current.ticket_id, self._clock()):
+                    return
+                current = await self._store.get_ticket(current.ticket_id)
+                if current is None:
+                    return
+            try:
+                await self._delete_remaining_projection(current, thread_absent=True)
+            except Exception:
+                return
+            self._locks.pop(current.ticket_id, None)
+
+    async def recover_projection_cleanup(self, ticket_id: int) -> TicketResult:
+        async with self._ticket_lock(ticket_id):
+            ticket = await self._store.get_ticket(ticket_id)
+            if ticket is None:
+                return TicketResult(True)
+            if ticket.state not in (TicketState.CREATING, TicketState.FINISHING):
+                return TicketResult(False, INACTIVE_TICKET)
+            try:
+                await self._delete_remaining_projection(ticket)
+            except Exception:
+                return TicketResult(False, ACTION_FAILED)
+            self._locks.pop(ticket_id, None)
+            return TicketResult(True)
 
     async def process_due(self, ticket_id: int) -> TicketResult:
         async with self._ticket_lock(ticket_id):
@@ -350,10 +388,12 @@ class TicketCoordinator:
         settings: GuildSettings,
         now: datetime,
     ) -> TicketResult:
+        next_action = ticket.next_action
+        assert next_action is not None
         if ticket.ping_count >= settings.max_pings:
             await self._store.exhaust_due_routing(
                 ticket.ticket_id,
-                ticket.next_action,
+                next_action,
                 now,
             )
             return TicketResult(True)
@@ -363,7 +403,7 @@ class TicketCoordinator:
         if reservation is None:
             await self._store.exhaust_due_routing(
                 ticket.ticket_id,
-                ticket.next_action,
+                next_action,
                 now,
             )
             return TicketResult(True)

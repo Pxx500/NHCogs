@@ -13,6 +13,13 @@ MODULE_NAMES = (
     "NHCogs.githubtickets.store",
     "NHCogs.githubtickets.settings",
     "NHCogs.githubtickets.presentation",
+    "NHCogs.githubtickets.routing",
+    "NHCogs.githubtickets.scheduler",
+    "NHCogs.githubtickets.projection",
+    "NHCogs.githubtickets.coordinator",
+    "NHCogs.githubtickets.ticket_views",
+    "NHCogs.githubtickets.discord_projection",
+    "NHCogs.githubtickets.dashboard",
     "NHCogs.githubtickets.githubtickets",
 )
 
@@ -36,7 +43,19 @@ def isolated_githubtickets_modules(data_path: Path):
         sys.modules["NHCogs.githubtickets"] = package
         try:
             loaded = {}
-            for short_name in ("models", "store", "settings", "presentation"):
+            for short_name in (
+                "models",
+                "store",
+                "settings",
+                "presentation",
+                "routing",
+                "scheduler",
+                "projection",
+                "coordinator",
+                "ticket_views",
+                "discord_projection",
+                "dashboard",
+            ):
                 loaded[short_name] = _load_module(
                     f"NHCogs.githubtickets.{short_name}",
                     PACKAGE_DIR / f"{short_name}.py",

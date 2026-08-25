@@ -7,6 +7,7 @@ rename belongs in its own commit.
 
 import ast
 import asyncio
+import inspect
 import sys
 import unittest
 from contextlib import asynccontextmanager, contextmanager
@@ -221,6 +222,9 @@ class _GuildConfig:
 
     async def all(self):
         return {**self._defaults, **self._values}
+
+    async def clear(self):
+        self._values.clear()
 
     async def clear_raw(self, key):
         self._values.pop(str(key), None)
@@ -491,6 +495,12 @@ def _isolated_honeypot_modules(data_path: Path):
         "User",
     ):
         setattr(discord, name, object)
+
+    class _Object:
+        def __init__(self, *, id):
+            self.id = id
+
+    discord.Object = _Object
     discord.ForumChannel = type("ForumChannel", (), {})
     discord.Forbidden = type("Forbidden", (Exception,), {})
     discord.HTTPException = type("HTTPException", (Exception,), {})
@@ -528,9 +538,41 @@ def _isolated_honeypot_modules(data_path: Path):
             self.name = name
             self.callback = callback
             self.default_permissions = None
-            self.guild_only = False
+            self.guild_only = bool(
+                getattr(callback, "__discord_app_commands_guild_only__", False)
+            )
+            parameters = tuple(inspect.signature(callback).parameters.values())
+            target_annotation = str(parameters[-1].annotation) if parameters else ""
+            self.type = (
+                discord.AppCommandType.user
+                if "Member" in target_annotation or "User" in target_annotation
+                else discord.AppCommandType.message
+            )
 
-    discord.app_commands = SimpleNamespace(ContextMenu=_ContextMenu)
+    class _AppCommand:
+        def __init__(self, *, name, description, callback):
+            self.name = name
+            self.description = description
+            self.callback = callback
+            self.default_permissions = None
+            self.guild_only = bool(
+                getattr(callback, "__discord_app_commands_guild_only__", False)
+            )
+            self.type = discord.AppCommandType.chat_input
+
+    discord.AppCommandType.chat_input = "chat_input"
+    def _app_guild_only():
+        def decorator(callback):
+            callback.__discord_app_commands_guild_only__ = True
+            return callback
+
+        return decorator
+
+    discord.app_commands = SimpleNamespace(
+        Command=_AppCommand,
+        ContextMenu=_ContextMenu,
+        guild_only=_app_guild_only,
+    )
 
     class _View:
         def __init__(self, *, timeout=None):
@@ -578,16 +620,17 @@ def _isolated_honeypot_modules(data_path: Path):
             self.__dict__.update(values)
 
     class _SelectOption:
-        def __init__(self, *, label, value, default=False):
+        def __init__(self, *, label, value=None, default=False, description=None):
             self.label = label
-            self.value = value
+            self.value = label if value is None else value
             self.default = default
+            self.description = description
 
     class _TextInput:
         def __init__(
             self,
             *,
-            label,
+            label=None,
             style=None,
             placeholder=None,
             required=True,
@@ -610,12 +653,38 @@ def _isolated_honeypot_modules(data_path: Path):
         def add_item(self, item):
             self.children.append(item)
 
+    class _Label:
+        def __init__(self, *, text, component, description=None, id=None):
+            self.text = text
+            self.component = component
+            self.description = description
+            self.id = id
+
+    class _Checkbox:
+        def __init__(self, *, default=False, **values):
+            self.default = default
+            self.value = default
+            self.__dict__.update(values)
+
+    class _RadioGroup:
+        def __init__(self, *, options, required=True, **values):
+            self.options = options
+            self.required = required
+            self.value = None
+            self.__dict__.update(values)
+
     discord.SelectOption = _SelectOption
+    discord.RadioGroupOption = _SelectOption
+    discord.abc = SimpleNamespace(GuildChannel=object)
     discord.ui = SimpleNamespace(
         Button=_Button,
+        Checkbox=_Checkbox,
+        Label=_Label,
         Modal=_Modal,
+        RadioGroup=_RadioGroup,
         Select=_Select,
         TextInput=_TextInput,
+        UserSelect=_Select,
         View=_View,
         button=lambda *args, **kwargs: (lambda function: function),
     )

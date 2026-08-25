@@ -6,6 +6,7 @@ import types
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_NAME = "NHCogs"
@@ -196,6 +197,7 @@ class FakeResponse:
 class FakeInteraction:
     def __init__(self):
         self.response = FakeResponse()
+        self.followup = types.SimpleNamespace(send=mock.AsyncMock())
         self.deleted_original_responses = 0
 
     async def delete_original_response(self):
@@ -732,6 +734,10 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         coordinator_error.ping_behavior.value = models.RoutingMode.NONE.value
         error_interaction = FakeInteraction()
         await coordinator_error.on_submit(error_interaction)
-        self.assertEqual(error_interaction.response.messages[0][0], "coordinator error")
-        self.assertTrue(error_interaction.response.messages[0][1]["ephemeral"])
+        self.assertEqual(error_interaction.response.messages, [])
+        self.assertEqual(error_interaction.response.defer_calls, 1)
+        error_interaction.followup.send.assert_awaited_once_with(
+            "coordinator error",
+            ephemeral=True,
+        )
         self.assertEqual(len(create_calls), 1)

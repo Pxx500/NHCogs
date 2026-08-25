@@ -5,6 +5,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_NAME = "NHCogs"
@@ -84,6 +85,7 @@ class FakeResponse:
 class FakeInteraction:
     def __init__(self):
         self.response = FakeResponse()
+        self.followup = types.SimpleNamespace(send=mock.AsyncMock())
 
 
 class TicketControlsTests(unittest.IsolatedAsyncioTestCase):
@@ -188,8 +190,9 @@ class TicketControlsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([name for name, _ticket_id, _actor in calls], ["claim"])
         self.assertEqual(actor_interactions, [interaction])
-        self.assertEqual(interaction.response.defer_calls, 0)
-        self.assertEqual(
-            interaction.response.messages,
-            [("This ticket is no longer active", True)],
+        self.assertEqual(interaction.response.defer_calls, 1)
+        self.assertEqual(interaction.response.messages, [])
+        interaction.followup.send.assert_awaited_once_with(
+            "This ticket is no longer active",
+            ephemeral=True,
         )

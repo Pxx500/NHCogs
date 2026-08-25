@@ -222,6 +222,16 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(creating.message_id, 300)
         self.assertIsNone(creating.thread_id)
 
+    async def test_creation_returns_accepted_failure_for_whitespace_native_fields(self):
+        request = replace(self.request(), pr_title="   ")
+
+        result = await self.coordinator.create_ticket(request, self.actor())
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.response, "Could not create the ticket")
+        self.assertEqual(await self.store.list_active_tickets(), ())
+        self.assertEqual(self.projection.calls, [])
+
     async def test_claim_permissions_and_first_claim_wins(self):
         ticket = await self.create_active(
             routing_mode=models.RoutingMode.DIRECT_WAIT,
@@ -413,6 +423,32 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             self.projection.calls,
             [("delete_message", second.channel_id, second.message_id)],
         )
+
+    async def test_recovery_retries_known_projection_cleanup_without_preflight(self):
+        ticket = await self.create_active(routing_mode=models.RoutingMode.NONE)
+        await self.store.begin_finishing(ticket.ticket_id, self.now)
+        self.projection.calls.clear()
+
+        result = await self.coordinator.recover_projection_cleanup(ticket.ticket_id)
+
+        self.assertTrue(result.success)
+        self.assertIsNone(await self.store.get_ticket(ticket.ticket_id))
+        self.assertEqual(
+            self.projection.calls,
+            [
+                ("delete_thread", ticket.thread_id),
+                ("delete_message", ticket.channel_id, ticket.message_id),
+            ],
+        )
+
+        retained = await self.create_active(routing_mode=models.RoutingMode.NONE)
+        await self.store.begin_finishing(retained.ticket_id, self.now)
+        self.projection.errors["delete_message"] = RuntimeError("controlled retry")
+
+        failed = await self.coordinator.recover_projection_cleanup(retained.ticket_id)
+
+        self.assertFalse(failed.success)
+        self.assertIsNotNone(await self.store.get_ticket(retained.ticket_id))
 
     async def test_protection_coalesces_due_ping_to_latest_state_change(self):
         ticket = await self.create_active(

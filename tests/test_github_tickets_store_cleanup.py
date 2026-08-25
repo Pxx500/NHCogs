@@ -124,6 +124,41 @@ class GitHubTicketsStoreCleanupTests(unittest.IsolatedAsyncioTestCase):
         with closing(store_module.connect(self.path)) as connection:
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
 
+    async def test_projection_cleanup_query_returns_only_creating_and_finishing_tickets(self):
+        creating = await self.store.create_ticket(
+            models.NewTicket(
+                guild_id=10,
+                channel_id=30,
+                author_id=100,
+                pr_title="Creating",
+                pr_url="https://example.test/pull/creating",
+                category_display="",
+                routing_mode=models.RoutingMode.NONE,
+                direct_target_id=None,
+                category_ids=(),
+                created_at=self.now,
+            )
+        )
+        open_ticket = await self.create_open_ticket(
+            guild_id=10,
+            channel_id=30,
+            author_id=101,
+        )
+        finishing = await self.create_open_ticket(
+            guild_id=10,
+            channel_id=30,
+            author_id=102,
+        )
+        await self.store.begin_finishing(finishing.ticket_id, self.now)
+
+        pending = await self.store.list_projection_cleanup_tickets()
+
+        self.assertEqual(
+            tuple(ticket.ticket_id for ticket in pending),
+            (creating.ticket_id, finishing.ticket_id),
+        )
+        self.assertNotIn(open_ticket.ticket_id, {ticket.ticket_id for ticket in pending})
+
     async def test_user_redaction_is_atomic_complete_and_persists_after_restart(self):
         user_id = 500
         category_10 = await self.store.add_category(10, "rendering", self.now)

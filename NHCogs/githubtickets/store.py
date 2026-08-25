@@ -481,6 +481,10 @@ class GitHubTicketsStore:
         async with self._lock:
             return await asyncio.to_thread(self._list_active_tickets_sync)
 
+    async def list_projection_cleanup_tickets(self) -> tuple[Ticket, ...]:
+        async with self._lock:
+            return await asyncio.to_thread(self._list_projection_cleanup_tickets_sync)
+
     async def claim(
         self,
         ticket_id: int,
@@ -1061,6 +1065,8 @@ class GitHubTicketsStore:
                         timestamp,
                     ),
                 )
+                if cursor.lastrowid is None:
+                    raise RuntimeError("ticket insert did not return an ID")
                 ticket_id = int(cursor.lastrowid)
                 connection.executemany(
                     "INSERT INTO ticket_categories (ticket_id, category_id) VALUES (?, ?)",
@@ -1179,6 +1185,17 @@ class GitHubTicketsStore:
                 """
                 SELECT * FROM tickets
                 WHERE state IN ('open', 'claimed')
+                ORDER BY ticket_id
+                """
+            ).fetchall()
+            return tuple(_decode_ticket(connection, row) for row in rows)
+
+    def _list_projection_cleanup_tickets_sync(self) -> tuple[Ticket, ...]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM tickets
+                WHERE state IN ('creating', 'finishing')
                 ORDER BY ticket_id
                 """
             ).fetchall()

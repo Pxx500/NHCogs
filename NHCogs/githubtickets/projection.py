@@ -9,6 +9,10 @@ class ProjectionNotFound(Exception):
     """A required Discord projection object is already absent."""
 
 
+class ProjectionUnavailable(RuntimeError):
+    """A required Discord projection object is not available from cache."""
+
+
 class TicketProjection(Protocol):
     async def send_ticket(self, ticket: Ticket) -> int: ...
 

@@ -242,6 +242,7 @@ class NewTicketModal(discord.ui.Modal):
         if any(category_id not in current_categories for category_id in category_ids):
             await self._send_error(interaction, presentation.CATEGORY_NO_LONGER_EXISTS)
             return
+        await interaction.response.defer()
         result = await self._create_ticket(
             TicketRequest(
                 guild_id=self._guild_id,
@@ -257,9 +258,8 @@ class NewTicketModal(discord.ui.Modal):
             self._actor_factory(interaction),
         )
         if result.success:
-            await interaction.response.defer()
             return
-        await self._send_error(interaction, result.response)
+        await interaction.followup.send(result.response, ephemeral=True)
 
     @staticmethod
     async def _send_error(

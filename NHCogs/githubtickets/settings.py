@@ -51,8 +51,10 @@ def parse_duration(raw: str) -> int:
 def _positive_id(raw: object) -> int | None:
     if isinstance(raw, bool):
         return None
+    if not isinstance(raw, (int, str, bytes, bytearray)):
+        return None
     try:
-        value = int(raw)  # type: ignore[arg-type]
+        value = int(raw)
     except (TypeError, ValueError):
         return None
     return value if value > 0 else None
