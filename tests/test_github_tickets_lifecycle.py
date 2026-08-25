@@ -146,7 +146,10 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(hasattr(bot, "restored_views"))
                 bot.ready.set()
                 for _attempt in range(50):
-                    if getattr(bot, "restored_views", None):
+                    if (
+                        getattr(bot, "restored_views", None)
+                        and cog.scheduler._task is not None
+                    ):
                         break
                     await asyncio.sleep(0.01)
 
