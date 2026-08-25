@@ -158,6 +158,18 @@ catalog, workflows = load_workflow_modules()
 
 
 class WorkflowDraftTests(unittest.TestCase):
+    def test_weight_range_feedback_uses_concise_copy(self):
+        draft = workflows.WorkflowDraft(
+            "hello",
+            responses=[catalog.ResponseDraft("response")],
+        )
+
+        with self.assertRaisesRegex(
+            workflows.WorkflowInputError,
+            "Weight must be between 1 and 1000",
+        ):
+            draft.set_weight(0, 0)
+
     def test_component_operations_share_one_draft_and_preserve_whitespace(self):
         draft = workflows.WorkflowDraft(
             "hello",
@@ -310,6 +322,10 @@ class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         await delete.callback(delete_interaction)
         self.assertEqual(len(session.draft.responses), 3)
+        self.assertNotIn(
+            "Error",
+            {field["name"] for field in session.render_embed().fields},
+        )
         confirm = next(
             item
             for item in session.view.children
@@ -512,10 +528,8 @@ class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
 
         embed = session.render_embed()
 
-        self.assertEqual(
-            embed.kwargs["description"],
-            "Editing · 12 responses · total weight 1200",
-        )
+        self.assertEqual(embed.kwargs["title"], "large")
+        self.assertEqual(embed.kwargs["description"], "Editing")
         response_field = next(
             field for field in embed.fields if field["name"].startswith("Responses")
         )
@@ -525,7 +539,57 @@ class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("response 5 ↵ second   line", response_field["value"])
         self.assertNotIn("response 4 ", response_field["value"])
         self.assertNotIn("response 10 ", response_field["value"])
-        self.assertNotIn("Controls", {field["name"] for field in embed.fields})
+        self.assertEqual(
+            {field["name"] for field in embed.fields},
+            {"Responses 6-10 of 12"},
+        )
+
+    def test_dashboard_uses_a_singular_response_heading(self):
+        manager = SimpleNamespace(
+            catalog=SimpleNamespace(),
+            session_timeout_seconds=workflows.SESSION_TIMEOUT_SECONDS,
+            remove=mock.Mock(),
+            logger=mock.Mock(),
+            log_moderation_action=mock.AsyncMock(),
+        )
+        session = workflows.WorkflowSession(
+            manager,
+            thread=SimpleNamespace(id=10),
+            opener=SimpleNamespace(id=200),
+            draft=workflows.WorkflowDraft(
+                "single",
+                responses=[catalog.ResponseDraft("only response")],
+            ),
+        )
+
+        embed = session.render_embed()
+
+        self.assertEqual(embed.fields[0]["name"], "Response")
+
+    def test_dashboard_keeps_configured_cooldowns_and_arguments(self):
+        manager = SimpleNamespace(
+            catalog=SimpleNamespace(),
+            session_timeout_seconds=workflows.SESSION_TIMEOUT_SECONDS,
+            remove=mock.Mock(),
+            logger=mock.Mock(),
+            log_moderation_action=mock.AsyncMock(),
+        )
+        session = workflows.WorkflowSession(
+            manager,
+            thread=SimpleNamespace(id=10),
+            opener=SimpleNamespace(id=200),
+            draft=workflows.WorkflowDraft(
+                "configured",
+                responses=[catalog.ResponseDraft("hello {1}")],
+                cooldowns={"member": 10},
+            ),
+        )
+
+        embed = session.render_embed()
+        fields = {field["name"]: field["value"] for field in embed.fields}
+
+        self.assertEqual(fields["Cooldowns"], "member: 10s")
+        self.assertEqual(fields["Arguments"], "argument 1: text")
 
     def test_page_and_selection_follow_add_move_and_delete(self):
         manager = SimpleNamespace(
@@ -731,6 +795,35 @@ class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
         await session.finish("Cancelled")
         await asyncio.sleep(0)
         self.assertTrue(second_timeout.done())
+
+    async def test_finish_removes_controls_from_the_terminal_dashboard(self):
+        manager = SimpleNamespace(
+            session_timeout_seconds=60,
+            remove=mock.Mock(),
+            _report_failure=mock.AsyncMock(),
+        )
+        thread = SimpleNamespace(
+            id=10,
+            guild=SimpleNamespace(id=100),
+            edit=mock.AsyncMock(),
+        )
+        session = workflows.WorkflowSession(
+            manager,
+            thread=thread,
+            opener=SimpleNamespace(id=200),
+            draft=workflows.WorkflowDraft(
+                "hello",
+                responses=[catalog.ResponseDraft("response")],
+            ),
+        )
+        session.dashboard = SimpleNamespace(id=300, edit=mock.AsyncMock())
+
+        await session.finish("Cancelled")
+
+        edited = session.dashboard.edit.await_args.kwargs
+        self.assertEqual(edited["embed"].kwargs["title"], "hello")
+        self.assertEqual(edited["embed"].kwargs["description"], "Cancelled")
+        self.assertIsNone(edited["view"])
 
     async def test_zero_inactivity_timeout_finishes_and_archives_session(self):
         manager = SimpleNamespace(

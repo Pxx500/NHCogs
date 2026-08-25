@@ -598,6 +598,89 @@ class CustomCommandsCommandErrorTests(unittest.IsolatedAsyncioTestCase):
         subject.nhmisc.report_operational_error.assert_not_awaited()
 
 
+class CustomCommandsCopyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_commands_share_one_not_found_message(self):
+        subject = object.__new__(cog.CustomCommands)
+        subject.catalog = types.SimpleNamespace(get=mock.AsyncMock(return_value=None))
+        ctx = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=100),
+            send=mock.AsyncMock(),
+        )
+        callbacks = (
+            cog.CustomCommands.cc_raw.callback,
+            cog.CustomCommands.cc_show.callback,
+            cog.CustomCommands.cc_edit.callback,
+            cog.CustomCommands.cc_cooldown.callback,
+            cog.CustomCommands.cc_delete.callback,
+        )
+
+        for callback in callbacks:
+            with self.subTest(command=callback.__name__):
+                ctx.send.reset_mock()
+                await callback(subject, ctx, "missing")
+                ctx.send.assert_awaited_once_with(
+                    "That custom command doesn't exist"
+                )
+
+    async def test_show_does_not_repeat_the_command_name_in_its_body(self):
+        command = types.SimpleNamespace(
+            name="spoodie",
+            author_id=200,
+            author_name="Moderator",
+            created_at=types.SimpleNamespace(isoformat=lambda: "created"),
+            edited_at=None,
+            revision=3,
+            cooldowns={},
+            responses=(types.SimpleNamespace(weight=100, content="response"),),
+        )
+        subject = object.__new__(cog.CustomCommands)
+        subject.catalog = types.SimpleNamespace(get=mock.AsyncMock(return_value=command))
+        ctx = types.SimpleNamespace(
+            guild=types.SimpleNamespace(
+                id=100,
+                get_member=lambda _user_id: None,
+            ),
+            send=mock.AsyncMock(),
+        )
+        cog.menus.menu.reset_mock()
+
+        await cog.CustomCommands.cc_show.callback(subject, ctx, "spoodie")
+
+        embed = cog.menus.menu.await_args.args[1][0]
+        self.assertEqual(embed.title, "Custom command: spoodie")
+        self.assertNotIn("Command: spoodie", embed.description)
+
+    async def test_create_and_cooldown_validation_use_concise_copy(self):
+        subject = object.__new__(cog.CustomCommands)
+        subject.bot = types.SimpleNamespace(all_commands={"hello": object()})
+        subject.catalog = types.SimpleNamespace(
+            normalize_name=lambda _name: "hello",
+            get=mock.AsyncMock(
+                return_value=types.SimpleNamespace(cooldowns={})
+            ),
+        )
+        subject.workflows = types.SimpleNamespace(open=mock.AsyncMock())
+        ctx = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=100),
+            send=mock.AsyncMock(),
+        )
+
+        await subject._open_create_workflow(ctx, "hello", None)
+        ctx.send.assert_awaited_once_with("A bot command already uses that name")
+
+        ctx.send.reset_mock()
+        await cog.CustomCommands.cc_cooldown.callback(
+            subject,
+            ctx,
+            "hello",
+            10,
+            per="invalid",
+        )
+        ctx.send.assert_awaited_once_with(
+            "Cooldown scope must be member, channel, or guild"
+        )
+
+
 class CustomCommandsMessageListenerTests(unittest.IsolatedAsyncioTestCase):
     def _subject(self):
         subject = object.__new__(cog.CustomCommands)
@@ -743,6 +826,34 @@ class CustomCommandsRawTests(unittest.IsolatedAsyncioTestCase):
             message_id=300,
         )
 
+    async def test_raw_pagination_error_is_reported_to_the_user(self):
+        subject = object.__new__(cog.CustomCommands)
+        subject.nhmisc = types.SimpleNamespace(
+            report_operational_error=mock.AsyncMock()
+        )
+        view = cog.RawResponseView(
+            subject,
+            requester_id=200,
+            pages=(cog.discord.Embed(description="page"),),
+        )
+        failure = RuntimeError("page failed")
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=100),
+            channel=types.SimpleNamespace(id=200),
+            response=types.SimpleNamespace(
+                is_done=lambda: False,
+                send_message=mock.AsyncMock(),
+            ),
+            followup=types.SimpleNamespace(send=mock.AsyncMock()),
+        )
+
+        await view.on_error(interaction, failure, object())
+
+        interaction.response.send_message.assert_awaited_once_with(
+            "Could not change the page. The error was reported",
+            ephemeral=True,
+        )
+
     async def test_raw_uses_one_exact_transcript_when_a_response_has_a_code_fence(self):
         responses = (
             types.SimpleNamespace(content="before  "),
@@ -769,6 +880,56 @@ class CustomCommandsRawTests(unittest.IsolatedAsyncioTestCase):
             marker = f"===== Response {index}: {len(encoded)} bytes =====\n".encode()
             start = transcript.index(marker) + len(marker)
             self.assertEqual(transcript[start : start + len(encoded)], encoded)
+
+
+class CustomCommandsDeleteViewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_confirmed_delete_replaces_prompt_with_compact_result(self):
+        subject = object.__new__(cog.CustomCommands)
+        subject.catalog = types.SimpleNamespace(delete=mock.AsyncMock())
+        subject._log_moderation_action = mock.AsyncMock()
+        command = types.SimpleNamespace(
+            guild_id=100,
+            name="spoodie",
+            revision=3,
+        )
+        view = cog.DeleteConfirmationView(subject, command=command, opener_id=200)
+        view.message = types.SimpleNamespace(edit=mock.AsyncMock())
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=100),
+            user="moderator",
+            response=types.SimpleNamespace(defer=mock.AsyncMock()),
+        )
+
+        await view.children[0].callback(interaction)
+
+        edited = view.message.edit.await_args.kwargs
+        self.assertEqual(edited["embed"].title, "Deleted")
+        self.assertEqual(edited["embed"].description, "`spoodie`")
+        self.assertIsNone(edited["view"])
+
+    async def test_cancelled_and_timed_out_delete_prompts_remove_controls(self):
+        for status in ("Cancelled", "Timed out"):
+            with self.subTest(status=status):
+                command = types.SimpleNamespace(name="spoodie")
+                view = cog.DeleteConfirmationView(
+                    object(),
+                    command=command,
+                    opener_id=200,
+                )
+                view.message = types.SimpleNamespace(edit=mock.AsyncMock())
+
+                if status == "Cancelled":
+                    interaction = types.SimpleNamespace(
+                        response=types.SimpleNamespace(defer=mock.AsyncMock())
+                    )
+                    await view.children[1].callback(interaction)
+                else:
+                    await view.on_timeout()
+
+                edited = view.message.edit.await_args.kwargs
+                self.assertEqual(edited["embed"].title, status)
+                self.assertEqual(edited["embed"].description, "`spoodie`")
+                self.assertIsNone(edited["view"])
 
 
 class CustomCommandsDeleteTimeoutTests(unittest.IsolatedAsyncioTestCase):

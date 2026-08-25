@@ -77,7 +77,7 @@ class WorkflowDraft:
     def set_weight(self, index: int, weight: int) -> None:
         index = self._existing_index(index)
         if type(weight) is not int or not 1 <= weight <= MAX_WEIGHT:
-            raise WorkflowInputError("Weight must be from 1 to 1000")
+            raise WorkflowInputError("Weight must be between 1 and 1000")
         current = self.responses[index]
         self.responses[index] = ResponseDraft(
             content=current.content,
@@ -366,7 +366,7 @@ class WorkflowView(discord.ui.View):
         selected = self._session._require_selection()
         if self._session.delete_confirmation_index != selected:
             self._session.delete_confirmation_index = selected
-            self._session.validation_error = "Click Confirm delete to remove this response."
+            self._session.validation_error = None
         else:
             self._session.remove_selected()
             self._session.delete_confirmation_index = None
@@ -537,11 +537,8 @@ class WorkflowSession:
         response_count = len(self.draft.responses)
         total_weight = sum(response.weight for response in self.draft.responses)
         embed = discord.Embed(
-            title=f"Custom command: {self.draft.name}",
-            description=(
-                f"{self.status} · {response_count} responses · "
-                f"total weight {total_weight}"
-            ),
+            title=self.draft.name,
+            description=self.status,
         )
         lines: list[str] = []
         visible = self.visible_response_indices
@@ -556,7 +553,9 @@ class WorkflowSession:
             lines.append(
                 f"#{index + 1} · weight {response.weight} · {probability}\n{preview}"
             )
-        if visible:
+        if response_count == 1:
+            response_field_name = "Response"
+        elif visible:
             response_field_name = (
                 f"Responses {visible[0] + 1}-{visible[-1] + 1} of {response_count}"
             )
@@ -567,19 +566,18 @@ class WorkflowSession:
             value="\n\n".join(lines) or "No responses yet",
             inline=False,
         )
-        embed.add_field(
-            name="Cooldowns",
-            value=(
-                ", ".join(
+        if self.draft.cooldowns:
+            embed.add_field(
+                name="Cooldowns",
+                value=", ".join(
                     f"{scope}: {seconds}s"
                     for scope, seconds in sorted(self.draft.cooldowns.items())
-                )
-                or "None"
-            ),
-            inline=True,
-        )
+                ),
+                inline=True,
+            )
         signature = self._signature_label()
-        embed.add_field(name="Arguments", value=signature, inline=True)
+        if signature != "None":
+            embed.add_field(name="Arguments", value=signature, inline=True)
         if self.validation_error is not None:
             embed.add_field(
                 name="Error",
@@ -694,11 +692,9 @@ class WorkflowSession:
             self._timeout_task.cancel()
         self._timeout_task = None
         self.status = status
-        for item in self.view.children:
-            item.disabled = True
         if self.dashboard is not None:
             try:
-                await self.dashboard.edit(embed=self.render_embed(), view=self.view)
+                await self.dashboard.edit(embed=self.render_embed(), view=None)
             except Exception as error:
                 await self._manager._report_failure(
                     guild_id=self.thread.guild.id,
