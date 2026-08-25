@@ -771,6 +771,32 @@ class CustomCommandsRawTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(transcript[start : start + len(encoded)], encoded)
 
 
+class CustomCommandsDeleteViewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_confirmed_delete_replaces_prompt_with_compact_result(self):
+        subject = object.__new__(cog.CustomCommands)
+        subject.catalog = types.SimpleNamespace(delete=mock.AsyncMock())
+        subject._log_moderation_action = mock.AsyncMock()
+        command = types.SimpleNamespace(
+            guild_id=100,
+            name="spoodie",
+            revision=3,
+        )
+        view = cog.DeleteConfirmationView(subject, command=command, opener_id=200)
+        view.message = types.SimpleNamespace(edit=mock.AsyncMock())
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=100),
+            user="moderator",
+            response=types.SimpleNamespace(defer=mock.AsyncMock()),
+        )
+
+        await view.children[0].callback(interaction)
+
+        edited = view.message.edit.await_args.kwargs
+        self.assertEqual(edited["embed"].title, "Deleted")
+        self.assertEqual(edited["embed"].description, "`spoodie`")
+        self.assertIsNone(edited["view"])
+
+
 class CustomCommandsDeleteTimeoutTests(unittest.IsolatedAsyncioTestCase):
     async def test_delete_timeout_reports_a_failed_message_edit(self):
         subject = object.__new__(cog.CustomCommands)

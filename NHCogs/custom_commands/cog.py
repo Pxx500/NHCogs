@@ -170,21 +170,22 @@ class DeleteConfirmationView(discord.ui.View):
             interaction.guild,
             f"{interaction.user} deleted custom command `{self._command.name}`",
         )
-        await self._finish("Deleted")
+        await self._finish("Deleted", remove_view=True)
 
     async def _cancel(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         await self._finish("Cancelled")
 
-    async def _finish(self, status: str) -> None:
-        for item in self.children:
-            item.disabled = True
+    async def _finish(self, status: str, *, remove_view: bool = False) -> None:
+        if not remove_view:
+            for item in self.children:
+                item.disabled = True
         if self.message is not None:
             embed = discord.Embed(
-                title=f"Custom command deletion: {status}",
+                title=status if remove_view else f"Custom command deletion: {status}",
                 description=f"`{self._command.name}`",
             )
-            await self.message.edit(embed=embed, view=self)
+            await self.message.edit(embed=embed, view=None if remove_view else self)
         self.stop()
 
     async def on_timeout(self) -> None:
