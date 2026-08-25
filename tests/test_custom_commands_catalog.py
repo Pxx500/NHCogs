@@ -56,6 +56,17 @@ catalog, migration_state = load_catalog_modules()
 
 
 class CustomCommandCatalogTests(unittest.IsolatedAsyncioTestCase):
+    def test_invalid_name_explains_the_actual_constraints(self):
+        expected = (
+            "Command names must be one word with no spaces and no more than "
+            f"{catalog.MAX_NAME_LENGTH} characters"
+        )
+
+        for name in ("two words", "x" * 101):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(catalog.InvalidCommand, expected):
+                    catalog.CustomCommandCatalog.normalize_name(name)
+
     async def test_create_normalizes_name_and_assigns_default_weight(self):
         created_at = datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc)
         with TemporaryDirectory() as directory:

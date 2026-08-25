@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import inspect
 import sys
@@ -140,6 +141,25 @@ class CustomCommandWhitespaceRoundTripTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CustomCommandRuntimeTests(unittest.TestCase):
+    def test_cooldown_feedback_uses_concise_singular_and_plural_copy(self):
+        async def run():
+            engine = runtime.CustomCommandRuntime(
+                object(),
+                object(),
+                object(),
+                logger=mock.Mock(),
+            )
+            ctx = SimpleNamespace(send=mock.AsyncMock())
+
+            await engine._send_cooldown_feedback(ctx, 0.1)
+            ctx.send.assert_awaited_once_with("Try again in 1 second")
+
+            ctx.send.reset_mock()
+            await engine._send_cooldown_feedback(ctx, 14.1)
+            ctx.send.assert_awaited_once_with("Try again in 15 seconds")
+
+        asyncio.run(run())
+
     def test_prepare_args_prefers_member_class_over_lowercase_module(self):
         parameters = runtime.CustomCommandRuntime.prepare_args("{1:Member}")
 
