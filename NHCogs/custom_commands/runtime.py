@@ -295,8 +295,9 @@ class CustomCommandRuntime:
 
     async def _send_cooldown_feedback(self, ctx: Any, retry_after: float) -> None:
         seconds = max(1, int(retry_after + 0.999))
+        unit = "second" if seconds == 1 else "seconds"
         try:
-            await ctx.send(f"This custom command is on cooldown for {seconds} seconds.")
+            await ctx.send(f"Try again in {seconds} {unit}")
         except Exception as error:
             await self._report(ctx, "send custom command cooldown", error)
 

@@ -171,7 +171,10 @@ class CustomCommandCatalog:
             or len(normalized) > MAX_NAME_LENGTH
             or COMMAND_NAME_PATTERN.fullmatch(normalized) is None
         ):
-            raise InvalidCommand("Command names must be one non-empty word")
+            raise InvalidCommand(
+                "Command names must be one word with no spaces and no more than "
+                f"{MAX_NAME_LENGTH} characters"
+            )
         return normalized
 
     @staticmethod

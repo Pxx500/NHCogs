@@ -34,6 +34,7 @@ log = logging.getLogger("red.NHCogs.CustomCommands")
 PREVIEW_LENGTH = 120
 EMBED_PAGE_LENGTH = 3_800
 FUZZY_MATCH_THRESHOLD = 60
+COMMAND_NOT_FOUND_MESSAGE = "That custom command doesn't exist"
 
 
 class RawResponseView(discord.ui.View):
@@ -121,6 +122,19 @@ class RawResponseView(discord.ui.View):
                 channel_id=getattr(interaction.channel, "id", None),
                 message_id=getattr(self.message, "id", None),
             )
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "Could not change the page. The error was reported",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Could not change the page. The error was reported",
+                    ephemeral=True,
+                )
+        except Exception:
+            log.exception("Failed to send CustomCommands pagination error feedback")
 
 
 class DeleteConfirmationView(discord.ui.View):
@@ -170,22 +184,19 @@ class DeleteConfirmationView(discord.ui.View):
             interaction.guild,
             f"{interaction.user} deleted custom command `{self._command.name}`",
         )
-        await self._finish("Deleted", remove_view=True)
+        await self._finish("Deleted")
 
     async def _cancel(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         await self._finish("Cancelled")
 
-    async def _finish(self, status: str, *, remove_view: bool = False) -> None:
-        if not remove_view:
-            for item in self.children:
-                item.disabled = True
+    async def _finish(self, status: str) -> None:
         if self.message is not None:
             embed = discord.Embed(
-                title=status if remove_view else f"Custom command deletion: {status}",
+                title=status,
                 description=f"`{self._command.name}`",
             )
-            await self.message.edit(embed=embed, view=None if remove_view else self)
+            await self.message.edit(embed=embed, view=None)
         self.stop()
 
     async def on_timeout(self) -> None:
@@ -466,7 +477,7 @@ class CustomCommands(commands.Cog):
         """Show exact stored responses without triggering mentions."""
         stored = await self.catalog.get(ctx.guild.id, command)
         if stored is None:
-            await ctx.send("That command doesn't exist.")
+            await ctx.send(COMMAND_NOT_FOUND_MESSAGE)
             return
         presentations = tuple(
             present_exact_response(response.content) for response in stored.responses
@@ -562,7 +573,7 @@ class CustomCommands(commands.Cog):
         """Show responses, weights, cooldowns, and metadata."""
         command = await self.catalog.get(ctx.guild.id, command_name)
         if command is None:
-            await ctx.send("I could not find that custom command.")
+            await ctx.send(COMMAND_NOT_FOUND_MESSAGE)
             return
         member = ctx.guild.get_member(command.author_id)
         author = str(member) if member is not None else command.author_name
@@ -574,7 +585,6 @@ class CustomCommands(commands.Cog):
                 f"{index}. weight {response.weight} ({probability:.1%})\n{response.content}"
             )
         header = (
-            f"Command: {command.name}\n"
             f"Author: {author}\n"
             f"Created: {discord.utils.format_dt(command.created_at)}\n"
             f"Edited: {self._edited_time_label(command)}\n"
@@ -661,7 +671,7 @@ class CustomCommands(commands.Cog):
         except CatalogError as error:
             raise commands.UserFeedbackCheckFailure(str(error)) from error
         if normalized in (*self.bot.all_commands, *commands.RESERVED_COMMAND_NAMES):
-            await ctx.send("There already exists a bot command with the same name.")
+            await ctx.send("A bot command already uses that name")
             return
         if await self.catalog.get(ctx.guild.id, normalized) is not None:
             await ctx.send(
@@ -686,7 +696,7 @@ class CustomCommands(commands.Cog):
         """Open a thread to edit an existing custom command."""
         stored = await self.catalog.get(ctx.guild.id, command)
         if stored is None:
-            await ctx.send("That command doesn't exist.")
+            await ctx.send(COMMAND_NOT_FOUND_MESSAGE)
             return
         draft = WorkflowDraft.from_command(stored)
         if text is not None:
@@ -707,7 +717,7 @@ class CustomCommands(commands.Cog):
         """Show, set, or remove a member, channel, or guild cooldown."""
         stored = await self.catalog.get(ctx.guild.id, command)
         if stored is None:
-            await ctx.send("That command doesn't exist.")
+            await ctx.send(COMMAND_NOT_FOUND_MESSAGE)
             return
         if cooldown is None:
             await ctx.send(f"Cooldowns: {self._cooldown_label(stored)}")
@@ -718,7 +728,7 @@ class CustomCommands(commands.Cog):
             normalized_scope,
         )
         if scope not in {"member", "channel", "guild"}:
-            await ctx.send("per must be one of member, channel, or guild")
+            await ctx.send("Cooldown scope must be member, channel, or guild")
             return
         cooldowns = dict(stored.cooldowns)
         if cooldown <= 0:
@@ -749,7 +759,7 @@ class CustomCommands(commands.Cog):
         """Review and delete a custom command."""
         stored = await self.catalog.get(ctx.guild.id, command)
         if stored is None:
-            await ctx.send("That command doesn't exist.")
+            await ctx.send(COMMAND_NOT_FOUND_MESSAGE)
             return
         embed = discord.Embed(
             title="Delete custom command?",
