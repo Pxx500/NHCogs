@@ -107,6 +107,18 @@ class GitHubTicketsSettingsTests(unittest.TestCase):
 
         self.assertEqual(snapshot, settings.GuildSettings.from_mapping({}))
 
+    def test_duration_parser_accepts_compact_units_and_distinguishes_negatives(self):
+        settings = load_settings_module()
+
+        self.assertEqual(settings.parse_duration("10s"), 10)
+        self.assertEqual(settings.parse_duration("2m"), 120)
+        self.assertEqual(settings.parse_duration("24h"), 24 * 60 * 60)
+        self.assertEqual(settings.parse_duration("0"), 0)
+        with self.assertRaises(settings.NegativeDuration):
+            settings.parse_duration("-1h")
+        with self.assertRaises(settings.InvalidDuration):
+            settings.parse_duration("later")
+
 
 if __name__ == "__main__":
     unittest.main()

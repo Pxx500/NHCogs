@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -11,6 +12,14 @@ DEFAULT_DND_RESPONSE_SECONDS = 6 * 60 * 60
 DEFAULT_OFFLINE_RESPONSE_SECONDS = 24 * 60 * 60
 DEFAULT_DIRECT_RESPONSE_SECONDS = 24 * 60 * 60
 DEFAULT_MAX_PINGS = 3
+
+
+class InvalidDuration(ValueError):
+    pass
+
+
+class NegativeDuration(ValueError):
+    pass
 
 DEFAULTS: dict[str, object] = {
     "ticket_channel_id": None,
@@ -24,6 +33,19 @@ DEFAULTS: dict[str, object] = {
     "direct_response_seconds": DEFAULT_DIRECT_RESPONSE_SECONDS,
     "max_pings": DEFAULT_MAX_PINGS,
 }
+
+_DURATION_PATTERN = re.compile(r"^(?P<sign>-?)(?P<value>\d+)(?P<unit>[smh]?)$")
+_DURATION_MULTIPLIERS = {"": 1, "s": 1, "m": 60, "h": 60 * 60}
+
+
+def parse_duration(raw: str) -> int:
+    match = _DURATION_PATTERN.fullmatch(raw.strip().lower())
+    if match is None:
+        raise InvalidDuration(raw)
+    value = int(match.group("value"))
+    if match.group("sign") == "-" and value:
+        raise NegativeDuration(raw)
+    return value * _DURATION_MULTIPLIERS[match.group("unit")]
 
 
 def _positive_id(raw: object) -> int | None:

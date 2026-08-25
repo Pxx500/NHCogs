@@ -225,6 +225,13 @@ class _GuildConfig:
     async def clear_raw(self, key):
         self._values.pop(str(key), None)
 
+    async def get_raw(self, key, *, default=None):
+        key = str(key)
+        return self._values.get(key, self._defaults.get(key, default))
+
+    async def set_raw(self, key, *, value):
+        self._values[str(key)] = value
+
     @asynccontextmanager
     async def stats(self):
         yield self._stats
@@ -627,6 +634,7 @@ def _isolated_honeypot_modules(data_path: Path):
         group=lambda *args, **kwargs: _command_decorator("group", **kwargs),
         command=lambda *args, **kwargs: _command_decorator("command", **kwargs),
         guild_only=lambda: (lambda function: function),
+        has_permissions=lambda **kwargs: (lambda function: function),
         admin_or_permissions=lambda **kwargs: (lambda function: function),
         mod_or_permissions=lambda **kwargs: (lambda function: function),
         bot_has_guild_permissions=lambda **kwargs: (lambda function: function),
