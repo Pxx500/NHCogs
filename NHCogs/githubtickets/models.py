@@ -102,6 +102,10 @@ class Ticket:
     protection_until: datetime | None
     next_action: NextAction | None
     next_action_at: datetime | None
+    pending_target_id: int | None
+    pending_presence_tier: PresenceTier | None
+    pending_ping_automatic: bool | None
+    pending_response_deadline: datetime | None
     created_at: datetime
     updated_at: datetime
     transition_version: int
@@ -121,6 +125,16 @@ class TicketPing:
     ticket_id: int
     sequence_number: int
     target_user_id: int
-    presence_tier: PresenceTier
+    presence_tier: PresenceTier | None
+    automatic: bool
     sent_at: datetime
+    response_deadline: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PingReservation:
+    ticket_id: int
+    target_user_id: int
+    presence_tier: PresenceTier | None
+    automatic: bool
     response_deadline: datetime

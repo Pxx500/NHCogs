@@ -7,7 +7,7 @@ import sys
 import types
 import unittest
 from contextlib import closing
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -52,7 +52,7 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
             if store_module is not None
             else None
         )
-        self.now = datetime(2026, 8, 26, 10, 0, tzinfo=UTC)
+        self.now = datetime(2026, 8, 26, 10, 0, tzinfo=timezone.utc)
 
     async def test_initialize_creates_versioned_schema_with_foreign_keys(self):
         self.assertIsNotNone(self.store, "the GitHub Tickets store interface is missing")
@@ -262,17 +262,24 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
             first.ticket_id,
             target_user_id=400,
             presence_tier=models.PresenceTier.ONLINE,
-            sent_at=self.now,
+            automatic=True,
+            reserved_at=self.now,
             response_deadline=self.now,
             maximum_pings=1,
         )
         self.assertIsNotNone(ping)
+        pending = await self.store.get_ticket(first.ticket_id)
+        self.assertEqual(pending.ping_count, 0)
+        self.assertEqual(await self.store.list_pings(first.ticket_id), ())
+        acknowledged = await self.store.acknowledge_ping(first.ticket_id, self.now)
+        self.assertIsNotNone(acknowledged)
         self.assertIsNone(
             await self.store.reserve_ping(
                 first.ticket_id,
                 target_user_id=401,
                 presence_tier=models.PresenceTier.IDLE,
-                sent_at=self.now,
+                automatic=True,
+                reserved_at=self.now,
                 response_deadline=self.now,
                 maximum_pings=1,
             )
@@ -280,18 +287,52 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
         second_ping = await self.store.reserve_ping(
             second.ticket_id,
             target_user_id=400,
-            presence_tier=models.PresenceTier.OFFLINE,
-            sent_at=self.now,
+            presence_tier=None,
+            automatic=False,
+            reserved_at=self.now,
             response_deadline=self.now,
             maximum_pings=1,
         )
         self.assertIsNotNone(second_ping)
+        await self.store.acknowledge_ping(second.ticket_id, self.now)
         self.assertEqual(len(await self.store.list_pings(first.ticket_id)), 1)
         self.assertEqual(len(await self.store.list_pings(second.ticket_id)), 1)
 
+    async def test_target_timeout_is_atomic_and_returns_to_scheduled_open_state(self):
+        await self.store.initialize()
+        ticket = await self._create_open_ticket()
+        await self.store.reserve_ping(
+            ticket.ticket_id,
+            target_user_id=400,
+            presence_tier=models.PresenceTier.IDLE,
+            automatic=True,
+            reserved_at=self.now,
+            response_deadline=self.now,
+            maximum_pings=3,
+        )
+        await self.store.acknowledge_ping(ticket.ticket_id, self.now)
+
+        settled = await self.store.settle_target_timeout(
+            ticket.ticket_id,
+            target_user_id=400,
+            protection_until=self.now,
+            next_action=models.NextAction.AUTOMATIC_PING,
+            next_action_at=self.now,
+            updated_at=self.now,
+        )
+
+        self.assertTrue(settled)
+        reopened = await self.store.get_ticket(ticket.ticket_id)
+        self.assertIsNone(reopened.current_target_id)
+        self.assertEqual(reopened.next_action, models.NextAction.AUTOMATIC_PING)
+        self.assertEqual(
+            [(item.user_id, item.reason) for item in await self.store.list_exclusions(ticket.ticket_id)],
+            [(400, models.ExclusionReason.TIMED_OUT)],
+        )
+
     async def test_deadlines_and_active_tickets_survive_reopening(self):
         await self.store.initialize()
-        deadline = datetime(2026, 8, 26, 12, 0, tzinfo=UTC)
+        deadline = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
         ticket = await self._create_open_ticket(next_action_at=deadline)
 
         reopened = store_module.GitHubTicketsStore(self.path)
@@ -303,6 +344,21 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
             tuple(item.ticket_id for item in await reopened.list_active_tickets()),
             (ticket.ticket_id,),
         )
+
+    async def test_ticket_projection_ids_resolve_without_message_content(self):
+        await self.store.initialize()
+        ticket = await self._create_open_ticket()
+
+        self.assertEqual(
+            await self.store.get_ticket_by_message_id(ticket.message_id),
+            ticket,
+        )
+        self.assertEqual(
+            await self.store.get_ticket_by_thread_id(ticket.thread_id),
+            ticket,
+        )
+        self.assertIsNone(await self.store.get_ticket_by_message_id(9999))
+        self.assertIsNone(await self.store.get_ticket_by_thread_id(9999))
 
     async def test_finishing_and_deletion_are_terminal(self):
         await self.store.initialize()

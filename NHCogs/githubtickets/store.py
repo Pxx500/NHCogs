@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from contextlib import closing
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -17,6 +17,7 @@ from .models import (
     InvalidCategoryName,
     NewTicket,
     NextAction,
+    PingReservation,
     PresenceTier,
     Profile,
     RoutingMode,
@@ -38,7 +39,7 @@ MAX_CATEGORY_NAME_LENGTH = 100
 def _serialize_datetime(value: datetime) -> str:
     if value.tzinfo is None:
         raise ValueError("timestamps must include a timezone")
-    return value.astimezone(UTC).isoformat()
+    return value.astimezone(timezone.utc).isoformat()
 
 
 def _serialize_optional_datetime(value: datetime | None) -> str | None:
@@ -138,6 +139,24 @@ def _decode_ticket(connection: sqlite3.Connection, row: sqlite3.Row) -> Ticket:
             NextAction(str(row["next_action"])) if row["next_action"] is not None else None
         ),
         next_action_at=_deserialize_optional_datetime(row["next_action_at"]),
+        pending_target_id=(
+            int(row["pending_target_id"])
+            if row["pending_target_id"] is not None
+            else None
+        ),
+        pending_presence_tier=(
+            PresenceTier(str(row["pending_presence_tier"]))
+            if row["pending_presence_tier"] is not None
+            else None
+        ),
+        pending_ping_automatic=(
+            bool(row["pending_ping_automatic"])
+            if row["pending_ping_automatic"] is not None
+            else None
+        ),
+        pending_response_deadline=_deserialize_optional_datetime(
+            row["pending_response_deadline"]
+        ),
         created_at=_deserialize_datetime(str(row["created_at"])),
         updated_at=_deserialize_datetime(str(row["updated_at"])),
         transition_version=int(row["transition_version"]),
@@ -202,6 +221,16 @@ def _create_schema(connection: sqlite3.Connection) -> None:
                 )
             ),
             next_action_at TEXT,
+            pending_target_id INTEGER,
+            pending_presence_tier TEXT CHECK (
+                pending_presence_tier IS NULL OR pending_presence_tier IN (
+                    'online', 'idle', 'do_not_disturb', 'offline'
+                )
+            ),
+            pending_ping_automatic INTEGER CHECK (
+                pending_ping_automatic IS NULL OR pending_ping_automatic IN (0, 1)
+            ),
+            pending_response_deadline TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             transition_version INTEGER NOT NULL DEFAULT 0
@@ -209,6 +238,14 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             CHECK (
                 (next_action IS NULL AND next_action_at IS NULL)
                 OR (next_action IS NOT NULL AND next_action_at IS NOT NULL)
+            ),
+            CHECK (
+                (pending_target_id IS NULL
+                    AND pending_ping_automatic IS NULL
+                    AND pending_response_deadline IS NULL)
+                OR (pending_target_id IS NOT NULL
+                    AND pending_ping_automatic IS NOT NULL
+                    AND pending_response_deadline IS NOT NULL)
             )
         );
 
@@ -238,9 +275,12 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             ticket_id INTEGER NOT NULL,
             sequence_number INTEGER NOT NULL CHECK (sequence_number > 0),
             target_user_id INTEGER NOT NULL,
-            presence_tier TEXT NOT NULL CHECK (
-                presence_tier IN ('online', 'idle', 'do_not_disturb', 'offline')
+            presence_tier TEXT CHECK (
+                presence_tier IS NULL OR presence_tier IN (
+                    'online', 'idle', 'do_not_disturb', 'offline'
+                )
             ),
+            automatic INTEGER NOT NULL CHECK (automatic IN (0, 1)),
             sent_at TEXT NOT NULL,
             response_deadline TEXT NOT NULL,
             PRIMARY KEY (ticket_id, sequence_number),
@@ -361,9 +401,53 @@ class GitHubTicketsStore:
                 updated_at,
             )
 
+    async def record_ticket_message(
+        self,
+        ticket_id: int,
+        message_id: int,
+        updated_at: datetime,
+    ) -> bool:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._record_ticket_message_sync,
+                ticket_id,
+                message_id,
+                updated_at,
+            )
+
+    async def record_ticket_thread(
+        self,
+        ticket_id: int,
+        thread_id: int,
+        updated_at: datetime,
+    ) -> bool:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._record_ticket_thread_sync,
+                ticket_id,
+                thread_id,
+                updated_at,
+            )
+
     async def get_ticket(self, ticket_id: int) -> Ticket | None:
         async with self._lock:
             return await asyncio.to_thread(self._get_ticket_sync, ticket_id)
+
+    async def get_ticket_by_message_id(self, message_id: int) -> Ticket | None:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._get_ticket_by_projection_id_sync,
+                "message_id",
+                message_id,
+            )
+
+    async def get_ticket_by_thread_id(self, thread_id: int) -> Ticket | None:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._get_ticket_by_projection_id_sync,
+                "thread_id",
+                thread_id,
+            )
 
     async def list_active_tickets(self) -> tuple[Ticket, ...]:
         async with self._lock:
@@ -432,17 +516,82 @@ class GitHubTicketsStore:
         ticket_id: int,
         *,
         target_user_id: int,
-        presence_tier: PresenceTier,
-        sent_at: datetime,
+        presence_tier: PresenceTier | None,
+        automatic: bool,
+        reserved_at: datetime,
         response_deadline: datetime,
         maximum_pings: int,
-    ) -> TicketPing | None:
+    ) -> PingReservation | None:
         async with self._lock:
             return await asyncio.to_thread(
                 self._reserve_ping_sync,
                 ticket_id,
-                (target_user_id, presence_tier, sent_at, response_deadline),
+                (
+                    target_user_id,
+                    presence_tier,
+                    automatic,
+                    reserved_at,
+                    response_deadline,
+                ),
                 maximum_pings,
+            )
+
+    async def acknowledge_ping(
+        self,
+        ticket_id: int,
+        sent_at: datetime,
+    ) -> TicketPing | None:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._acknowledge_ping_sync,
+                ticket_id,
+                sent_at,
+            )
+
+    async def settle_target_timeout(
+        self,
+        ticket_id: int,
+        *,
+        target_user_id: int,
+        protection_until: datetime,
+        next_action: NextAction | None,
+        next_action_at: datetime | None,
+        updated_at: datetime,
+    ) -> bool:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._settle_target_timeout_sync,
+                ticket_id,
+                target_user_id,
+                (protection_until, next_action, next_action_at, updated_at),
+            )
+
+    async def defer_due_ping(
+        self,
+        ticket_id: int,
+        next_action_at: datetime,
+        updated_at: datetime,
+    ) -> bool:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._defer_due_ping_sync,
+                ticket_id,
+                next_action_at,
+                updated_at,
+            )
+
+    async def exhaust_due_routing(
+        self,
+        ticket_id: int,
+        expected_action: NextAction,
+        updated_at: datetime,
+    ) -> bool:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._exhaust_due_routing_sync,
+                ticket_id,
+                expected_action,
+                updated_at,
             )
 
     async def list_pings(self, ticket_id: int) -> tuple[TicketPing, ...]:
@@ -727,11 +876,68 @@ class GitHubTicketsStore:
         )
         return cursor > 0
 
+    def _record_ticket_message_sync(
+        self,
+        ticket_id: int,
+        message_id: int,
+        updated_at: datetime,
+    ) -> bool:
+        changed = self._update_ticket_state(
+            """
+            UPDATE tickets
+            SET message_id = ?, updated_at = ?,
+                transition_version = transition_version + 1
+            WHERE ticket_id = ? AND state = 'creating' AND message_id IS NULL
+            """,
+            (
+                message_id,
+                _serialize_datetime(updated_at),
+                ticket_id,
+            ),
+        )
+        return changed > 0
+
+    def _record_ticket_thread_sync(
+        self,
+        ticket_id: int,
+        thread_id: int,
+        updated_at: datetime,
+    ) -> bool:
+        changed = self._update_ticket_state(
+            """
+            UPDATE tickets
+            SET thread_id = ?, updated_at = ?,
+                transition_version = transition_version + 1
+            WHERE ticket_id = ? AND state = 'creating'
+                AND message_id IS NOT NULL AND thread_id IS NULL
+            """,
+            (
+                thread_id,
+                _serialize_datetime(updated_at),
+                ticket_id,
+            ),
+        )
+        return changed > 0
+
     def _get_ticket_sync(self, ticket_id: int) -> Ticket | None:
         with closing(self._connect()) as connection:
             row = connection.execute(
                 "SELECT * FROM tickets WHERE ticket_id = ?",
                 (ticket_id,),
+            ).fetchone()
+            return _decode_ticket(connection, row) if row is not None else None
+
+    def _get_ticket_by_projection_id_sync(
+        self,
+        column: str,
+        projection_id: int,
+    ) -> Ticket | None:
+        if column not in {"message_id", "thread_id"}:
+            raise ValueError("unsupported ticket projection column")
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                f"SELECT * FROM tickets WHERE {column} = ?",  # noqa: S608
+                (projection_id,),
             ).fetchone()
             return _decode_ticket(connection, row) if row is not None else None
 
@@ -758,6 +964,9 @@ class GitHubTicketsStore:
             UPDATE tickets
             SET state = 'claimed', assignee_id = ?, current_target_id = NULL,
                 protection_until = ?, next_action = NULL, next_action_at = NULL,
+                pending_target_id = NULL, pending_presence_tier = NULL,
+                pending_ping_automatic = NULL,
+                pending_response_deadline = NULL,
                 updated_at = ?, transition_version = transition_version + 1
             WHERE ticket_id = ? AND state = 'open'
             """,
@@ -782,7 +991,10 @@ class GitHubTicketsStore:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 row = connection.execute(
-                    "SELECT state, current_target_id FROM tickets WHERE ticket_id = ?",
+                    """
+                    SELECT state, current_target_id, pending_target_id
+                    FROM tickets WHERE ticket_id = ?
+                    """,
                     (ticket_id,),
                 ).fetchone()
                 if row is None or row["state"] != TicketState.OPEN.value:
@@ -799,12 +1011,19 @@ class GitHubTicketsStore:
                 if inserted == 0:
                     connection.rollback()
                     return False
-                if row["current_target_id"] == user_id:
+                if (
+                    row["current_target_id"] == user_id
+                    or row["pending_target_id"] == user_id
+                ):
                     connection.execute(
                         """
                         UPDATE tickets
                         SET current_target_id = NULL, protection_until = ?,
                             next_action = ?, next_action_at = ?, updated_at = ?,
+                            pending_target_id = NULL,
+                            pending_presence_tier = NULL,
+                            pending_ping_automatic = NULL,
+                            pending_response_deadline = NULL,
                             transition_version = transition_version + 1
                         WHERE ticket_id = ?
                         """,
@@ -869,6 +1088,9 @@ class GitHubTicketsStore:
                     UPDATE tickets
                     SET state = 'open', assignee_id = NULL, current_target_id = NULL,
                         protection_until = ?, next_action = ?, next_action_at = ?,
+                        pending_target_id = NULL, pending_presence_tier = NULL,
+                        pending_ping_automatic = NULL,
+                        pending_response_deadline = NULL,
                         updated_at = ?, transition_version = transition_version + 1
                     WHERE ticket_id = ? AND state = 'claimed'
                     """,
@@ -908,19 +1130,34 @@ class GitHubTicketsStore:
     def _reserve_ping_sync(
         self,
         ticket_id: int,
-        target: tuple[int, PresenceTier, datetime, datetime],
+        target: tuple[int, PresenceTier | None, bool, datetime, datetime],
         maximum_pings: int,
-    ) -> TicketPing | None:
-        target_user_id, presence_tier, sent_at, response_deadline = target
+    ) -> PingReservation | None:
+        target_user_id, presence_tier, automatic, reserved_at, response_deadline = target
         if maximum_pings <= 0:
             return None
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 row = connection.execute(
-                    "SELECT state, ping_count FROM tickets WHERE ticket_id = ?",
+                    "SELECT * FROM tickets WHERE ticket_id = ?",
                     (ticket_id,),
                 ).fetchone()
+                if row is not None and row["pending_target_id"] is not None:
+                    connection.rollback()
+                    return PingReservation(
+                        ticket_id=ticket_id,
+                        target_user_id=int(row["pending_target_id"]),
+                        presence_tier=(
+                            PresenceTier(str(row["pending_presence_tier"]))
+                            if row["pending_presence_tier"] is not None
+                            else None
+                        ),
+                        automatic=bool(row["pending_ping_automatic"]),
+                        response_deadline=_deserialize_datetime(
+                            str(row["pending_response_deadline"])
+                        ),
+                    )
                 if (
                     row is None
                     or row["state"] != TicketState.OPEN.value
@@ -929,19 +1166,74 @@ class GitHubTicketsStore:
                 ):
                     connection.rollback()
                     return None
+                connection.execute(
+                    """
+                    UPDATE tickets
+                    SET pending_target_id = ?, pending_presence_tier = ?,
+                        pending_ping_automatic = ?, pending_response_deadline = ?,
+                        updated_at = ?, transition_version = transition_version + 1
+                    WHERE ticket_id = ? AND state = 'open'
+                    """,
+                    (
+                        target_user_id,
+                        presence_tier.value if presence_tier is not None else None,
+                        int(automatic),
+                        _serialize_datetime(response_deadline),
+                        _serialize_datetime(reserved_at),
+                        ticket_id,
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return PingReservation(
+            ticket_id=ticket_id,
+            target_user_id=target_user_id,
+            presence_tier=presence_tier,
+            automatic=automatic,
+            response_deadline=response_deadline.astimezone(timezone.utc),
+        )
+
+    def _acknowledge_ping_sync(
+        self,
+        ticket_id: int,
+        sent_at: datetime,
+    ) -> TicketPing | None:
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT * FROM tickets WHERE ticket_id = ? AND state = 'open'",
+                    (ticket_id,),
+                ).fetchone()
+                if row is None or row["pending_target_id"] is None:
+                    connection.rollback()
+                    return None
                 sequence_number = int(row["ping_count"]) + 1
+                target_user_id = int(row["pending_target_id"])
+                presence_tier = (
+                    PresenceTier(str(row["pending_presence_tier"]))
+                    if row["pending_presence_tier"] is not None
+                    else None
+                )
+                automatic = bool(row["pending_ping_automatic"])
+                response_deadline = _deserialize_datetime(
+                    str(row["pending_response_deadline"])
+                )
                 connection.execute(
                     """
                     INSERT INTO ticket_pings (
                         ticket_id, sequence_number, target_user_id, presence_tier,
-                        sent_at, response_deadline
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        automatic, sent_at, response_deadline
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ticket_id,
                         sequence_number,
                         target_user_id,
-                        presence_tier.value,
+                        presence_tier.value if presence_tier is not None else None,
+                        int(automatic),
                         _serialize_datetime(sent_at),
                         _serialize_datetime(response_deadline),
                     ),
@@ -951,6 +1243,9 @@ class GitHubTicketsStore:
                     UPDATE tickets
                     SET ping_count = ?, current_target_id = ?,
                         next_action = 'target_timeout', next_action_at = ?,
+                        pending_target_id = NULL, pending_presence_tier = NULL,
+                        pending_ping_automatic = NULL,
+                        pending_response_deadline = NULL,
                         updated_at = ?, transition_version = transition_version + 1
                     WHERE ticket_id = ? AND state = 'open'
                     """,
@@ -971,9 +1266,114 @@ class GitHubTicketsStore:
             sequence_number=sequence_number,
             target_user_id=target_user_id,
             presence_tier=presence_tier,
-            sent_at=sent_at.astimezone(UTC),
-            response_deadline=response_deadline.astimezone(UTC),
+            automatic=automatic,
+            sent_at=sent_at.astimezone(timezone.utc),
+            response_deadline=response_deadline,
         )
+
+    def _settle_target_timeout_sync(
+        self,
+        ticket_id: int,
+        target_user_id: int,
+        settlement: tuple[
+            datetime,
+            NextAction | None,
+            datetime | None,
+            datetime,
+        ],
+    ) -> bool:
+        protection_until, next_action, next_action_at, updated_at = settlement
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    """
+                    SELECT 1 FROM tickets
+                    WHERE ticket_id = ? AND state = 'open'
+                        AND current_target_id = ? AND next_action = 'target_timeout'
+                    """,
+                    (ticket_id, target_user_id),
+                ).fetchone()
+                if row is None:
+                    connection.rollback()
+                    return False
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO ticket_exclusions (
+                        ticket_id, user_id, reason, created_at
+                    ) VALUES (?, ?, 'timed_out', ?)
+                    """,
+                    (ticket_id, target_user_id, _serialize_datetime(updated_at)),
+                )
+                connection.execute(
+                    """
+                    UPDATE tickets
+                    SET current_target_id = NULL, protection_until = ?,
+                        next_action = ?, next_action_at = ?, updated_at = ?,
+                        transition_version = transition_version + 1
+                    WHERE ticket_id = ? AND state = 'open'
+                        AND current_target_id = ?
+                    """,
+                    (
+                        _serialize_datetime(protection_until),
+                        next_action.value if next_action is not None else None,
+                        _serialize_optional_datetime(next_action_at),
+                        _serialize_datetime(updated_at),
+                        ticket_id,
+                        target_user_id,
+                    ),
+                )
+                connection.commit()
+                return True
+            except Exception:
+                connection.rollback()
+                raise
+
+    def _defer_due_ping_sync(
+        self,
+        ticket_id: int,
+        next_action_at: datetime,
+        updated_at: datetime,
+    ) -> bool:
+        changed = self._update_ticket_state(
+            """
+            UPDATE tickets
+            SET next_action_at = ?, updated_at = ?,
+                transition_version = transition_version + 1
+            WHERE ticket_id = ? AND state = 'open'
+                AND next_action IN ('direct_ping', 'automatic_ping')
+            """,
+            (
+                _serialize_datetime(next_action_at),
+                _serialize_datetime(updated_at),
+                ticket_id,
+            ),
+        )
+        return changed > 0
+
+    def _exhaust_due_routing_sync(
+        self,
+        ticket_id: int,
+        expected_action: NextAction,
+        updated_at: datetime,
+    ) -> bool:
+        changed = self._update_ticket_state(
+            """
+            UPDATE tickets
+            SET next_action = NULL, next_action_at = NULL,
+                pending_target_id = NULL, pending_presence_tier = NULL,
+                pending_ping_automatic = NULL,
+                pending_response_deadline = NULL,
+                updated_at = ?, transition_version = transition_version + 1
+            WHERE ticket_id = ? AND state = 'open' AND next_action = ?
+            """,
+            (
+                _serialize_datetime(updated_at),
+                ticket_id,
+                expected_action.value,
+            ),
+        )
+        return changed > 0
 
     @staticmethod
     def _target_was_used(
@@ -1010,7 +1410,12 @@ class GitHubTicketsStore:
                 ticket_id=int(row["ticket_id"]),
                 sequence_number=int(row["sequence_number"]),
                 target_user_id=int(row["target_user_id"]),
-                presence_tier=PresenceTier(str(row["presence_tier"])),
+                presence_tier=(
+                    PresenceTier(str(row["presence_tier"]))
+                    if row["presence_tier"] is not None
+                    else None
+                ),
+                automatic=bool(row["automatic"]),
                 sent_at=_deserialize_datetime(str(row["sent_at"])),
                 response_deadline=_deserialize_datetime(str(row["response_deadline"])),
             )
