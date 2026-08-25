@@ -7,7 +7,7 @@ import sys
 import types
 import unittest
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -144,21 +144,26 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
     async def _create_open_ticket(
         self,
         *,
+        guild_id: int = 10,
+        channel_id: int = 20,
         author_id: int = 100,
         category_ids: tuple[int, ...] = (),
         category_display: str = "",
+        routing_mode=None,
+        direct_target_id: int | None = None,
         next_action_at: datetime | None = None,
     ):
+        selected_routing_mode = routing_mode or models.RoutingMode.AUTOMATIC
         ticket = await self.store.create_ticket(
             models.NewTicket(
-                guild_id=10,
-                channel_id=20,
+                guild_id=guild_id,
+                channel_id=channel_id,
                 author_id=author_id,
                 pr_title="Improve rendering",
                 pr_url="https://example.test/pull/1",
                 category_display=category_display,
-                routing_mode=models.RoutingMode.AUTOMATIC,
-                direct_target_id=None,
+                routing_mode=selected_routing_mode,
+                direct_target_id=direct_target_id,
                 category_ids=category_ids,
                 created_at=self.now,
             )
@@ -177,6 +182,138 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(activated)
         return await self.store.get_ticket(ticket.ticket_id)
+
+    async def test_candidate_history_batches_all_persisted_facts_in_candidate_order(self):
+        await self.store.initialize()
+        rendering = await self.store.add_category(10, "rendering", self.now)
+        python = await self.store.add_category(10, "python", self.now)
+        target = await self._create_open_ticket(
+            category_ids=(rendering.category_id, python.category_id),
+            category_display="rendering, python",
+        )
+        for user_id, category_ids, automatic in (
+            (101, (rendering.category_id, python.category_id), True),
+            (102, (rendering.category_id,), False),
+            (104, (python.category_id,), True),
+        ):
+            await self.store.save_profile(
+                guild_id=10,
+                user_id=user_id,
+                github_username=None,
+                category_ids=category_ids,
+                automatic_pings=automatic,
+                updated_at=self.now,
+            )
+
+        assignment = await self._create_open_ticket(author_id=201)
+        await self.store.claim(assignment.ticket_id, 101, self.now, self.now)
+        other_guild_assignment = await self._create_open_ticket(
+            guild_id=20,
+            channel_id=30,
+            author_id=202,
+        )
+        await self.store.claim(other_guild_assignment.ticket_id, 101, self.now, self.now)
+
+        last_ping_at = self.now - timedelta(hours=1)
+        history_ticket = await self._create_open_ticket(author_id=203)
+        await self.store.reserve_ping(
+            history_ticket.ticket_id,
+            target_user_id=101,
+            presence_tier=models.PresenceTier.ONLINE,
+            automatic=True,
+            reserved_at=last_ping_at,
+            response_deadline=self.now,
+            maximum_pings=3,
+        )
+        await self.store.acknowledge_ping(history_ticket.ticket_id, last_ping_at)
+
+        await self.store.decline(target.ticket_id, 102, self.now)
+        await self.store.reserve_ping(
+            target.ticket_id,
+            target_user_id=103,
+            presence_tier=models.PresenceTier.IDLE,
+            automatic=True,
+            reserved_at=self.now,
+            response_deadline=self.now,
+            maximum_pings=3,
+        )
+        await self.store.acknowledge_ping(target.ticket_id, self.now)
+        await self.store.settle_target_timeout(
+            target.ticket_id,
+            target_user_id=103,
+            protection_until=self.now,
+            next_action=None,
+            next_action_at=None,
+            updated_at=self.now,
+        )
+        await self.store.claim(target.ticket_id, 104, self.now, self.now)
+        await self.store.unassign(
+            target.ticket_id,
+            protection_until=self.now,
+            next_action=None,
+            next_action_at=None,
+            updated_at=self.now,
+        )
+
+        traced_statements = []
+
+        def traced_connection_factory(*args, **kwargs):
+            connection = sqlite3.connect(*args, **kwargs)
+            connection.set_trace_callback(traced_statements.append)
+            return connection
+
+        traced_store = store_module.GitHubTicketsStore(
+            self.path,
+            connection_factory=traced_connection_factory,
+        )
+        histories = await traced_store.candidate_history(
+            target.ticket_id,
+            (103, 101, 102, 104, 101),
+        )
+
+        self.assertEqual(tuple(item.user_id for item in histories), (103, 101, 102, 104))
+        by_user_id = {item.user_id: item for item in histories}
+        self.assertFalse(by_user_id[103].has_profile)
+        self.assertTrue(by_user_id[101].automatic_pings)
+        self.assertFalse(by_user_id[102].automatic_pings)
+        self.assertEqual(by_user_id[101].matching_category_count, 2)
+        self.assertEqual(by_user_id[104].matching_category_count, 1)
+        self.assertEqual(by_user_id[101].active_assignment_count, 1)
+        self.assertEqual(by_user_id[101].last_ping_at, last_ping_at)
+        self.assertTrue(by_user_id[103].was_pinged)
+        self.assertTrue(by_user_id[102].declined)
+        self.assertTrue(by_user_id[104].unassigned)
+        self.assertTrue(by_user_id[103].timed_out)
+        selects = [
+            statement
+            for statement in traced_statements
+            if statement.lstrip().upper().startswith(("SELECT", "WITH"))
+        ]
+        self.assertEqual(len(selects), 1)
+
+    async def test_list_profiles_for_category_is_guild_scoped_and_ordered(self):
+        await self.store.initialize()
+        category = await self.store.add_category(10, "rendering", self.now)
+        other = await self.store.add_category(10, "python", self.now)
+        for user_id, categories in (
+            (200, (category.category_id, other.category_id)),
+            (100, (category.category_id,)),
+            (300, (other.category_id,)),
+        ):
+            await self.store.save_profile(
+                guild_id=10,
+                user_id=user_id,
+                github_username=str(user_id),
+                category_ids=categories,
+                automatic_pings=False,
+                updated_at=self.now,
+            )
+
+        profiles = await self.store.list_profiles_for_category(10, category.category_id)
+
+        self.assertEqual(tuple(profile.user_id for profile in profiles), (100, 200))
+        self.assertEqual(profiles[1].category_ids, (other.category_id, category.category_id))
+        self.assertEqual(await self.store.list_profiles_for_category(20, category.category_id), ())
 
     async def test_category_deletion_removes_routing_links_but_preserves_snapshot(self):
         await self.store.initialize()

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from NHCogs.storage import ConnectionFactory, apply_migrations, connect
 
 from .models import (
+    CandidateHistory,
     Category,
     CategoryAlreadyExists,
     CategoryLimitReached,
@@ -28,7 +29,7 @@ from .models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
 
 
 SCHEMA_VERSION = 1
@@ -377,6 +378,33 @@ class GitHubTicketsStore:
         async with self._lock:
             return await asyncio.to_thread(self._get_profile_sync, guild_id, user_id)
 
+    async def list_profiles_for_category(
+        self,
+        guild_id: int,
+        category_id: int,
+    ) -> tuple[Profile, ...]:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._list_profiles_for_category_sync,
+                guild_id,
+                category_id,
+            )
+
+    async def candidate_history(
+        self,
+        ticket_id: int,
+        candidate_user_ids: Iterable[int],
+    ) -> tuple[CandidateHistory, ...]:
+        user_ids = tuple(dict.fromkeys(candidate_user_ids))
+        if not user_ids:
+            return ()
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._candidate_history_sync,
+                ticket_id,
+                user_ids,
+            )
+
     async def create_ticket(self, new_ticket: NewTicket) -> Ticket:
         async with self._lock:
             return await asyncio.to_thread(self._create_ticket_sync, new_ticket)
@@ -606,6 +634,46 @@ class GitHubTicketsStore:
         async with self._lock:
             return await asyncio.to_thread(self._due_ticket_ids_sync, now)
 
+    async def delete_tickets_for_channel(
+        self,
+        guild_id: int,
+        channel_id: int,
+    ) -> tuple[Ticket, ...]:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._delete_tickets_for_channel_sync,
+                guild_id,
+                channel_id,
+            )
+
+    async def delete_guild_state(self, guild_id: int) -> bool:
+        async with self._lock:
+            return await asyncio.to_thread(self._delete_guild_state_sync, guild_id)
+
+    async def list_authored_tickets(self, user_id: int) -> tuple[Ticket, ...]:
+        async with self._lock:
+            return await asyncio.to_thread(self._list_authored_tickets_sync, user_id)
+
+    async def user_reference_guild_ids(self, user_id: int) -> tuple[int, ...]:
+        async with self._lock:
+            return await asyncio.to_thread(self._user_reference_guild_ids_sync, user_id)
+
+    async def redact_user(
+        self,
+        user_id: int,
+        *,
+        protection_until_by_guild: Mapping[int, datetime],
+        updated_at: datetime,
+    ) -> tuple[Ticket, ...]:
+        deadlines = dict(protection_until_by_guild)
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._redact_user_sync,
+                user_id,
+                deadlines,
+                updated_at,
+            )
+
     async def begin_finishing(self, ticket_id: int, updated_at: datetime) -> bool:
         async with self._lock:
             return await asyncio.to_thread(self._begin_finishing_sync, ticket_id, updated_at)
@@ -788,6 +856,170 @@ class GitHubTicketsStore:
             if row is None:
                 return None
             return _decode_profile(connection, row)
+
+    def _list_profiles_for_category_sync(
+        self,
+        guild_id: int,
+        category_id: int,
+    ) -> tuple[Profile, ...]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT p.*,
+                    (
+                        SELECT GROUP_CONCAT(ordered.category_id, ',')
+                        FROM (
+                            SELECT pc2.category_id
+                            FROM profile_categories AS pc2
+                            JOIN categories AS c2
+                                ON c2.category_id = pc2.category_id
+                            WHERE pc2.guild_id = p.guild_id
+                                AND pc2.user_id = p.user_id
+                            ORDER BY c2.name, pc2.category_id
+                        ) AS ordered
+                    ) AS category_ids
+                FROM profiles AS p
+                JOIN profile_categories AS requested
+                    ON requested.guild_id = p.guild_id
+                    AND requested.user_id = p.user_id
+                    AND requested.category_id = ?
+                JOIN categories AS c
+                    ON c.category_id = requested.category_id
+                    AND c.guild_id = p.guild_id
+                WHERE p.guild_id = ?
+                ORDER BY p.user_id
+                """,
+                (category_id, guild_id),
+            ).fetchall()
+        return tuple(
+            Profile(
+                guild_id=int(row["guild_id"]),
+                user_id=int(row["user_id"]),
+                github_username=(
+                    str(row["github_username"])
+                    if row["github_username"] is not None
+                    else None
+                ),
+                automatic_pings=bool(row["automatic_pings"]),
+                category_ids=tuple(
+                    int(value)
+                    for value in str(row["category_ids"] or "").split(",")
+                    if value
+                ),
+                updated_at=_deserialize_datetime(str(row["updated_at"])),
+            )
+            for row in rows
+        )
+
+    def _candidate_history_sync(
+        self,
+        ticket_id: int,
+        user_ids: tuple[int, ...],
+    ) -> tuple[CandidateHistory, ...]:
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """
+                CREATE TEMP TABLE candidate_history_input (
+                    user_id INTEGER PRIMARY KEY,
+                    ordinal INTEGER NOT NULL
+                )
+                """
+            )
+            connection.executemany(
+                """
+                INSERT INTO candidate_history_input (user_id, ordinal)
+                VALUES (?, ?)
+                """,
+                ((user_id, ordinal) for ordinal, user_id in enumerate(user_ids)),
+            )
+            rows = connection.execute(
+                """
+                WITH target AS (
+                    SELECT ticket_id, guild_id
+                    FROM tickets
+                    WHERE ticket_id = ?
+                ),
+                matches AS (
+                    SELECT pc.user_id, COUNT(*) AS matching_category_count
+                    FROM profile_categories AS pc
+                    JOIN ticket_categories AS tc
+                        ON tc.category_id = pc.category_id
+                    JOIN target ON target.ticket_id = tc.ticket_id
+                    WHERE pc.guild_id = target.guild_id
+                    GROUP BY pc.user_id
+                ),
+                assignments AS (
+                    SELECT assignee_id AS user_id, COUNT(*) AS active_assignment_count
+                    FROM tickets
+                    JOIN target ON target.guild_id = tickets.guild_id
+                    WHERE tickets.state = 'claimed' AND assignee_id IS NOT NULL
+                    GROUP BY assignee_id
+                ),
+                last_pings AS (
+                    SELECT tp.target_user_id AS user_id, MAX(tp.sent_at) AS last_ping_at
+                    FROM ticket_pings AS tp
+                    JOIN tickets AS ping_ticket
+                        ON ping_ticket.ticket_id = tp.ticket_id
+                    JOIN target ON target.guild_id = ping_ticket.guild_id
+                    GROUP BY tp.target_user_id
+                ),
+                ticket_ping_facts AS (
+                    SELECT target_user_id AS user_id, 1 AS was_pinged
+                    FROM ticket_pings
+                    WHERE ticket_id = ?
+                    GROUP BY target_user_id
+                ),
+                exclusion_facts AS (
+                    SELECT user_id,
+                        MAX(reason = 'declined') AS declined,
+                        MAX(reason = 'unassigned') AS unassigned,
+                        MAX(reason = 'timed_out') AS timed_out
+                    FROM ticket_exclusions
+                    WHERE ticket_id = ?
+                    GROUP BY user_id
+                )
+                SELECT input.user_id,
+                    profile.user_id IS NOT NULL AS has_profile,
+                    COALESCE(profile.automatic_pings, 0) AS automatic_pings,
+                    COALESCE(matches.matching_category_count, 0)
+                        AS matching_category_count,
+                    COALESCE(assignments.active_assignment_count, 0)
+                        AS active_assignment_count,
+                    last_pings.last_ping_at,
+                    COALESCE(ticket_ping_facts.was_pinged, 0) AS was_pinged,
+                    COALESCE(exclusion_facts.declined, 0) AS declined,
+                    COALESCE(exclusion_facts.unassigned, 0) AS unassigned,
+                    COALESCE(exclusion_facts.timed_out, 0) AS timed_out
+                FROM candidate_history_input AS input
+                CROSS JOIN target
+                LEFT JOIN profiles AS profile
+                    ON profile.guild_id = target.guild_id
+                    AND profile.user_id = input.user_id
+                LEFT JOIN matches ON matches.user_id = input.user_id
+                LEFT JOIN assignments ON assignments.user_id = input.user_id
+                LEFT JOIN last_pings ON last_pings.user_id = input.user_id
+                LEFT JOIN ticket_ping_facts
+                    ON ticket_ping_facts.user_id = input.user_id
+                LEFT JOIN exclusion_facts ON exclusion_facts.user_id = input.user_id
+                ORDER BY input.ordinal
+                """,
+                (ticket_id, ticket_id, ticket_id),
+            ).fetchall()
+        return tuple(
+            CandidateHistory(
+                user_id=int(row["user_id"]),
+                has_profile=bool(row["has_profile"]),
+                automatic_pings=bool(row["automatic_pings"]),
+                matching_category_count=int(row["matching_category_count"]),
+                active_assignment_count=int(row["active_assignment_count"]),
+                last_ping_at=_deserialize_optional_datetime(row["last_ping_at"]),
+                was_pinged=bool(row["was_pinged"]),
+                declined=bool(row["declined"]),
+                unassigned=bool(row["unassigned"]),
+                timed_out=bool(row["timed_out"]),
+            )
+            for row in rows
+        )
 
     def _create_ticket_sync(self, new_ticket: NewTicket) -> Ticket:
         title = new_ticket.pr_title.strip()
@@ -1444,6 +1676,280 @@ class GitHubTicketsStore:
                 (_serialize_datetime(now),),
             ).fetchall()
         return tuple(int(row["ticket_id"]) for row in rows)
+
+    def _delete_tickets_for_channel_sync(
+        self,
+        guild_id: int,
+        channel_id: int,
+    ) -> tuple[Ticket, ...]:
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM tickets
+                    WHERE guild_id = ? AND channel_id = ?
+                    ORDER BY ticket_id
+                    """,
+                    (guild_id, channel_id),
+                ).fetchall()
+                tickets = tuple(_decode_ticket(connection, row) for row in rows)
+                connection.execute(
+                    "DELETE FROM tickets WHERE guild_id = ? AND channel_id = ?",
+                    (guild_id, channel_id),
+                )
+                connection.commit()
+                return tickets
+            except Exception:
+                connection.rollback()
+                raise
+
+    def _delete_guild_state_sync(self, guild_id: int) -> bool:
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                changed = 0
+                changed += connection.execute(
+                    "DELETE FROM tickets WHERE guild_id = ?",
+                    (guild_id,),
+                ).rowcount
+                changed += connection.execute(
+                    "DELETE FROM profiles WHERE guild_id = ?",
+                    (guild_id,),
+                ).rowcount
+                changed += connection.execute(
+                    "DELETE FROM categories WHERE guild_id = ?",
+                    (guild_id,),
+                ).rowcount
+                connection.commit()
+                return changed > 0
+            except Exception:
+                connection.rollback()
+                raise
+
+    def _list_authored_tickets_sync(self, user_id: int) -> tuple[Ticket, ...]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM tickets
+                WHERE author_id = ?
+                ORDER BY ticket_id
+                """,
+                (user_id,),
+            ).fetchall()
+            return tuple(_decode_ticket(connection, row) for row in rows)
+
+    def _user_reference_guild_ids_sync(self, user_id: int) -> tuple[int, ...]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT guild_id FROM profiles WHERE user_id = ?
+                UNION
+                SELECT guild_id FROM tickets
+                WHERE author_id = ? OR direct_target_id = ?
+                    OR current_target_id = ? OR pending_target_id = ?
+                    OR assignee_id = ?
+                UNION
+                SELECT ticket.guild_id
+                FROM ticket_exclusions AS exclusion
+                JOIN tickets AS ticket ON ticket.ticket_id = exclusion.ticket_id
+                WHERE exclusion.user_id = ?
+                UNION
+                SELECT ticket.guild_id
+                FROM ticket_pings AS ping
+                JOIN tickets AS ticket ON ticket.ticket_id = ping.ticket_id
+                WHERE ping.target_user_id = ?
+                ORDER BY guild_id
+                """,
+                (user_id,) * 8,
+            ).fetchall()
+        return tuple(int(row["guild_id"]) for row in rows)
+
+    def _redact_user_sync(
+        self,
+        user_id: int,
+        protection_until_by_guild: dict[int, datetime],
+        updated_at: datetime,
+    ) -> tuple[Ticket, ...]:
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                affected_rows = connection.execute(
+                    """
+                    SELECT ticket_id, guild_id
+                    FROM tickets
+                    WHERE author_id <> ? AND state IN ('open', 'claimed')
+                        AND (
+                            current_target_id = ?
+                            OR pending_target_id = ?
+                            OR assignee_id = ?
+                            OR direct_target_id = ?
+                        )
+                    ORDER BY ticket_id
+                    """,
+                    (user_id, user_id, user_id, user_id, user_id),
+                ).fetchall()
+                affected_guild_ids = {
+                    int(row["guild_id"])
+                    for row in affected_rows
+                }
+                missing_deadlines = affected_guild_ids.difference(
+                    protection_until_by_guild
+                )
+                if missing_deadlines:
+                    raise ValueError(
+                        "a protection deadline is required for every affected guild"
+                    )
+                serialized_deadlines = {
+                    guild_id: _serialize_datetime(
+                        protection_until_by_guild[guild_id]
+                    )
+                    for guild_id in affected_guild_ids
+                }
+                updated_timestamp = _serialize_datetime(updated_at)
+                connection.execute(
+                    """
+                    CREATE TEMP TABLE redacted_user_affected_tickets (
+                        ticket_id INTEGER PRIMARY KEY
+                    )
+                    """
+                )
+                connection.executemany(
+                    """
+                    INSERT INTO redacted_user_affected_tickets (ticket_id)
+                    VALUES (?)
+                    """,
+                    ((int(row["ticket_id"]),) for row in affected_rows),
+                )
+
+                connection.execute(
+                    "DELETE FROM tickets WHERE author_id = ?",
+                    (user_id,),
+                )
+                connection.execute(
+                    "DELETE FROM profiles WHERE user_id = ?",
+                    (user_id,),
+                )
+                connection.execute(
+                    "DELETE FROM ticket_exclusions WHERE user_id = ?",
+                    (user_id,),
+                )
+                connection.execute(
+                    "DELETE FROM ticket_pings WHERE target_user_id = ?",
+                    (user_id,),
+                )
+
+                for guild_id in sorted(affected_guild_ids):
+                    deadline = serialized_deadlines[guild_id]
+                    connection.execute(
+                        """
+                        UPDATE tickets
+                        SET state = 'open',
+                            direct_target_id = NULL,
+                            current_target_id = NULL,
+                            assignee_id = NULL,
+                            pending_target_id = NULL,
+                            pending_presence_tier = NULL,
+                            pending_ping_automatic = NULL,
+                            pending_response_deadline = NULL,
+                            protection_until = ?,
+                            next_action = CASE
+                                WHEN routing_mode IN (
+                                    'automatic', 'direct_automatic'
+                                ) THEN 'automatic_ping'
+                                ELSE NULL
+                            END,
+                            next_action_at = CASE
+                                WHEN routing_mode IN (
+                                    'automatic', 'direct_automatic'
+                                ) THEN ?
+                                ELSE NULL
+                            END,
+                            updated_at = ?,
+                            transition_version = transition_version + 1
+                        WHERE guild_id = ?
+                            AND ticket_id IN (
+                                SELECT ticket_id
+                                FROM redacted_user_affected_tickets
+                            )
+                        """,
+                        (deadline, deadline, updated_timestamp, guild_id),
+                    )
+
+                connection.execute(
+                    """
+                    UPDATE tickets
+                    SET current_target_id = CASE
+                            WHEN current_target_id = ? THEN NULL
+                            ELSE current_target_id
+                        END,
+                        assignee_id = CASE
+                            WHEN assignee_id = ? THEN NULL
+                            ELSE assignee_id
+                        END,
+                        pending_target_id = CASE
+                            WHEN pending_target_id = ? THEN NULL
+                            ELSE pending_target_id
+                        END,
+                        pending_presence_tier = CASE
+                            WHEN pending_target_id = ? THEN NULL
+                            ELSE pending_presence_tier
+                        END,
+                        pending_ping_automatic = CASE
+                            WHEN pending_target_id = ? THEN NULL
+                            ELSE pending_ping_automatic
+                        END,
+                        pending_response_deadline = CASE
+                            WHEN pending_target_id = ? THEN NULL
+                            ELSE pending_response_deadline
+                        END,
+                        updated_at = ?,
+                        transition_version = transition_version + 1
+                    WHERE state NOT IN ('open', 'claimed')
+                        AND (
+                            current_target_id = ?
+                            OR pending_target_id = ?
+                            OR assignee_id = ?
+                        )
+                    """,
+                    (
+                        user_id,
+                        user_id,
+                        user_id,
+                        user_id,
+                        user_id,
+                        user_id,
+                        updated_timestamp,
+                        user_id,
+                        user_id,
+                        user_id,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE tickets
+                    SET direct_target_id = NULL, updated_at = ?,
+                        transition_version = transition_version + 1
+                    WHERE state NOT IN ('open', 'claimed') AND direct_target_id = ?
+                    """,
+                    (updated_timestamp, user_id),
+                )
+
+                rows = connection.execute(
+                    """
+                    SELECT ticket.*
+                    FROM tickets AS ticket
+                    JOIN redacted_user_affected_tickets AS affected
+                        ON affected.ticket_id = ticket.ticket_id
+                    ORDER BY ticket.ticket_id
+                    """
+                ).fetchall()
+                affected = tuple(_decode_ticket(connection, row) for row in rows)
+                connection.commit()
+                return affected
+            except Exception:
+                connection.rollback()
+                raise
 
     def _begin_finishing_sync(self, ticket_id: int, updated_at: datetime) -> bool:
         changed = self._update_ticket_state(

@@ -69,6 +69,20 @@ class Profile:
 
 
 @dataclass(frozen=True, slots=True)
+class CandidateHistory:
+    user_id: int
+    has_profile: bool
+    automatic_pings: bool
+    matching_category_count: int
+    active_assignment_count: int
+    last_ping_at: datetime | None
+    was_pinged: bool
+    declined: bool
+    unassigned: bool
+    timed_out: bool
+
+
+@dataclass(frozen=True, slots=True)
 class NewTicket:
     guild_id: int
     channel_id: int
