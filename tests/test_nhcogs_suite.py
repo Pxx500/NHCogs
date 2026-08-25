@@ -28,6 +28,15 @@ class StubHoneypot:
         bot.constructed.append(self.qualified_name)
 
 
+class StubGitHubTickets:
+    qualified_name = "GitHubTickets"
+    CONFIG_IDENTIFIER = 228724500916148494760637198509440112622
+
+    def __init__(self, bot):
+        self.bot = bot
+        bot.constructed.append(self.qualified_name)
+
+
 class StubCustomCommandsMigration:
     qualified_name = "CustomCommandsMigration"
 
@@ -48,6 +57,7 @@ def load_suite_module():
         "NHCogs",
         "NHCogs.nhmisc",
         "NHCogs.honeypot",
+        "NHCogs.githubtickets",
         "NHCogs.custom_commands",
     )
     previous = {name: sys.modules.get(name, _MISSING) for name in names}
@@ -61,6 +71,8 @@ def load_suite_module():
     nhmisc.NHMisc = StubNHMisc
     honeypot = types.ModuleType("NHCogs.honeypot")
     honeypot.Honeypot = StubHoneypot
+    githubtickets = types.ModuleType("NHCogs.githubtickets")
+    githubtickets.GitHubTickets = StubGitHubTickets
     custom_commands = types.ModuleType("NHCogs.custom_commands")
 
     async def build_custom_commands_component(bot, _nhmisc):
@@ -93,6 +105,7 @@ def load_suite_module():
                 "NHCogs": module,
                 "NHCogs.nhmisc": nhmisc,
                 "NHCogs.honeypot": honeypot,
+                "NHCogs.githubtickets": githubtickets,
                 "NHCogs.custom_commands": custom_commands,
             }
         )
@@ -145,14 +158,18 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
                 suite.Honeypot.CONFIG_IDENTIFIER,
                 205192943327321000143939875896557571750,
             )
+            self.assertEqual(
+                suite.GitHubTickets.CONFIG_IDENTIFIER,
+                228724500916148494760637198509440112622,
+            )
 
         self.assertEqual(
             bot.added,
-            ["NHMisc", "Honeypot", "CustomCommandsMigration"],
+            ["NHMisc", "Honeypot", "GitHubTickets", "CustomCommandsMigration"],
         )
         self.assertEqual(
             set(bot.cogs),
-            {"NHMisc", "Honeypot", "CustomCommandsMigration"},
+            {"NHMisc", "Honeypot", "GitHubTickets", "CustomCommandsMigration"},
         )
         self.assertEqual(bot.removed, [])
         self.assertEqual(bot.preflight_calls, 1)
@@ -178,6 +195,8 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
             ("NHMisc", "after"),
             ("Honeypot", "before"),
             ("Honeypot", "after"),
+            ("GitHubTickets", "before"),
+            ("GitHubTickets", "after"),
             ("CustomCommandsMigration", "before"),
             ("CustomCommandsMigration", "after"),
         )
@@ -197,6 +216,11 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
         metadata = json.loads((PACKAGE_PATH / "info.json").read_text("utf-8"))
 
         self.assertEqual(metadata["name"], "NHCogs")
+        self.assertEqual(
+            metadata["description"],
+            "Loads NHMisc, Honeypot, GitHubTickets, and Custom Commands together "
+            "while preserving their separate commands, configuration, and stored data",
+        )
         self.assertEqual(metadata["min_bot_version"], "3.5.23")
         self.assertEqual(metadata["min_python_version"], [3, 10, 0])
         self.assertEqual(
@@ -213,6 +237,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("moderation case metadata", statement)
         self.assertIn("Custom Commands stores guild IDs", statement)
         self.assertIn("Operational error records store the guild", statement)
+        self.assertIn("GitHubTickets stores guild and user IDs", statement)
 
     async def test_teardown_removes_late_registered_replacement_cog(self):
         with load_suite_module() as suite:

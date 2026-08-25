@@ -6,18 +6,19 @@ from .custom_commands import (
     assert_safe_to_replace,
     build_custom_commands_component,
 )
+from .githubtickets import GitHubTickets
 from .honeypot import Honeypot
 from .nhmisc import NHMisc
 
 __red_end_user_data_statement__ = get_end_user_data_statement(file=__file__)
 
-__all__ = ("CustomCommands", "Honeypot", "NHMisc")
+__all__ = ("CustomCommands", "GitHubTickets", "Honeypot", "NHMisc")
 
 
 async def setup(bot: Red) -> None:
     assert_safe_to_replace(bot)
     nhmisc = NHMisc(bot)
-    cogs = (nhmisc, Honeypot(bot))
+    cogs = (nhmisc, Honeypot(bot), GitHubTickets(bot))
     attempted = []
     try:
         for cog in cogs:
