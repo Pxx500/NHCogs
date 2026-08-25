@@ -5,7 +5,7 @@ import sys
 import types
 import unittest
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -91,8 +91,8 @@ class ReviewerSelectionTests(unittest.TestCase):
         self.assertEqual(routing_module.select_reviewer(candidates).user_id, 1)
 
     def test_within_tier_priorities_are_lexicographic(self):
-        recent = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
-        old = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
+        recent = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+        old = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
 
         with self.subTest(priority="fewest active assignments"):
             selected = routing_module.select_reviewer(

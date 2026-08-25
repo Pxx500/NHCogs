@@ -5,7 +5,7 @@ import importlib
 import sys
 import types
 import unittest
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,7 +55,7 @@ class FakeDeadlineSource:
 @unittest.skipIf(scheduler_module is None, "GitHub Tickets scheduler is not implemented yet")
 class DeadlineSchedulerTests(unittest.IsolatedAsyncioTestCase):
     async def test_new_earlier_deadline_interrupts_current_sleep(self):
-        source = FakeDeadlineSource({1: datetime.now(UTC) + timedelta(minutes=5)})
+        source = FakeDeadlineSource({1: datetime.now(timezone.utc) + timedelta(minutes=5)})
         processed = asyncio.Event()
 
         async def on_due(ticket_id):
@@ -66,14 +66,14 @@ class DeadlineSchedulerTests(unittest.IsolatedAsyncioTestCase):
         scheduler.start()
         try:
             await asyncio.wait_for(source.nearest_queried.wait(), timeout=0.5)
-            source.deadlines[1] = datetime.now(UTC)
+            source.deadlines[1] = datetime.now(timezone.utc)
             scheduler.wake()
             await asyncio.wait_for(processed.wait(), timeout=0.5)
         finally:
             await scheduler.close()
 
     async def test_restart_reads_overdue_and_future_deadlines_from_the_same_source(self):
-        now = datetime.now(UTC)
+        now = datetime.now(timezone.utc)
         source = FakeDeadlineSource({1: now - timedelta(seconds=1), 2: now + timedelta(seconds=0.05)})
         processed = []
         first_processed = asyncio.Event()
@@ -101,7 +101,7 @@ class DeadlineSchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(processed, [1, 2])
 
     async def test_one_failing_due_callback_does_not_stop_later_tickets(self):
-        overdue = datetime.now(UTC) - timedelta(seconds=1)
+        overdue = datetime.now(timezone.utc) - timedelta(seconds=1)
         source = FakeDeadlineSource({1: overdue, 2: overdue})
         calls = []
         later_processed = asyncio.Event()
