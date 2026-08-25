@@ -62,7 +62,7 @@ class RawResponseView(discord.ui.View):
         self._next_button.callback = self._next
         self.add_item(self._previous_button)
         self.add_item(self._next_button)
-        self._refresh()
+        self._update_navigation_buttons()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self._requester_id:
@@ -75,7 +75,7 @@ class RawResponseView(discord.ui.View):
 
     async def _previous(self, interaction: discord.Interaction) -> None:
         self._page -= 1
-        self._refresh()
+        self._update_navigation_buttons()
         await interaction.response.edit_message(
             embed=self._pages[self._page],
             view=self,
@@ -83,13 +83,13 @@ class RawResponseView(discord.ui.View):
 
     async def _next(self, interaction: discord.Interaction) -> None:
         self._page += 1
-        self._refresh()
+        self._update_navigation_buttons()
         await interaction.response.edit_message(
             embed=self._pages[self._page],
             view=self,
         )
 
-    def _refresh(self) -> None:
+    def _update_navigation_buttons(self) -> None:
         self._previous_button.disabled = self._page == 0
         self._next_button.disabled = self._page == len(self._pages) - 1
 
@@ -772,8 +772,24 @@ class CustomCommands(commands.Cog):
     async def on_message_without_command(self, message: discord.Message) -> None:
         if message.guild is None:
             return
-        if await self.bot.cog_disabled_in_guild(self, message.guild):
-            return
-        if await self.workflows.on_message(message):
-            return
-        await self.runtime.handle_message(message)
+        try:
+            if await self.bot.cog_disabled_in_guild(self, message.guild):
+                return
+            if await self.workflows.on_message(message):
+                return
+            await self.runtime.handle_message(message)
+        except Exception as error:
+            channel = message.channel
+            await self.nhmisc.report_operational_error(
+                guild_id=message.guild.id,
+                source="CustomCommands",
+                action="process custom command message",
+                error=error,
+                channel_id=getattr(channel, "id", None),
+                thread_id=(
+                    getattr(channel, "id", None)
+                    if getattr(channel, "parent", None) is not None
+                    else None
+                ),
+                message_id=message.id,
+            )

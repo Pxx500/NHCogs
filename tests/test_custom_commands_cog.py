@@ -55,6 +55,7 @@ def load_cog_module():  # noqa: PLR0915
         def __init__(self, *, timeout=None):
             self.timeout = timeout
             self.children = []
+            self.refreshed_components = None
 
         def add_item(self, item):
             self.children.append(item)
@@ -65,6 +66,9 @@ def load_cog_module():  # noqa: PLR0915
         def stop(self):
             return None
 
+        def _refresh(self, components):
+            self.refreshed_components = components
+
     class Button:
         def __init__(self, *, label, style, row=None):
             self.label = label
@@ -72,6 +76,11 @@ def load_cog_module():  # noqa: PLR0915
             self.row = row
             self.disabled = False
             self.callback = None
+
+    class ViewStore:
+        @staticmethod
+        def update_from_message(view, components):
+            view._refresh(components)
 
     class Select:
         def __init__(self, *, placeholder, options, row=None):
@@ -122,6 +131,7 @@ def load_cog_module():  # noqa: PLR0915
 
     discord.ui = types.SimpleNamespace(
         View=View,
+        ViewStore=ViewStore,
         Button=Button,
         Select=Select,
         TextInput=TextInput,
@@ -588,7 +598,80 @@ class CustomCommandsCommandErrorTests(unittest.IsolatedAsyncioTestCase):
         subject.nhmisc.report_operational_error.assert_not_awaited()
 
 
+class CustomCommandsMessageListenerTests(unittest.IsolatedAsyncioTestCase):
+    def _subject(self):
+        subject = object.__new__(cog.CustomCommands)
+        subject.bot = types.SimpleNamespace(
+            cog_disabled_in_guild=mock.AsyncMock(return_value=False)
+        )
+        subject.nhmisc = types.SimpleNamespace(
+            report_operational_error=mock.AsyncMock()
+        )
+        subject.workflows = types.SimpleNamespace(
+            on_message=mock.AsyncMock(return_value=False)
+        )
+        subject.runtime = types.SimpleNamespace(handle_message=mock.AsyncMock())
+        return subject
+
+    @staticmethod
+    def _message():
+        return types.SimpleNamespace(
+            id=300,
+            guild=types.SimpleNamespace(id=100),
+            channel=types.SimpleNamespace(id=200, parent=object()),
+        )
+
+    async def test_listener_reports_unexpected_workflow_dispatch_failure(self):
+        subject = self._subject()
+        message = self._message()
+        failure = RuntimeError("workflow dispatch failed")
+        subject.workflows.on_message.side_effect = failure
+
+        await subject.on_message_without_command(message)
+
+        subject.runtime.handle_message.assert_not_awaited()
+        subject.nhmisc.report_operational_error.assert_awaited_once_with(
+            guild_id=100,
+            source="CustomCommands",
+            action="process custom command message",
+            error=failure,
+            channel_id=200,
+            thread_id=200,
+            message_id=300,
+        )
+
+    async def test_listener_reports_unexpected_runtime_dispatch_failure(self):
+        subject = self._subject()
+        message = self._message()
+        failure = RuntimeError("runtime dispatch failed")
+        subject.runtime.handle_message.side_effect = failure
+
+        await subject.on_message_without_command(message)
+
+        subject.nhmisc.report_operational_error.assert_awaited_once_with(
+            guild_id=100,
+            source="CustomCommands",
+            action="process custom command message",
+            error=failure,
+            channel_id=200,
+            thread_id=200,
+            message_id=300,
+        )
+
+
 class CustomCommandsRawTests(unittest.IsolatedAsyncioTestCase):
+    async def test_raw_view_accepts_discord_message_component_updates(self):
+        view = cog.RawResponseView(
+            object(),
+            requester_id=200,
+            pages=(cog.discord.Embed(description="page"),),
+        )
+        components = [object()]
+
+        cog.discord.ui.ViewStore.update_from_message(view, components)
+
+        self.assertIs(view.refreshed_components, components)
+
     async def test_raw_uses_an_invoker_owned_button_view_and_exact_code_block(self):
         stored = types.SimpleNamespace(
             name="ben",
