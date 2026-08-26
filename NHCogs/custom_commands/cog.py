@@ -31,10 +31,121 @@ from .runtime import CustomCommandRuntime
 from .workflows import WorkflowDraft, WorkflowManager
 
 log = logging.getLogger("red.NHCogs.CustomCommands")
-PREVIEW_LENGTH = 120
+PREVIEW_LENGTH = 52
+COMMANDS_PER_PAGE = 15
 EMBED_PAGE_LENGTH = 3_800
 FUZZY_MATCH_THRESHOLD = 60
 COMMAND_NOT_FOUND_MESSAGE = "That custom command doesn't exist"
+
+
+class CommandListView(discord.ui.View):
+    def __init__(
+        self,
+        cog: CustomCommands,
+        *,
+        requester_id: int,
+        pages: tuple[discord.Embed, ...],
+    ):
+        super().__init__(timeout=300)
+        self._cog = cog
+        self._requester_id = requester_id
+        self._pages = pages
+        self._page = 0
+        self.message: discord.Message | None = None
+        self._previous_button = discord.ui.Button(
+            label="Previous",
+            style=discord.ButtonStyle.secondary,
+        )
+        self._close_button = discord.ui.Button(
+            emoji="❌",
+            style=discord.ButtonStyle.danger,
+        )
+        self._next_button = discord.ui.Button(
+            label="Next",
+            style=discord.ButtonStyle.secondary,
+        )
+        self._previous_button.callback = self._previous
+        self._close_button.callback = self._close
+        self._next_button.callback = self._next
+        self.add_item(self._previous_button)
+        self.add_item(self._close_button)
+        self.add_item(self._next_button)
+        self._update_navigation_buttons()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self._requester_id:
+            return True
+        await interaction.response.send_message(
+            "Only the person who ran this command can use these controls.",
+            ephemeral=True,
+        )
+        return False
+
+    async def _previous(self, interaction: discord.Interaction) -> None:
+        self._page -= 1
+        self._update_navigation_buttons()
+        await interaction.response.edit_message(
+            embed=self._pages[self._page],
+            view=self,
+        )
+
+    async def _close(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        if self.message is not None:
+            await self.message.delete()
+        self.stop()
+
+    async def _next(self, interaction: discord.Interaction) -> None:
+        self._page += 1
+        self._update_navigation_buttons()
+        await interaction.response.edit_message(
+            embed=self._pages[self._page],
+            view=self,
+        )
+
+    def _update_navigation_buttons(self) -> None:
+        self._previous_button.disabled = self._page == 0
+        self._next_button.disabled = self._page == len(self._pages) - 1
+
+    async def on_timeout(self) -> None:
+        if self.message is not None:
+            try:
+                await self.message.edit(view=None)
+            except Exception as error:
+                await self._cog._report_view_timeout_error(
+                    self.message,
+                    action="expire custom command list",
+                    error=error,
+                )
+
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        _item: discord.ui.Item[CommandListView],
+    ) -> None:
+        if interaction.guild is not None:
+            await self._cog.nhmisc.report_operational_error(
+                guild_id=interaction.guild.id,
+                source="CustomCommands",
+                action="browse custom command list",
+                error=error,
+                channel_id=getattr(interaction.channel, "id", None),
+                message_id=getattr(self.message, "id", None),
+            )
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "Could not update the command list. The error was reported",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Could not update the command list. The error was reported",
+                    ephemeral=True,
+                )
+        except Exception:
+            log.exception("Failed to send CustomCommands list error feedback")
 
 
 class RawResponseView(discord.ui.View):
@@ -553,20 +664,50 @@ class CustomCommands(commands.Cog):
     ) -> None:
         lines = []
         for command in stored:
-            preview = command.responses[0].content.replace("\n", " ")
+            preview = " ".join(command.responses[0].content.split())
             if len(preview) > PREVIEW_LENGTH:
                 preview = preview[: PREVIEW_LENGTH - 3] + "..."
-            kind = "random" if len(command.responses) > 1 else "simple"
-            lines.append(f"**{ctx.clean_prefix}{command.name}** · {kind}\n{preview}")
-        content = "\n\n".join(lines)
-        pages = tuple(pagify(content, page_length=EMBED_PAGE_LENGTH))
+            preview = discord.utils.escape_markdown(preview)
+            name = discord.utils.escape_markdown(
+                f"{ctx.clean_prefix}{command.name}"
+            )
+            line = f"**{name}**"
+            if preview:
+                line = f"{line} - {preview}"
+            lines.append(line)
+        page_lines: list[tuple[str, ...]] = []
+        current_page: list[str] = []
+        current_length = 0
+        for line in lines:
+            added_length = len(line) + (1 if current_page else 0)
+            if current_page and (
+                len(current_page) == COMMANDS_PER_PAGE
+                or current_length + added_length > EMBED_PAGE_LENGTH
+            ):
+                page_lines.append(tuple(current_page))
+                current_page = []
+                current_length = 0
+                added_length = len(line)
+            current_page.append(line)
+            current_length += added_length
+        if current_page:
+            page_lines.append(tuple(current_page))
         embeds = []
-        for index, page in enumerate(pages, start=1):
-            embed = discord.Embed(title=title, description=page)
-            if len(pages) > 1:
-                embed.set_footer(text=f"Page {index}/{len(pages)}")
+        for index, page in enumerate(page_lines, start=1):
+            embed = discord.Embed(title=title, description="\n".join(page))
+            embed.set_footer(text=f"Page {index}/{len(page_lines)}")
             embeds.append(embed)
-        await menus.menu(ctx, embeds)
+        pages = tuple(embeds)
+        view = CommandListView(
+            self,
+            requester_id=ctx.author.id,
+            pages=pages,
+        )
+        view.message = await ctx.send(
+            embed=pages[0],
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @customcom.command(name="show")
     async def cc_show(self, ctx: commands.Context, command_name: str) -> None:
