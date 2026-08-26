@@ -35,6 +35,7 @@ PREVIEW_LENGTH = 52
 COMMANDS_PER_PAGE = 15
 EMBED_PAGE_LENGTH = 3_800
 FUZZY_MATCH_THRESHOLD = 60
+INTERACTIVE_VIEW_TIMEOUT_SECONDS = 30
 COMMAND_NOT_FOUND_MESSAGE = "That custom command doesn't exist"
 
 
@@ -46,7 +47,7 @@ class CommandListView(discord.ui.View):
         requester_id: int,
         pages: tuple[discord.Embed, ...],
     ):
-        super().__init__(timeout=300)
+        super().__init__(timeout=INTERACTIVE_VIEW_TIMEOUT_SECONDS)
         self._cog = cog
         self._requester_id = requester_id
         self._pages = pages
@@ -57,7 +58,7 @@ class CommandListView(discord.ui.View):
             style=discord.ButtonStyle.secondary,
         )
         self._close_button = discord.ui.Button(
-            emoji="❌",
+            label="X",
             style=discord.ButtonStyle.danger,
         )
         self._next_button = discord.ui.Button(
@@ -156,7 +157,7 @@ class RawResponseView(discord.ui.View):
         requester_id: int,
         pages: tuple[discord.Embed, ...],
     ):
-        super().__init__(timeout=300)
+        super().__init__(timeout=INTERACTIVE_VIEW_TIMEOUT_SECONDS)
         self._cog = cog
         self._requester_id = requester_id
         self._pages = pages
@@ -256,7 +257,7 @@ class DeleteConfirmationView(discord.ui.View):
         command: CustomCommand,
         opener_id: int,
     ):
-        super().__init__(timeout=120)
+        super().__init__(timeout=INTERACTIVE_VIEW_TIMEOUT_SECONDS)
         self._cog = cog
         self._command = command
         self._opener_id = opener_id
