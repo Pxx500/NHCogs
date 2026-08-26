@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from importlib import import_module
 
@@ -8,50 +9,121 @@ __red_end_user_data_statement__ = get_end_user_data_statement(file=__file__)
 log = logging.getLogger("red.NHCogs")
 
 
-async def _remove_partial_subcog(bot: Red, cog, name: str) -> None:
-    if cog is None or bot.get_cog(cog.qualified_name) is not cog:
-        return
+class _LifecycleTracker:
+    def __init__(self, cog) -> None:
+        self.cog = cog
+        self.load_started = False
+        self.unload_started = False
+        self._original_load = cog.cog_load
+        self._original_unload = cog.cog_unload
+
+    async def load(self) -> None:
+        self.load_started = True
+        await self._original_load()
+
+    async def unload(self) -> None:
+        self.unload_started = True
+        await self._original_unload()
+
+    def install(self) -> None:
+        self.cog.cog_load = self.load
+        self.cog.cog_unload = self.unload
+
+    def restore(self) -> None:
+        self.cog.cog_load = self._original_load
+        self.cog.cog_unload = self._original_unload
+
+
+async def _cleanup_failed_subcog(
+    bot: Red,
+    cog,
+    name: str,
+    lifecycle: _LifecycleTracker,
+) -> None:
     try:
-        await bot.remove_cog(cog.qualified_name)
+        if bot.get_cog(cog.qualified_name) is cog:
+            await bot.remove_cog(cog.qualified_name)
+        elif lifecycle.load_started and not lifecycle.unload_started:
+            await lifecycle.unload()
     except Exception:
         log.exception("NHCogs subcog %s cleanup failed", name)
 
 
+async def _add_subcog(bot: Red, cog, name: str) -> bool:
+    lifecycle = _LifecycleTracker(cog)
+    lifecycle.install()
+    try:
+        await bot.add_cog(cog)
+    except asyncio.CancelledError:
+        await _cleanup_failed_subcog(bot, cog, name, lifecycle)
+        raise
+    except Exception:
+        log.exception("NHCogs subcog %s failed during startup", name)
+        await _cleanup_failed_subcog(bot, cog, name, lifecycle)
+        return False
+    finally:
+        lifecycle.restore()
+    return True
+
+
 async def _load_subcog(bot: Red, module_name: str, class_name: str):
-    cog = None
     try:
         module = import_module(module_name, __name__)
         cog = getattr(module, class_name)(bot)
-        await bot.add_cog(cog)
     except Exception:
         log.exception("NHCogs subcog %s failed during startup", class_name)
-        await _remove_partial_subcog(bot, cog, class_name)
+        return None
+    if not await _add_subcog(bot, cog, class_name):
         return None
     return cog
 
 
-async def _load_custom_commands(bot: Red, nhmisc) -> None:
+async def _load_custom_commands(bot: Red, nhmisc):
     if nhmisc is None:
         log.error("NHCogs subcog CustomCommands skipped because NHMisc is unavailable")
-        return
+        return None
     custom_commands = None
     try:
         module = import_module(".custom_commands", __name__)
         module.assert_safe_to_replace(bot)
         custom_commands = await module.build_custom_commands_component(bot, nhmisc)
-        if bot.get_cog(custom_commands.qualified_name) is not custom_commands:
-            await bot.add_cog(custom_commands)
     except Exception:
         log.exception("NHCogs subcog CustomCommands failed during startup")
-        await _remove_partial_subcog(bot, custom_commands, "CustomCommands")
+        return None
+    if bot.get_cog(custom_commands.qualified_name) is custom_commands:
+        return custom_commands
+    if not await _add_subcog(bot, custom_commands, "CustomCommands"):
+        return None
+    return custom_commands
+
+
+async def _cleanup_cancelled_setup(bot: Red, loaded: list) -> None:
+    for cog in reversed(loaded):
+        if bot.get_cog(cog.qualified_name) is not cog:
+            continue
+        try:
+            await bot.remove_cog(cog.qualified_name)
+        except Exception:
+            log.exception("NHCogs subcog %s cancellation cleanup failed", cog.qualified_name)
 
 
 async def setup(bot: Red) -> None:
-    await _load_subcog(bot, ".consoledump", "ConsoleDump")
-    nhmisc = await _load_subcog(bot, ".nhmisc", "NHMisc")
-    await _load_subcog(bot, ".honeypot", "Honeypot")
-    await _load_subcog(bot, ".githubtickets", "GitHubTickets")
-    await _load_custom_commands(bot, nhmisc)
+    loaded = []
+    try:
+        if consoledump := await _load_subcog(bot, ".consoledump", "ConsoleDump"):
+            loaded.append(consoledump)
+        nhmisc = await _load_subcog(bot, ".nhmisc", "NHMisc")
+        if nhmisc is not None:
+            loaded.append(nhmisc)
+        if honeypot := await _load_subcog(bot, ".honeypot", "Honeypot"):
+            loaded.append(honeypot)
+        if githubtickets := await _load_subcog(bot, ".githubtickets", "GitHubTickets"):
+            loaded.append(githubtickets)
+        if custom_commands := await _load_custom_commands(bot, nhmisc):
+            loaded.append(custom_commands)
+    except asyncio.CancelledError:
+        await _cleanup_cancelled_setup(bot, loaded)
+        raise
 
 
 async def teardown(bot: Red) -> None:
