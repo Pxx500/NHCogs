@@ -21,9 +21,7 @@ class CandidateFacts:
     is_cached_member: bool
     has_participant_role: bool
     can_manage_messages: bool
-    has_profile: bool
-    allows_automatic_pings: bool
-    matching_category_count: int
+    matches_profile: bool
     was_pinged: bool
     timed_out: bool
     declined: bool
@@ -50,9 +48,7 @@ def _is_eligible(candidate: CandidateFacts) -> bool:
     return (
         candidate.is_cached_member
         and (candidate.has_participant_role or candidate.can_manage_messages)
-        and candidate.has_profile
-        and candidate.allows_automatic_pings
-        and candidate.matching_category_count > 0
+        and candidate.matches_profile
         and not candidate.was_pinged
         and not candidate.timed_out
         and not candidate.declined
@@ -64,7 +60,6 @@ def _priority_key(candidate: CandidateFacts) -> tuple[object, ...]:
     return (
         _PRESENCE_PRIORITY[candidate.presence_tier],
         candidate.active_assignment_count,
-        -candidate.matching_category_count,
         candidate.last_ping_at is not None,
         candidate.last_ping_at,
     )

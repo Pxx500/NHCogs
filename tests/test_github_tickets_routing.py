@@ -47,9 +47,7 @@ class ReviewerSelectionTests(unittest.TestCase):
             is_cached_member=True,
             has_participant_role=True,
             can_manage_messages=False,
-            has_profile=True,
-            allows_automatic_pings=True,
-            matching_category_count=1,
+            matches_profile=True,
             was_pinged=False,
             timed_out=False,
             declined=False,
@@ -64,9 +62,7 @@ class ReviewerSelectionTests(unittest.TestCase):
         ineligible_changes = (
             {"is_cached_member": False},
             {"has_participant_role": False, "can_manage_messages": False},
-            {"has_profile": False},
-            {"allows_automatic_pings": False},
-            {"matching_category_count": 0},
+            {"matches_profile": False},
             {"was_pinged": True},
             {"timed_out": True},
             {"declined": True},
@@ -97,17 +93,8 @@ class ReviewerSelectionTests(unittest.TestCase):
         with self.subTest(priority="fewest active assignments"):
             selected = routing_module.select_reviewer(
                 [
-                    self.candidate(1, active_assignment_count=2, matching_category_count=3),
-                    self.candidate(2, active_assignment_count=1, matching_category_count=1),
-                ]
-            )
-            self.assertEqual(selected.user_id, 2)
-
-        with self.subTest(priority="most category matches"):
-            selected = routing_module.select_reviewer(
-                [
-                    self.candidate(1, matching_category_count=1),
-                    self.candidate(2, matching_category_count=2),
+                    self.candidate(1, active_assignment_count=2),
+                    self.candidate(2, active_assignment_count=1),
                 ]
             )
             self.assertEqual(selected.user_id, 2)
@@ -149,7 +136,10 @@ class ReviewerSelectionTests(unittest.TestCase):
             self.fail("chooser was called for candidates with different priority")
 
         selected = routing_module.select_reviewer(
-            [self.candidate(1, matching_category_count=1), self.candidate(2, matching_category_count=2)],
+            [
+                self.candidate(1, last_ping_at=datetime(2026, 8, 25, tzinfo=timezone.utc)),
+                self.candidate(2, last_ping_at=None),
+            ],
             chooser=unexpected_choice,
         )
         self.assertEqual(selected.user_id, 2)

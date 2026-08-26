@@ -18,9 +18,11 @@ DASHBOARD_TITLE = "GitHub Tickets"
 NEW_TICKET = "New Ticket"
 EDIT_PROFILE = "Edit Profile"
 BROWSE_CATEGORIES = "Browse Categories"
+FIND_BY_GITHUB_USERNAME = "Find by GitHub username"
 CLEAR_PROFILE = "Clear Profile"
 GITHUB_USERNAME = "GitHub username"
 GITHUB_USERNAME_DESCRIPTION = "Leave empty if it matches your Discord name"
+ENTER_GITHUB_USERNAME = "Enter a GitHub username"
 CATEGORIES = "Categories"
 SELECT_YOUR_CATEGORIES = "Select your categories"
 ALLOW_AUTOMATIC_PINGS = "Allow automatic pings"
@@ -32,6 +34,8 @@ NO_CATEGORIES_CONFIGURED = "No categories configured"
 PREVIOUS = "Previous"
 NEXT = "Next"
 BACK = "Back"
+CONFIRM_CATEGORIES = "Confirm categories"
+CREATE_TICKET = "Create Ticket"
 PR_TITLE = "PR title"
 ENTER_PR_TITLE = "Enter the PR title"
 PR_LINK = "PR link"
@@ -165,6 +169,18 @@ FIXED_COPY = (
     INVALID_USER_ID,
     *HELP_COPY,
 )
+
+
+def confirm_categories(candidate_count: int) -> str:
+    if candidate_count == 0:
+        detail = "No one can receive automatic pings for all selected categories"
+    elif candidate_count == 1:
+        detail = "1 person can receive automatic pings for all selected categories"
+    else:
+        detail = (
+            f"{candidate_count} people can receive automatic pings for all selected categories"
+        )
+    return f"{CONFIRM_CATEGORIES}\n{detail}"
 
 
 def _linked_title(title: str, url: str) -> str:

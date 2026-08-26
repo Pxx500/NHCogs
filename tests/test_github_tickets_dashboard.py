@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
 import types
@@ -108,6 +109,7 @@ def _install_discord_stub():
             self.disabled = disabled
             self.values = []
             self.callback = None
+            self.__dict__.update(_kwargs)
 
     class UserSelect(Select):
         pass
@@ -149,6 +151,12 @@ def _install_discord_stub():
     discord.SelectOption = SelectOption
     discord.RadioGroupOption = RadioGroupOption
     discord.Interaction = type("Interaction", (), {})
+    discord.Member = type("Member", (), {})
+    discord.Object = lambda *, id: types.SimpleNamespace(id=id)
+    discord.utils = types.SimpleNamespace(
+        escape_markdown=lambda value: value.replace("_", r"\_"),
+        escape_mentions=lambda value: value.replace("@", "@\u200b"),
+    )
     sys.modules["discord"] = discord
     sys.modules["discord.ui"] = ui
     return discord
@@ -213,11 +221,21 @@ class FakeInteraction:
         self.deleted_original_responses += 1
 
 
+class FakeGuild:
+    def __init__(self, members=()):
+        self._members = {member.id: member for member in members}
+
+    def get_member(self, user_id):
+        return self._members.get(user_id)
+
+
 class FakeStore:
     def __init__(self):
         self.categories = []
         self.profiles = {}
         self.category_profiles = {}
+        self.matching_profiles = {}
+        self.github_profiles = {}
         self.save_calls = []
 
     async def list_categories(self, _guild_id):
@@ -232,25 +250,46 @@ class FakeStore:
     async def list_profiles_for_category(self, guild_id, category_id):
         return tuple(self.category_profiles.get((guild_id, category_id), ()))
 
+    async def list_matching_profiles(self, guild_id, category_ids):
+        return tuple(self.matching_profiles.get((guild_id, tuple(category_ids)), ()))
+
+    async def list_profiles_by_github_username(self, guild_id, github_username):
+        return tuple(self.github_profiles.get((guild_id, github_username.casefold()), ()))
+
 
 class DashboardTests(unittest.IsolatedAsyncioTestCase):
-    def make_dashboard(self, store=None):
+    def make_dashboard(self, store=None, *, guild=None, member_actor_factory=None):
         store = store or FakeStore()
         actor = coordinator.TicketActor(10, True, False)
+        guild = guild or FakeGuild()
+        member_actor_factory = member_actor_factory or (
+            lambda member: coordinator.TicketActor(member.id, True, False)
+        )
         view = dashboard_module.GitHubTicketsDashboard(
             store,
             guild_id=100,
+            member_lookup=guild.get_member,
             actor_factory=lambda _interaction: actor,
+            member_actor_factory=member_actor_factory,
             clock=lambda: datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc),
         )
         return view, store, actor
 
-    async def open_ticket_modal(self, store=None, actor=None, create_ticket=None):
+    async def open_ticket_modal(
+        self,
+        store=None,
+        actor=None,
+        create_ticket=None,
+        count_candidates=None,
+    ):
         store = store or FakeStore()
         actor = actor or coordinator.TicketActor(10, True, False)
 
         async def successful_create(_request, _actor):
             return coordinator.TicketResult(True)
+
+        async def no_candidates(_guild_id, _category_ids, _excluded_user_ids):
+            return 0
 
         interaction = FakeInteraction()
         await dashboard_module.send_new_ticket_modal(
@@ -259,6 +298,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             guild_id=100,
             create_ticket=create_ticket or successful_create,
             actor_factory=lambda _interaction: actor,
+            count_automatic_candidates=count_candidates or no_candidates,
         )
         return interaction.response.modals[0]
 
@@ -273,6 +313,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             [
                 (presentation.EDIT_PROFILE, discord.ButtonStyle.secondary),
                 (presentation.BROWSE_CATEGORIES, discord.ButtonStyle.secondary),
+                (presentation.FIND_BY_GITHUB_USERNAME, discord.ButtonStyle.secondary),
                 (presentation.CLEAR_PROFILE, discord.ButtonStyle.danger),
             ],
         )
@@ -286,6 +327,68 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(allowed_mentions.users)
         self.assertFalse(allowed_mentions.roles)
 
+    async def test_github_username_lookup_returns_only_cached_participants_without_pinging(self):
+        store = FakeStore()
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        store.github_profiles[(100, "someuser")] = [
+            models.Profile(100, 20, "SomeUser", False, (), now),
+            models.Profile(100, 21, "someuser", False, (), now),
+            models.Profile(100, 22, "SOMEUSER", False, (), now),
+        ]
+        members = [
+            types.SimpleNamespace(
+                id=20,
+                name="discord_user",
+                is_participant=True,
+                can_manage_messages=False,
+            ),
+            types.SimpleNamespace(
+                id=21,
+                name="staff_user",
+                is_participant=False,
+                can_manage_messages=True,
+            ),
+        ]
+        dashboard, _store, _actor = self.make_dashboard(
+            store,
+            guild=FakeGuild(members),
+            member_actor_factory=lambda member: coordinator.TicketActor(
+                member.id,
+                member.is_participant,
+                member.can_manage_messages,
+            ),
+        )
+        open_interaction = FakeInteraction()
+
+        await dashboard.children[2].callback(open_interaction)
+
+        modal = open_interaction.response.modals[0]
+        self.assertEqual(modal.title, presentation.FIND_BY_GITHUB_USERNAME)
+        self.assertEqual(modal.github_username.placeholder, presentation.ENTER_GITHUB_USERNAME)
+        modal.github_username.value = "SomeUser"
+        submit_interaction = FakeInteraction()
+        await modal.on_submit(submit_interaction)
+
+        content, kwargs = submit_interaction.response.messages[0]
+        self.assertEqual(
+            content,
+            "<@20> | discord\\_user | SomeUser\n<@21> | staff\\_user | someuser",
+        )
+        self.assertTrue(kwargs["ephemeral"])
+        self.assertFalse(kwargs["allowed_mentions"].users)
+
+    async def test_github_username_lookup_reports_no_profile(self):
+        dashboard, _store, _actor = self.make_dashboard()
+        open_interaction = FakeInteraction()
+        await dashboard.children[2].callback(open_interaction)
+        modal = open_interaction.response.modals[0]
+        modal.github_username.value = "missing"
+        submit_interaction = FakeInteraction()
+
+        await modal.on_submit(submit_interaction)
+
+        self.assertEqual(submit_interaction.response.messages[0][0], presentation.NO_PROFILE)
+
     async def test_dashboard_descendants_recheck_participant_access_after_role_loss(self):
         store = FakeStore()
         now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
@@ -295,7 +398,13 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         dashboard = dashboard_module.GitHubTicketsDashboard(
             store,
             guild_id=100,
+            member_lookup=FakeGuild().get_member,
             actor_factory=lambda _interaction: current_actor[0],
+            member_actor_factory=lambda member: coordinator.TicketActor(
+                member.id,
+                True,
+                False,
+            ),
         )
 
         profile_open = FakeInteraction()
@@ -303,7 +412,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         profile_modal = profile_open.response.modals[0]
 
         clear_open = FakeInteraction()
-        await dashboard.children[2].callback(clear_open)
+        await dashboard.children[3].callback(clear_open)
         clear_confirmation = clear_open.response.messages[0][1]["view"]
 
         browse_open = FakeInteraction()
@@ -513,7 +622,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         view, store, _actor = self.make_dashboard()
         open_interaction = FakeInteraction()
 
-        await view.children[2].callback(open_interaction)
+        await view.children[3].callback(open_interaction)
 
         self.assertEqual(len(open_interaction.response.messages), 1)
         content, kwargs = open_interaction.response.messages[0]
@@ -555,11 +664,12 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(interaction.response.messages[0][1]["ephemeral"])
         self.assertFalse(interaction.response.messages[0][1]["allowed_mentions"].users)
 
-    async def test_category_browser_pages_non_pinging_profiles_and_returns_to_dashboard(self):
+    async def test_category_browser_filters_cached_participants_before_pagination(self):
         store = FakeStore()
         now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
         category = models.Category(1, 100, "rendering", now)
         store.categories = [category]
+        profile_ids = [20, *range(1, 6), 21, *range(6, 13)]
         store.category_profiles[(100, 1)] = [
             models.Profile(
                 100,
@@ -569,9 +679,27 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
                 (1,),
                 now,
             )
-            for user_id in range(1, 13)
+            for user_id in profile_ids
         ]
-        dashboard, _store, _actor = self.make_dashboard(store)
+        members = [
+            types.SimpleNamespace(
+                id=user_id,
+                name=f"user_{user_id}",
+                is_participant=user_id not in (12, 20),
+                can_manage_messages=user_id == 12,
+            )
+            for user_id in [*range(1, 13), 20]
+        ]
+        guild = FakeGuild(members)
+        dashboard, _store, _actor = self.make_dashboard(
+            store,
+            guild=guild,
+            member_actor_factory=lambda member: coordinator.TicketActor(
+                member.id,
+                member.is_participant,
+                member.can_manage_messages,
+            ),
+        )
         open_interaction = FakeInteraction()
 
         await dashboard.children[1].callback(open_interaction)
@@ -595,7 +723,8 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         await browser.children[0].callback(select_interaction)
         first_page = select_interaction.response.edits[0]
         expected_first_users = [
-            f"<@{user_id}>" + (f" | github-{user_id}" if user_id % 2 == 0 else "")
+            f"<@{user_id}> | user\\_{user_id}"
+            + (f" | github-{user_id}" if user_id % 2 == 0 else "")
             for user_id in range(1, 11)
         ]
         self.assertEqual(
@@ -617,7 +746,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             next_interaction.response.edits[0]["content"],
             presentation.category_page(
                 category="rendering",
-                users=["<@11>", "<@12> | github-12"],
+                users=["<@11> | user\\_11", "<@12> | user\\_12 | github-12"],
                 page=2,
                 page_count=2,
             ),
@@ -827,6 +956,350 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(submit_interaction.response.defer_calls, 1)
                 self.assertEqual(submit_interaction.response.messages, [])
+
+    async def test_multiple_automatic_categories_open_confirmation_before_create(self):
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        store = FakeStore()
+        store.categories = [
+            models.Category(1, 100, "rendering", now),
+            models.Category(2, 100, "mixins", now),
+        ]
+        actor = coordinator.TicketActor(10, True, False)
+        create_calls = []
+        count_calls = []
+
+        async def create_ticket(request, selected_actor):
+            create_calls.append((request, selected_actor))
+            return coordinator.TicketResult(True)
+
+        async def count_candidates(guild_id, category_ids, excluded_user_ids):
+            count_calls.append((guild_id, category_ids, excluded_user_ids))
+            return 4
+
+        modal = await self.open_ticket_modal(
+            store,
+            actor,
+            create_ticket,
+            count_candidates,
+        )
+        modal.pr_title.value = "title"
+        modal.pr_link.value = "link"
+        modal.categories.values = ["1", "2"]
+        modal.ping_behavior.value = models.RoutingMode.AUTOMATIC.value
+        submit_interaction = FakeInteraction()
+
+        await modal.on_submit(submit_interaction)
+
+        self.assertEqual(create_calls, [])
+        self.assertEqual(count_calls, [(100, (1, 2), frozenset({10}))])
+        content, kwargs = submit_interaction.response.messages[0]
+        self.assertEqual(
+            content,
+            "Confirm categories\n4 people can receive automatic pings for all selected categories",
+        )
+        self.assertTrue(kwargs["ephemeral"])
+        self.assertFalse(kwargs["allowed_mentions"].users)
+        view = kwargs["view"]
+        self.assertEqual(view.categories.min_values, 1)
+        self.assertEqual(view.categories.max_values, 2)
+        self.assertEqual(
+            [(option.label, option.value, option.default) for option in view.categories.options],
+            [
+                ("rendering", "1", True),
+                ("mixins", "2", True),
+            ],
+        )
+        self.assertEqual(
+            [item.label for item in view.children[1:]],
+            [presentation.BACK, presentation.CREATE_TICKET],
+        )
+
+    async def test_confirmation_updates_count_creates_filtered_ticket_and_prefills_back(self):
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        store = FakeStore()
+        store.categories = [
+            models.Category(1, 100, "rendering", now),
+            models.Category(2, 100, "mixins", now),
+        ]
+        actor = coordinator.TicketActor(10, True, False)
+        create_calls = []
+
+        async def create_ticket(request, selected_actor):
+            create_calls.append((request, selected_actor))
+            return coordinator.TicketResult(True)
+
+        async def count_candidates(_guild_id, category_ids, _excluded_user_ids):
+            return len(category_ids)
+
+        modal = await self.open_ticket_modal(
+            store,
+            actor,
+            create_ticket,
+            count_candidates,
+        )
+        modal.pr_title.value = "title"
+        modal.pr_link.value = "link"
+        modal.categories.values = ["1", "2"]
+        modal.ping_behavior.value = models.RoutingMode.DIRECT_AUTOMATIC.value
+        modal.direct_reviewer.values = [types.SimpleNamespace(id=99)]
+        submit_interaction = FakeInteraction()
+        await modal.on_submit(submit_interaction)
+        view = submit_interaction.response.messages[0][1]["view"]
+
+        view.categories.values = ["2"]
+        select_interaction = FakeInteraction()
+        await view.categories.callback(select_interaction)
+        self.assertEqual(
+            select_interaction.response.edits[0]["content"],
+            "Confirm categories\n1 person can receive automatic pings for all selected categories",
+        )
+        self.assertEqual(
+            [option.default for option in view.categories.options],
+            [False, True],
+        )
+
+        back_button = next(
+            item
+            for item in view.children
+            if getattr(item, "label", None) == presentation.BACK
+        )
+        back_interaction = FakeInteraction()
+        await back_button.callback(back_interaction)
+        reopened = back_interaction.response.modals[0]
+        self.assertEqual(reopened.pr_title.default, "title")
+        self.assertEqual(reopened.pr_link.default, "link")
+        self.assertEqual(
+            [option.default for option in reopened.categories.options],
+            [False, True],
+        )
+        self.assertEqual(
+            [option.default for option in reopened.ping_behavior.options],
+            [False, False, False, True],
+        )
+        self.assertEqual(reopened.direct_reviewer.default_values[0].id, 99)
+
+        create_button = next(
+            item
+            for item in view.children
+            if getattr(item, "label", None) == presentation.CREATE_TICKET
+        )
+        create_interaction = FakeInteraction()
+        await create_button.callback(create_interaction)
+        self.assertEqual(create_interaction.response.defer_calls, 1)
+        self.assertEqual(create_calls, [])
+
+    async def test_confirmation_create_uses_defaults_and_prevents_double_submit(self):
+        class YieldingStore(FakeStore):
+            async def list_categories(self, guild_id):
+                await asyncio.sleep(0)
+                return await super().list_categories(guild_id)
+
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        store = YieldingStore()
+        store.categories = [
+            models.Category(1, 100, "rendering", now),
+            models.Category(2, 100, "mixins", now),
+        ]
+        actor = coordinator.TicketActor(10, True, False)
+        create_calls = []
+
+        async def create_ticket(request, selected_actor):
+            await asyncio.sleep(0)
+            create_calls.append((request, selected_actor))
+            return coordinator.TicketResult(True)
+
+        modal = await self.open_ticket_modal(store, actor, create_ticket)
+        modal.pr_title.value = "title"
+        modal.pr_link.value = "link"
+        modal.categories.values = ["1", "2"]
+        modal.ping_behavior.value = models.RoutingMode.AUTOMATIC.value
+        submit_interaction = FakeInteraction()
+        await modal.on_submit(submit_interaction)
+        view = submit_interaction.response.messages[0][1]["view"]
+        create_button = next(
+            item
+            for item in view.children
+            if getattr(item, "label", None) == presentation.CREATE_TICKET
+        )
+        first = FakeInteraction()
+        second = FakeInteraction()
+
+        await asyncio.gather(
+            create_button.callback(first),
+            create_button.callback(second),
+        )
+
+        self.assertEqual(len(create_calls), 1)
+        request, selected_actor = create_calls[0]
+        self.assertEqual(selected_actor, actor)
+        self.assertEqual(request.category_ids, (1, 2))
+        self.assertEqual(request.category_display, "rendering, mixins")
+
+    async def test_confirmation_selection_creates_only_the_visible_defaults(self):
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        store = FakeStore()
+        store.categories = [
+            models.Category(1, 100, "rendering", now),
+            models.Category(2, 100, "mixins", now),
+        ]
+        create_calls = []
+
+        async def create_ticket(request, actor):
+            create_calls.append((request, actor))
+            return coordinator.TicketResult(True)
+
+        modal = await self.open_ticket_modal(store, create_ticket=create_ticket)
+        modal.pr_title.value = "title"
+        modal.pr_link.value = "link"
+        modal.categories.values = ["1", "2"]
+        modal.ping_behavior.value = models.RoutingMode.AUTOMATIC.value
+        submit_interaction = FakeInteraction()
+        await modal.on_submit(submit_interaction)
+        view = submit_interaction.response.messages[0][1]["view"]
+        view.categories.values = ["2"]
+        await view.categories.callback(FakeInteraction())
+        create_button = next(
+            item
+            for item in view.children
+            if getattr(item, "label", None) == presentation.CREATE_TICKET
+        )
+
+        await create_button.callback(FakeInteraction())
+
+        self.assertEqual(create_calls[0][0].category_ids, (2,))
+        self.assertEqual(create_calls[0][0].category_display, "mixins")
+
+    async def test_direct_automatic_count_excludes_author_and_direct_target(self):
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        store = FakeStore()
+        store.categories = [
+            models.Category(1, 100, "rendering", now),
+            models.Category(2, 100, "mixins", now),
+        ]
+        count_candidates = mock.AsyncMock(return_value=1)
+        modal = await self.open_ticket_modal(
+            store,
+            count_candidates=count_candidates,
+        )
+        modal.pr_title.value = "title"
+        modal.pr_link.value = "link"
+        modal.categories.values = ["1", "2"]
+        modal.ping_behavior.value = models.RoutingMode.DIRECT_AUTOMATIC.value
+        modal.direct_reviewer.values = [types.SimpleNamespace(id=99)]
+
+        await modal.on_submit(FakeInteraction())
+
+        count_candidates.assert_awaited_once_with(
+            100,
+            (1, 2),
+            frozenset({10, 99}),
+        )
+
+    async def test_confirmation_revalidates_categories_before_refreshing_count(self):
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        store = FakeStore()
+        store.categories = [
+            models.Category(1, 100, "rendering", now),
+            models.Category(2, 100, "mixins", now),
+        ]
+        count_candidates = mock.AsyncMock(return_value=2)
+        modal = await self.open_ticket_modal(
+            store,
+            count_candidates=count_candidates,
+        )
+        modal.pr_title.value = "title"
+        modal.pr_link.value = "link"
+        modal.categories.values = ["1", "2"]
+        modal.ping_behavior.value = models.RoutingMode.AUTOMATIC.value
+        submit_interaction = FakeInteraction()
+        await modal.on_submit(submit_interaction)
+        view = submit_interaction.response.messages[0][1]["view"]
+        store.categories = [store.categories[0]]
+        view.categories.values = ["1", "2"]
+        interaction = FakeInteraction()
+
+        await view.categories.callback(interaction)
+
+        self.assertEqual(
+            interaction.response.messages[0][0],
+            presentation.CATEGORY_NO_LONGER_EXISTS,
+        )
+        self.assertEqual(count_candidates.await_count, 1)
+
+    async def test_confirmation_reports_when_no_one_matches_all_categories(self):
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        store = FakeStore()
+        store.categories = [
+            models.Category(1, 100, "rendering", now),
+            models.Category(2, 100, "mixins", now),
+        ]
+        modal = await self.open_ticket_modal(store)
+        modal.pr_title.value = "title"
+        modal.pr_link.value = "link"
+        modal.categories.values = ["1", "2"]
+        modal.ping_behavior.value = models.RoutingMode.AUTOMATIC.value
+        submit_interaction = FakeInteraction()
+
+        await modal.on_submit(submit_interaction)
+
+        self.assertEqual(
+            submit_interaction.response.messages[0][0],
+            "Confirm categories\nNo one can receive automatic pings for all selected categories",
+        )
+
+    async def test_direct_self_review_is_rejected_before_category_confirmation(self):
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        store = FakeStore()
+        store.categories = [
+            models.Category(1, 100, "rendering", now),
+            models.Category(2, 100, "mixins", now),
+        ]
+        create_ticket = mock.AsyncMock()
+        count_candidates = mock.AsyncMock(return_value=4)
+        modal = await self.open_ticket_modal(
+            store,
+            coordinator.TicketActor(10, True, False),
+            create_ticket,
+            count_candidates,
+        )
+        modal.pr_title.value = "title"
+        modal.pr_link.value = "link"
+        modal.categories.values = ["1", "2"]
+        modal.ping_behavior.value = models.RoutingMode.DIRECT_AUTOMATIC.value
+        modal.direct_reviewer.values = [types.SimpleNamespace(id=10)]
+        interaction = FakeInteraction()
+
+        await modal.on_submit(interaction)
+
+        self.assertEqual(
+            interaction.response.messages[0][0],
+            coordinator.SELF_REVIEW_DENIED,
+        )
+        create_ticket.assert_not_awaited()
+        count_candidates.assert_not_awaited()
+
+    async def test_direct_reviewer_is_ignored_for_non_direct_routing(self):
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        store = FakeStore()
+        store.categories = [models.Category(1, 100, "rendering", now)]
+        create_calls = []
+
+        async def create_ticket(request, actor):
+            create_calls.append((request, actor))
+            return coordinator.TicketResult(True)
+
+        modal = await self.open_ticket_modal(store, create_ticket=create_ticket)
+        modal.pr_title.value = "title"
+        modal.pr_link.value = "link"
+        modal.categories.values = ["1"]
+        modal.ping_behavior.value = models.RoutingMode.AUTOMATIC.value
+        modal.direct_reviewer.values = [types.SimpleNamespace(id=10)]
+        interaction = FakeInteraction()
+
+        await modal.on_submit(interaction)
+
+        self.assertEqual(interaction.response.messages, [])
+        self.assertEqual(create_calls[0][0].direct_target_id, None)
 
     async def test_new_ticket_returns_only_accepted_validation_and_coordinator_errors(self):
         now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)

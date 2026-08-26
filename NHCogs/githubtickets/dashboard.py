@@ -2,17 +2,24 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import discord
 
 from . import presentation
-from .coordinator import TicketActor, TicketRequest, TicketResult
+from .coordinator import SELF_REVIEW_DENIED, TicketActor, TicketRequest, TicketResult
 from .models import Category, Profile, RoutingMode
 from .store import GitHubTicketsStore
 
 CreateTicket = Callable[[TicketRequest, TicketActor], Awaitable[TicketResult]]
+CountAutomaticCandidates = Callable[
+    [int, tuple[int, ...], frozenset[int]],
+    Awaitable[int],
+]
 ActorFactory = Callable[[discord.Interaction], TicketActor]
+MemberLookup = Callable[[int], discord.Member | None]
+MemberActorFactory = Callable[[discord.Member], TicketActor]
 log = logging.getLogger("red.NHCogs.GitHubTickets")
 
 
@@ -92,6 +99,30 @@ def _category_options(categories: Sequence[Category]) -> list[discord.SelectOpti
             value="none",
         )
     ]
+
+
+def _visible_profiles(
+    profiles: Sequence[Profile],
+    member_lookup: MemberLookup,
+    member_actor_factory: MemberActorFactory,
+) -> tuple[tuple[Profile, discord.Member], ...]:
+    visible: list[tuple[Profile, discord.Member]] = []
+    for profile in profiles:
+        member = member_lookup(profile.user_id)
+        if member is None or not member_actor_factory(member).can_participate:
+            continue
+        visible.append((profile, member))
+    return tuple(visible)
+
+
+def _profile_line(profile: Profile, member: discord.Member) -> str:
+    discord_name = discord.utils.escape_mentions(
+        discord.utils.escape_markdown(member.name)
+    )
+    return (
+        f"<@{profile.user_id}> | {discord_name}"
+        + (f" | {profile.github_username}" if profile.github_username else "")
+    )
 
 
 async def send_developer_profile(
@@ -234,21 +265,26 @@ class NewTicketModal(_DashboardModal):
         categories: Sequence[Category],
         create_ticket: CreateTicket,
         actor_factory: ActorFactory,
+        count_automatic_candidates: CountAutomaticCandidates,
+        draft: TicketRequest | None = None,
     ) -> None:
         super().__init__(title=presentation.NEW_TICKET)
         self._store = store
         self._guild_id = guild_id
         self._create_ticket = create_ticket
         self._actor_factory = actor_factory
+        self._count_automatic_candidates = count_automatic_candidates
         visible_categories = tuple(categories[:25])
 
         self.pr_title = discord.ui.TextInput(
             placeholder=presentation.ENTER_PR_TITLE,
+            default=draft.pr_title if draft is not None else None,
             required=True,
             max_length=presentation.MAX_PR_TITLE_LENGTH,
         )
         self.pr_link = discord.ui.TextInput(
             placeholder=presentation.ENTER_PR_LINK,
+            default=draft.pr_url if draft is not None else None,
             required=True,
             max_length=presentation.MAX_PR_URL_LENGTH,
         )
@@ -270,18 +306,23 @@ class NewTicketModal(_DashboardModal):
                 discord.RadioGroupOption(
                     label=presentation.NO_PING,
                     value=RoutingMode.NONE.value,
+                    default=draft is not None and draft.routing_mode is RoutingMode.NONE,
                 ),
                 discord.RadioGroupOption(
                     label=presentation.AUTOMATIC,
                     value=RoutingMode.AUTOMATIC.value,
+                    default=draft is not None and draft.routing_mode is RoutingMode.AUTOMATIC,
                 ),
                 discord.RadioGroupOption(
                     label=presentation.DIRECT_THEN_WAIT,
                     value=RoutingMode.DIRECT_WAIT.value,
+                    default=draft is not None and draft.routing_mode is RoutingMode.DIRECT_WAIT,
                 ),
                 discord.RadioGroupOption(
                     label=presentation.DIRECT_THEN_AUTOMATIC,
                     value=RoutingMode.DIRECT_AUTOMATIC.value,
+                    default=draft is not None
+                    and draft.routing_mode is RoutingMode.DIRECT_AUTOMATIC,
                 ),
             ],
             required=True,
@@ -291,7 +332,18 @@ class NewTicketModal(_DashboardModal):
             min_values=0,
             max_values=1,
             required=False,
+            default_values=(
+                [discord.Object(id=draft.direct_target_id)]
+                if draft is not None and draft.direct_target_id is not None
+                else None
+            ),
         )
+        if draft is not None:
+            selected_ids = set(draft.category_ids)
+            for option in self.categories.options:
+                option.default = (
+                    int(option.value) in selected_ids if option.value != "none" else False
+                )
         for label, component, description in (
             (presentation.PR_TITLE, self.pr_title, None),
             (presentation.PR_LINK, self.pr_link, None),
@@ -318,16 +370,25 @@ class NewTicketModal(_DashboardModal):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if not await _check_participant(interaction, self._actor_factory):
             return
+        actor = self._actor_factory(interaction)
         routing_mode = RoutingMode(self.ping_behavior.value)
         category_ids = tuple(int(value) for value in self.categories.values)
         if routing_mode in (RoutingMode.AUTOMATIC, RoutingMode.DIRECT_AUTOMATIC) and not category_ids:
             await self._send_error(interaction, presentation.AUTOMATIC_REQUIRES_CATEGORY)
             return
-        direct_target_id = (
+        selected_direct_target_id = (
             self.direct_reviewer.values[0].id if self.direct_reviewer.values else None
         )
-        if routing_mode in (RoutingMode.DIRECT_WAIT, RoutingMode.DIRECT_AUTOMATIC) and direct_target_id is None:
+        direct_routing = routing_mode in (
+            RoutingMode.DIRECT_WAIT,
+            RoutingMode.DIRECT_AUTOMATIC,
+        )
+        if direct_routing and selected_direct_target_id is None:
             await self._send_error(interaction, presentation.DIRECT_REQUIRES_REVIEWER)
+            return
+        direct_target_id = selected_direct_target_id if direct_routing else None
+        if direct_target_id == actor.user_id:
+            await self._send_error(interaction, SELF_REVIEW_DENIED)
             return
 
         current_categories = {
@@ -337,24 +398,53 @@ class NewTicketModal(_DashboardModal):
         if any(category_id not in current_categories for category_id in category_ids):
             await self._send_error(interaction, presentation.CATEGORY_NO_LONGER_EXISTS)
             return
-        await interaction.response.defer()
-        result = await self._create_ticket(
-            TicketRequest(
-                guild_id=self._guild_id,
-                pr_title=str(self.pr_title.value).strip(),
-                pr_url=str(self.pr_link.value).strip(),
-                category_display=", ".join(
-                    current_categories[category_id].name for category_id in category_ids
-                ),
-                routing_mode=routing_mode,
-                direct_target_id=direct_target_id,
-                category_ids=category_ids,
+        request = TicketRequest(
+            guild_id=self._guild_id,
+            pr_title=str(self.pr_title.value).strip(),
+            pr_url=str(self.pr_link.value).strip(),
+            category_display=", ".join(
+                current_categories[category_id].name for category_id in category_ids
             ),
-            self._actor_factory(interaction),
+            routing_mode=routing_mode,
+            direct_target_id=direct_target_id,
+            category_ids=category_ids,
         )
-        if result.success:
+        if (
+            len(category_ids) > 1
+            and routing_mode in (RoutingMode.AUTOMATIC, RoutingMode.DIRECT_AUTOMATIC)
+        ):
+            excluded_user_ids = {actor.user_id}
+            if direct_target_id is not None:
+                excluded_user_ids.add(direct_target_id)
+            candidate_count = await self._count_automatic_candidates(
+                self._guild_id,
+                category_ids,
+                frozenset(excluded_user_ids),
+            )
+            await interaction.response.send_message(
+                presentation.confirm_categories(candidate_count),
+                view=ConfirmCategoriesView(
+                    self._store,
+                    guild_id=self._guild_id,
+                    categories=tuple(
+                        current_categories[category_id] for category_id in category_ids
+                    ),
+                    request=request,
+                    create_ticket=self._create_ticket,
+                    actor_factory=self._actor_factory,
+                    count_automatic_candidates=self._count_automatic_candidates,
+                    automatic_candidate_exclusions=frozenset(excluded_user_ids),
+                ),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             return
-        await interaction.followup.send(result.response, ephemeral=True)
+        await _create_ticket_request(
+            interaction,
+            request=request,
+            create_ticket=self._create_ticket,
+            actor_factory=self._actor_factory,
+        )
 
     @staticmethod
     async def _send_error(
@@ -368,6 +458,178 @@ class NewTicketModal(_DashboardModal):
         )
 
 
+async def _create_ticket_request(
+    interaction: discord.Interaction,
+    *,
+    request: TicketRequest,
+    create_ticket: CreateTicket,
+    actor_factory: ActorFactory,
+) -> bool:
+    await interaction.response.defer()
+    result = await create_ticket(request, actor_factory(interaction))
+    if result.success:
+        return True
+    await interaction.followup.send(result.response, ephemeral=True)
+    return False
+
+
+class ConfirmCategoriesView(_DashboardView):
+    def __init__(
+        self,
+        store: GitHubTicketsStore,
+        *,
+        guild_id: int,
+        categories: Sequence[Category],
+        request: TicketRequest,
+        create_ticket: CreateTicket,
+        actor_factory: ActorFactory,
+        count_automatic_candidates: CountAutomaticCandidates,
+        automatic_candidate_exclusions: frozenset[int],
+    ) -> None:
+        super().__init__()
+        self._store = store
+        self._guild_id = guild_id
+        self._categories = tuple(categories)
+        self._request = request
+        self._create_ticket = create_ticket
+        self._actor_factory = actor_factory
+        self._count_automatic_candidates = count_automatic_candidates
+        self._automatic_candidate_exclusions = automatic_candidate_exclusions
+        self._submitted = False
+        self._selected_ids = request.category_ids
+
+        self.categories = discord.ui.Select(
+            placeholder=presentation.SELECT_CATEGORIES,
+            options=[
+                discord.SelectOption(
+                    label=category.name,
+                    value=str(category.category_id),
+                    default=True,
+                )
+                for category in self._categories
+            ],
+            min_values=1,
+            max_values=len(self._categories),
+            required=True,
+        )
+        self.categories.callback = self._categories_changed
+        self.add_item(self.categories)
+
+        back = discord.ui.Button(
+            label=presentation.BACK,
+            style=discord.ButtonStyle.secondary,
+        )
+        back.callback = self._back
+        self.add_item(back)
+        create = discord.ui.Button(
+            label=presentation.CREATE_TICKET,
+            style=discord.ButtonStyle.primary,
+        )
+        create.callback = self._create
+        self.add_item(create)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await _check_participant(interaction, self._actor_factory)
+
+    def _component_category_ids(self) -> tuple[int, ...]:
+        selected = {int(value) for value in self.categories.values}
+        return tuple(
+            category.category_id
+            for category in self._categories
+            if category.category_id in selected
+        )
+
+    def _selected_request(self) -> TicketRequest:
+        category_ids = self._selected_ids
+        categories_by_id = {
+            category.category_id: category for category in self._categories
+        }
+        return replace(
+            self._request,
+            category_ids=category_ids,
+            category_display=", ".join(
+                categories_by_id[category_id].name for category_id in category_ids
+            ),
+        )
+
+    async def _categories_changed(self, interaction: discord.Interaction) -> None:
+        if self._submitted:
+            await interaction.response.defer()
+            return
+        self._selected_ids = self._component_category_ids()
+        selected = set(self._selected_ids)
+        for option in self.categories.options:
+            option.default = int(option.value) in selected
+        current_ids = {
+            category.category_id
+            for category in await self._store.list_categories(self._guild_id)
+        }
+        if self._submitted:
+            await interaction.response.defer()
+            return
+        if any(category_id not in current_ids for category_id in self._selected_ids):
+            await interaction.response.send_message(
+                presentation.CATEGORY_NO_LONGER_EXISTS,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        candidate_count = await self._count_automatic_candidates(
+            self._guild_id,
+            self._selected_ids,
+            self._automatic_candidate_exclusions,
+        )
+        await interaction.response.edit_message(
+            content=presentation.confirm_categories(candidate_count),
+            view=self,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _back(self, interaction: discord.Interaction) -> None:
+        if self._submitted:
+            await interaction.response.defer()
+            return
+        self._submitted = True
+        categories = await self._store.list_categories(self._guild_id)
+        await interaction.response.send_modal(
+            NewTicketModal(
+                self._store,
+                guild_id=self._guild_id,
+                categories=categories,
+                create_ticket=self._create_ticket,
+                actor_factory=self._actor_factory,
+                count_automatic_candidates=self._count_automatic_candidates,
+                draft=self._selected_request(),
+            )
+        )
+
+    async def _create(self, interaction: discord.Interaction) -> None:
+        if self._submitted:
+            await interaction.response.defer()
+            return
+        self._submitted = True
+        current_ids = {
+            category.category_id
+            for category in await self._store.list_categories(self._guild_id)
+        }
+        request = self._selected_request()
+        if any(category_id not in current_ids for category_id in request.category_ids):
+            self._submitted = False
+            await interaction.response.send_message(
+                presentation.CATEGORY_NO_LONGER_EXISTS,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        if await _create_ticket_request(
+            interaction,
+            request=request,
+            create_ticket=self._create_ticket,
+            actor_factory=self._actor_factory,
+        ):
+            await interaction.delete_original_response()
+
+
 async def send_new_ticket_modal(
     interaction: discord.Interaction,
     store: GitHubTicketsStore,
@@ -375,6 +637,7 @@ async def send_new_ticket_modal(
     guild_id: int,
     create_ticket: CreateTicket,
     actor_factory: ActorFactory,
+    count_automatic_candidates: CountAutomaticCandidates,
 ) -> None:
     if not await _check_participant(interaction, actor_factory):
         return
@@ -386,6 +649,7 @@ async def send_new_ticket_modal(
             categories=categories,
             create_ticket=create_ticket,
             actor_factory=actor_factory,
+            count_automatic_candidates=count_automatic_candidates,
         )
     )
 
@@ -439,6 +703,8 @@ class CategoryBrowser(_DashboardView):
         categories: Sequence[Category],
         back_view: GitHubTicketsDashboard,
         actor_factory: ActorFactory,
+        member_lookup: MemberLookup,
+        member_actor_factory: MemberActorFactory,
     ) -> None:
         super().__init__()
         self._store = store
@@ -446,8 +712,10 @@ class CategoryBrowser(_DashboardView):
         self._categories = {category.category_id: category for category in categories[:25]}
         self._back_view = back_view
         self._actor_factory = actor_factory
+        self._member_lookup = member_lookup
+        self._member_actor_factory = member_actor_factory
         self._selected_category: Category | None = None
-        self._profiles: Sequence[Profile] = ()
+        self._profiles: Sequence[tuple[Profile, discord.Member]] = ()
         self._page = 0
 
         self.category_select = discord.ui.Select(
@@ -499,9 +767,14 @@ class CategoryBrowser(_DashboardView):
             )
             return
         self._selected_category = category
-        self._profiles = await self._store.list_profiles_for_category(
+        profiles = await self._store.list_profiles_for_category(
             self._guild_id,
             category_id,
+        )
+        self._profiles = _visible_profiles(
+            profiles,
+            self._member_lookup,
+            self._member_actor_factory,
         )
         self._page = 0
         await self._render(interaction)
@@ -531,11 +804,7 @@ class CategoryBrowser(_DashboardView):
         page_count = self._page_count
         start = self._page * self.PAGE_SIZE
         visible_profiles = self._profiles[start : start + self.PAGE_SIZE]
-        users = [
-            f"<@{profile.user_id}>"
-            + (f" | {profile.github_username}" if profile.github_username else "")
-            for profile in visible_profiles
-        ]
+        users = [_profile_line(profile, member) for profile, member in visible_profiles]
         self.previous.disabled = self._page == 0
         self.next.disabled = self._page >= page_count - 1
         await interaction.response.edit_message(
@@ -550,6 +819,56 @@ class CategoryBrowser(_DashboardView):
         )
 
 
+class GitHubUsernameLookupModal(_DashboardModal):
+    def __init__(
+        self,
+        store: GitHubTicketsStore,
+        *,
+        guild_id: int,
+        actor_factory: ActorFactory,
+        member_lookup: MemberLookup,
+        member_actor_factory: MemberActorFactory,
+    ) -> None:
+        super().__init__(title=presentation.FIND_BY_GITHUB_USERNAME)
+        self._store = store
+        self._guild_id = guild_id
+        self._actor_factory = actor_factory
+        self._member_lookup = member_lookup
+        self._member_actor_factory = member_actor_factory
+        self.github_username = discord.ui.TextInput(
+            placeholder=presentation.ENTER_GITHUB_USERNAME,
+            required=True,
+            max_length=presentation.MAX_GITHUB_USERNAME_LENGTH,
+        )
+        self.add_item(
+            discord.ui.Label(
+                text=presentation.GITHUB_USERNAME,
+                component=self.github_username,
+            )
+        )
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await _check_participant(interaction, self._actor_factory):
+            return
+        profiles = await self._store.list_profiles_by_github_username(
+            self._guild_id,
+            str(self.github_username.value),
+        )
+        visible = _visible_profiles(
+            profiles,
+            self._member_lookup,
+            self._member_actor_factory,
+        )
+        content = "\n".join(
+            _profile_line(profile, member) for profile, member in visible
+        )
+        await interaction.response.send_message(
+            content or presentation.NO_PROFILE,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
 class GitHubTicketsDashboard(_DashboardView):
     def __init__(
         self,
@@ -557,12 +876,16 @@ class GitHubTicketsDashboard(_DashboardView):
         *,
         guild_id: int,
         actor_factory: ActorFactory,
+        member_lookup: MemberLookup,
+        member_actor_factory: MemberActorFactory,
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         super().__init__()
         self._store = store
         self._guild_id = guild_id
         self._actor_factory = actor_factory
+        self._member_lookup = member_lookup
+        self._member_actor_factory = member_actor_factory
         self._clock = clock
         for label, style, callback in (
             (presentation.EDIT_PROFILE, discord.ButtonStyle.secondary, self._edit_profile),
@@ -570,6 +893,11 @@ class GitHubTicketsDashboard(_DashboardView):
                 presentation.BROWSE_CATEGORIES,
                 discord.ButtonStyle.secondary,
                 self._browse_categories,
+            ),
+            (
+                presentation.FIND_BY_GITHUB_USERNAME,
+                discord.ButtonStyle.secondary,
+                self._find_by_github_username,
             ),
             (presentation.CLEAR_PROFILE, discord.ButtonStyle.danger, self._clear_profile),
         ):
@@ -620,8 +948,24 @@ class GitHubTicketsDashboard(_DashboardView):
                 categories=categories,
                 back_view=self,
                 actor_factory=self._actor_factory,
+                member_lookup=self._member_lookup,
+                member_actor_factory=self._member_actor_factory,
             ),
             allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _find_by_github_username(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        await interaction.response.send_modal(
+            GitHubUsernameLookupModal(
+                self._store,
+                guild_id=self._guild_id,
+                actor_factory=self._actor_factory,
+                member_lookup=self._member_lookup,
+                member_actor_factory=self._member_actor_factory,
+            )
         )
 
     async def _clear_profile(self, interaction: discord.Interaction) -> None:

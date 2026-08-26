@@ -237,6 +237,7 @@ class GitHubTickets(commands.Cog):
             guild_id=guild_id,
             create_ticket=self.coordinator.create_ticket,
             actor_factory=self._actor_from_interaction,
+            count_automatic_candidates=self._count_automatic_candidates,
         )
 
     @discord.app_commands.guild_only()
@@ -257,6 +258,11 @@ class GitHubTickets(commands.Cog):
             self.store,
             guild_id=guild_id,
             actor_factory=self._actor_from_interaction,
+            member_lookup=lambda user_id: self._cached_member(guild_id, user_id),
+            member_actor_factory=lambda member: self._actor_for_member(
+                guild_id,
+                member,
+            ),
         ).send(interaction)
 
     @discord.app_commands.guild_only()
@@ -339,18 +345,28 @@ class GitHubTickets(commands.Cog):
 
     def _actor_from_interaction(self, interaction: discord.Interaction) -> TicketActor:
         guild_id = self._interaction_guild_id(interaction)
-        user = interaction.user
-        permissions = getattr(user, "guild_permissions", None)
+        return self._actor_for_member(guild_id or 0, interaction.user)
+
+    def _actor_for_member(
+        self,
+        guild_id: int,
+        member: discord.Member,
+    ) -> TicketActor:
+        permissions = getattr(member, "guild_permissions", None)
         can_manage_messages = bool(
             permissions is not None and permissions.manage_messages
         )
-        participant_role_ids = self._participant_roles.get(guild_id or 0, frozenset())
-        member_role_ids = {int(role.id) for role in getattr(user, "roles", ())}
+        participant_role_ids = self._participant_roles.get(guild_id, frozenset())
+        member_role_ids = {int(role.id) for role in getattr(member, "roles", ())}
         return TicketActor(
-            user_id=int(user.id),
+            user_id=int(member.id),
             is_participant=bool(participant_role_ids.intersection(member_role_ids)),
             can_manage_messages=can_manage_messages,
         )
+
+    def _cached_member(self, guild_id: int, user_id: int) -> discord.Member | None:
+        guild = self.bot.get_guild(guild_id)
+        return guild.get_member(user_id) if guild is not None else None
 
     def _ticket_view(self, ticket: Ticket) -> TicketControls:
         return TicketControls(
@@ -430,38 +446,74 @@ class GitHubTickets(commands.Cog):
     async def _process_due_deadline(self, ticket_id: int) -> None:
         await self.coordinator.process_due(ticket_id)
 
+    async def _automatic_candidate_ids(
+        self,
+        guild_id: int,
+        category_ids: tuple[int, ...],
+        excluded_user_ids: frozenset[int],
+    ) -> frozenset[int]:
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            return frozenset()
+        profiles = await self.store.list_matching_profiles(guild_id, category_ids)
+        profile_ids = {profile.user_id for profile in profiles}
+        return frozenset(
+            user_id
+            for member in getattr(guild, "members", ())
+            if (user_id := int(member.id)) not in excluded_user_ids
+            and user_id in profile_ids
+            and self._actor_for_member(guild_id, member).can_participate
+        )
+
+    async def _count_automatic_candidates(
+        self,
+        guild_id: int,
+        category_ids: tuple[int, ...],
+        excluded_user_ids: frozenset[int],
+    ) -> int:
+        return len(
+            await self._automatic_candidate_ids(
+                guild_id,
+                category_ids,
+                excluded_user_ids,
+            )
+        )
+
     async def _get_candidates(self, ticket: Ticket) -> tuple[CandidateFacts, ...]:
         guild = self.bot.get_guild(ticket.guild_id)
         if guild is None:
             return ()
         members = tuple(getattr(guild, "members", ()))
+        matching_profile_ids = await self._automatic_candidate_ids(
+            ticket.guild_id,
+            ticket.category_ids,
+            frozenset({ticket.author_id}),
+        )
         histories = await self.store.candidate_history(
             ticket.ticket_id,
-            (int(member.id) for member in members),
+            (
+                int(member.id)
+                for member in members
+                if int(member.id) != ticket.author_id
+            ),
         )
         history_by_id = {history.user_id: history for history in histories}
-        participant_role_ids = self._participant_roles.get(ticket.guild_id, frozenset())
         candidates: list[CandidateFacts] = []
         for member in members:
             user_id = int(member.id)
+            if user_id == ticket.author_id:
+                continue
             history = history_by_id.get(user_id)
             if history is None:
                 continue
-            member_role_ids = {int(role.id) for role in getattr(member, "roles", ())}
-            permissions = getattr(member, "guild_permissions", None)
+            actor = self._actor_for_member(ticket.guild_id, member)
             candidates.append(
                 CandidateFacts(
                     user_id=user_id,
                     is_cached_member=True,
-                    has_participant_role=bool(
-                        participant_role_ids.intersection(member_role_ids)
-                    ),
-                    can_manage_messages=bool(
-                        permissions is not None and permissions.manage_messages
-                    ),
-                    has_profile=history.has_profile,
-                    allows_automatic_pings=history.automatic_pings,
-                    matching_category_count=history.matching_category_count,
+                    has_participant_role=actor.is_participant,
+                    can_manage_messages=actor.can_manage_messages,
+                    matches_profile=user_id in matching_profile_ids,
                     was_pinged=history.was_pinged,
                     timed_out=history.timed_out,
                     declined=history.declined,
@@ -508,6 +560,15 @@ class GitHubTickets(commands.Cog):
             lambda: self.coordinator.handle_thread_deleted(int(thread.id)),
             "thread deletion",
         )
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member) -> None:
+        try:
+            await self.store.delete_profile(int(member.guild.id), int(member.id))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("GitHub Tickets member profile deletion failed")
 
     async def _run_listener(self, operation, label: str) -> None:
         for attempt in range(2):

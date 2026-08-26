@@ -28,6 +28,7 @@ CLAIM_RACE_LOST = presentation.TICKET_ALREADY_CLAIMED
 MISSING_TICKET_CHANNEL = presentation.TICKET_CHANNEL_NOT_CONFIGURED
 MISSING_AUTOMATIC_CATEGORIES = presentation.AUTOMATIC_REQUIRES_CATEGORY
 MISSING_DIRECT_REVIEWER = presentation.DIRECT_REQUIRES_REVIEWER
+SELF_REVIEW_DENIED = "You cannot select yourself as the reviewer"
 CREATE_FAILED = presentation.COULD_NOT_CREATE_TICKET
 ACTION_FAILED = presentation.COULD_NOT_COMPLETE_ACTION
 PROJECTION_RETRY_SECONDS = 5
@@ -110,8 +111,19 @@ class TicketCoordinator:
         request: TicketRequest,
         actor: TicketActor,
     ) -> TicketResult:
+        direct_target_id = (
+            request.direct_target_id
+            if request.routing_mode
+            in (RoutingMode.DIRECT_WAIT, RoutingMode.DIRECT_AUTOMATIC)
+            else None
+        )
+        actor_error = None
         if not actor.can_participate:
-            return TicketResult(False, PERMISSION_DENIED)
+            actor_error = PERMISSION_DENIED
+        elif direct_target_id == actor.user_id:
+            actor_error = SELF_REVIEW_DENIED
+        if actor_error is not None:
+            return TicketResult(False, actor_error)
         settings = await self._get_settings(request.guild_id)
         if settings.ticket_channel_id is None:
             return TicketResult(False, MISSING_TICKET_CHANNEL)
@@ -130,7 +142,7 @@ class TicketCoordinator:
                     pr_url=request.pr_url,
                     category_display=request.category_display,
                     routing_mode=request.routing_mode,
-                    direct_target_id=request.direct_target_id,
+                    direct_target_id=direct_target_id,
                     category_ids=request.category_ids,
                     created_at=now,
                 )
@@ -861,11 +873,7 @@ class TicketCoordinator:
         return TicketResult(True)
 
     async def _reviewer_github(self, ticket: Ticket) -> str | None:
-        reviewer_id = (
-            ticket.assignee_id
-            if ticket.state is TicketState.CLAIMED
-            else ticket.current_target_id
-        )
+        reviewer_id = ticket.assignee_id
         if reviewer_id is None:
             return None
         profile = await self._store.get_profile(ticket.guild_id, reviewer_id)

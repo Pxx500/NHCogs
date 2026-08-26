@@ -352,7 +352,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(channel.fetch_calls, 0)
         self.assertEqual(bot.fetch_calls, 0)
 
-    async def test_open_ticket_edit_displays_the_current_target_and_github_username(self):
+    async def test_open_ticket_edit_does_not_display_the_pinged_target_as_reviewer(self):
         channel = FakeChannel()
         bot = FakeBot({channel.id: channel})
         adapter = adapter_module.DiscordTicketProjection(
@@ -374,8 +374,6 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
                 url=current.pr_url,
                 author_mention="<@30>",
                 categories=("rendering, performance",),
-                reviewer_mention="<@41>",
-                reviewer_github="reviewer-gh",
             ),
         )
 
