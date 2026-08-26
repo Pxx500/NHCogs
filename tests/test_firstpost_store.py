@@ -7,11 +7,14 @@ from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from tests.storage_loader import load_shared_storage
+
 PACKAGE_NAME = "_honeypot_firstpost_store_tests"
 PACKAGE_PATH = Path(__file__).resolve().parents[1] / "NHCogs" / "honeypot"
 
 
 def load_firstpost_store_module():
+    load_shared_storage()
     package = sys.modules.get(PACKAGE_NAME)
     if package is None:
         package = types.ModuleType(PACKAGE_NAME)

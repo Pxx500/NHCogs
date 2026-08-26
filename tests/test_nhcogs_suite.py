@@ -28,6 +28,15 @@ class StubHoneypot:
         bot.constructed.append(self.qualified_name)
 
 
+class StubGitHubTickets:
+    qualified_name = "GitHubTickets"
+    CONFIG_IDENTIFIER = 228724500916148494760637198509440112622
+
+    def __init__(self, bot):
+        self.bot = bot
+        bot.constructed.append(self.qualified_name)
+
+
 class StubCustomCommandsMigration:
     qualified_name = "CustomCommandsMigration"
 
@@ -48,6 +57,7 @@ def load_suite_module():
         "NHCogs",
         "NHCogs.nhmisc",
         "NHCogs.honeypot",
+        "NHCogs.githubtickets",
         "NHCogs.custom_commands",
     )
     previous = {name: sys.modules.get(name, _MISSING) for name in names}
@@ -61,6 +71,8 @@ def load_suite_module():
     nhmisc.NHMisc = StubNHMisc
     honeypot = types.ModuleType("NHCogs.honeypot")
     honeypot.Honeypot = StubHoneypot
+    githubtickets = types.ModuleType("NHCogs.githubtickets")
+    githubtickets.GitHubTickets = StubGitHubTickets
     custom_commands = types.ModuleType("NHCogs.custom_commands")
 
     async def build_custom_commands_component(bot, _nhmisc):
@@ -93,6 +105,7 @@ def load_suite_module():
                 "NHCogs": module,
                 "NHCogs.nhmisc": nhmisc,
                 "NHCogs.honeypot": honeypot,
+                "NHCogs.githubtickets": githubtickets,
                 "NHCogs.custom_commands": custom_commands,
             }
         )
@@ -120,6 +133,8 @@ class FakeBot:
         self.added.append(name)
         if self.failure == (name, "before"):
             raise RuntimeError(f"failed before adding {name}")
+        if name in self.cogs:
+            raise RuntimeError(f"cog already loaded: {name}")
         self.cogs[name] = cog
         if self.failure == (name, "after"):
             raise RuntimeError(f"failed after adding {name}")
@@ -145,14 +160,18 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
                 suite.Honeypot.CONFIG_IDENTIFIER,
                 205192943327321000143939875896557571750,
             )
+            self.assertEqual(
+                suite.GitHubTickets.CONFIG_IDENTIFIER,
+                228724500916148494760637198509440112622,
+            )
 
         self.assertEqual(
             bot.added,
-            ["NHMisc", "Honeypot", "CustomCommandsMigration"],
+            ["NHMisc", "Honeypot", "GitHubTickets", "CustomCommandsMigration"],
         )
         self.assertEqual(
             set(bot.cogs),
-            {"NHMisc", "Honeypot", "CustomCommandsMigration"},
+            {"NHMisc", "Honeypot", "GitHubTickets", "CustomCommandsMigration"},
         )
         self.assertEqual(bot.removed, [])
         self.assertEqual(bot.preflight_calls, 1)
@@ -178,6 +197,8 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
             ("NHMisc", "after"),
             ("Honeypot", "before"),
             ("Honeypot", "after"),
+            ("GitHubTickets", "before"),
+            ("GitHubTickets", "after"),
             ("CustomCommandsMigration", "before"),
             ("CustomCommandsMigration", "after"),
         )
@@ -191,12 +212,34 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
                         await suite.setup(bot)
 
                 self.assertEqual(bot.cogs, {})
-                self.assertEqual(bot.removed, list(reversed(bot.added)))
+                expected_removed = (
+                    list(reversed(bot.added[:-1]))
+                    if failure[1] == "before"
+                    else list(reversed(bot.added))
+                )
+                self.assertEqual(bot.removed, expected_removed)
+
+    async def test_setup_failure_preserves_a_previously_loaded_cog(self):
+        with load_suite_module() as suite:
+            bot = FakeBot()
+            existing = StubGitHubTickets(bot)
+            bot.cogs[existing.qualified_name] = existing
+
+            with self.assertRaisesRegex(RuntimeError, "cog already loaded"):
+                await suite.setup(bot)
+
+        self.assertIs(bot.cogs["GitHubTickets"], existing)
+        self.assertEqual(bot.removed, ["Honeypot", "NHMisc"])
 
     def test_combined_metadata_preserves_both_data_contracts(self):
         metadata = json.loads((PACKAGE_PATH / "info.json").read_text("utf-8"))
 
         self.assertEqual(metadata["name"], "NHCogs")
+        self.assertEqual(
+            metadata["description"],
+            "Loads NHMisc, Honeypot, GitHubTickets, and Custom Commands together "
+            "while preserving their separate commands, configuration, and stored data",
+        )
         self.assertEqual(metadata["min_bot_version"], "3.5.23")
         self.assertEqual(metadata["min_python_version"], [3, 10, 0])
         self.assertEqual(
@@ -213,6 +256,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("moderation case metadata", statement)
         self.assertIn("Custom Commands stores guild IDs", statement)
         self.assertIn("Operational error records store the guild", statement)
+        self.assertIn("GitHubTickets stores guild and user IDs", statement)
 
     async def test_teardown_removes_late_registered_replacement_cog(self):
         with load_suite_module() as suite:

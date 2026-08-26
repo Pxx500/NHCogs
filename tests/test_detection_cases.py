@@ -14,9 +14,11 @@ from unittest import mock
 from zoneinfo import ZoneInfo
 
 from tests.detection_case_fixtures import capture_attachment, publish_primary
+from tests.storage_loader import load_shared_storage
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "NHCogs" / "honeypot" / "detection_cases.py"
 PACKAGE_NAME = "_honeypot_detection_cases_tests"
+load_shared_storage()
 package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(MODULE_PATH.parent)]
 sys.modules[PACKAGE_NAME] = package

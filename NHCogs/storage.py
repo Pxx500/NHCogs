@@ -1,4 +1,4 @@
-"""Shared synchronous SQLite plumbing for Honeypot stores."""
+"""Shared synchronous SQLite plumbing for NHCogs stores."""
 
 import sqlite3
 from collections.abc import Callable, Sequence

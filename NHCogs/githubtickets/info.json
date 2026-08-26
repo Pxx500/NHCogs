@@ -1,0 +1,24 @@
+{
+  "author": [
+    "Pxx500"
+  ],
+  "name": "GitHubTickets",
+  "install_msg": "GitHubTickets installed\nLoad it with `[p]load NHCogs.githubtickets`",
+  "short": "Create pull request review tickets and route reviewers",
+  "description": "Publish pull request tickets, manage developer expertise profiles, and route review requests through Discord",
+  "tags": [
+    "github",
+    "pull-request",
+    "review",
+    "utility",
+    "redbot"
+  ],
+  "requirements": [],
+  "min_bot_version": "3.5.23",
+  "min_python_version": [
+    3,
+    10,
+    0
+  ],
+  "end_user_data_statement": "GitHubTickets stores guild and user IDs, optional GitHub usernames, expertise categories, pull request titles and links, Discord ticket locations, reviewer routing state, exclusions, ping history, and deadlines in SQLite. Finished tickets, deleted ticket messages or threads, guild removal, and Red user-data deletion remove the corresponding data. Discord message content is not read back into the database."
+}
