@@ -1,31 +1,17 @@
-import importlib
 import sqlite3
-import sys
-import types
 import unittest
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-PACKAGE_NAME = "_honeypot_storage_tests"
-PACKAGE_PATH = Path(__file__).resolve().parents[1] / "NHCogs" / "honeypot"
+from tests.storage_loader import load_shared_storage
 
 
 def load_storage_module():
-    package = sys.modules.get(PACKAGE_NAME)
-    if package is None:
-        package = types.ModuleType(PACKAGE_NAME)
-        package.__path__ = [str(PACKAGE_PATH)]
-        sys.modules[PACKAGE_NAME] = package
-    try:
-        return importlib.import_module(f"{PACKAGE_NAME}.storage")
-    except ModuleNotFoundError as error:
-        if error.name == f"{PACKAGE_NAME}.storage":
-            raise AssertionError("the shared Honeypot storage interface is missing") from error
-        raise
+    return load_shared_storage()
 
 
-class HoneypotStorageTests(unittest.TestCase):
+class SharedStorageTests(unittest.TestCase):
     def setUp(self):
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

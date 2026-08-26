@@ -8,11 +8,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from tests.storage_loader import load_shared_storage
+
 PACKAGE_NAME = "_honeypot_message_registry_tests"
 PACKAGE_PATH = Path(__file__).resolve().parents[1] / "NHCogs" / "honeypot"
 
 
 def load_message_registry_module():
+    load_shared_storage()
     package = sys.modules.get(PACKAGE_NAME)
     if package is None:
         package = types.ModuleType(PACKAGE_NAME)
