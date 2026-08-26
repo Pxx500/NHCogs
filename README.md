@@ -12,6 +12,8 @@ The combined `NHCogs` extension loads the maintained cogs:
   statistics, and other server utilities.
 - [`CustomCommands`](NHCogs/custom_commands/README.md) provides weighted text commands,
   Red-compatible placeholders, and thread-based moderator editing.
+- [`GitHubTickets`](NHCogs/githubtickets/README.md) publishes pull request review tickets,
+  manages developer expertise profiles, and routes reviewer requests.
 
 ## Installation
 
