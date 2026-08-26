@@ -106,6 +106,7 @@ class _Bot:
         self.commands = {
             "customcom": SimpleNamespace(cog=runtime),
             "cc": SimpleNamespace(cog=runtime),
+            "commands": SimpleNamespace(cog=runtime),
         }
 
     async def remove_cog(self, name):
@@ -287,6 +288,7 @@ class ReplacementActivatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(second, first)
         self.assertIs(bot.get_command("customcom").cog, first)
         self.assertIs(bot.get_command("cc").cog, first)
+        self.assertIs(bot.get_command("commands").cog, first)
 
     async def test_activation_refuses_to_remove_an_unknown_custom_commands_owner(self):
         bot = _Bot()

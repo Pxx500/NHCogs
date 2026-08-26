@@ -497,6 +497,12 @@ class CustomCommands(commands.Cog):
         )
         await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
+    @commands.command(name="commands")
+    @commands.guild_only()
+    async def public_commands(self, ctx: commands.Context) -> None:
+        """List all available custom commands."""
+        await self._show_all_commands(ctx)
+
     async def _assert_legacy_purge_authority(self) -> None:
         if self.bot.get_cog("CustomCommands") is not self:
             raise commands.UserFeedbackCheckFailure(
@@ -647,6 +653,9 @@ class CustomCommands(commands.Cog):
     @customcom.command(name="list")
     async def cc_list(self, ctx: commands.Context) -> None:
         """List all available custom commands."""
+        await self._show_all_commands(ctx)
+
+    async def _show_all_commands(self, ctx: commands.Context) -> None:
         stored = await self.catalog.list_commands(ctx.guild.id)
         if not stored:
             await ctx.send(
