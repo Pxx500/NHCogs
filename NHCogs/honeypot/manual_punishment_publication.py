@@ -268,7 +268,7 @@ async def create_private_audit(
                     )
         for start in range(0, len(files), 10):
             part = await evidence_channel.send(
-                content=f"Evidence files for source message {source_message.id}.",
+                content=f"Evidence files for source message {source_message.id}",
                 files=files[start : start + 10],
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -363,9 +363,9 @@ def _public_content(
     ban = next((outcome for outcome in successful if outcome.kind == "ban"), None)
     def render(role_label: str | None) -> str | None:
         if ban is not None:
-            sentence = f"<@{target.id}> was banned by <@{moderator.id}>."
+            sentence = f"<@{target.id}> was banned by <@{moderator.id}>"
         elif kick is not None:
-            sentence = f"<@{target.id}> was kicked by <@{moderator.id}>."
+            sentence = f"<@{target.id}> was kicked by <@{moderator.id}>"
         elif role_label is not None and mute is not None:
             sentence = (
                 f"<@{target.id}> received {role_label} and was muted "
@@ -373,7 +373,7 @@ def _public_content(
             )
         elif role_label is not None:
             sentence = (
-                f"<@{target.id}> received {role_label} from <@{moderator.id}>."
+                f"<@{target.id}> received {role_label} from <@{moderator.id}>"
             )
         elif mute is not None:
             sentence = (

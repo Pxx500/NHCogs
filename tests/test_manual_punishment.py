@@ -144,6 +144,44 @@ class ManualPunishmentSettingsTests(unittest.TestCase):
 
 
 class ManualPunishmentPublicationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_public_punishment_mentions_have_no_trailing_period(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)):
+                publication = import_module("NHCogs.honeypot.manual_punishment_publication")
+                channel = SimpleNamespace(id=100, send=mock.AsyncMock())
+                guild = SimpleNamespace(get_channel=lambda channel_id: None)
+                target = SimpleNamespace(id=20)
+                moderator = SimpleNamespace(id=10)
+                cases = (
+                    (
+                        publication.PunishmentOutcome.role_succeeded(
+                            500, "Memen't", notification_channel_id=None
+                        ),
+                        "<@20> received Memen't from <@10>\nReason: reposting",
+                    ),
+                    (
+                        publication.PunishmentOutcome.succeeded_action("kick", "kicked"),
+                        "<@20> was kicked by <@10>\nReason: reposting",
+                    ),
+                    (
+                        publication.PunishmentOutcome.succeeded_action("ban", "banned"),
+                        "<@20> was banned by <@10>\nReason: reposting",
+                    ),
+                )
+
+                for outcome, expected in cases:
+                    with self.subTest(outcome=outcome.kind):
+                        await publication.publish_public_result(
+                            guild,
+                            channel,
+                            target,
+                            moderator,
+                            (outcome,),
+                            reason="reposting",
+                        )
+
+                        self.assertEqual(channel.send.await_args.args[0], expected)
+
     async def test_no_evidence_audit_never_copies_source_content_or_attachments(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
@@ -568,7 +606,7 @@ class ManualPunishmentControllerTests(unittest.IsolatedAsyncioTestCase):
                     _execute_action=mock.AsyncMock(
                         return_value=SimpleNamespace(
                             status=module.EffectStatus.SUCCEEDED,
-                            label="The member has been kicked.",
+                            label="The member has been kicked",
                             failed_message=None,
                             modlog_failed=False,
                         )

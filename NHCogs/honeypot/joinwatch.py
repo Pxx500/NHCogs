@@ -120,7 +120,7 @@ async def _reschedule_joinwatch_role_retry(
 
 
 def _joinwatch_kick_status_value(action_label: str | None, default: str) -> str:
-    if action_label and action_label != _("The member has been kicked."):
+    if action_label and action_label != _("The member has been kicked"):
         return action_label
     return default
 
@@ -136,7 +136,7 @@ async def _execute_joinwatch_action(
 ) -> tuple[str | None, str | None]:
     action = settings.joinwatch_auto_role_action.value
     if action not in ("kick", "ban"):
-        return (_("No joinwatch punishment configured."), None)
+        return (_("No joinwatch punishment configured"), None)
     if not await cog._punitive_effect_allowed(guild):
         return (cog._dry_run_label(action), None)
     missing_permission = cog._missing_action_permission(guild, action)
@@ -189,7 +189,7 @@ async def _execute_joinwatch_action(
         )
     except Exception:
         log.exception("Failed to create modlog case in _execute_joinwatch_action")
-    label = _("The member has been kicked.") if action == "kick" else _("The member has been banned.")
+    label = _("The member has been kicked") if action == "kick" else _("The member has been banned")
     return (label, None)
 
 
@@ -239,17 +239,17 @@ async def _apply_joinwatch_assignment_actions(
                 guild_settings.joinwatch_auto_role_action
                 is JoinwatchAutoRoleActionOption.BAN
             ):
-                status = _("Banned.")
+                status = _("Banned")
             elif (
                 guild_settings.joinwatch_auto_role_action
                 is JoinwatchAutoRoleActionOption.KICK
             ):
                 status = _joinwatch_kick_status_value(
                     action_label,
-                    _("Left server."),
+                    _("Left server"),
                 )
             else:
-                status = _("Auto-role timer expired.")
+                status = _("Auto-role timer expired")
             await joinwatch_state.delete_pending_assignment(cog, guild, member_id)
             await joinwatch_publication.publish_joinwatch_incident(
                 cog,
@@ -286,7 +286,7 @@ async def _apply_joinwatch_assignment_actions(
                     cog,
                     guild,
                     data,
-                    _("{role} planned (dry run).").format(role=role.mention),
+                    _("{role} planned (dry run)").format(role=role.mention),
                 )
                 continue
             role_permission_error = cog._missing_role_assignment_permission(guild, role)
@@ -347,7 +347,7 @@ async def _apply_joinwatch_assignment_actions(
             cog,
             guild,
             data,
-            _("{role} applied until {time}.").format(
+            _("{role} applied until {time}").format(
                 role=role.mention,
                 time=discord.utils.format_dt(expires_at, style="R"),
             ),
@@ -400,17 +400,17 @@ async def _apply_joinwatch_role_actions(
                     guild_settings.joinwatch_auto_role_action
                     is JoinwatchAutoRoleActionOption.BAN
                 ):
-                    status = _("Banned.")
+                    status = _("Banned")
                 elif (
                     guild_settings.joinwatch_auto_role_action
                     is JoinwatchAutoRoleActionOption.KICK
                 ):
                     status = _joinwatch_kick_status_value(
                         action_label,
-                        _("Left server."),
+                        _("Left server"),
                     )
                 else:
-                    status = _("Auto-role timer expired.")
+                    status = _("Auto-role timer expired")
                 await joinwatch_state.delete_pending_role(cog, guild, member_id)
                 await joinwatch_publication.publish_joinwatch_incident(
                     cog,
@@ -443,7 +443,7 @@ async def _apply_joinwatch_role_actions(
                 cog,
                 guild,
                 data,
-                _("Role manually removed."),
+                _("Role manually removed"),
             )
             await cog._increment_stat(guild, "joinwatch_auto_roles_cleared")
             continue
@@ -472,17 +472,17 @@ async def _apply_joinwatch_role_actions(
                 guild_settings.joinwatch_auto_role_action
                 is JoinwatchAutoRoleActionOption.BAN
             ):
-                status = _("Banned.")
+                status = _("Banned")
             elif (
                 guild_settings.joinwatch_auto_role_action
                 is JoinwatchAutoRoleActionOption.KICK
             ):
                 status = _joinwatch_kick_status_value(
                     action_label,
-                    _("Kicked."),
+                    _("Kicked"),
                 )
             else:
-                status = _("Auto-role timer expired.")
+                status = _("Auto-role timer expired")
             await joinwatch_state.delete_pending_role(cog, guild, member_id)
             await joinwatch_publication.publish_joinwatch_incident(
                 cog,
@@ -674,12 +674,12 @@ async def on_member_join(cog, member: discord.Member) -> None:
                         expires_at=expires_at,
                         incident=incident,
                     )
-                    status = _("{role} scheduled for {time}.").format(
+                    status = _("{role} scheduled for {time}").format(
                         role=role.mention,
                         time=discord.utils.format_dt(apply_at, style="R"),
                     )
                 elif not await cog._punitive_effect_allowed(member.guild):
-                    status = _("{role} planned (dry run).").format(
+                    status = _("{role} planned (dry run)").format(
                         role=role.mention,
                     )
                 else:
@@ -699,7 +699,7 @@ async def on_member_join(cog, member: discord.Member) -> None:
                             applied_at=now,
                             incident=incident,
                         )
-                        status = _("{role} applied until {time}.").format(
+                        status = _("{role} applied until {time}").format(
                             role=role.mention,
                             time=discord.utils.format_dt(expires_at, style="R"),
                         )
@@ -755,7 +755,7 @@ async def on_member_update(cog, before: discord.Member, after: discord.Member) -
                     cog,
                     after.guild,
                     pending_role,
-                    _("Role manually removed."),
+                    _("Role manually removed"),
                 )
                 await cog._increment_stat(after.guild, "joinwatch_auto_roles_cleared")
     if not guild_settings.baitrole_enabled or guild_settings.baitrole_id is None:

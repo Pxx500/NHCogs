@@ -425,7 +425,7 @@ async def review_dump(cog, ctx: commands.Context) -> None:
             )
 
             if not archives:
-                await ctx.send(_("No dump files were created."))
+                await ctx.send(_("No dump files were created"))
                 return
             for archive in archives:
                 await ctx.send(file=discord.File(archive))
@@ -450,7 +450,7 @@ async def honeypot_errors(cog, ctx: commands.Context) -> None:
         include_resolved=True,
     )
     if not failures:
-        await ctx.send(_("No unacknowledged Honeypot errors."))
+        await ctx.send(_("No unacknowledged Honeypot errors"))
         return
     lines = []
     for failure in failures:
@@ -476,7 +476,7 @@ async def honeypot_errors_clear(cog, ctx: commands.Context) -> None:
         ctx.guild.id,
         datetime.now(timezone.utc),
     )
-    await ctx.send(_("Acknowledged {count} Honeypot errors.").format(count=count))
+    await ctx.send(_("Acknowledged {count} Honeypot errors").format(count=count))
 
 
 async def honeypot_errors_maintainer_show(cog, ctx: commands.Context) -> None:
@@ -517,7 +517,7 @@ async def honeypot_errors_maintainer_set(
 async def honeypot_errors_maintainer_clear(cog, ctx: commands.Context) -> None:
     """Stop pinging a maintainer for Honeypot operational failures."""
     await cog.config.guild(ctx.guild).maintainer_id.set(None)
-    await ctx.send(_("✅ Error maintainer cleared."))
+    await ctx.send(_("✅ Error maintainer cleared"))
 
 
 async def honeypot_mod_stats(cog, ctx: commands.Context) -> None:
@@ -639,7 +639,7 @@ async def honeypot_stats(cog, ctx: commands.Context) -> None:
 async def honeypot_reset_stats(cog, ctx: commands.Context) -> None:
     """Reset stored honeypot statistics."""
     await cog.config.guild(ctx.guild).stats.set(DEFAULT_STATS.copy())
-    await ctx.send(_("✅ Stats reset."))
+    await ctx.send(_("✅ Stats reset"))
 
 
 def _verify_detection_case_evidence_directory(cog) -> None:

@@ -76,7 +76,7 @@ class CleanupOrchestrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     result.public_message,
                     "Cleanup complete: requested 2, selected 2, deleted 2, "
-                    "already missing 0, failed 0.",
+                    "already missing 0, failed 0",
                 )
 
     async def test_channel_cleanup_with_no_candidates_only_removes_invocation(self):
@@ -101,7 +101,7 @@ class CleanupOrchestrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     result.public_message,
                     "Cleanup complete: requested 10, selected 0, deleted 0, "
-                    "already missing 0, failed 0.",
+                    "already missing 0, failed 0",
                 )
 
     async def test_permission_failure_retains_candidates_and_reports_aggregate(self):

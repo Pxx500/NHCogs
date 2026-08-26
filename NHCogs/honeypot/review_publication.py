@@ -952,7 +952,7 @@ def _case_note_chunks(notes: tuple[str, ...]) -> tuple[str, ...]:
     if notes:
         chunks.append(current)
     else:
-        chunks.append("**Case operation notes**\nNo current operation warnings.")
+        chunks.append("**Case operation notes**\nNo current operation warnings")
     return tuple(chunks)
 
 
@@ -1056,7 +1056,7 @@ async def _publish_case_timeline(
         content = (
             note_chunks[chunk_index]
             if chunk_index < len(note_chunks)
-            else "**Case operation notes**\nNo current operation warnings."
+            else "**Case operation notes**\nNo current operation warnings"
         )
         await _upsert_case_timeline_text(cog, publication, thread, content)
     if resolved or message_sequence is None:
@@ -1112,7 +1112,7 @@ async def _publish_case_timeline(
             content = (
                 message_chunks[chunk_index]
                 if chunk_index < len(message_chunks)
-                else f"**M{message.sequence} (continued)**\nNo additional content."
+                else f"**M{message.sequence} (continued)**\nNo additional content"
             )
             view = (
                 DetectionCaseView(
@@ -1241,7 +1241,7 @@ async def _publish_case_timeline(
             await published.edit(
                 content=(
                     f"Message {message.sequence} attachments: "
-                    "No additional attachments."
+                    "No additional attachments"
                 ),
                 attachments=[],
                 view=None,
@@ -1973,7 +1973,7 @@ async def _case_review_individual_prompt(
     )
     if not feedback_items:
         await _case_review_error(
-            interaction, _("No unresolved image evidence remains.")
+            interaction, _("No unresolved image evidence remains")
         )
         return
     await interaction.response.send_message(

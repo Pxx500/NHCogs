@@ -43,7 +43,7 @@ async def _reschedule_pending_roles(
             cog,
             guild,
             data,
-            _("{role} applied until {time}.").format(
+            _("{role} applied until {time}").format(
                 role=role.mention,
                 time=discord.utils.format_dt(expires_at, style="R"),
             ),
@@ -152,7 +152,7 @@ async def joinwatch_autorole_timer(
         )
         await ctx.send(
             _(
-                "✅ Joinwatch auto-role timer set to {value} minutes. Updated {count} active timer(s)."
+                "✅ Joinwatch auto-role timer set to {value} minutes. Updated {count} active timer(s)"
             ).format(
                 value=minutes,
                 count=updated,
@@ -189,7 +189,7 @@ async def joinwatch_autorole_bantimers(cog, ctx: commands.Context) -> None:
     guild_settings = GuildSettings.from_mapping(raw_config)
     pending_roles = guild_settings.joinwatch_pending_roles
     if not pending_roles:
-        await ctx.send(_("No active joinwatch punishment timers."))
+        await ctx.send(_("No active joinwatch punishment timers"))
         return
 
     now = datetime.now(timezone.utc)
@@ -239,7 +239,7 @@ async def joinwatch_autorole_bantimers(cog, ctx: commands.Context) -> None:
         )
 
     if not entries:
-        await ctx.send(_("No readable joinwatch punishment timers."))
+        await ctx.send(_("No readable joinwatch punishment timers"))
         return
 
     entries.sort(key=lambda item: item[0])
