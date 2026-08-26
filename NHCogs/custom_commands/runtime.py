@@ -21,6 +21,7 @@ from .arguments import (
 from .catalog import CustomCommand, CustomCommandCatalog, CustomResponse
 
 MIN_PREFIX_MESSAGE_LENGTH = 2
+INVOCATION_CHANNEL_COOLDOWN_SECONDS = 5
 
 
 class RuntimeArgumentError(ValueError):
@@ -237,6 +238,12 @@ class CustomCommandRuntime:
         for key, seconds in keys:
             self._cooldown_deadlines[key] = now + seconds
 
+    @staticmethod
+    def _invocation_channel_key(
+        command: CustomCommand, ctx: Any
+    ) -> tuple[str, int, str, int]:
+        return command.name, command.guild_id, "invocation_channel", ctx.channel.id
+
     async def handle_message(self, message: Any) -> None:  # noqa: PLR0911
         if (
             message.guild is None
@@ -257,9 +264,16 @@ class CustomCommandRuntime:
             return
         if command is None:
             return
+        now = time.monotonic()
+        invocation_channel_key = self._invocation_channel_key(command, ctx)
+        if self._cooldown_deadlines.get(invocation_channel_key, 0.0) > now:
+            return
         try:
             response = self.choose_response(command)
             self.check_cooldowns(command, ctx)
+            self._cooldown_deadlines[invocation_channel_key] = (
+                now + INVOCATION_CHANNEL_COOLDOWN_SECONDS
+            )
             parameters = self.prepare_args(response.content)
         except CustomCommandOnCooldown as error:
             await self._send_cooldown_feedback(ctx, error.retry_after)
