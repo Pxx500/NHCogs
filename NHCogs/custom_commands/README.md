@@ -9,17 +9,20 @@ alias.
 These commands are available to regular guild members:
 
 ```ini
+[p]commands
 [p]customcom list
 [p]customcom search <query>
 [p]customcom show <name>
 [p]customcom raw <name>
 ```
 
+`[p]commands` is a standalone public command and shows the same output as
+`[p]customcom list` without inheriting permissions configured for the `customcom` group.
 Lists and previews disable mentions. `list` and `search` show 15 commands per page. Each
 entry uses one logical line in the form `[p]command - short preview`, with whitespace and
 markdown normalized for compact display. The invoker navigates with Previous and Next
-and closes the list with the red X button. Temporary list, raw, and delete controls
-expire after 30 seconds.
+and closes the list with the red X button. Temporary list, raw, and delete controls expire
+after 30 seconds.
 
 Running the custom command itself preserves normal Discord mention behavior. `raw` shows
 exact whitespace in code blocks with Previous and Next buttons. Responses containing a
