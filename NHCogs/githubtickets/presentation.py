@@ -182,7 +182,7 @@ def ticket_message(
         if reviewer_github:
             reviewer = f"{reviewer} | {reviewer_github}"
         metadata.append(reviewer)
-    return f"[{title}]({url})\n{' | '.join(metadata)}"
+    return f"{title} <{url}>\n{' | '.join(metadata)}"
 
 
 def finished_ticket_log(
