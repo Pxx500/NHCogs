@@ -38,8 +38,8 @@ class GitHubTicketsPresentationTests(unittest.TestCase):
                 reviewer_mention="@Nova",
                 reviewer_github="nova-dev",
             ),
-            "Fix shader cache invalidation "
-            "<https://github.com/example/repository/pull/123>\n"
+            "[Fix shader cache invalidation]"
+            "(<https://github.com/example/repository/pull/123>)\n"
             "Author: @Mira | rendering, performance | Reviewer: @Nova | nova-dev",
         )
         self.assertEqual(
