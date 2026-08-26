@@ -737,6 +737,23 @@ class CustomCommandsListTests(unittest.IsolatedAsyncioTestCase):
         )
         return subject, ctx, message
 
+    async def test_commands_is_a_standalone_public_list_command(self):
+        command = getattr(cog.CustomCommands, "public_commands", None)
+        self.assertIsNotNone(command)
+        self.assertEqual(command.name, "commands")
+        self.assertIsNone(command.parent)
+        self.assertTrue(command.callback.guild_only)
+        self.assertFalse(hasattr(command.callback, "required_permissions"))
+        subject, ctx, message = self._subject_and_ctx()
+
+        await command.callback(subject, ctx)
+
+        subject.catalog.list_commands.assert_awaited_once_with(100)
+        sent = ctx.send.await_args.kwargs
+        self.assertEqual(sent["embed"].title, "Custom Command List")
+        self.assertEqual(len(sent["embed"].description.splitlines()), 15)
+        self.assertIs(sent["view"].message, message)
+
     async def test_list_sends_fifteen_single_line_entries_per_page(self):
         subject, ctx, message = self._subject_and_ctx()
 

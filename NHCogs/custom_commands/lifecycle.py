@@ -95,7 +95,7 @@ class ReplacementActivator:
             raise MigrationApplyError("Official customcom extension did not unload")
 
     def verify_public_commands(self, runtime: CustomCommands) -> None:
-        for name in ("customcom", "cc"):
+        for name in ("customcom", "cc", "commands"):
             command = self.bot.get_command(name)
             if command is None or command.cog is not runtime:
                 raise MigrationApplyError(
