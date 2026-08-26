@@ -700,7 +700,13 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ping_label.description, presentation.SELECT_PING_BEHAVIOR)
         self.assertEqual(
             [label.description for label in modal.children],
-            [None, None, None, presentation.SELECT_PING_BEHAVIOR, None],
+            [
+                None,
+                None,
+                None,
+                presentation.SELECT_PING_BEHAVIOR,
+                "Ignored unless a direct ping option is selected",
+            ],
         )
         self.assertIsInstance(modal.pr_title, discord.ui.TextInput)
         self.assertTrue(modal.pr_title.required)
