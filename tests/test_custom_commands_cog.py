@@ -70,8 +70,9 @@ def load_cog_module():  # noqa: PLR0915
             self.refreshed_components = components
 
     class Button:
-        def __init__(self, *, label, style, row=None):
+        def __init__(self, *, label=None, emoji=None, style, row=None):
             self.label = label
+            self.emoji = emoji
             self.style = style
             self.row = row
             self.disabled = False
@@ -154,7 +155,10 @@ def load_cog_module():  # noqa: PLR0915
     discord.Thread = object
     discord.Member = type("Member", (), {})
     discord.File = File
-    discord.utils = types.SimpleNamespace(format_dt=lambda value: value.isoformat())
+    discord.utils = types.SimpleNamespace(
+        escape_markdown=lambda value: value.replace("*", r"\*"),
+        format_dt=lambda value: value.isoformat(),
+    )
 
     class Cog:
         @staticmethod
@@ -679,6 +683,169 @@ class CustomCommandsCopyTests(unittest.IsolatedAsyncioTestCase):
         ctx.send.assert_awaited_once_with(
             "Cooldown scope must be member, channel, or guild"
         )
+
+
+class CustomCommandsListTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _subject_and_ctx(command_count=16, *, stored=None):
+        if stored is None:
+            stored = tuple(
+                types.SimpleNamespace(
+                    name=f"command{index:02}",
+                    responses=(
+                        types.SimpleNamespace(
+                            content="**first**\n\tsecond   " + "x" * 80
+                        ),
+                    ),
+                )
+                for index in range(command_count)
+            )
+        subject = object.__new__(cog.CustomCommands)
+        subject.catalog = types.SimpleNamespace(
+            list_commands=mock.AsyncMock(return_value=stored)
+        )
+        message = types.SimpleNamespace(
+            edit=mock.AsyncMock(),
+            delete=mock.AsyncMock(),
+        )
+        ctx = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=100),
+            author=types.SimpleNamespace(id=200),
+            clean_prefix="!",
+            send=mock.AsyncMock(return_value=message),
+        )
+        return subject, ctx, message
+
+    async def test_list_sends_fifteen_single_line_entries_per_page(self):
+        subject, ctx, message = self._subject_and_ctx()
+
+        await cog.CustomCommands.cc_list.callback(subject, ctx)
+
+        ctx.send.assert_awaited_once()
+        sent = ctx.send.await_args.kwargs
+        first_page = sent["embed"]
+        self.assertEqual(first_page.title, "Custom Command List")
+        self.assertEqual(len(first_page.description.splitlines()), 15)
+        self.assertEqual(first_page.footer, "Page 1/2")
+        self.assertTrue(
+            first_page.description.startswith(
+                r"**!command00** - \*\*first\*\* second "
+            )
+        )
+        self.assertNotIn("simple", first_page.description)
+        self.assertNotIn("random", first_page.description)
+        self.assertNotIn("·", first_page.description)
+        self.assertEqual(
+            [(item.label, item.emoji) for item in sent["view"].children],
+            [("Previous", None), (None, "❌"), ("Next", None)],
+        )
+        self.assertIs(sent["view"].message, message)
+        self.assertIsNone(sent["allowed_mentions"])
+
+    async def test_list_buttons_navigate_and_close_the_message(self):
+        subject, ctx, message = self._subject_and_ctx()
+        await cog.CustomCommands.cc_list.callback(subject, ctx)
+        view = ctx.send.await_args.kwargs["view"]
+        previous, close, next_button = view.children
+        self.assertTrue(previous.disabled)
+        self.assertFalse(close.disabled)
+        self.assertFalse(next_button.disabled)
+        interaction = types.SimpleNamespace(
+            response=types.SimpleNamespace(
+                defer=mock.AsyncMock(),
+                edit_message=mock.AsyncMock(),
+            )
+        )
+
+        await next_button.callback(interaction)
+
+        edited = interaction.response.edit_message.await_args.kwargs
+        self.assertEqual(edited["embed"].footer, "Page 2/2")
+        self.assertEqual(len(edited["embed"].description.splitlines()), 1)
+        self.assertFalse(previous.disabled)
+        self.assertTrue(next_button.disabled)
+
+        await close.callback(interaction)
+
+        interaction.response.defer.assert_awaited_once()
+        message.delete.assert_awaited_once()
+
+    async def test_list_controls_are_invoker_owned_and_disappear_on_timeout(self):
+        subject, ctx, message = self._subject_and_ctx()
+        subject._report_view_timeout_error = mock.AsyncMock()
+        await cog.CustomCommands.cc_list.callback(subject, ctx)
+        view = ctx.send.await_args.kwargs["view"]
+        denied_response = types.SimpleNamespace(send_message=mock.AsyncMock())
+        denied = types.SimpleNamespace(
+            user=types.SimpleNamespace(id=201),
+            response=denied_response,
+        )
+
+        self.assertFalse(await view.interaction_check(denied))
+        denied_response.send_message.assert_awaited_once_with(
+            "Only the person who ran this command can use these controls.",
+            ephemeral=True,
+        )
+        self.assertTrue(
+            await view.interaction_check(
+                types.SimpleNamespace(user=types.SimpleNamespace(id=200))
+            )
+        )
+
+        await view.on_timeout()
+
+        message.edit.assert_awaited_once_with(view=None)
+        subject._report_view_timeout_error.assert_not_awaited()
+
+    async def test_list_timeout_edit_failure_is_reported(self):
+        subject, ctx, message = self._subject_and_ctx()
+        failure = RuntimeError("message edit failed")
+        message.edit.side_effect = failure
+        subject._report_view_timeout_error = mock.AsyncMock()
+        await cog.CustomCommands.cc_list.callback(subject, ctx)
+        view = ctx.send.await_args.kwargs["view"]
+
+        await view.on_timeout()
+
+        subject._report_view_timeout_error.assert_awaited_once_with(
+            message,
+            action="expire custom command list",
+            error=failure,
+        )
+
+    async def test_list_keeps_escaped_long_entries_within_embed_limits(self):
+        stored = tuple(
+            types.SimpleNamespace(
+                name=f"cmd{index:02}" + "*" * 95,
+                responses=(types.SimpleNamespace(content="*" * 52),),
+            )
+            for index in range(30)
+        )
+        subject, ctx, _message = self._subject_and_ctx(stored=stored)
+        await cog.CustomCommands.cc_list.callback(subject, ctx)
+        sent = ctx.send.await_args.kwargs
+        view = sent["view"]
+        next_button = view.children[2]
+        descriptions = [sent["embed"].description]
+        interaction = types.SimpleNamespace(
+            response=types.SimpleNamespace(edit_message=mock.AsyncMock())
+        )
+
+        while not next_button.disabled:
+            await next_button.callback(interaction)
+            descriptions.append(
+                interaction.response.edit_message.await_args.kwargs[
+                    "embed"
+                ].description
+            )
+
+        self.assertTrue(all(len(page) <= 3_800 for page in descriptions))
+        self.assertTrue(
+            all(len(page.splitlines()) <= 15 for page in descriptions)
+        )
+        rendered = "\n".join(descriptions)
+        for index in range(30):
+            self.assertEqual(rendered.count(f"cmd{index:02}"), 1)
 
 
 class CustomCommandsMessageListenerTests(unittest.IsolatedAsyncioTestCase):

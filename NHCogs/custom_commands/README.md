@@ -15,10 +15,14 @@ These commands are available to regular guild members:
 [p]customcom raw <name>
 ```
 
-Lists and previews disable mentions. Running the custom command itself preserves normal
-Discord mention behavior. `raw` shows exact whitespace in code blocks with Previous and
-Next buttons. Responses containing a code fence are provided in one exact `.txt`
-transcript instead.
+Lists and previews disable mentions. `list` and `search` show 15 commands per page. Each
+entry uses one logical line in the form `[p]command - short preview`, with whitespace and
+markdown normalized for compact display. The invoker navigates with Previous and Next
+and closes the list with the red ❌ button. The controls disappear after five minutes.
+
+Running the custom command itself preserves normal Discord mention behavior. `raw` shows
+exact whitespace in code blocks with Previous and Next buttons. Responses containing a
+code fence are provided in one exact `.txt` transcript instead.
 
 ## Create and edit
 
