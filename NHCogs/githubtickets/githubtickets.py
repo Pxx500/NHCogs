@@ -10,6 +10,7 @@ from redbot.core import Config, commands
 from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
 
+from .. import command_overview
 from . import presentation, settings
 from .coordinator import TicketActor, TicketCoordinator, TicketResult
 from .dashboard import (
@@ -609,7 +610,24 @@ class GitHubTickets(commands.Cog):
     @commands.has_permissions(manage_messages=True)
     async def githubtickets(self, ctx: commands.Context) -> None:
         """Configure GitHub Tickets"""
-        await self._send_configuration_overview(ctx)
+        await self._send_group_overview(ctx, include_descendants=False)
+
+    async def _send_group_overview(
+        self,
+        ctx: commands.Context,
+        *,
+        include_descendants: bool = True,
+    ) -> None:
+        titles = {
+            "githubtickets": "GitHub Tickets",
+            "logchannel": "Log channel",
+        }
+        await command_overview.send_group_overview(
+            ctx,
+            lambda: self._send_configuration_overview(ctx),
+            include_descendants=include_descendants,
+            title=titles.get(ctx.command.name),
+        )
 
     async def _send_configuration_overview(self, ctx: commands.Context) -> None:
         guild_settings = settings.GuildSettings.from_mapping(
@@ -649,7 +667,7 @@ class GitHubTickets(commands.Cog):
     @githubtickets.group(name="channel", invoke_without_command=True)
     async def githubtickets_channel(self, ctx: commands.Context) -> None:
         """Configure the ticket channel"""
-        await self._send_configuration_overview(ctx)
+        await self._send_group_overview(ctx)
 
     @githubtickets_channel.command(name="set")
     async def githubtickets_channel_set(
@@ -676,7 +694,7 @@ class GitHubTickets(commands.Cog):
     @githubtickets.group(name="logchannel", invoke_without_command=True)
     async def githubtickets_logchannel(self, ctx: commands.Context) -> None:
         """Configure the log channel"""
-        await self._send_configuration_overview(ctx)
+        await self._send_group_overview(ctx)
 
     @githubtickets_logchannel.command(name="set")
     async def githubtickets_logchannel_set(
@@ -700,7 +718,7 @@ class GitHubTickets(commands.Cog):
     @githubtickets.group(name="role", invoke_without_command=True)
     async def githubtickets_role(self, ctx: commands.Context) -> None:
         """Configure participant roles"""
-        await self._send_configuration_overview(ctx)
+        await self._send_group_overview(ctx)
 
     @githubtickets_role.command(name="add")
     async def githubtickets_role_add(
@@ -745,7 +763,7 @@ class GitHubTickets(commands.Cog):
     @githubtickets.group(name="category", invoke_without_command=True)
     async def githubtickets_category(self, ctx: commands.Context) -> None:
         """Configure categories"""
-        await self._send_configuration_overview(ctx)
+        await self._send_group_overview(ctx)
 
     @githubtickets_category.command(name="add")
     async def githubtickets_category_add(
@@ -818,7 +836,7 @@ class GitHubTickets(commands.Cog):
     @githubtickets.group(name="timing", invoke_without_command=True)
     async def githubtickets_timing(self, ctx: commands.Context) -> None:
         """Configure ticket timing"""
-        await self._send_configuration_overview(ctx)
+        await self._send_group_overview(ctx)
 
     @githubtickets_timing.command(name="protection")
     async def githubtickets_timing_protection(
@@ -905,7 +923,7 @@ class GitHubTickets(commands.Cog):
     @githubtickets.group(name="profile", invoke_without_command=True)
     async def githubtickets_profile(self, ctx: commands.Context) -> None:
         """Manage developer profiles"""
-        await self._send_configuration_overview(ctx)
+        await self._send_group_overview(ctx)
 
     @githubtickets_profile.command(name="clear")
     async def githubtickets_profile_clear(

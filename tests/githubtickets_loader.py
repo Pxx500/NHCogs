@@ -8,6 +8,7 @@ from tests.harness import _MISSING, _isolated_honeypot_modules
 
 PACKAGE_DIR = Path(__file__).parents[1] / "NHCogs" / "githubtickets"
 MODULE_NAMES = (
+    "NHCogs.command_overview",
     "NHCogs.githubtickets",
     "NHCogs.githubtickets.models",
     "NHCogs.githubtickets.store",

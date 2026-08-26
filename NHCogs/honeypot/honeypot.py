@@ -13,6 +13,7 @@ from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
 from redbot.core.i18n import Translator, cog_i18n
 
+from .. import command_overview
 from . import (
     channel_routing,
     cleanup,
@@ -774,32 +775,17 @@ class Honeypot(Cog):
 
     @staticmethod
     def _group_overview_is_private(ctx: commands.Context) -> bool:
-        guild = getattr(ctx, "guild", None)
-        channel = getattr(ctx, "channel", None)
-        return Honeypot._channel_is_private(guild, channel)
+        return command_overview.group_overview_is_private(ctx)
 
     @staticmethod
     def _channel_is_private(guild: typing.Any, channel: typing.Any) -> bool:
-        default_role = getattr(guild, "default_role", None)
-        permissions_for = getattr(channel, "permissions_for", None)
-        if default_role is None or not callable(permissions_for):
-            return False
-        try:
-            permissions = permissions_for(default_role)
-        except (AttributeError, TypeError):
-            return False
-        return not bool(getattr(permissions, "view_channel", True))
+        return command_overview.channel_is_private(guild, channel)
 
     @staticmethod
     def _group_overview_commands(
         parent: commands.Group,
     ) -> typing.Iterator[typing.Any]:
-        for child in getattr(parent, "commands", ()):
-            descendants = getattr(child, "commands", ())
-            if descendants:
-                yield from Honeypot._group_overview_commands(child)
-            else:
-                yield child
+        return command_overview.descendant_leaf_commands(parent)
 
     @staticmethod
     def _group_overview_embeds(
@@ -807,35 +793,7 @@ class Honeypot(Cog):
         description: str,
         fields: list[tuple[str, str]],
     ) -> list[discord.Embed]:
-        max_fields = 25
-        max_embed_text = 6000
-        embeds: list[discord.Embed] = []
-        field_index = 0
-        while field_index < len(fields) or not embeds:
-            embed = discord.Embed(
-                title=title,
-                description=description if not embeds else None,
-            )
-            text_length = len(title) + (len(description) if not embeds else 0)
-            field_count = 0
-            while field_index < len(fields):
-                field_name, field_value = fields[field_index]
-                field_length = len(field_name) + len(field_value)
-                if field_count and (
-                    field_count >= max_fields
-                    or text_length + field_length > max_embed_text
-                ):
-                    break
-                embed.add_field(
-                    name=field_name,
-                    value=field_value,
-                    inline=False,
-                )
-                field_index += 1
-                field_count += 1
-                text_length += field_length
-            embeds.append(embed)
-        return embeds
+        return command_overview.overview_embeds(title, description, fields)
 
     async def _send_group_overview(
         self,
@@ -844,67 +802,17 @@ class Honeypot(Cog):
         *,
         include_descendants: bool = True,
     ) -> None:
-        private = self._group_overview_is_private(ctx)
-        if private and config_sender is not None:
-            await config_sender(self, ctx)
-
-        command = ctx.command
-        title = command.name.replace("_", " ").title()
-        description = command.short_doc
-        if not include_descendants:
-            description = (
-                f"{description}\n\n"
-                + _("Run a category below to see its complete command list.")
-            )
-        fields: list[tuple[str, str]] = []
-        if not private and config_sender is not None:
-            fields.append(
-                (
-                    _("Current configuration"),
-                    _(
-                    "Current values are hidden in channels visible to regular members. "
-                    "Run this command in a private moderator channel to view them."
-                    ),
-                )
-            )
-
-        command_lines = []
-        children = (
-            self._group_overview_commands(command)
-            if include_descendants
-            else iter(getattr(command, "commands", ()))
+        config_callback = (
+            None
+            if config_sender is None
+            else lambda: config_sender(self, ctx)
         )
-        for child in children:
-            usage = f"{ctx.clean_prefix}{child.qualified_name}"
-            if child.signature:
-                usage = f"{usage} {child.signature}"
-            command_lines.append(f"`{usage}` — {child.short_doc}")
-
-        chunks: list[str] = []
-        current: list[str] = []
-        for line in command_lines:
-            candidate = "\n".join((*current, line))
-            if current and len(candidate) > 1024:
-                chunks.append("\n".join(current))
-                current = [line]
-            else:
-                current.append(line)
-        if current:
-            chunks.append("\n".join(current))
-
-        for index, chunk in enumerate(chunks):
-            fields.append(
-                (
-                    _("Commands") if index == 0 else _("Commands (continued)"),
-                    chunk,
-                )
-            )
-
-        for embed in self._group_overview_embeds(title, description, fields):
-            await ctx.send(
-                embed=embed,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+        await command_overview.send_group_overview(
+            ctx,
+            config_callback,
+            include_descendants=include_descendants,
+            translate=_,
+        )
 
     async def _is_protected_member(
         self,
