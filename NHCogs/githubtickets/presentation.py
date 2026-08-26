@@ -9,7 +9,10 @@ MAX_PR_URL_LENGTH = 1_024
 MAX_GITHUB_USERNAME_LENGTH = 100
 _MAX_USER_MENTION = "<@18446744073709551615>"
 
-SLASH_DESCRIPTION = "Open the GitHub Tickets dashboard"
+NEW_TICKET_COMMAND = "newticket"
+NEW_TICKET_COMMAND_DESCRIPTION = "Create a new GitHub ticket"
+DEVELOPER_PROFILE_SLASH_COMMAND = "developerprofile"
+DEVELOPER_PROFILE_SLASH_DESCRIPTION = "Manage your developer profile"
 DEVELOPER_PROFILE_COMMAND = "Developer Profile"
 DASHBOARD_TITLE = "GitHub Tickets"
 NEW_TICKET = "New Ticket"
@@ -57,6 +60,7 @@ COULD_NOT_CREATE_TICKET = "Could not create the ticket"
 COULD_NOT_COMPLETE_ACTION = "Could not complete this action"
 TICKET_CHANNEL_CLEARED = "Ticket channel cleared"
 TICKET_CHANNEL_MUST_BE_TEXT = "Ticket channel must be a text channel"
+LOG_CHANNEL_CLEARED = "Log channel cleared"
 ROLE_ALREADY_CONFIGURED = "Participant role is already configured"
 ROLE_NOT_CONFIGURED = "Participant role is not configured"
 CATEGORY_NAME_EMPTY = "Category name cannot be empty"
@@ -74,6 +78,9 @@ HELP_COPY = (
     "Configure the ticket channel",
     "Set the ticket channel",
     "Clear the ticket channel",
+    "Configure the log channel",
+    "Set the log channel",
+    "Clear the log channel",
     "Configure participant roles",
     "Add a participant role",
     "Remove a participant role",
@@ -94,7 +101,8 @@ HELP_COPY = (
 )
 
 FIXED_COPY = (
-    SLASH_DESCRIPTION,
+    NEW_TICKET_COMMAND_DESCRIPTION,
+    DEVELOPER_PROFILE_SLASH_DESCRIPTION,
     DEVELOPER_PROFILE_COMMAND,
     DASHBOARD_TITLE,
     NEW_TICKET,
@@ -174,6 +182,20 @@ def ticket_message(
         if reviewer_github:
             reviewer = f"{reviewer} | {reviewer_github}"
         metadata.append(reviewer)
+    return f"[{title}]({url})\n{' | '.join(metadata)}"
+
+
+def finished_ticket_log(
+    *,
+    title: str,
+    url: str,
+    actor_id: int,
+    author_id: int,
+    reviewer_id: int | None,
+) -> str:
+    metadata = [f"Finished by <@{actor_id}>", f"Author <@{author_id}>"]
+    if reviewer_id is not None:
+        metadata.append(f"Reviewer <@{reviewer_id}>")
     return f"[{title}]({url})\n{' | '.join(metadata)}"
 
 
@@ -285,6 +307,7 @@ def duration_text(seconds: int) -> str:
 def configuration_overview(
     *,
     ticket_channel: str | None,
+    log_channel: str | None,
     participant_roles: Sequence[str],
     categories: Sequence[str],
     max_pings: int,
@@ -297,10 +320,12 @@ def configuration_overview(
     direct_response_seconds: int,
 ) -> str:
     channel = ticket_channel or "Not set"
+    log = log_channel or "Not set"
     roles = ", ".join(participant_roles) if participant_roles else "None"
     category_text = ", ".join(categories) if categories else "None"
     lines = (
         f"Ticket channel: {channel}",
+        f"Log channel: {log}",
         f"Participant roles: {roles}",
         f"Categories: {category_text}",
         f"Maximum pings: {max_pings}",
@@ -317,6 +342,10 @@ def configuration_overview(
 
 def ticket_channel_set(channel_mention: str) -> str:
     return f"Ticket channel set to {channel_mention}"
+
+
+def log_channel_set(channel_mention: str) -> str:
+    return f"Log channel set to {channel_mention}"
 
 
 def participant_role_added(role_mention: str) -> str:

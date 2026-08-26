@@ -364,6 +364,28 @@ class NewTicketModal(_DashboardModal):
         )
 
 
+async def send_new_ticket_modal(
+    interaction: discord.Interaction,
+    store: GitHubTicketsStore,
+    *,
+    guild_id: int,
+    create_ticket: CreateTicket,
+    actor_factory: ActorFactory,
+) -> None:
+    if not await _check_participant(interaction, actor_factory):
+        return
+    categories = await store.list_categories(guild_id)
+    await interaction.response.send_modal(
+        NewTicketModal(
+            store,
+            guild_id=guild_id,
+            categories=categories,
+            create_ticket=create_ticket,
+            actor_factory=actor_factory,
+        )
+    )
+
+
 class ClearProfileConfirmation(_DashboardView):
     def __init__(
         self,
@@ -490,7 +512,7 @@ class CategoryBrowser(_DashboardView):
 
     async def _back(self, interaction: discord.Interaction) -> None:
         await interaction.response.edit_message(
-            content=presentation.DASHBOARD_TITLE,
+            content=presentation.DEVELOPER_PROFILE_COMMAND,
             view=self._back_view,
             allowed_mentions=discord.AllowedMentions.none(),
         )
@@ -530,18 +552,15 @@ class GitHubTicketsDashboard(_DashboardView):
         store: GitHubTicketsStore,
         *,
         guild_id: int,
-        create_ticket: CreateTicket,
         actor_factory: ActorFactory,
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         super().__init__()
         self._store = store
         self._guild_id = guild_id
-        self._create_ticket = create_ticket
         self._actor_factory = actor_factory
         self._clock = clock
         for label, style, callback in (
-            (presentation.NEW_TICKET, discord.ButtonStyle.primary, self._new_ticket),
             (presentation.EDIT_PROFILE, discord.ButtonStyle.secondary, self._edit_profile),
             (
                 presentation.BROWSE_CATEGORIES,
@@ -559,22 +578,10 @@ class GitHubTicketsDashboard(_DashboardView):
 
     async def send(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
-            presentation.DASHBOARD_TITLE,
+            presentation.DEVELOPER_PROFILE_COMMAND,
             view=self,
             ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
-        )
-
-    async def _new_ticket(self, interaction: discord.Interaction) -> None:
-        categories = await self._store.list_categories(self._guild_id)
-        await interaction.response.send_modal(
-            NewTicketModal(
-                self._store,
-                guild_id=self._guild_id,
-                categories=categories,
-                create_ticket=self._create_ticket,
-                actor_factory=self._actor_factory,
-            )
         )
 
     async def _edit_profile(self, interaction: discord.Interaction) -> None:
