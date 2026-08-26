@@ -213,9 +213,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             is_cached_member=True,
             has_participant_role=True,
             can_manage_messages=False,
-            has_profile=True,
-            allows_automatic_pings=True,
-            matching_category_count=1,
+            matches_profile=True,
             was_pinged=False,
             timed_out=False,
             declined=False,
@@ -249,6 +247,28 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             [("send_ticket", 1, None), ("create_thread", 1, 300)],
         )
         self.assertEqual(self.wake_count, 1)
+
+    async def test_create_rejects_direct_self_review_without_writing_ticket(self):
+        result = await self.coordinator.create_ticket(
+            self.request(models.RoutingMode.DIRECT_WAIT, direct_target_id=100),
+            self.actor(user_id=100),
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.response, "You cannot select yourself as the reviewer")
+        self.assertIsNone(await self.store.get_ticket(1))
+        self.assertEqual(self.projection.calls, [])
+
+    async def test_create_ignores_direct_target_for_non_direct_routing(self):
+        result = await self.coordinator.create_ticket(
+            self.request(models.RoutingMode.AUTOMATIC, direct_target_id=100),
+            self.actor(user_id=100),
+        )
+
+        self.assertTrue(result.success)
+        ticket = await self.store.get_ticket(1)
+        self.assertIsNotNone(ticket)
+        self.assertIsNone(ticket.direct_target_id)
 
     async def test_creation_retains_known_message_when_cleanup_cannot_settle(self):
         self.projection.errors["create_thread"] = RuntimeError("controlled thread failure")
@@ -496,7 +516,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                     "edit_ticket",
                     ticket.ticket_id,
                     models.TicketState.OPEN,
-                    "direct-reviewer",
+                    None,
                 ),
             ],
         )

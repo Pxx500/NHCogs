@@ -234,7 +234,7 @@ class DiscordTicketProjection:
         reviewer_github: str | None = None,
     ) -> str:
         categories = (ticket.category_display,) if ticket.category_display else ()
-        reviewer_id = ticket.assignee_id or ticket.current_target_id
+        reviewer_id = ticket.assignee_id
         reviewer_mention = f"<@{reviewer_id}>" if reviewer_id is not None else None
         return ticket_message(
             title=ticket.pr_title,
