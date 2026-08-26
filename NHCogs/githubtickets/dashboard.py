@@ -301,7 +301,11 @@ class NewTicketModal(_DashboardModal):
                 self.ping_behavior,
                 presentation.SELECT_PING_BEHAVIOR,
             ),
-            (presentation.DIRECT_REVIEWER, self.direct_reviewer, None),
+            (
+                presentation.DIRECT_REVIEWER,
+                self.direct_reviewer,
+                presentation.DIRECT_REVIEWER_DESCRIPTION,
+            ),
         ):
             self.add_item(
                 discord.ui.Label(

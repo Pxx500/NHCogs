@@ -40,6 +40,7 @@ SELECT_CATEGORIES = "Select categories"
 PING_BEHAVIOR = "Ping behavior"
 SELECT_PING_BEHAVIOR = "Select ping behavior"
 DIRECT_REVIEWER = "Direct reviewer"
+DIRECT_REVIEWER_DESCRIPTION = "Ignored unless a direct ping option is selected"
 SELECT_A_REVIEWER = "Select a reviewer"
 NO_PING = "No ping"
 AUTOMATIC = "Automatic"
@@ -130,6 +131,7 @@ FIXED_COPY = (
     PING_BEHAVIOR,
     SELECT_PING_BEHAVIOR,
     DIRECT_REVIEWER,
+    DIRECT_REVIEWER_DESCRIPTION,
     SELECT_A_REVIEWER,
     NO_PING,
     AUTOMATIC,
