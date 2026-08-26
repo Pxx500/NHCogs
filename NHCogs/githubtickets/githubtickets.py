@@ -858,6 +858,42 @@ class GitHubTickets(commands.Cog):
             return
         await ctx.send(presentation.category_added(category.name))
 
+    @githubtickets_category.command(name="rename")
+    async def githubtickets_category_rename(
+        self,
+        ctx: commands.Context,
+        old_name: str,
+        *,
+        new_name: str,
+    ) -> None:
+        """Rename a category"""
+        normalized_old_name = old_name.strip().lower()
+        normalized_new_name = new_name.strip().lower()
+        if not normalized_new_name:
+            await ctx.send(presentation.CATEGORY_NAME_EMPTY)
+            return
+        if len(normalized_new_name) > MAX_CATEGORY_NAME_LENGTH:
+            await ctx.send(presentation.CATEGORY_NAME_TOO_LONG)
+            return
+        try:
+            category = await self.store.rename_category(
+                ctx.guild.id,
+                normalized_old_name,
+                normalized_new_name,
+            )
+        except InvalidCategoryName:
+            await ctx.send(presentation.CATEGORY_NAME_EMPTY)
+            return
+        except CategoryAlreadyExists:
+            await ctx.send(presentation.CATEGORY_ALREADY_EXISTS)
+            return
+        if category is None:
+            await ctx.send(presentation.CATEGORY_NOT_FOUND)
+            return
+        await ctx.send(
+            presentation.category_renamed(normalized_old_name, category.name)
+        )
+
     @githubtickets_category.command(name="remove")
     async def githubtickets_category_remove(
         self,

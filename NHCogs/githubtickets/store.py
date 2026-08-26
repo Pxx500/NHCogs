@@ -354,6 +354,22 @@ class GitHubTicketsStore:
         async with self._lock:
             return await asyncio.to_thread(self._list_categories_sync, guild_id)
 
+    async def rename_category(
+        self,
+        guild_id: int,
+        old_name: str,
+        new_name: str,
+    ) -> Category | None:
+        normalized_old_name = old_name.strip().lower()
+        normalized_new_name = _normalize_category_name(new_name)
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._rename_category_sync,
+                guild_id,
+                normalized_old_name,
+                normalized_new_name,
+            )
+
     async def delete_category(self, category_id: int) -> bool:
         async with self._lock:
             return await asyncio.to_thread(self._delete_category_sync, category_id)
@@ -859,6 +875,45 @@ class GitHubTicketsStore:
                 (guild_id,),
             ).fetchall()
         return tuple(_decode_category(row) for row in rows)
+
+    def _rename_category_sync(
+        self,
+        guild_id: int,
+        old_name: str,
+        new_name: str,
+    ) -> Category | None:
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT * FROM categories WHERE guild_id = ? AND name = ?",
+                    (guild_id, old_name),
+                ).fetchone()
+                if row is None:
+                    connection.rollback()
+                    return None
+                if old_name != new_name:
+                    existing = connection.execute(
+                        "SELECT 1 FROM categories WHERE guild_id = ? AND name = ?",
+                        (guild_id, new_name),
+                    ).fetchone()
+                    if existing is not None:
+                        raise CategoryAlreadyExists(new_name)
+                    connection.execute(
+                        "UPDATE categories SET name = ? WHERE category_id = ?",
+                        (new_name, row["category_id"]),
+                    )
+                    row = connection.execute(
+                        "SELECT * FROM categories WHERE category_id = ?",
+                        (row["category_id"],),
+                    ).fetchone()
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        if row is None:
+            raise RuntimeError("renamed category could not be loaded")
+        return _decode_category(row)
 
     def _delete_category_sync(self, category_id: int) -> bool:
         with closing(self._connect()) as connection:

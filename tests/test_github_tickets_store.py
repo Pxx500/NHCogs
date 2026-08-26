@@ -438,6 +438,58 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
             (),
         )
 
+    async def test_category_rename_preserves_profiles_and_active_ticket_links(self):
+        await self.store.initialize()
+        category = await self.store.add_category(10, "rendring", self.now)
+        await self.store.save_profile(
+            guild_id=10,
+            user_id=100,
+            github_username=None,
+            category_ids=(category.category_id,),
+            automatic_pings=True,
+            updated_at=self.now,
+        )
+        ticket = await self._create_open_ticket(
+            category_ids=(category.category_id,),
+            category_display="rendring",
+        )
+
+        renamed = await self.store.rename_category(10, " ReNDrInG ", " Rendering ")
+
+        self.assertIsNotNone(renamed)
+        self.assertEqual(renamed.category_id, category.category_id)
+        self.assertEqual(renamed.created_at, category.created_at)
+        self.assertEqual(renamed.name, "rendering")
+        profile = await self.store.get_profile(10, 100)
+        reloaded_ticket = await self.store.get_ticket(ticket.ticket_id)
+        self.assertEqual(profile.category_ids, (category.category_id,))
+        self.assertEqual(reloaded_ticket.category_ids, (category.category_id,))
+        self.assertEqual(reloaded_ticket.category_display, "rendring")
+
+    async def test_category_rename_is_guild_scoped_and_validates_the_new_name(self):
+        await self.store.initialize()
+        rendering = await self.store.add_category(10, "rendering", self.now)
+        python = await self.store.add_category(10, "python", self.now)
+        other_guild = await self.store.add_category(20, "rendering", self.now)
+
+        self.assertIsNone(await self.store.rename_category(20, "python", "scala"))
+        self.assertEqual(
+            await self.store.rename_category(10, " RENDERING ", "rendering"),
+            rendering,
+        )
+        with self.assertRaises(models.CategoryAlreadyExists):
+            await self.store.rename_category(10, "rendering", " PYTHON ")
+        with self.assertRaises(models.InvalidCategoryName):
+            await self.store.rename_category(10, "rendering", "   ")
+        with self.assertRaises(models.InvalidCategoryName):
+            await self.store.rename_category(10, "rendering", "x" * 101)
+
+        self.assertEqual(
+            await self.store.list_categories(10),
+            (python, rendering),
+        )
+        self.assertEqual(await self.store.list_categories(20), (other_guild,))
+
     async def test_category_deletion_removes_routing_links_but_preserves_snapshot(self):
         await self.store.initialize()
         rendering = await self.store.add_category(10, "rendering", self.now)
