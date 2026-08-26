@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import json
 import sys
@@ -16,7 +17,19 @@ def _record_construction(bot, name):
         raise RuntimeError(f"failed constructing {name}")
 
 
-class StubConsoleDump:
+class StubLifecycle:
+    async def cog_load(self):
+        self.bot.started.append(self.qualified_name)
+        if self.bot.failure == (self.qualified_name, "cog_load"):
+            raise RuntimeError(f"failed loading {self.qualified_name}")
+        if self.bot.failure == (self.qualified_name, "cancel"):
+            raise asyncio.CancelledError
+
+    async def cog_unload(self):
+        self.bot.unloaded.append(self.qualified_name)
+
+
+class StubConsoleDump(StubLifecycle):
     qualified_name = "ConsoleDump"
 
     def __init__(self, bot):
@@ -24,7 +37,7 @@ class StubConsoleDump:
         _record_construction(bot, self.qualified_name)
 
 
-class StubNHMisc:
+class StubNHMisc(StubLifecycle):
     qualified_name = "NHMisc"
     CONFIG_IDENTIFIER = 8597423150612235807
 
@@ -33,7 +46,7 @@ class StubNHMisc:
         _record_construction(bot, self.qualified_name)
 
 
-class StubHoneypot:
+class StubHoneypot(StubLifecycle):
     qualified_name = "Honeypot"
     CONFIG_IDENTIFIER = 205192943327321000143939875896557571750
 
@@ -42,7 +55,7 @@ class StubHoneypot:
         _record_construction(bot, self.qualified_name)
 
 
-class StubGitHubTickets:
+class StubGitHubTickets(StubLifecycle):
     qualified_name = "GitHubTickets"
     CONFIG_IDENTIFIER = 228724500916148494760637198509440112622
 
@@ -51,7 +64,7 @@ class StubGitHubTickets:
         _record_construction(bot, self.qualified_name)
 
 
-class StubCustomCommandsMigration:
+class StubCustomCommandsMigration(StubLifecycle):
     qualified_name = "CustomCommandsMigration"
 
     def __init__(self, bot):
@@ -144,6 +157,8 @@ class FakeBot:
         self.added = []
         self.removed = []
         self.constructed = []
+        self.started = []
+        self.unloaded = []
         self.preflight_calls = 0
 
     async def add_cog(self, cog):
@@ -153,13 +168,20 @@ class FakeBot:
             raise RuntimeError(f"failed before adding {name}")
         if name in self.cogs:
             raise RuntimeError(f"cog already loaded: {name}")
+        await cog.cog_load()
+        if self.failure == (name, "framework_cleanup"):
+            await cog.cog_unload()
+            raise RuntimeError(f"framework cleaned {name} before failing")
         self.cogs[name] = cog
         if self.failure == (name, "after"):
             raise RuntimeError(f"failed after adding {name}")
 
     async def remove_cog(self, name):
         self.removed.append(name)
-        return self.cogs.pop(name, None)
+        cog = self.cogs.pop(name, None)
+        if cog is not None:
+            await cog.cog_unload()
+        return cog
 
     def get_cog(self, name):
         return self.cogs.get(name)
@@ -260,6 +282,43 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
                     f"failed constructing {name}",
                     "\n".join(captured.output),
                 )
+
+    async def test_each_subcog_cog_load_failure_is_cleaned_up_and_isolated(self):
+        for name in ("ConsoleDump", "NHMisc", "Honeypot", "GitHubTickets"):
+            with self.subTest(name=name):
+                with load_suite_module() as suite:
+                    bot = FakeBot((name, "cog_load"))
+
+                    with self.assertLogs("red.NHCogs", level="ERROR") as captured:
+                        await suite.setup(bot)
+
+                self.assertNotIn(name, bot.cogs)
+                self.assertEqual(bot.unloaded.count(name), 1)
+                self.assertIn(f"failed loading {name}", "\n".join(captured.output))
+                for other in ("ConsoleDump", "NHMisc", "Honeypot", "GitHubTickets"):
+                    if other != name:
+                        self.assertIn(other, bot.cogs)
+
+    async def test_setup_cancellation_cleans_loaded_and_partial_cogs_then_reraises(self):
+        with load_suite_module() as suite:
+            bot = FakeBot(("Honeypot", "cancel"))
+
+            with self.assertRaises(asyncio.CancelledError):
+                await suite.setup(bot)
+
+        self.assertEqual(bot.cogs, {})
+        self.assertEqual(bot.removed, ["NHMisc", "ConsoleDump"])
+        self.assertEqual(bot.unloaded, ["Honeypot", "NHMisc", "ConsoleDump"])
+
+    async def test_framework_cleanup_is_not_repeated_by_supervisor(self):
+        with load_suite_module() as suite:
+            bot = FakeBot(("GitHubTickets", "framework_cleanup"))
+
+            with self.assertLogs("red.NHCogs", level="ERROR"):
+                await suite.setup(bot)
+
+        self.assertEqual(bot.unloaded.count("GitHubTickets"), 1)
+        self.assertNotIn("GitHubTickets", bot.cogs)
 
     async def test_import_failure_is_isolated_and_logs_complete_traceback(self):
         with load_suite_module() as suite:
