@@ -151,11 +151,27 @@ class GitHubTicketsPresentationTests(unittest.TestCase):
         long_title = "x" * 120
         self.assertEqual(presentation.thread_name(long_title), "x" * 100)
 
+    def test_finished_ticket_log_omits_a_missing_reviewer(self):
+        presentation = load_presentation_module()
+
+        self.assertEqual(
+            presentation.finished_ticket_log(
+                title="Improve rendering",
+                url="https://github.com/example/repository/pull/123",
+                actor_id=40,
+                author_id=30,
+                reviewer_id=None,
+            ),
+            "[Improve rendering](https://github.com/example/repository/pull/123)\n"
+            "Finished by <@40> | Author <@30>",
+        )
+
     def test_configuration_overview_uses_the_accepted_labels(self):
         presentation = load_presentation_module()
 
         overview = presentation.configuration_overview(
             ticket_channel="#github-tickets",
+            log_channel="#github-ticket-logs",
             participant_roles=("@GT:NH Devs", "@GT:NH Contributor"),
             categories=("rendering", "mixins", "performance"),
             max_pings=3,
@@ -171,6 +187,7 @@ class GitHubTicketsPresentationTests(unittest.TestCase):
         self.assertEqual(
             overview,
             "Ticket channel: #github-tickets\n"
+            "Log channel: #github-ticket-logs\n"
             "Participant roles: @GT:NH Devs, @GT:NH Contributor\n"
             "Categories: rendering, mixins, performance\n"
             "Maximum pings: 3\n"
@@ -188,6 +205,7 @@ class GitHubTicketsPresentationTests(unittest.TestCase):
 
         overview = presentation.configuration_overview(
             ticket_channel=None,
+            log_channel=None,
             participant_roles=(),
             categories=(),
             max_pings=0,
@@ -201,6 +219,7 @@ class GitHubTicketsPresentationTests(unittest.TestCase):
         )
 
         self.assertIn("Ticket channel: Not set", overview)
+        self.assertIn("Log channel: Not set", overview)
         self.assertIn("Participant roles: None", overview)
         self.assertIn("Categories: None", overview)
         self.assertIn("Maximum pings: 0", overview)
@@ -209,6 +228,7 @@ class GitHubTicketsPresentationTests(unittest.TestCase):
         presentation = load_presentation_module()
         overview = presentation.configuration_overview(
             ticket_channel="#github-tickets",
+            log_channel="#github-ticket-logs",
             participant_roles=tuple(f"@role-{index}-" + "x" * 80 for index in range(50)),
             categories=tuple(f"category-{index}-" + "x" * 80 for index in range(25)),
             max_pings=3,

@@ -237,20 +237,32 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
     def make_dashboard(self, store=None):
         store = store or FakeStore()
         actor = coordinator.TicketActor(10, True, False)
-
-        async def create_ticket(_request, _actor):
-            return coordinator.TicketResult(True)
-
         view = dashboard_module.GitHubTicketsDashboard(
             store,
             guild_id=100,
-            create_ticket=create_ticket,
             actor_factory=lambda _interaction: actor,
             clock=lambda: datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc),
         )
         return view, store, actor
 
-    async def test_dashboard_is_exact_ephemeral_four_button_interface(self):
+    async def open_ticket_modal(self, store=None, actor=None, create_ticket=None):
+        store = store or FakeStore()
+        actor = actor or coordinator.TicketActor(10, True, False)
+
+        async def successful_create(_request, _actor):
+            return coordinator.TicketResult(True)
+
+        interaction = FakeInteraction()
+        await dashboard_module.send_new_ticket_modal(
+            interaction,
+            store,
+            guild_id=100,
+            create_ticket=create_ticket or successful_create,
+            actor_factory=lambda _interaction: actor,
+        )
+        return interaction.response.modals[0]
+
+    async def test_dashboard_is_exact_ephemeral_profile_interface(self):
         view, _store, _actor = self.make_dashboard()
         interaction = FakeInteraction()
 
@@ -259,7 +271,6 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [(button.label, button.style) for button in view.children],
             [
-                (presentation.NEW_TICKET, discord.ButtonStyle.primary),
                 (presentation.EDIT_PROFILE, discord.ButtonStyle.secondary),
                 (presentation.BROWSE_CATEGORIES, discord.ButtonStyle.secondary),
                 (presentation.CLEAR_PROFILE, discord.ButtonStyle.danger),
@@ -267,7 +278,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(interaction.response.messages), 1)
         content, kwargs = interaction.response.messages[0]
-        self.assertEqual(content, presentation.DASHBOARD_TITLE)
+        self.assertEqual(content, presentation.DEVELOPER_PROFILE_COMMAND)
         self.assertIs(kwargs["view"], view)
         self.assertTrue(kwargs["ephemeral"])
         allowed_mentions = kwargs["allowed_mentions"]
@@ -281,26 +292,22 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         store.categories = [models.Category(1, 100, "rendering", now)]
         current_actor = [coordinator.TicketActor(10, True, False)]
 
-        async def create_ticket(_request, _actor):
-            return coordinator.TicketResult(True)
-
         dashboard = dashboard_module.GitHubTicketsDashboard(
             store,
             guild_id=100,
-            create_ticket=create_ticket,
             actor_factory=lambda _interaction: current_actor[0],
         )
 
         profile_open = FakeInteraction()
-        await dashboard.children[1].callback(profile_open)
+        await dashboard.children[0].callback(profile_open)
         profile_modal = profile_open.response.modals[0]
 
         clear_open = FakeInteraction()
-        await dashboard.children[3].callback(clear_open)
+        await dashboard.children[2].callback(clear_open)
         clear_confirmation = clear_open.response.messages[0][1]["view"]
 
         browse_open = FakeInteraction()
-        await dashboard.children[2].callback(browse_open)
+        await dashboard.children[1].callback(browse_open)
         category_browser = browse_open.response.edits[0]["view"]
 
         current_actor[0] = coordinator.TicketActor(10, False, False)
@@ -390,7 +397,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         view, _store, _actor = self.make_dashboard(store)
         open_interaction = FakeInteraction()
 
-        await view.children[1].callback(open_interaction)
+        await view.children[0].callback(open_interaction)
 
         self.assertEqual(len(open_interaction.response.modals), 1)
         modal = open_interaction.response.modals[0]
@@ -453,7 +460,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
     async def test_edit_profile_rejects_automatic_pings_without_categories(self):
         view, store, _actor = self.make_dashboard()
         open_interaction = FakeInteraction()
-        await view.children[1].callback(open_interaction)
+        await view.children[0].callback(open_interaction)
         modal = open_interaction.response.modals[0]
         modal.automatic_pings.value = True
         modal.categories.values = []
@@ -474,7 +481,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         store.categories = [models.Category(1, 100, "rendering", now)]
         view, _store, _actor = self.make_dashboard(store)
         open_interaction = FakeInteraction()
-        await view.children[1].callback(open_interaction)
+        await view.children[0].callback(open_interaction)
         modal = open_interaction.response.modals[0]
         modal.categories.values = ["1"]
         store.categories = []
@@ -492,12 +499,10 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         view, _store, _actor = self.make_dashboard()
 
         profile_interaction = FakeInteraction()
-        await view.children[1].callback(profile_interaction)
+        await view.children[0].callback(profile_interaction)
         profile_select = profile_interaction.response.modals[0].categories
 
-        ticket_interaction = FakeInteraction()
-        await view.children[0].callback(ticket_interaction)
-        ticket_select = ticket_interaction.response.modals[0].categories
+        ticket_select = (await self.open_ticket_modal(_store)).categories
 
         for select in (profile_select, ticket_select):
             self.assertTrue(select.disabled)
@@ -508,7 +513,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         view, store, _actor = self.make_dashboard()
         open_interaction = FakeInteraction()
 
-        await view.children[3].callback(open_interaction)
+        await view.children[2].callback(open_interaction)
 
         self.assertEqual(len(open_interaction.response.messages), 1)
         content, kwargs = open_interaction.response.messages[0]
@@ -544,7 +549,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         view, _store, _actor = self.make_dashboard()
         interaction = FakeInteraction()
 
-        await view.children[2].callback(interaction)
+        await view.children[1].callback(interaction)
 
         self.assertEqual(interaction.response.messages[0][0], presentation.NO_CATEGORIES_CONFIGURED)
         self.assertTrue(interaction.response.messages[0][1]["ephemeral"])
@@ -569,7 +574,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         dashboard, _store, _actor = self.make_dashboard(store)
         open_interaction = FakeInteraction()
 
-        await dashboard.children[2].callback(open_interaction)
+        await dashboard.children[1].callback(open_interaction)
 
         self.assertEqual(len(open_interaction.response.edits), 1)
         initial = open_interaction.response.edits[0]
@@ -621,7 +626,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         back_interaction = FakeInteraction()
         await browser.children[3].callback(back_interaction)
         back = back_interaction.response.edits[0]
-        self.assertEqual(back["content"], presentation.DASHBOARD_TITLE)
+        self.assertEqual(back["content"], presentation.DEVELOPER_PROFILE_COMMAND)
         self.assertIs(back["view"], dashboard)
         self.assertFalse(back["allowed_mentions"].users)
 
@@ -677,12 +682,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             models.Category(category_id, 100, f"category-{category_id}", now)
             for category_id in range(1, 27)
         ]
-        view, _store, _actor = self.make_dashboard(store)
-        interaction = FakeInteraction()
-
-        await view.children[0].callback(interaction)
-
-        modal = interaction.response.modals[0]
+        modal = await self.open_ticket_modal(store)
         self.assertEqual(modal.title, presentation.NEW_TICKET)
         self.assertEqual(
             [label.text for label in modal.children],
@@ -742,12 +742,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             models.Category(category_id, 100, "x" * 100, now)
             for category_id in range(1, 26)
         ]
-        dashboard, _store, _actor = self.make_dashboard(store)
-        interaction = FakeInteraction()
-
-        await dashboard.children[0].callback(interaction)
-
-        modal = interaction.response.modals[0]
+        modal = await self.open_ticket_modal(store)
         selected = [option.label for option in modal.categories.options[: modal.categories.max_values]]
         content = presentation.ticket_message(
             title="x" * modal.pr_title.max_length,
@@ -800,16 +795,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
                     calls.append((request, selected_actor))
                     return coordinator.TicketResult(True)
 
-                dashboard = dashboard_module.GitHubTicketsDashboard(
-                    store,
-                    guild_id=100,
-                    create_ticket=create_ticket,
-                    actor_factory=lambda _interaction, selected_actor=actor: selected_actor,
-                    clock=lambda: datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc),
-                )
-                open_interaction = FakeInteraction()
-                await dashboard.children[0].callback(open_interaction)
-                modal = open_interaction.response.modals[0]
+                modal = await self.open_ticket_modal(store, actor, create_ticket)
                 modal.pr_title.value = "  title  "
                 modal.pr_link.value = "  not validated  "
                 modal.categories.values = list(category_values)
@@ -848,15 +834,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             return coordinator.TicketResult(False, "coordinator error")
 
         async def modal():
-            dashboard = dashboard_module.GitHubTicketsDashboard(
-                store,
-                guild_id=100,
-                create_ticket=create_ticket,
-                actor_factory=lambda _interaction: actor,
-            )
-            interaction = FakeInteraction()
-            await dashboard.children[0].callback(interaction)
-            return interaction.response.modals[0]
+            return await self.open_ticket_modal(store, actor, create_ticket)
 
         automatic = await modal()
         automatic.ping_behavior.value = models.RoutingMode.AUTOMATIC.value

@@ -65,6 +65,7 @@ class TicketRequest:
 class TicketResult:
     success: bool
     response: str | None = None
+    finished_ticket: Ticket | None = None
 
 
 SettingsGetter = Callable[[int], Awaitable[GuildSettings]]
@@ -321,14 +322,14 @@ class TicketCoordinator:
                 return TicketResult(False, INACTIVE_TICKET)
             finishing = await self._store.get_ticket(ticket_id)
             if finishing is None:
-                return TicketResult(True)
+                return TicketResult(True, finished_ticket=ticket)
             try:
                 await self._delete_remaining_projection(finishing)
             except Exception:
                 await self._defer_cleanup_retry(ticket_id)
                 return TicketResult(False, ACTION_FAILED)
             self._locks.pop(ticket_id, None)
-            return TicketResult(True)
+            return TicketResult(True, finished_ticket=ticket)
 
     async def handle_message_deleted(self, message_id: int) -> None:
         ticket = await self._store.get_ticket_by_message_id(message_id)

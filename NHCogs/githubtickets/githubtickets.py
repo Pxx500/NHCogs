@@ -12,7 +12,11 @@ from redbot.core.data_manager import cog_data_path
 
 from . import presentation, settings
 from .coordinator import TicketActor, TicketCoordinator, TicketResult
-from .dashboard import GitHubTicketsDashboard, send_developer_profile
+from .dashboard import (
+    GitHubTicketsDashboard,
+    send_developer_profile,
+    send_new_ticket_modal,
+)
 from .discord_projection import DiscordTicketProjection
 from .models import (
     CategoryAlreadyExists,
@@ -55,16 +59,30 @@ class GitHubTickets(commands.Cog):
         )
         self.scheduler = DeadlineScheduler(self.store, self._process_due_deadline)
         self._startup_task: asyncio.Task[None] | None = None
-        self._dashboard_command = discord.app_commands.Command(
-            name="github-tickets",
-            description=presentation.SLASH_DESCRIPTION,
-            callback=self._safe_open_dashboard,
+        self._new_ticket_command = discord.app_commands.Command(
+            name=presentation.NEW_TICKET_COMMAND,
+            description=presentation.NEW_TICKET_COMMAND_DESCRIPTION,
+            callback=self._safe_open_new_ticket,
         )
-        self._developer_profile_command = discord.app_commands.ContextMenu(
+        self._developer_profile_slash_command = discord.app_commands.Command(
+            name=presentation.DEVELOPER_PROFILE_SLASH_COMMAND,
+            description=presentation.DEVELOPER_PROFILE_SLASH_DESCRIPTION,
+            callback=self._safe_open_profile_dashboard,
+        )
+        self._developer_profile_context_command = discord.app_commands.ContextMenu(
             name=presentation.DEVELOPER_PROFILE_COMMAND,
             callback=self._safe_open_developer_profile,
         )
         self._application_commands_registered = False
+        self._replaced_application_commands: dict[
+            tuple[str, discord.AppCommandType],
+            (
+                discord.app_commands.Command
+                | discord.app_commands.ContextMenu
+                | discord.app_commands.Group
+                | None
+            ),
+        ] = {}
         self._restored_view_message_ids: set[int] = set()
 
     async def cog_check(self, ctx: commands.Context) -> bool:
@@ -142,7 +160,7 @@ class GitHubTickets(commands.Cog):
     def _register_application_commands(self) -> None:
         if self._application_commands_registered:
             return
-        commands_to_add = (self._dashboard_command, self._developer_profile_command)
+        commands_to_add = self._application_commands()
         previous = {
             (command.name, command.type): self.bot.tree.get_command(
                 command.name,
@@ -160,22 +178,66 @@ class GitHubTickets(commands.Cog):
                     self.bot.tree.remove_command(command.name, type=command.type)
             for _key, command in previous.items():
                 if command is not None:
-                    self.bot.tree.add_command(command, override=True)
+                    try:
+                        self.bot.tree.add_command(command, override=True)
+                    except Exception:
+                        log.exception(
+                            "GitHub Tickets failed to restore an application command"
+                        )
             raise
+        self._replaced_application_commands = previous
         self._application_commands_registered = True
 
     def _unregister_application_commands(self) -> None:
         if not self._application_commands_registered:
             return
-        for command in (self._dashboard_command, self._developer_profile_command):
+        previous = self._replaced_application_commands
+        self._replaced_application_commands = {}
+        for command in self._application_commands():
             command_type = command.type
             existing = self.bot.tree.get_command(command.name, type=command_type)
             if existing is command:
                 self.bot.tree.remove_command(command.name, type=command_type)
+                displaced = previous.get((command.name, command_type))
+                if displaced is not None:
+                    try:
+                        self.bot.tree.add_command(displaced, override=True)
+                    except Exception:
+                        log.exception(
+                            "GitHub Tickets failed to restore a displaced application command"
+                        )
         self._application_commands_registered = False
 
+    def _application_commands(self):
+        return (
+            self._new_ticket_command,
+            self._developer_profile_slash_command,
+            self._developer_profile_context_command,
+        )
+
     @discord.app_commands.guild_only()
-    async def _open_dashboard(self, interaction: discord.Interaction) -> None:
+    async def _open_new_ticket(self, interaction: discord.Interaction) -> None:
+        guild_id = self._interaction_guild_id(interaction)
+        if guild_id is None:
+            await interaction.response.send_message(
+                presentation.CANNOT_USE_ACTION,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        await send_new_ticket_modal(
+            interaction,
+            self.store,
+            guild_id=guild_id,
+            create_ticket=self.coordinator.create_ticket,
+            actor_factory=self._actor_from_interaction,
+        )
+
+    @discord.app_commands.guild_only()
+    async def _open_profile_dashboard(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
         guild_id = self._interaction_guild_id(interaction)
         actor = self._actor_from_interaction(interaction)
         if guild_id is None or not actor.can_participate:
@@ -188,18 +250,30 @@ class GitHubTickets(commands.Cog):
         await GitHubTicketsDashboard(
             self.store,
             guild_id=guild_id,
-            create_ticket=self.coordinator.create_ticket,
             actor_factory=self._actor_from_interaction,
         ).send(interaction)
 
     @discord.app_commands.guild_only()
-    async def _safe_open_dashboard(self, interaction: discord.Interaction) -> None:
+    async def _safe_open_new_ticket(self, interaction: discord.Interaction) -> None:
         try:
-            await self._open_dashboard(interaction)
+            await self._open_new_ticket(interaction)
         except asyncio.CancelledError:
             raise
         except Exception:
-            log.exception("GitHub Tickets dashboard callback failed")
+            log.exception("GitHub Tickets new ticket callback failed")
+            await self._send_interaction_failure(interaction)
+
+    @discord.app_commands.guild_only()
+    async def _safe_open_profile_dashboard(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        try:
+            await self._open_profile_dashboard(interaction)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("GitHub Tickets developer profile dashboard callback failed")
             await self._send_interaction_failure(interaction)
 
     @discord.app_commands.guild_only()
@@ -300,11 +374,36 @@ class GitHubTickets(commands.Cog):
         return await self._ticket_action(self.coordinator.unassign, public_token, actor)
 
     async def _finish_ticket(self, public_token: str, actor: TicketActor):
-        return await self._ticket_action(
-            self.coordinator.mark_finished,
-            public_token,
-            actor,
-        )
+        ticket = await self.store.get_ticket_by_public_token(public_token)
+        if ticket is None:
+            return TicketResult(False, presentation.TICKET_NOT_ACTIVE)
+        result = await self.coordinator.mark_finished(ticket.ticket_id, actor)
+        if result.success and result.finished_ticket is not None:
+            await self._log_finished_ticket(result.finished_ticket, actor.user_id)
+        return result
+
+    async def _log_finished_ticket(self, ticket: Ticket, actor_id: int) -> None:
+        try:
+            guild_settings = await self._get_guild_settings(ticket.guild_id)
+            if guild_settings.log_channel_id is None:
+                return
+            channel = self.bot.get_channel(guild_settings.log_channel_id)
+            if channel is None:
+                return
+            await channel.send(
+                presentation.finished_ticket_log(
+                    title=ticket.pr_title,
+                    url=ticket.pr_url,
+                    actor_id=actor_id,
+                    author_id=ticket.author_id,
+                    reviewer_id=ticket.assignee_id,
+                ),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("GitHub Tickets finished ticket log failed")
 
     async def _get_guild_settings(self, guild_id: int) -> settings.GuildSettings:
         raw = await self.config.guild_from_id(guild_id).all()
@@ -425,14 +524,31 @@ class GitHubTickets(commands.Cog):
 
     async def _handle_guild_channel_delete(self, channel) -> None:
         guild_id = int(channel.guild.id)
-        await self.store.delete_tickets_for_channel(guild_id, int(channel.id))
-        guild_config = self.config.guild_from_id(guild_id)
-        configured_channel_id = await guild_config.get_raw(
-            "ticket_channel_id",
-            default=None,
-        )
-        if configured_channel_id == channel.id:
-            await guild_config.clear_raw("ticket_channel_id")
+        config_error: Exception | None = None
+        try:
+            guild_config = self.config.guild_from_id(guild_id)
+            configured_channel_id = await guild_config.get_raw(
+                "ticket_channel_id",
+                default=None,
+            )
+            if configured_channel_id == channel.id:
+                await guild_config.clear_raw("ticket_channel_id")
+            configured_log_channel_id = await guild_config.get_raw(
+                "log_channel_id",
+                default=None,
+            )
+            if configured_log_channel_id == channel.id:
+                await guild_config.clear_raw("log_channel_id")
+        except Exception as error:
+            config_error = error
+        try:
+            await self.store.delete_tickets_for_channel(guild_id, int(channel.id))
+        except Exception as store_error:
+            if config_error is not None:
+                raise store_error from config_error
+            raise
+        if config_error is not None:
+            raise config_error
 
     @commands.Cog.listener()
     async def on_guild_role_delete(self, role: discord.Role) -> None:
@@ -501,6 +617,11 @@ class GitHubTickets(commands.Cog):
                     if guild_settings.ticket_channel_id is not None
                     else None
                 ),
+                log_channel=(
+                    f"<#{guild_settings.log_channel_id}>"
+                    if guild_settings.log_channel_id is not None
+                    else None
+                ),
                 participant_roles=tuple(
                     f"<@&{role_id}>" for role_id in guild_settings.participant_role_ids
                 ),
@@ -546,6 +667,30 @@ class GitHubTickets(commands.Cog):
         """Clear the ticket channel"""
         await self.config.guild(ctx.guild).clear_raw("ticket_channel_id")
         await ctx.send(presentation.TICKET_CHANNEL_CLEARED)
+
+    @githubtickets.group(name="logchannel", invoke_without_command=True)
+    async def githubtickets_logchannel(self, ctx: commands.Context) -> None:
+        """Configure the log channel"""
+        await self._send_configuration_overview(ctx)
+
+    @githubtickets_logchannel.command(name="set")
+    async def githubtickets_logchannel_set(
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel,
+    ) -> None:
+        """Set the log channel"""
+        await self.config.guild(ctx.guild).set_raw("log_channel_id", value=channel.id)
+        await ctx.send(
+            presentation.log_channel_set(channel.mention),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @githubtickets_logchannel.command(name="clear")
+    async def githubtickets_logchannel_clear(self, ctx: commands.Context) -> None:
+        """Clear the log channel"""
+        await self.config.guild(ctx.guild).clear_raw("log_channel_id")
+        await ctx.send(presentation.LOG_CHANNEL_CLEARED)
 
     @githubtickets.group(name="role", invoke_without_command=True)
     async def githubtickets_role(self, ctx: commands.Context) -> None:

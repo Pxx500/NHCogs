@@ -24,6 +24,7 @@ class NegativeDuration(ValueError):
 
 DEFAULTS: dict[str, object] = {
     "ticket_channel_id": None,
+    "log_channel_id": None,
     "participant_role_ids": [],
     "protection_seconds": DEFAULT_PROTECTION_SECONDS,
     "volunteer_seconds": DEFAULT_VOLUNTEER_SECONDS,
@@ -89,6 +90,7 @@ def _nonnegative_int(raw: object, default: int) -> int:
 @dataclass(frozen=True, slots=True)
 class GuildSettings:
     ticket_channel_id: int | None
+    log_channel_id: int | None
     participant_role_ids: tuple[int, ...]
     protection_seconds: int
     volunteer_seconds: int
@@ -104,6 +106,7 @@ class GuildSettings:
         values = raw if isinstance(raw, Mapping) else {}
         return cls(
             ticket_channel_id=_positive_id(values.get("ticket_channel_id")),
+            log_channel_id=_positive_id(values.get("log_channel_id")),
             participant_role_ids=_role_ids(values.get("participant_role_ids")),
             protection_seconds=_nonnegative_int(
                 values.get("protection_seconds"), DEFAULT_PROTECTION_SECONDS
