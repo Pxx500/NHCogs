@@ -7,16 +7,83 @@ from unittest import mock
 
 from tests.githubtickets_loader import isolated_githubtickets_modules
 
+COMMAND_SIGNATURES = {
+    "githubtickets channel set": "<channel>",
+    "githubtickets logchannel set": "<channel>",
+    "githubtickets role add": "<role>",
+    "githubtickets role remove": "<role>",
+    "githubtickets category add": "<name>",
+    "githubtickets category remove": "<name>",
+    "githubtickets maxpings": "<count>",
+    "githubtickets timing protection": "<duration>",
+    "githubtickets timing volunteer": "<duration>",
+    "githubtickets timing online": "<duration>",
+    "githubtickets timing idle": "<duration>",
+    "githubtickets timing donotdisturb": "<duration>",
+    "githubtickets timing offline": "<duration>",
+    "githubtickets timing direct": "<duration>",
+    "githubtickets profile clear": "<user_id>",
+}
+
+
+class _OverviewEmbed:
+    def __init__(self, *, title=None, description=None):
+        self.title = title
+        self.description = description
+        self.fields = []
+
+    def add_field(self, *, name, value, inline):
+        self.fields.append(SimpleNamespace(name=name, value=value, inline=inline))
+
+
+def _registered_command_tree(cog_type, root):
+    commands = tuple(cog_type.__cog_commands__)
+
+    def clone(command):
+        docstring = command.callback.__doc__ or ""
+        return SimpleNamespace(
+            name=command.name,
+            qualified_name=command.qualified_name,
+            signature=COMMAND_SIGNATURES.get(command.qualified_name, ""),
+            short_doc=docstring.strip().splitlines()[0] if docstring.strip() else "",
+            commands=[
+                clone(child)
+                for child in commands
+                if getattr(child, "parent", None) is command
+            ],
+        )
+
+    return clone(root)
+
+
+def _leaf_command_names(command):
+    if not command.commands:
+        return [command.qualified_name]
+    return [
+        leaf
+        for child in command.commands
+        for leaf in _leaf_command_names(child)
+    ]
+
 
 class FakeContext:
-    def __init__(self, guild_id=42, *, manage_messages=True):
-        self.guild = SimpleNamespace(id=guild_id) if guild_id is not None else None
-        self.author = SimpleNamespace()
-        self.channel = SimpleNamespace(
-            permissions_for=lambda _author: SimpleNamespace(
-                manage_messages=manage_messages
-            )
+    def __init__(self, guild_id=42, *, manage_messages=True, private=True):
+        default_role = object()
+        self.guild = (
+            SimpleNamespace(id=guild_id, default_role=default_role)
+            if guild_id is not None
+            else None
         )
+        self.author = SimpleNamespace()
+
+        def permissions_for(target):
+            if target is default_role:
+                return SimpleNamespace(view_channel=not private)
+            return SimpleNamespace(manage_messages=manage_messages)
+
+        self.channel = SimpleNamespace(permissions_for=permissions_for)
+        self.clean_prefix = "??"
+        self.command = None
         self.send = mock.AsyncMock()
 
 
@@ -105,19 +172,130 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 datetime.now(timezone.utc),
             )
             ctx = FakeContext()
+            ctx.command = _registered_command_tree(
+                modules.githubtickets.GitHubTickets,
+                modules.githubtickets.GitHubTickets.githubtickets,
+            )
 
-            await cog.githubtickets(ctx)
+            with mock.patch.object(
+                modules.githubtickets.discord,
+                "Embed",
+                _OverviewEmbed,
+            ):
+                await cog.githubtickets(ctx)
 
-        content = ctx.send.await_args.args[0]
-        self.assertIn("Ticket channel: <#100>", content)
-        self.assertIn("Log channel: <#101>", content)
-        self.assertIn("Participant roles: <@&200>, <@&201>", content)
-        self.assertIn("Categories: rendering", content)
-        self.assertIn("Maximum pings: 3", content)
-        allowed_mentions = ctx.send.await_args.kwargs["allowed_mentions"]
-        self.assertFalse(allowed_mentions.users)
-        self.assertFalse(allowed_mentions.roles)
-        self.assertFalse(allowed_mentions.everyone)
+        self.assertEqual(ctx.send.await_count, 2)
+        configuration = ctx.send.await_args_list[0].args[0]
+        self.assertIn("Ticket channel: <#100>", configuration)
+        self.assertIn("Log channel: <#101>", configuration)
+        self.assertIn("Participant roles: <@&200>, <@&201>", configuration)
+        self.assertIn("Categories: rendering", configuration)
+        self.assertIn("Maximum pings: 3", configuration)
+
+        command_embed = ctx.send.await_args_list[1].kwargs["embed"]
+        self.assertEqual(command_embed.title, "GitHub Tickets")
+        rendered_commands = "\n".join(field.value for field in command_embed.fields)
+        direct_names = [child.qualified_name for child in ctx.command.commands]
+        deep_names = [
+            leaf
+            for child in ctx.command.commands
+            for leaf in _leaf_command_names(child)
+            if leaf not in direct_names
+        ]
+        for qualified_name in direct_names:
+            self.assertIn(f"??{qualified_name}", rendered_commands)
+        for qualified_name in deep_names:
+            self.assertNotIn(f"??{qualified_name}", rendered_commands)
+        self.assertIn("??githubtickets maxpings <count>", rendered_commands)
+        self.assertIn("Run a category below", command_embed.description)
+
+        for call in ctx.send.await_args_list:
+            allowed_mentions = call.kwargs["allowed_mentions"]
+            self.assertFalse(allowed_mentions.users)
+            self.assertFalse(allowed_mentions.roles)
+            self.assertFalse(allowed_mentions.everyone)
+
+    async def test_public_bare_group_hides_configuration_without_reading_it(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            ctx = FakeContext(private=False)
+            ctx.command = _registered_command_tree(
+                modules.githubtickets.GitHubTickets,
+                modules.githubtickets.GitHubTickets.githubtickets,
+            )
+
+            with (
+                mock.patch.object(
+                    cog,
+                    "_send_configuration_overview",
+                    new=mock.AsyncMock(),
+                ) as configuration_sender,
+                mock.patch.object(
+                    modules.githubtickets.discord,
+                    "Embed",
+                    _OverviewEmbed,
+                ),
+            ):
+                await cog.githubtickets(ctx)
+
+        configuration_sender.assert_not_awaited()
+        ctx.send.assert_awaited_once()
+        embed = ctx.send.await_args.kwargs["embed"]
+        fields = {field.name: field.value for field in embed.fields}
+        self.assertIn("Current configuration", fields)
+        self.assertIn("hidden", fields["Current configuration"])
+        self.assertIn("Commands", fields)
+
+    async def test_every_bare_subgroup_shows_its_commands(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            cog_type = modules.githubtickets.GitHubTickets
+            cog = cog_type(SimpleNamespace())
+            commands = tuple(cog_type.__cog_commands__)
+            groups = [
+                command
+                for command in commands
+                if command.qualified_name != "githubtickets"
+                and any(
+                    getattr(child, "parent", None) is command
+                    for child in commands
+                )
+            ]
+
+            with (
+                mock.patch.object(
+                    cog,
+                    "_send_configuration_overview",
+                    new=mock.AsyncMock(),
+                ) as configuration_sender,
+                mock.patch.object(
+                    modules.githubtickets.discord,
+                    "Embed",
+                    _OverviewEmbed,
+                ),
+            ):
+                for group in groups:
+                    with self.subTest(group=group.qualified_name):
+                        ctx = FakeContext()
+                        ctx.command = _registered_command_tree(cog_type, group)
+                        await group.callback(cog, ctx)
+
+                        self.assertEqual(ctx.send.await_count, 1)
+                        embed = ctx.send.await_args.kwargs["embed"]
+                        rendered = "\n".join(
+                            field.value for field in embed.fields
+                        )
+                        for leaf_name in _leaf_command_names(ctx.command):
+                            self.assertIn(f"??{leaf_name}", rendered)
+                            signature = COMMAND_SIGNATURES.get(leaf_name)
+                            if signature is not None:
+                                self.assertIn(
+                                    f"??{leaf_name} {signature}",
+                                    rendered,
+                                )
+                        if group.qualified_name == "githubtickets logchannel":
+                            self.assertEqual(embed.title, "Log channel")
+
+        self.assertEqual(configuration_sender.await_count, len(groups))
 
     async def test_resource_commands_store_values_and_use_accepted_confirmations(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
