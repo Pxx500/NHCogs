@@ -10,13 +10,27 @@ PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs"
 _MISSING = object()
 
 
+def _record_construction(bot, name):
+    bot.constructed.append(name)
+    if bot.failure == (name, "construct"):
+        raise RuntimeError(f"failed constructing {name}")
+
+
+class StubConsoleDump:
+    qualified_name = "ConsoleDump"
+
+    def __init__(self, bot):
+        self.bot = bot
+        _record_construction(bot, self.qualified_name)
+
+
 class StubNHMisc:
     qualified_name = "NHMisc"
     CONFIG_IDENTIFIER = 8597423150612235807
 
     def __init__(self, bot):
         self.bot = bot
-        bot.constructed.append(self.qualified_name)
+        _record_construction(bot, self.qualified_name)
 
 
 class StubHoneypot:
@@ -25,7 +39,7 @@ class StubHoneypot:
 
     def __init__(self, bot):
         self.bot = bot
-        bot.constructed.append(self.qualified_name)
+        _record_construction(bot, self.qualified_name)
 
 
 class StubGitHubTickets:
@@ -34,7 +48,7 @@ class StubGitHubTickets:
 
     def __init__(self, bot):
         self.bot = bot
-        bot.constructed.append(self.qualified_name)
+        _record_construction(bot, self.qualified_name)
 
 
 class StubCustomCommandsMigration:
@@ -55,6 +69,7 @@ def load_suite_module():
         "redbot.core.bot",
         "redbot.core.utils",
         "NHCogs",
+        "NHCogs.consoledump",
         "NHCogs.nhmisc",
         "NHCogs.honeypot",
         "NHCogs.githubtickets",
@@ -67,6 +82,8 @@ def load_suite_module():
     redbot_bot.Red = object
     redbot_utils = types.ModuleType("redbot.core.utils")
     redbot_utils.get_end_user_data_statement = lambda **_kwargs: "data statement"
+    console_dump = types.ModuleType("NHCogs.consoledump")
+    console_dump.ConsoleDump = StubConsoleDump
     nhmisc = types.ModuleType("NHCogs.nhmisc")
     nhmisc.NHMisc = StubNHMisc
     honeypot = types.ModuleType("NHCogs.honeypot")
@@ -103,6 +120,7 @@ def load_suite_module():
                 "redbot.core.bot": redbot_bot,
                 "redbot.core.utils": redbot_utils,
                 "NHCogs": module,
+                "NHCogs.consoledump": console_dump,
                 "NHCogs.nhmisc": nhmisc,
                 "NHCogs.honeypot": honeypot,
                 "NHCogs.githubtickets": githubtickets,
@@ -154,45 +172,48 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
 
             await suite.setup(bot)
 
-            self.assertEqual(suite.NHMisc.__name__, "StubNHMisc")
-            self.assertEqual(suite.NHMisc.CONFIG_IDENTIFIER, 8597423150612235807)
-            self.assertEqual(
-                suite.Honeypot.CONFIG_IDENTIFIER,
-                205192943327321000143939875896557571750,
-            )
-            self.assertEqual(
-                suite.GitHubTickets.CONFIG_IDENTIFIER,
-                228724500916148494760637198509440112622,
-            )
-
         self.assertEqual(
             bot.added,
-            ["NHMisc", "Honeypot", "GitHubTickets", "CustomCommandsMigration"],
+            [
+                "ConsoleDump",
+                "NHMisc",
+                "Honeypot",
+                "GitHubTickets",
+                "CustomCommandsMigration",
+            ],
         )
         self.assertEqual(
             set(bot.cogs),
-            {"NHMisc", "Honeypot", "GitHubTickets", "CustomCommandsMigration"},
+            {
+                "ConsoleDump",
+                "NHMisc",
+                "Honeypot",
+                "GitHubTickets",
+                "CustomCommandsMigration",
+            },
         )
         self.assertEqual(bot.removed, [])
         self.assertEqual(bot.preflight_calls, 1)
 
-    async def test_setup_rejects_custom_commands_conflict_before_suite_effects(self):
+    async def test_custom_commands_conflict_does_not_block_other_subcogs(self):
         with load_suite_module() as suite:
             bot = FakeBot(("preflight", "before"))
 
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "custom commands ownership conflict",
-            ):
+            with self.assertLogs("red.NHCogs", level="ERROR") as captured:
                 await suite.setup(bot)
 
         self.assertEqual(bot.preflight_calls, 1)
-        self.assertEqual(bot.constructed, [])
-        self.assertEqual(bot.added, [])
+        self.assertEqual(
+            set(bot.cogs),
+            {"ConsoleDump", "NHMisc", "Honeypot", "GitHubTickets"},
+        )
+        self.assertIn("custom commands ownership conflict", "\n".join(captured.output))
         self.assertEqual(bot.removed, [])
 
-    async def test_setup_compensates_every_add_failure(self):
+    async def test_each_subcog_add_failure_is_isolated_and_logged(self):
         failures = (
+            ("ConsoleDump", "before"),
+            ("ConsoleDump", "after"),
             ("NHMisc", "before"),
             ("NHMisc", "after"),
             ("Honeypot", "before"),
@@ -208,28 +229,83 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
                     bot = FakeBot(failure)
                     expected_error = f"failed {failure[1]} adding {failure[0]}"
 
-                    with self.assertRaisesRegex(RuntimeError, expected_error):
+                    with self.assertLogs("red.NHCogs", level="ERROR") as captured:
                         await suite.setup(bot)
 
-                self.assertEqual(bot.cogs, {})
-                expected_removed = (
-                    list(reversed(bot.added[:-1]))
-                    if failure[1] == "before"
-                    else list(reversed(bot.added))
+                self.assertNotIn(failure[0], bot.cogs)
+                if failure[0] != "CustomCommandsMigration":
+                    for name in ("ConsoleDump", "NHMisc", "Honeypot", "GitHubTickets"):
+                        if name != failure[0]:
+                            self.assertIn(name, bot.cogs)
+                self.assertIn(expected_error, "\n".join(captured.output))
+                self.assertEqual(
+                    bot.removed,
+                    [failure[0]] if failure[1] == "after" else [],
                 )
-                self.assertEqual(bot.removed, expected_removed)
 
-    async def test_setup_failure_preserves_a_previously_loaded_cog(self):
+    async def test_each_subcog_construction_failure_is_isolated_and_logged(self):
+        for name in ("ConsoleDump", "NHMisc", "Honeypot", "GitHubTickets"):
+            with self.subTest(name=name):
+                with load_suite_module() as suite:
+                    bot = FakeBot((name, "construct"))
+
+                    with self.assertLogs("red.NHCogs", level="ERROR") as captured:
+                        await suite.setup(bot)
+
+                self.assertNotIn(name, bot.cogs)
+                for other in ("ConsoleDump", "NHMisc", "Honeypot", "GitHubTickets"):
+                    if other != name:
+                        self.assertIn(other, bot.cogs)
+                self.assertIn(
+                    f"failed constructing {name}",
+                    "\n".join(captured.output),
+                )
+
+    async def test_import_failure_is_isolated_and_logs_complete_traceback(self):
+        with load_suite_module() as suite:
+            bot = FakeBot()
+            real_import = suite.import_module
+
+            def import_with_githubtickets_failure(name, package=None):
+                if name == ".githubtickets":
+                    raise RuntimeError("githubtickets import exploded")
+                return real_import(name, package)
+
+            suite.import_module = import_with_githubtickets_failure
+            with self.assertLogs("red.NHCogs", level="ERROR") as captured:
+                await suite.setup(bot)
+
+        self.assertNotIn("GitHubTickets", bot.cogs)
+        self.assertEqual(
+            set(bot.cogs),
+            {"ConsoleDump", "NHMisc", "Honeypot", "CustomCommandsMigration"},
+        )
+        log_output = "\n".join(captured.output)
+        self.assertIn("githubtickets import exploded", log_output)
+        self.assertIn("Traceback (most recent call last)", log_output)
+
+    async def test_existing_cog_conflict_does_not_block_other_subcogs(self):
         with load_suite_module() as suite:
             bot = FakeBot()
             existing = StubGitHubTickets(bot)
             bot.cogs[existing.qualified_name] = existing
 
-            with self.assertRaisesRegex(RuntimeError, "cog already loaded"):
+            with self.assertLogs("red.NHCogs", level="ERROR") as captured:
                 await suite.setup(bot)
 
         self.assertIs(bot.cogs["GitHubTickets"], existing)
-        self.assertEqual(bot.removed, ["Honeypot", "NHMisc"])
+        self.assertEqual(
+            set(bot.cogs),
+            {
+                "ConsoleDump",
+                "NHMisc",
+                "Honeypot",
+                "GitHubTickets",
+                "CustomCommandsMigration",
+            },
+        )
+        self.assertIn("cog already loaded", "\n".join(captured.output))
+        self.assertEqual(bot.removed, [])
 
     def test_combined_metadata_preserves_both_data_contracts(self):
         metadata = json.loads((PACKAGE_PATH / "info.json").read_text("utf-8"))
@@ -237,7 +313,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata["name"], "NHCogs")
         self.assertEqual(
             metadata["description"],
-            "Loads NHMisc, Honeypot, GitHubTickets, and Custom Commands together "
+            "Loads ConsoleDump, NHMisc, Honeypot, GitHubTickets, and Custom Commands together "
             "while preserving their separate commands, configuration, and stored data",
         )
         self.assertEqual(metadata["min_bot_version"], "3.5.23")

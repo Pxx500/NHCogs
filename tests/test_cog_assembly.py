@@ -252,7 +252,7 @@ class CogAssemblyContractTests(unittest.TestCase):
         expected_counts = {
             "channel_routing": 23,
             "detection": 73,
-            "diagnostics": 13,
+            "diagnostics": 12,
             "gif_detector": 9,
             "imagescan": 21,
             "joinwatch": 3,

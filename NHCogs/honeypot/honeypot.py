@@ -37,7 +37,6 @@ from .case_review import (
     render_timeline,  # noqa: F401 - public module re-export
 )
 from .cleanup import CleanupResult
-from .console_dump import ReadOnlyLogBuffer
 from .detection_cases import (
     ActionIntent,
     AttachmentKey,
@@ -97,9 +96,6 @@ log = logging.getLogger("red.Honeypot")
 COG_AUTHOR = "Pxx500"
 COG_REPO_NAME = "NHCogs"
 COG_REPO_URL = "https://github.com/Pxx500/NHCogs"
-CONSOLE_DUMP_USAGE = diagnostics.CONSOLE_DUMP_USAGE
-
-
 JOINWATCH_RETRY_DELAY_MINUTES = joinwatch_state.JOINWATCH_RETRY_DELAY_MINUTES
 JOINWATCH_MAX_RETRIES = joinwatch_state.JOINWATCH_MAX_RETRIES
 REVIEW_DUMP_START = diagnostics.REVIEW_DUMP_START
@@ -166,7 +162,6 @@ class Honeypot(Cog):
         self.config.register_guild(**settings.DEFAULTS)
         self._manual_punishment = manual_punishment.ManualPunishmentController(self)
 
-        self._console_log_buffer = ReadOnlyLogBuffer()
         self._post_ban_sweep_tasks: set[asyncio.Task] = set()
         self._case_review_tasks: set[asyncio.Task] = set()
         self._gif_detector_tasks: set[asyncio.Task] = set()
@@ -962,16 +957,6 @@ class Honeypot(Cog):
             return f"{size / 1024:.1f} KB"
         return f"{size} B"
 
-    def _install_console_log_buffer(self) -> None:
-        root_logger = logging.getLogger()
-        if self._console_log_buffer not in root_logger.handlers:
-            root_logger.addHandler(self._console_log_buffer)
-
-    def _remove_console_log_buffer(self) -> None:
-        root_logger = logging.getLogger()
-        if self._console_log_buffer in root_logger.handlers:
-            root_logger.removeHandler(self._console_log_buffer)
-
     async def _prune_unknown_guild_config(self) -> None:
         registered_keys = settings.DEFAULTS.keys()
         for guild_id, values in (await self.config.all_guilds()).items():
@@ -1009,7 +994,6 @@ class Honeypot(Cog):
         self._daily_stats_task.add_done_callback(
             lambda task: self._observe_background_task(task, "daily statistics publisher")
         )
-        self._install_console_log_buffer()
         self._manual_punishment.register()
 
     def runtime_health_issues(self) -> tuple[str, ...]:
@@ -1064,7 +1048,6 @@ class Honeypot(Cog):
             pass
 
     async def cog_unload(self) -> None:
-        self._remove_console_log_buffer()
         loops = (
             self.joinwatch_auto_role_loop,
             self.purge_cache_cleanup_loop,
@@ -1483,18 +1466,6 @@ class Honeypot(Cog):
         return await joinwatch.on_member_update(self, before, after)
 
     # ─── Commands ─────────────────────────────────────────────────────────
-
-    @commands.command(name="consoledump")
-    @commands.guild_only()
-    async def console_dump(
-        self,
-        ctx: commands.Context,
-        scope: str | None = None,
-        hours: str | None = None,
-        level: str | None = None,
-    ) -> None:
-        """Export recent sanitized Python logs to a private text channel."""
-        return await diagnostics.console_dump(self, ctx, scope, hours, level)
 
     @commands.guild_only()
     @commands.permissions_check(lambda ctx: ctx.author.id == ctx.guild.owner_id or ctx.author.id in ctx.bot.owner_ids)

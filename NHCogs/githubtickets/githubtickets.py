@@ -162,9 +162,9 @@ class GitHubTickets(commands.Cog):
             return
         commands_to_add = self._application_commands()
         previous = {
-            (command.name, command.type): self.bot.tree.get_command(
+            (command.name, self._application_command_type(command)): self.bot.tree.get_command(
                 command.name,
-                type=command.type,
+                type=self._application_command_type(command),
             )
             for command in commands_to_add
         }
@@ -173,9 +173,10 @@ class GitHubTickets(commands.Cog):
                 self.bot.tree.add_command(command, override=True)
         except Exception:
             for command in commands_to_add:
-                existing = self.bot.tree.get_command(command.name, type=command.type)
+                command_type = self._application_command_type(command)
+                existing = self.bot.tree.get_command(command.name, type=command_type)
                 if existing is command:
-                    self.bot.tree.remove_command(command.name, type=command.type)
+                    self.bot.tree.remove_command(command.name, type=command_type)
             for _key, command in previous.items():
                 if command is not None:
                     try:
@@ -194,7 +195,7 @@ class GitHubTickets(commands.Cog):
         previous = self._replaced_application_commands
         self._replaced_application_commands = {}
         for command in self._application_commands():
-            command_type = command.type
+            command_type = self._application_command_type(command)
             existing = self.bot.tree.get_command(command.name, type=command_type)
             if existing is command:
                 self.bot.tree.remove_command(command.name, type=command_type)
@@ -207,6 +208,10 @@ class GitHubTickets(commands.Cog):
                             "GitHub Tickets failed to restore a displaced application command"
                         )
         self._application_commands_registered = False
+
+    @staticmethod
+    def _application_command_type(command) -> discord.AppCommandType:
+        return getattr(command, "type", discord.AppCommandType.chat_input)
 
     def _application_commands(self):
         return (
