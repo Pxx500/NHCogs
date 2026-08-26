@@ -133,6 +133,8 @@ class FakeBot:
         self.added.append(name)
         if self.failure == (name, "before"):
             raise RuntimeError(f"failed before adding {name}")
+        if name in self.cogs:
+            raise RuntimeError(f"cog already loaded: {name}")
         self.cogs[name] = cog
         if self.failure == (name, "after"):
             raise RuntimeError(f"failed after adding {name}")
@@ -210,7 +212,24 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
                         await suite.setup(bot)
 
                 self.assertEqual(bot.cogs, {})
-                self.assertEqual(bot.removed, list(reversed(bot.added)))
+                expected_removed = (
+                    list(reversed(bot.added[:-1]))
+                    if failure[1] == "before"
+                    else list(reversed(bot.added))
+                )
+                self.assertEqual(bot.removed, expected_removed)
+
+    async def test_setup_failure_preserves_a_previously_loaded_cog(self):
+        with load_suite_module() as suite:
+            bot = FakeBot()
+            existing = StubGitHubTickets(bot)
+            bot.cogs[existing.qualified_name] = existing
+
+            with self.assertRaisesRegex(RuntimeError, "cog already loaded"):
+                await suite.setup(bot)
+
+        self.assertIs(bot.cogs["GitHubTickets"], existing)
+        self.assertEqual(bot.removed, ["Honeypot", "NHMisc"])
 
     def test_combined_metadata_preserves_both_data_contracts(self):
         metadata = json.loads((PACKAGE_PATH / "info.json").read_text("utf-8"))

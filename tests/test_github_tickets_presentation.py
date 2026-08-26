@@ -205,6 +205,32 @@ class GitHubTicketsPresentationTests(unittest.TestCase):
         self.assertIn("Categories: None", overview)
         self.assertIn("Maximum pings: 0", overview)
 
+    def test_long_configuration_overview_splits_without_losing_content(self):
+        presentation = load_presentation_module()
+        overview = presentation.configuration_overview(
+            ticket_channel="#github-tickets",
+            participant_roles=tuple(f"@role-{index}-" + "x" * 80 for index in range(50)),
+            categories=tuple(f"category-{index}-" + "x" * 80 for index in range(25)),
+            max_pings=3,
+            protection_seconds=10,
+            volunteer_seconds=7200,
+            online_response_seconds=7200,
+            idle_response_seconds=14400,
+            dnd_response_seconds=21600,
+            offline_response_seconds=86400,
+            direct_response_seconds=86400,
+        )
+
+        chunks = getattr(presentation, "message_chunks", lambda value: (value,))(
+            overview
+        )
+
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(
+            all(len(chunk) <= presentation.DISCORD_MESSAGE_LIMIT for chunk in chunks)
+        )
+        self.assertEqual("".join(chunks), overview)
+
     def test_configuration_confirmations_use_the_resulting_value(self):
         presentation = load_presentation_module()
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
 from .models import Ticket
@@ -21,6 +22,10 @@ class TicketProjection(Protocol):
         reviewer_github: str | None = None,
     ) -> int: ...
 
+    async def find_ticket_message(self, ticket: Ticket) -> int | None: ...
+
+    async def find_ticket_thread(self, ticket: Ticket) -> int | None: ...
+
     async def create_thread(self, ticket: Ticket, message_id: int) -> int: ...
 
     async def edit_ticket(
@@ -36,6 +41,14 @@ class TicketProjection(Protocol):
         target_user_id: int,
         automatic: bool,
     ) -> None: ...
+
+    async def find_ping(
+        self,
+        thread_id: int,
+        target_user_id: int,
+        automatic: bool,
+        reserved_at: datetime,
+    ) -> datetime | None: ...
 
     async def delete_message(self, channel_id: int, message_id: int) -> None: ...
 

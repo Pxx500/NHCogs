@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timezone
 
@@ -12,6 +13,7 @@ from .store import GitHubTicketsStore
 
 CreateTicket = Callable[[TicketRequest, TicketActor], Awaitable[TicketResult]]
 ActorFactory = Callable[[discord.Interaction], TicketActor]
+log = logging.getLogger("red.NHCogs.GitHubTickets")
 
 
 def _utc_now() -> datetime:
@@ -30,6 +32,52 @@ async def _check_participant(
         allowed_mentions=discord.AllowedMentions.none(),
     )
     return False
+
+
+async def _send_interaction_failure(
+    interaction: discord.Interaction,
+    error: Exception,
+) -> None:
+    log.error(
+        "GitHub Tickets dashboard interaction failed",
+        exc_info=(type(error), error, error.__traceback__),
+    )
+    kwargs = {
+        "ephemeral": True,
+        "allowed_mentions": discord.AllowedMentions.none(),
+    }
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                presentation.COULD_NOT_COMPLETE_ACTION,
+                **kwargs,
+            )
+        else:
+            await interaction.response.send_message(
+                presentation.COULD_NOT_COMPLETE_ACTION,
+                **kwargs,
+            )
+    except Exception:
+        log.exception("Failed to send GitHub Tickets interaction error feedback")
+
+
+class _DashboardView(discord.ui.View):
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+        _item: discord.ui.Item,
+    ) -> None:
+        await _send_interaction_failure(interaction, error)
+
+
+class _DashboardModal(discord.ui.Modal):
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: Exception,
+    ) -> None:
+        await _send_interaction_failure(interaction, error)
 
 
 def _category_options(categories: Sequence[Category]) -> list[discord.SelectOption]:
@@ -65,19 +113,26 @@ async def send_developer_profile(
             for category_id in profile.category_ids
             if category_id in categories
         )
+    content = presentation.developer_profile(
+        mention=f"<@{user_id}>",
+        has_profile=profile is not None,
+        github_username=profile.github_username if profile is not None else None,
+        categories=category_names,
+    )
+    kwargs = {
+        "ephemeral": True,
+        "allowed_mentions": discord.AllowedMentions.none(),
+    }
+    if len(content) <= presentation.DISCORD_MESSAGE_LIMIT:
+        await interaction.response.send_message(content, **kwargs)
+        return
     await interaction.response.send_message(
-        presentation.developer_profile(
-            mention=f"<@{user_id}>",
-            has_profile=profile is not None,
-            github_username=profile.github_username if profile is not None else None,
-            categories=category_names,
-        ),
-        ephemeral=True,
-        allowed_mentions=discord.AllowedMentions.none(),
+        embed=discord.Embed(description=content),
+        **kwargs,
     )
 
 
-class EditProfileModal(discord.ui.Modal):
+class EditProfileModal(_DashboardModal):
     def __init__(
         self,
         store: GitHubTicketsStore,
@@ -170,7 +225,7 @@ class EditProfileModal(discord.ui.Modal):
         await interaction.response.defer()
 
 
-class NewTicketModal(discord.ui.Modal):
+class NewTicketModal(_DashboardModal):
     def __init__(
         self,
         store: GitHubTicketsStore,
@@ -237,14 +292,24 @@ class NewTicketModal(discord.ui.Modal):
             max_values=1,
             required=False,
         )
-        for label, component in (
-            (presentation.PR_TITLE, self.pr_title),
-            (presentation.PR_LINK, self.pr_link),
-            (presentation.CATEGORIES, self.categories),
-            (presentation.PING_BEHAVIOR, self.ping_behavior),
-            (presentation.DIRECT_REVIEWER, self.direct_reviewer),
+        for label, component, description in (
+            (presentation.PR_TITLE, self.pr_title, None),
+            (presentation.PR_LINK, self.pr_link, None),
+            (presentation.CATEGORIES, self.categories, None),
+            (
+                presentation.PING_BEHAVIOR,
+                self.ping_behavior,
+                presentation.SELECT_PING_BEHAVIOR,
+            ),
+            (presentation.DIRECT_REVIEWER, self.direct_reviewer, None),
         ):
-            self.add_item(discord.ui.Label(text=label, component=component))
+            self.add_item(
+                discord.ui.Label(
+                    text=label,
+                    description=description,
+                    component=component,
+                )
+            )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if not await _check_participant(interaction, self._actor_factory):
@@ -299,7 +364,7 @@ class NewTicketModal(discord.ui.Modal):
         )
 
 
-class ClearProfileConfirmation(discord.ui.View):
+class ClearProfileConfirmation(_DashboardView):
     def __init__(
         self,
         store: GitHubTicketsStore,
@@ -337,7 +402,7 @@ class ClearProfileConfirmation(discord.ui.View):
         await interaction.delete_original_response()
 
 
-class CategoryBrowser(discord.ui.View):
+class CategoryBrowser(_DashboardView):
     PAGE_SIZE = 10
 
     def __init__(
@@ -459,7 +524,7 @@ class CategoryBrowser(discord.ui.View):
         )
 
 
-class GitHubTicketsDashboard(discord.ui.View):
+class GitHubTicketsDashboard(_DashboardView):
     def __init__(
         self,
         store: GitHubTicketsStore,

@@ -119,6 +119,12 @@ class GitHubTicketsSettingsTests(unittest.TestCase):
         with self.assertRaises(settings.InvalidDuration):
             settings.parse_duration("later")
 
+    def test_duration_parser_rejects_values_that_cannot_form_a_deadline(self):
+        settings = load_settings_module()
+
+        with self.assertRaises(settings.InvalidDuration):
+            settings.parse_duration("100000000000000000000h")
+
 
 if __name__ == "__main__":
     unittest.main()

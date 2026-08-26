@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import timedelta
 from typing import Any
 
 import discord
 
-from .models import Ticket, TicketState
+from .models import Ticket
 from .presentation import (
     automatic_review_notification,
     direct_review_notification,
@@ -14,12 +15,14 @@ from .presentation import (
 )
 from .projection import ProjectionNotFound, ProjectionUnavailable
 
+RECOVERY_LOOKBACK = timedelta(seconds=5)
+
 
 class DiscordTicketProjection:
     def __init__(
         self,
         bot,
-        view_factory: Callable[[int, bool], discord.ui.View],
+        view_factory: Callable[[Ticket], discord.ui.View],
     ) -> None:
         self._bot = bot
         self._view_factory = view_factory
@@ -42,6 +45,38 @@ class DiscordTicketProjection:
             raise ProjectionNotFound from error
         self._sent_messages[message.id] = message
         return message.id
+
+    async def find_ticket_message(self, ticket: Ticket) -> int | None:
+        channel = await self._recovery_channel(ticket.channel_id)
+        history = getattr(channel, "history", None)
+        if not callable(history):
+            raise ProjectionUnavailable("Discord channel history is unavailable")
+        prefix = f"githubtickets:{ticket.public_token}:"
+        async for message in history(
+            after=ticket.created_at - RECOVERY_LOOKBACK,
+            oldest_first=True,
+            limit=100,
+        ):
+            if self._is_bot_authored(message) and self._has_custom_id(message, prefix):
+                return int(message.id)
+        return None
+
+    async def find_ticket_thread(self, ticket: Ticket) -> int | None:
+        if ticket.message_id is None:
+            return None
+        channel = await self._recovery_channel(ticket.channel_id)
+        try:
+            message = await channel.fetch_message(ticket.message_id)
+        except discord.NotFound as error:
+            raise ProjectionNotFound from error
+        thread = getattr(message, "thread", None)
+        if thread is not None:
+            return int(thread.id)
+        try:
+            thread = await self._bot.fetch_channel(ticket.message_id)
+        except discord.NotFound:
+            return None
+        return int(thread.id)
 
     async def create_thread(self, ticket: Ticket, message_id: int) -> int:
         message = self._sent_messages.get(message_id)
@@ -87,7 +122,10 @@ class DiscordTicketProjection:
         target_user_id: int,
         automatic: bool,
     ) -> None:
-        thread = self._cached_channel(thread_id)
+        partial_messageable = getattr(self._bot, "get_partial_messageable", None)
+        if not callable(partial_messageable):
+            raise ProjectionUnavailable("Discord partial messageable is unavailable")
+        thread = partial_messageable(thread_id)
         target_mention = f"<@{target_user_id}>"
         content = (
             automatic_review_notification(target_mention)
@@ -105,6 +143,32 @@ class DiscordTicketProjection:
         except discord.NotFound as error:
             raise ProjectionNotFound from error
 
+    async def find_ping(
+        self,
+        thread_id: int,
+        target_user_id: int,
+        automatic: bool,
+        reserved_at,
+    ):
+        thread = await self._recovery_channel(thread_id)
+        history = getattr(thread, "history", None)
+        if not callable(history):
+            raise ProjectionUnavailable("Discord thread history is unavailable")
+        target_mention = f"<@{target_user_id}>"
+        expected = (
+            automatic_review_notification(target_mention)
+            if automatic
+            else direct_review_notification(target_mention)
+        )
+        async for message in history(
+            after=reserved_at - RECOVERY_LOOKBACK,
+            oldest_first=True,
+            limit=100,
+        ):
+            if self._is_bot_authored(message) and message.content == expected:
+                return message.created_at
+        return None
+
     async def delete_message(self, channel_id: int, message_id: int) -> None:
         self._sent_messages.pop(message_id, None)
         message = self._partial_message(channel_id, message_id)
@@ -114,7 +178,12 @@ class DiscordTicketProjection:
             raise ProjectionNotFound from error
 
     async def delete_thread(self, thread_id: int) -> None:
-        thread = self._cached_channel(thread_id)
+        thread = self._bot.get_channel(thread_id)
+        if thread is None:
+            try:
+                thread = await self._bot.fetch_channel(thread_id)
+            except discord.NotFound as error:
+                raise ProjectionNotFound from error
         try:
             await thread.delete()
         except discord.NotFound as error:
@@ -133,8 +202,30 @@ class DiscordTicketProjection:
             raise ProjectionUnavailable("Discord channel cannot create partial messages")
         return get_partial_message(message_id)
 
+    async def _recovery_channel(self, channel_id: int):
+        channel = self._bot.get_channel(channel_id)
+        if channel is not None:
+            return channel
+        try:
+            return await self._bot.fetch_channel(channel_id)
+        except discord.NotFound as error:
+            raise ProjectionNotFound from error
+
+    def _is_bot_authored(self, message) -> bool:
+        bot_user = getattr(self._bot, "user", None)
+        author = getattr(message, "author", None)
+        return bot_user is not None and author is not None and author.id == bot_user.id
+
+    @staticmethod
+    def _has_custom_id(message, prefix: str) -> bool:
+        return any(
+            getattr(component, "custom_id", "").startswith(prefix)
+            for row in getattr(message, "components", ())
+            for component in getattr(row, "children", ())
+        )
+
     def _ticket_view(self, ticket: Ticket) -> discord.ui.View:
-        return self._view_factory(ticket.ticket_id, ticket.state is TicketState.CLAIMED)
+        return self._view_factory(ticket)
 
     @staticmethod
     def _ticket_content(

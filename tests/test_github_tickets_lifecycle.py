@@ -19,6 +19,9 @@ class FakeBot(_Bot):
     def get_channel(self, channel_id):
         return self.channels.get(channel_id)
 
+    def get_partial_messageable(self, channel_id):
+        return self.channels[channel_id]
+
     def get_guild(self, guild_id):
         return self.guild_map.get(guild_id)
 
@@ -590,7 +593,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cleanup.message_id, 40)
             self.assertEqual(cleanup.thread_id, 50)
             self.assertEqual(channel.message.delete_calls, 0)
-            self.assertEqual(bot.fetch_calls, 0)
+            self.assertEqual(bot.fetch_calls, 1)
 
             thread = CachedThread(50)
             bot.channels[50] = thread
@@ -602,4 +605,4 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await cog.store.get_ticket(created.ticket_id))
             self.assertEqual(thread.delete_calls, 1)
             self.assertEqual(channel.message.delete_calls, 1)
-            self.assertEqual(bot.fetch_calls, 0)
+            self.assertEqual(bot.fetch_calls, 1)

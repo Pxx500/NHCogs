@@ -94,8 +94,10 @@ class TicketControlsTests(unittest.IsolatedAsyncioTestCase):
         action_result = result or types.SimpleNamespace(success=True, response=None)
 
         def action(name):
-            async def callback(ticket_id, actor):
-                calls.append((name, ticket_id, actor))
+            async def callback(public_token, actor):
+                calls.append((name, public_token, actor))
+                if isinstance(action_result, Exception):
+                    raise action_result
                 return action_result
 
             return callback
@@ -118,6 +120,7 @@ class TicketControlsTests(unittest.IsolatedAsyncioTestCase):
 
         view = ticket_views.TicketControls(
             321,
+            "opaque-ticket-token",
             claimed=claimed,
             actor_factory=actor_factory,
             **actions,
@@ -132,17 +135,17 @@ class TicketControlsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [(button.label, button.style, button.custom_id) for button in open_view.children],
             [
-                ("Mark Finished", discord.ButtonStyle.success, "githubtickets:321:mark_finished"),
-                ("Claim", discord.ButtonStyle.primary, "githubtickets:321:claim"),
-                ("Decline", discord.ButtonStyle.danger, "githubtickets:321:decline"),
+                ("Mark Finished", discord.ButtonStyle.success, "githubtickets:opaque-ticket-token:mark_finished"),
+                ("Claim", discord.ButtonStyle.primary, "githubtickets:opaque-ticket-token:claim"),
+                ("Decline", discord.ButtonStyle.danger, "githubtickets:opaque-ticket-token:decline"),
             ],
         )
         self.assertIsNone(claimed_view.timeout)
         self.assertEqual(
             [(button.label, button.style, button.custom_id) for button in claimed_view.children],
             [
-                ("Mark Finished", discord.ButtonStyle.success, "githubtickets:321:mark_finished"),
-                ("Unassign", discord.ButtonStyle.danger, "githubtickets:321:unassign"),
+                ("Mark Finished", discord.ButtonStyle.success, "githubtickets:opaque-ticket-token:mark_finished"),
+                ("Unassign", discord.ButtonStyle.danger, "githubtickets:opaque-ticket-token:unassign"),
             ],
         )
 
@@ -163,16 +166,16 @@ class TicketControlsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             open_calls,
             [
-                ("mark_finished", 321, actor),
-                ("claim", 321, actor),
-                ("decline", 321, actor),
+                ("mark_finished", "opaque-ticket-token", actor),
+                ("claim", "opaque-ticket-token", actor),
+                ("decline", "opaque-ticket-token", actor),
             ],
         )
         self.assertEqual(
             claimed_calls,
             [
-                ("mark_finished", 321, claimed_actor),
-                ("unassign", 321, claimed_actor),
+                ("mark_finished", "opaque-ticket-token", claimed_actor),
+                ("unassign", "opaque-ticket-token", claimed_actor),
             ],
         )
         self.assertEqual(open_actor_interactions, open_interactions)
@@ -194,5 +197,20 @@ class TicketControlsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(interaction.response.messages, [])
         interaction.followup.send.assert_awaited_once_with(
             "This ticket is no longer active",
+            ephemeral=True,
+        )
+
+    async def test_unexpected_action_failure_is_logged_and_accepted_ephemerally(self):
+        view, _actor, _actor_interactions, _calls = self.view(
+            claimed=False,
+            result=RuntimeError("controlled callback failure"),
+        )
+        interaction = FakeInteraction()
+
+        with self.assertLogs(ticket_views.log, level="ERROR"):
+            await view.children[1].callback(interaction)
+
+        interaction.followup.send.assert_awaited_once_with(
+            ticket_views.presentation.COULD_NOT_COMPLETE_ACTION,
             ephemeral=True,
         )

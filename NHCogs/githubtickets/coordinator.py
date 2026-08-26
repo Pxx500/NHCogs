@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable, Sequence
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from . import presentation
 from .models import (
     NewTicket,
     NextAction,
@@ -19,15 +22,17 @@ from .routing import CandidateFacts, select_reviewer
 from .settings import GuildSettings
 from .store import GitHubTicketsStore
 
-PERMISSION_DENIED = "You cannot use this action"
-INACTIVE_TICKET = "This ticket is no longer active"
-CLAIM_RACE_LOST = "This ticket has already been claimed"
-MISSING_TICKET_CHANNEL = "Ticket channel is not configured"
-MISSING_AUTOMATIC_CATEGORIES = "Select at least one category for automatic pings"
-MISSING_DIRECT_REVIEWER = "Select a reviewer for direct pings"
-CREATE_FAILED = "Could not create the ticket"
-ACTION_FAILED = "Could not complete this action"
+PERMISSION_DENIED = presentation.CANNOT_USE_ACTION
+INACTIVE_TICKET = presentation.TICKET_NOT_ACTIVE
+CLAIM_RACE_LOST = presentation.TICKET_ALREADY_CLAIMED
+MISSING_TICKET_CHANNEL = presentation.TICKET_CHANNEL_NOT_CONFIGURED
+MISSING_AUTOMATIC_CATEGORIES = presentation.AUTOMATIC_REQUIRES_CATEGORY
+MISSING_DIRECT_REVIEWER = presentation.DIRECT_REQUIRES_REVIEWER
+CREATE_FAILED = presentation.COULD_NOT_CREATE_TICKET
+ACTION_FAILED = presentation.COULD_NOT_COMPLETE_ACTION
 PROJECTION_RETRY_SECONDS = 5
+PING_RETRY_FLOOR_SECONDS = 5
+log = logging.getLogger(__name__)
 
 
 def _utc_now() -> datetime:
@@ -84,12 +89,22 @@ class TicketCoordinator:
         self._wake_deadlines = wake_deadlines
         self._clock = clock
         self._locks: dict[int, asyncio.Lock] = {}
+        self._lifecycle_lock = asyncio.Lock()
         self._sent_ping_settlements: dict[
             int,
             tuple[PingReservation, datetime],
         ] = {}
+        self._locally_reserved_pings: set[int] = set()
 
     async def create_ticket(
+        self,
+        request: TicketRequest,
+        actor: TicketActor,
+    ) -> TicketResult:
+        async with self._lifecycle_lock:
+            return await self._create_ticket_locked(request, actor)
+
+    async def _create_ticket_locked(
         self,
         request: TicketRequest,
         actor: TicketActor,
@@ -157,6 +172,8 @@ class TicketCoordinator:
                 raise RuntimeError("ticket activation lost its creating state")
         except Exception:
             await self._cleanup_failed_creation(ticket, locals().get("message_id"), locals().get("thread_id"))
+            if await self._store.get_ticket(ticket.ticket_id) is not None:
+                await self._defer_cleanup_retry(ticket.ticket_id)
             return TicketResult(False, CREATE_FAILED)
 
         if next_action_at is not None:
@@ -308,6 +325,7 @@ class TicketCoordinator:
             try:
                 await self._delete_remaining_projection(finishing)
             except Exception:
+                await self._defer_cleanup_retry(ticket_id)
                 return TicketResult(False, ACTION_FAILED)
             self._locks.pop(ticket_id, None)
             return TicketResult(True)
@@ -320,8 +338,17 @@ class TicketCoordinator:
             current = await self._store.get_ticket(ticket.ticket_id)
             if current is None or current.message_id != message_id:
                 return
-            if current.state in (TicketState.OPEN, TicketState.CLAIMED):
-                if not await self._store.begin_finishing(current.ticket_id, self._clock()):
+            if current.state in (
+                TicketState.CREATING,
+                TicketState.OPEN,
+                TicketState.CLAIMED,
+                TicketState.FINISHING,
+            ):
+                if not await self._store.begin_finishing(
+                    current.ticket_id,
+                    self._clock(),
+                    message_absent=True,
+                ):
                     return
                 current = await self._store.get_ticket(current.ticket_id)
                 if current is None:
@@ -329,7 +356,8 @@ class TicketCoordinator:
             try:
                 await self._delete_remaining_projection(current, message_absent=True)
             except Exception:
-                return
+                await self._defer_cleanup_retry(current.ticket_id)
+                raise
             self._locks.pop(current.ticket_id, None)
 
     async def handle_thread_deleted(self, thread_id: int) -> None:
@@ -340,8 +368,17 @@ class TicketCoordinator:
             current = await self._store.get_ticket(ticket.ticket_id)
             if current is None or current.thread_id != thread_id:
                 return
-            if current.state in (TicketState.OPEN, TicketState.CLAIMED):
-                if not await self._store.begin_finishing(current.ticket_id, self._clock()):
+            if current.state in (
+                TicketState.CREATING,
+                TicketState.OPEN,
+                TicketState.CLAIMED,
+                TicketState.FINISHING,
+            ):
+                if not await self._store.begin_finishing(
+                    current.ticket_id,
+                    self._clock(),
+                    thread_absent=True,
+                ):
                     return
                 current = await self._store.get_ticket(current.ticket_id)
                 if current is None:
@@ -349,25 +386,207 @@ class TicketCoordinator:
             try:
                 await self._delete_remaining_projection(current, thread_absent=True)
             except Exception:
-                return
+                await self._defer_cleanup_retry(current.ticket_id)
+                raise
             self._locks.pop(current.ticket_id, None)
 
     async def recover_projection_cleanup(self, ticket_id: int) -> TicketResult:
         async with self._ticket_lock(ticket_id):
-            ticket = await self._store.get_ticket(ticket_id)
-            if ticket is None:
-                return TicketResult(True)
-            if ticket.state not in (TicketState.CREATING, TicketState.FINISHING):
-                return TicketResult(False, INACTIVE_TICKET)
-            try:
-                await self._delete_remaining_projection(ticket)
-            except Exception:
-                return TicketResult(False, ACTION_FAILED)
-            self._locks.pop(ticket_id, None)
+            return await self._recover_projection_cleanup_locked(ticket_id)
+
+    async def _recover_projection_cleanup_locked(
+        self,
+        ticket_id: int,
+        *,
+        thread_absent: bool = False,
+    ) -> TicketResult:
+        ticket = await self._store.get_ticket(ticket_id)
+        if ticket is None:
             return TicketResult(True)
+        if ticket.state not in (TicketState.CREATING, TicketState.FINISHING):
+            return TicketResult(False, INACTIVE_TICKET)
+        if ticket.state is TicketState.CREATING:
+            result = await self._recover_creation(ticket)
+        else:
+            try:
+                await self._delete_remaining_projection(
+                    ticket,
+                    thread_absent=thread_absent,
+                )
+            except Exception:
+                result = TicketResult(False, ACTION_FAILED)
+            else:
+                self._locks.pop(ticket_id, None)
+                return TicketResult(True)
+        if not result.success:
+            await self._defer_cleanup_retry(ticket.ticket_id)
+        return result
+
+    async def sync_projection(self, ticket_id: int) -> TicketResult:
+        async with self._ticket_lock(ticket_id):
+            ticket = await self._store.get_ticket(ticket_id)
+            if ticket is None or ticket.state not in (TicketState.OPEN, TicketState.CLAIMED):
+                return TicketResult(False, INACTIVE_TICKET)
+            return await self._edit_after_transition(ticket)
+
+    async def begin_authored_ticket_cleanup(
+        self,
+        ticket_id: int,
+        *,
+        author_id: int,
+        updated_at: datetime,
+    ) -> Ticket | None:
+        async with self._ticket_lock(ticket_id):
+            ticket = await self._store.get_ticket(ticket_id)
+            if ticket is None or ticket.author_id != author_id:
+                return None
+            return await self._store.begin_authored_ticket_cleanup(
+                ticket_id,
+                author_id=author_id,
+                updated_at=updated_at,
+            )
+
+    async def redact_user(
+        self,
+        user_id: int,
+        *,
+        updated_at: datetime,
+    ) -> tuple[Ticket, ...]:
+        async with self._lifecycle_lock:
+            return await self._redact_user_locked(
+                user_id,
+                updated_at=updated_at,
+            )
+
+    async def _redact_user_locked(
+        self,
+        user_id: int,
+        *,
+        updated_at: datetime,
+    ) -> tuple[Ticket, ...]:
+        authored = await self._store.list_authored_tickets(user_id)
+        active_ids = {
+            ticket.ticket_id for ticket in await self._store.list_active_tickets()
+        }
+        ticket_ids = tuple(
+            sorted(
+                active_ids
+                .union(ticket.ticket_id for ticket in authored)
+                .union(await self._store.user_reference_ticket_ids(user_id))
+            )
+        )
+        async with AsyncExitStack() as stack:
+            for ticket_id in ticket_ids:
+                await stack.enter_async_context(self._ticket_lock(ticket_id))
+            for ticket_id in ticket_ids:
+                await self._store.get_ticket(ticket_id)
+            for ticket in authored:
+                current = await self._store.get_ticket(ticket.ticket_id)
+                if current is None or current.author_id != user_id:
+                    continue
+                cleanup = await self._store.begin_authored_ticket_cleanup(
+                    current.ticket_id,
+                    author_id=user_id,
+                    updated_at=updated_at,
+                )
+                if cleanup is not None:
+                    await self._recover_projection_cleanup_locked(cleanup.ticket_id)
+            protection_until_by_guild = {}
+            for guild_id in await self._store.user_reference_guild_ids(user_id):
+                settings = await self._get_settings(guild_id)
+                protection_until_by_guild[guild_id] = updated_at + timedelta(
+                    seconds=settings.protection_seconds
+                )
+            return await self._store.redact_user(
+                user_id,
+                protection_until_by_guild=protection_until_by_guild,
+                updated_at=updated_at,
+            )
+
+    async def _recover_creation(self, ticket: Ticket) -> TicketResult:
+        now = self._clock()
+        try:
+            message_id = ticket.message_id
+            if message_id is None:
+                message_id = await self._projection.find_ticket_message(ticket)
+                if message_id is None:
+                    message_id = await self._projection.send_ticket(
+                        ticket,
+                        reviewer_github=await self._reviewer_github(ticket),
+                    )
+                if not await self._store.record_ticket_message(
+                    ticket.ticket_id,
+                    message_id,
+                    now,
+                ):
+                    raise RuntimeError("creating ticket lost its message reservation")
+
+            current = await self._store.get_ticket(ticket.ticket_id)
+            if current is None or current.state is not TicketState.CREATING:
+                return TicketResult(False, INACTIVE_TICKET)
+            thread_id = current.thread_id
+            if thread_id is None:
+                try:
+                    thread_id = await self._projection.find_ticket_thread(current)
+                except ProjectionNotFound:
+                    return await self._finish_missing_creation_message(current, now)
+                if thread_id is None:
+                    thread_id = await self._projection.create_thread(current, message_id)
+                if not await self._store.record_ticket_thread(
+                    current.ticket_id,
+                    thread_id,
+                    now,
+                ):
+                    raise RuntimeError("creating ticket lost its thread reservation")
+
+            settings = await self._get_settings(current.guild_id)
+            protection_until, next_action, next_action_at = self._creation_schedule(
+                current.routing_mode,
+                settings,
+                now,
+            )
+            activated = await self._store.activate_ticket(
+                current.ticket_id,
+                message_id=message_id,
+                thread_id=thread_id,
+                protection_until=protection_until,
+                next_action=next_action,
+                next_action_at=next_action_at,
+                updated_at=now,
+            )
+        except Exception:
+            return TicketResult(False, ACTION_FAILED)
+        if not activated:
+            return TicketResult(False, ACTION_FAILED)
+        if next_action_at is not None:
+            self._wake_deadlines()
+        return TicketResult(True)
+
+    async def _finish_missing_creation_message(
+        self,
+        ticket: Ticket,
+        now: datetime,
+    ) -> TicketResult:
+        if not await self._store.begin_finishing(
+            ticket.ticket_id,
+            now,
+            message_absent=True,
+        ):
+            return TicketResult(False, INACTIVE_TICKET)
+        finishing = await self._store.get_ticket(ticket.ticket_id)
+        if finishing is None:
+            return TicketResult(True)
+        await self._delete_remaining_projection(finishing)
+        return TicketResult(True)
 
     async def process_due(self, ticket_id: int) -> TicketResult:
         async with self._ticket_lock(ticket_id):
+            ticket = await self._store.get_ticket(ticket_id)
+            if ticket is not None and ticket.state in (
+                TicketState.CREATING,
+                TicketState.FINISHING,
+            ):
+                return await self._recover_projection_cleanup_locked(ticket_id)
             projection_sync = await self._store.get_projection_sync_ticket(ticket_id)
             if projection_sync is not None:
                 result = await self._edit_after_transition(projection_sync)
@@ -407,16 +626,13 @@ class TicketCoordinator:
     ) -> TicketResult:
         next_action = ticket.next_action
         assert next_action is not None
-        if ticket.ping_count >= settings.max_pings:
-            await self._store.exhaust_due_routing(
-                ticket.ticket_id,
-                next_action,
-                now,
-            )
-            return TicketResult(True)
-        reservation = self._pending_reservation(ticket)
-        if reservation is None:
-            reservation = await self._reserve_new_ping(ticket, settings, now)
+        reservation = None
+        if ticket.ping_count < settings.max_pings:
+            reservation = self._pending_reservation(ticket)
+            if reservation is None:
+                reservation = await self._reserve_new_ping(ticket, settings, now)
+                if reservation is not None:
+                    self._locally_reserved_pings.add(ticket.ticket_id)
         if reservation is None:
             await self._store.exhaust_due_routing(
                 ticket.ticket_id,
@@ -424,7 +640,42 @@ class TicketCoordinator:
                 now,
             )
             return TicketResult(True)
+        return await self._settle_due_ping(ticket, reservation, settings, now)
+
+    async def _settle_due_ping(
+        self,
+        ticket: Ticket,
+        reservation: PingReservation,
+        settings: GuildSettings,
+        now: datetime,
+    ) -> TicketResult:
         pending_settlement = self._sent_ping_settlements.get(ticket.ticket_id)
+        if (
+            pending_settlement is None
+            and ticket.ticket_id not in self._locally_reserved_pings
+            and ticket.thread_id is not None
+        ):
+            try:
+                recovered_sent_at = await self._projection.find_ping(
+                    ticket.thread_id,
+                    reservation.target_user_id,
+                    reservation.automatic,
+                    reservation.reserved_at,
+                )
+            except ProjectionNotFound:
+                if not await self._store.begin_finishing(
+                    ticket.ticket_id,
+                    now,
+                    thread_absent=True,
+                ):
+                    return TicketResult(False, INACTIVE_TICKET)
+                return await self._recover_projection_cleanup_locked(
+                    ticket.ticket_id,
+                    thread_absent=True,
+                )
+            if recovered_sent_at is not None:
+                pending_settlement = (reservation, recovered_sent_at)
+                self._sent_ping_settlements[ticket.ticket_id] = pending_settlement
         if pending_settlement is None or pending_settlement[0] != reservation:
             effect_result = await self._send_ping_effect(
                 ticket,
@@ -442,6 +693,7 @@ class TicketCoordinator:
             pending_settlement[1],
         )
         self._sent_ping_settlements.pop(ticket.ticket_id, None)
+        self._locally_reserved_pings.discard(ticket.ticket_id)
         if acknowledged is None:
             return TicketResult(False, INACTIVE_TICKET)
         current = await self._store.get_ticket(ticket.ticket_id)
@@ -472,7 +724,10 @@ class TicketCoordinator:
             await self._delete_remaining_projection(ticket, thread_absent=True)
             return TicketResult(True)
         except Exception:
-            retry_at = now + timedelta(seconds=settings.protection_seconds)
+            log.exception("GitHub Tickets reviewer ping failed for ticket %s", ticket.ticket_id)
+            retry_at = now + timedelta(
+                seconds=max(settings.protection_seconds, PING_RETRY_FLOOR_SECONDS)
+            )
             await self._store.defer_due_ping(ticket.ticket_id, retry_at, now)
             self._wake_deadlines()
             return TicketResult(False, ACTION_FAILED)
@@ -519,6 +774,7 @@ class TicketCoordinator:
         if (
             ticket.pending_target_id is None
             or ticket.pending_ping_automatic is None
+            or ticket.pending_ping_reserved_at is None
             or ticket.pending_response_deadline is None
         ):
             return None
@@ -527,6 +783,7 @@ class TicketCoordinator:
             target_user_id=ticket.pending_target_id,
             presence_tier=ticket.pending_presence_tier,
             automatic=ticket.pending_ping_automatic,
+            reserved_at=ticket.pending_ping_reserved_at,
             response_deadline=ticket.pending_response_deadline,
         )
 
@@ -694,3 +951,14 @@ class TicketCoordinator:
             except Exception:
                 return
         await self._store.delete_ticket(ticket.ticket_id)
+
+    async def _defer_cleanup_retry(self, ticket_id: int) -> None:
+        current = await self._store.get_ticket(ticket_id)
+        if current is None:
+            return
+        await self._store.defer_projection_sync(
+            current.ticket_id,
+            current.transition_version,
+            self._clock() + timedelta(seconds=PROJECTION_RETRY_SECONDS),
+        )
+        self._wake_deadlines()

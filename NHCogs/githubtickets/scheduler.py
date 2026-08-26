@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Protocol
 
 log = logging.getLogger(__name__)
+ERROR_RETRY_SECONDS = 1
 
 
 def _utc_now() -> datetime:
@@ -57,33 +58,42 @@ class DeadlineScheduler:
 
     async def _run(self) -> None:
         while True:
-            self._wake_event.clear()
-            deadline = await self._deadlines.nearest_deadline()
-            if deadline is None:
-                await self._wake_event.wait()
-                continue
+            try:
+                await self._run_iteration()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("GitHub Tickets deadline scheduler iteration failed")
+                await asyncio.sleep(ERROR_RETRY_SECONDS)
 
-            delay = max(0.0, (deadline - self._clock()).total_seconds())
-            if delay > 0:
-                try:
-                    await asyncio.wait_for(self._wake_event.wait(), timeout=delay)
-                except asyncio.TimeoutError:
-                    pass
-                else:
-                    continue
+    async def _run_iteration(self) -> None:
+        self._wake_event.clear()
+        deadline = await self._deadlines.nearest_deadline()
+        if deadline is None:
+            await self._wake_event.wait()
+            return
 
-            callback_failed = False
-            for ticket_id in await self._deadlines.due_ticket_ids(self._clock()):
-                try:
-                    await self._on_due(ticket_id)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    callback_failed = True
-                    log.exception("GitHub Tickets deadline callback failed for ticket %s", ticket_id)
+        delay = max(0.0, (deadline - self._clock()).total_seconds())
+        if delay > 0:
+            try:
+                await asyncio.wait_for(self._wake_event.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
+            else:
+                return
 
-            if callback_failed:
-                await asyncio.sleep(1)
+        callback_failed = False
+        for ticket_id in await self._deadlines.due_ticket_ids(self._clock()):
+            try:
+                await self._on_due(ticket_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                callback_failed = True
+                log.exception("GitHub Tickets deadline callback failed for ticket %s", ticket_id)
+
+        if callback_failed:
+            await asyncio.sleep(ERROR_RETRY_SECONDS)
 
     @staticmethod
     def _observe_task(task: asyncio.Task[None]) -> None:

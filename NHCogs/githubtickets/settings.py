@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 DEFAULT_PROTECTION_SECONDS = 10
 DEFAULT_VOLUNTEER_SECONDS = 2 * 60 * 60
@@ -45,7 +46,12 @@ def parse_duration(raw: str) -> int:
     value = int(match.group("value"))
     if match.group("sign") == "-" and value:
         raise NegativeDuration(raw)
-    return value * _DURATION_MULTIPLIERS[match.group("unit")]
+    seconds = value * _DURATION_MULTIPLIERS[match.group("unit")]
+    try:
+        datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    except OverflowError as error:
+        raise InvalidDuration(raw) from error
+    return seconds
 
 
 def _positive_id(raw: object) -> int | None:

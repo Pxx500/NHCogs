@@ -72,7 +72,7 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
                 for row in connection.execute("PRAGMA table_info(tickets)")
             }
 
-        self.assertEqual(version, 2)
+        self.assertEqual(version, 1)
         self.assertEqual(foreign_keys, 1)
         self.assertIn("projection_sync_at", ticket_columns)
         self.assertTrue(
@@ -90,9 +90,9 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
     async def test_initialize_rejects_newer_schema_version(self):
         self.assertIsNotNone(self.store, "the GitHub Tickets store interface is missing")
         with closing(sqlite3.connect(self.path)) as connection:
-            connection.execute("PRAGMA user_version = 3")
+            connection.execute("PRAGMA user_version = 2")
 
-        with self.assertRaisesRegex(ValueError, "newer than supported version 2"):
+        with self.assertRaisesRegex(ValueError, "newer than supported version 1"):
             await self.store.initialize()
 
     async def test_categories_normalize_validate_and_enforce_guild_limit(self):
@@ -501,6 +501,28 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(await self.store.get_ticket_by_message_id(9999))
         self.assertIsNone(await self.store.get_ticket_by_thread_id(9999))
+
+    async def test_ticket_public_tokens_are_opaque_unique_and_restart_stable(self):
+        await self.store.initialize()
+        first = await self._create_open_ticket()
+        second = await self._create_open_ticket()
+
+        self.assertTrue(first.public_token)
+        self.assertFalse(first.public_token.isdecimal())
+        self.assertNotEqual(first.public_token, second.public_token)
+        self.assertEqual(
+            (await self.store.get_ticket_by_public_token(first.public_token)).ticket_id,
+            first.ticket_id,
+        )
+
+        reopened = store_module.GitHubTicketsStore(self.path)
+        await reopened.initialize()
+        persisted = await reopened.get_ticket(first.ticket_id)
+        self.assertEqual(persisted.public_token, first.public_token)
+        self.assertEqual(
+            (await reopened.get_ticket_by_public_token(first.public_token)).ticket_id,
+            first.ticket_id,
+        )
 
     async def test_finishing_and_deletion_are_terminal(self):
         await self.store.initialize()

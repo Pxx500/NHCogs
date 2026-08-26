@@ -124,6 +124,8 @@ class Ticket:
     updated_at: datetime
     transition_version: int
     category_ids: tuple[int, ...]
+    public_token: str = ""
+    pending_ping_reserved_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,4 +153,5 @@ class PingReservation:
     target_user_id: int
     presence_tier: PresenceTier | None
     automatic: bool
+    reserved_at: datetime
     response_deadline: datetime

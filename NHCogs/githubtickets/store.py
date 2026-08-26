@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 1
 MAX_CATEGORIES = 25
 MAX_CATEGORY_NAME_LENGTH = 100
 
@@ -155,6 +156,9 @@ def _decode_ticket(connection: sqlite3.Connection, row: sqlite3.Row) -> Ticket:
             if row["pending_ping_automatic"] is not None
             else None
         ),
+        pending_ping_reserved_at=_deserialize_optional_datetime(
+            row["pending_ping_reserved_at"]
+        ),
         pending_response_deadline=_deserialize_optional_datetime(
             row["pending_response_deadline"]
         ),
@@ -162,6 +166,7 @@ def _decode_ticket(connection: sqlite3.Connection, row: sqlite3.Row) -> Ticket:
         updated_at=_deserialize_datetime(str(row["updated_at"])),
         transition_version=int(row["transition_version"]),
         category_ids=category_ids,
+        public_token=str(row["public_token"]),
     )
 def _create_schema(connection: sqlite3.Connection) -> None:
     schema = """
@@ -195,6 +200,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
 
         CREATE TABLE tickets (
             ticket_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            public_token TEXT NOT NULL UNIQUE,
             guild_id INTEGER NOT NULL,
             channel_id INTEGER NOT NULL,
             message_id INTEGER UNIQUE,
@@ -231,9 +237,11 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             pending_ping_automatic INTEGER CHECK (
                 pending_ping_automatic IS NULL OR pending_ping_automatic IN (0, 1)
             ),
+            pending_ping_reserved_at TEXT,
             pending_response_deadline TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            projection_sync_at TEXT,
             transition_version INTEGER NOT NULL DEFAULT 0
                 CHECK (transition_version >= 0),
             CHECK (
@@ -243,9 +251,11 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             CHECK (
                 (pending_target_id IS NULL
                     AND pending_ping_automatic IS NULL
+                    AND pending_ping_reserved_at IS NULL
                     AND pending_response_deadline IS NULL)
                 OR (pending_target_id IS NOT NULL
                     AND pending_ping_automatic IS NOT NULL
+                    AND pending_ping_reserved_at IS NOT NULL
                     AND pending_response_deadline IS NOT NULL)
             )
         );
@@ -307,11 +317,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             connection.execute(statement)
 
 
-def _add_projection_sync_deadline(connection: sqlite3.Connection) -> None:
-    connection.execute("ALTER TABLE tickets ADD COLUMN projection_sync_at TEXT")
-
-
-MIGRATIONS = (_create_schema, _add_projection_sync_deadline)
+MIGRATIONS = (_create_schema,)
 
 
 class GitHubTicketsStore:
@@ -464,6 +470,13 @@ class GitHubTicketsStore:
     async def get_ticket(self, ticket_id: int) -> Ticket | None:
         async with self._lock:
             return await asyncio.to_thread(self._get_ticket_sync, ticket_id)
+
+    async def get_ticket_by_public_token(self, public_token: str) -> Ticket | None:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._get_ticket_by_public_token_sync,
+                public_token,
+            )
 
     async def get_projection_sync_ticket(self, ticket_id: int) -> Ticket | None:
         async with self._lock:
@@ -714,6 +727,10 @@ class GitHubTicketsStore:
         async with self._lock:
             return await asyncio.to_thread(self._user_reference_guild_ids_sync, user_id)
 
+    async def user_reference_ticket_ids(self, user_id: int) -> tuple[int, ...]:
+        async with self._lock:
+            return await asyncio.to_thread(self._user_reference_ticket_ids_sync, user_id)
+
     async def redact_user(
         self,
         user_id: int,
@@ -730,9 +747,22 @@ class GitHubTicketsStore:
                 updated_at,
             )
 
-    async def begin_finishing(self, ticket_id: int, updated_at: datetime) -> bool:
+    async def begin_finishing(
+        self,
+        ticket_id: int,
+        updated_at: datetime,
+        *,
+        message_absent: bool = False,
+        thread_absent: bool = False,
+    ) -> bool:
         async with self._lock:
-            return await asyncio.to_thread(self._begin_finishing_sync, ticket_id, updated_at)
+            return await asyncio.to_thread(
+                self._begin_finishing_sync,
+                ticket_id,
+                updated_at,
+                message_absent,
+                thread_absent,
+            )
 
     async def delete_ticket(self, ticket_id: int) -> bool:
         async with self._lock:
@@ -1099,12 +1129,13 @@ class GitHubTicketsStore:
                 cursor = connection.execute(
                     """
                     INSERT INTO tickets (
-                        guild_id, channel_id, author_id, pr_title, pr_url,
+                        public_token, guild_id, channel_id, author_id, pr_title, pr_url,
                         category_display, routing_mode, state, direct_target_id,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?, ?)
                     """,
                     (
+                        secrets.token_urlsafe(16),
                         new_ticket.guild_id,
                         new_ticket.channel_id,
                         new_ticket.author_id,
@@ -1151,7 +1182,8 @@ class GitHubTicketsStore:
             UPDATE tickets
             SET message_id = ?, thread_id = ?, state = 'open',
                 protection_until = ?, next_action = ?, next_action_at = ?,
-                updated_at = ?, transition_version = transition_version + 1
+                projection_sync_at = NULL, updated_at = ?,
+                transition_version = transition_version + 1
             WHERE ticket_id = ? AND state = 'creating'
             """,
             (
@@ -1217,6 +1249,14 @@ class GitHubTicketsStore:
             ).fetchone()
             return _decode_ticket(connection, row) if row is not None else None
 
+    def _get_ticket_by_public_token_sync(self, public_token: str) -> Ticket | None:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM tickets WHERE public_token = ?",
+                (public_token,),
+            ).fetchone()
+            return _decode_ticket(connection, row) if row is not None else None
+
     def _get_projection_sync_ticket_sync(self, ticket_id: int) -> Ticket | None:
         with closing(self._connect()) as connection:
             row = connection.execute(
@@ -1256,7 +1296,6 @@ class GitHubTicketsStore:
             UPDATE tickets
             SET projection_sync_at = ?
             WHERE ticket_id = ? AND transition_version = ?
-                AND projection_sync_at IS NOT NULL
             """,
             (
                 _serialize_datetime(retry_at),
@@ -1316,6 +1355,7 @@ class GitHubTicketsStore:
                 protection_until = ?, next_action = NULL, next_action_at = NULL,
                 pending_target_id = NULL, pending_presence_tier = NULL,
                 pending_ping_automatic = NULL,
+                pending_ping_reserved_at = NULL,
                 pending_response_deadline = NULL,
                 updated_at = ?, projection_sync_at = ?,
                 transition_version = transition_version + 1
@@ -1372,9 +1412,11 @@ class GitHubTicketsStore:
                         UPDATE tickets
                         SET current_target_id = NULL, protection_until = ?,
                             next_action = ?, next_action_at = ?, updated_at = ?,
+                            projection_sync_at = ?,
                             pending_target_id = NULL,
                             pending_presence_tier = NULL,
                             pending_ping_automatic = NULL,
+                            pending_ping_reserved_at = NULL,
                             pending_response_deadline = NULL,
                             transition_version = transition_version + 1
                         WHERE ticket_id = ?
@@ -1383,6 +1425,7 @@ class GitHubTicketsStore:
                             _serialize_optional_datetime(protection_until),
                             next_action.value if next_action is not None else None,
                             _serialize_optional_datetime(next_action_at),
+                            _serialize_datetime(updated_at),
                             _serialize_datetime(updated_at),
                             ticket_id,
                         ),
@@ -1442,6 +1485,7 @@ class GitHubTicketsStore:
                         protection_until = ?, next_action = ?, next_action_at = ?,
                         pending_target_id = NULL, pending_presence_tier = NULL,
                         pending_ping_automatic = NULL,
+                        pending_ping_reserved_at = NULL,
                         pending_response_deadline = NULL,
                         updated_at = ?, projection_sync_at = ?,
                         transition_version = transition_version + 1
@@ -1508,6 +1552,9 @@ class GitHubTicketsStore:
                             else None
                         ),
                         automatic=bool(row["pending_ping_automatic"]),
+                        reserved_at=_deserialize_datetime(
+                            str(row["pending_ping_reserved_at"])
+                        ),
                         response_deadline=_deserialize_datetime(
                             str(row["pending_response_deadline"])
                         ),
@@ -1524,7 +1571,8 @@ class GitHubTicketsStore:
                     """
                     UPDATE tickets
                     SET pending_target_id = ?, pending_presence_tier = ?,
-                        pending_ping_automatic = ?, pending_response_deadline = ?,
+                        pending_ping_automatic = ?, pending_ping_reserved_at = ?,
+                        pending_response_deadline = ?,
                         updated_at = ?, transition_version = transition_version + 1
                     WHERE ticket_id = ? AND state = 'open'
                     """,
@@ -1532,6 +1580,7 @@ class GitHubTicketsStore:
                         target_user_id,
                         presence_tier.value if presence_tier is not None else None,
                         int(automatic),
+                        _serialize_datetime(reserved_at),
                         _serialize_datetime(response_deadline),
                         _serialize_datetime(reserved_at),
                         ticket_id,
@@ -1546,6 +1595,7 @@ class GitHubTicketsStore:
             target_user_id=target_user_id,
             presence_tier=presence_tier,
             automatic=automatic,
+            reserved_at=reserved_at.astimezone(timezone.utc),
             response_deadline=response_deadline.astimezone(timezone.utc),
         )
 
@@ -1599,14 +1649,17 @@ class GitHubTicketsStore:
                         next_action = 'target_timeout', next_action_at = ?,
                         pending_target_id = NULL, pending_presence_tier = NULL,
                         pending_ping_automatic = NULL,
+                        pending_ping_reserved_at = NULL,
                         pending_response_deadline = NULL,
-                        updated_at = ?, transition_version = transition_version + 1
+                        updated_at = ?, projection_sync_at = ?,
+                        transition_version = transition_version + 1
                     WHERE ticket_id = ? AND state = 'open'
                     """,
                     (
                         sequence_number,
                         target_user_id,
                         _serialize_datetime(response_deadline),
+                        _serialize_datetime(sent_at),
                         _serialize_datetime(sent_at),
                         ticket_id,
                     ),
@@ -1664,6 +1717,7 @@ class GitHubTicketsStore:
                     UPDATE tickets
                     SET current_target_id = NULL, protection_until = ?,
                         next_action = ?, next_action_at = ?, updated_at = ?,
+                        projection_sync_at = ?,
                         transition_version = transition_version + 1
                     WHERE ticket_id = ? AND state = 'open'
                         AND current_target_id = ?
@@ -1672,6 +1726,7 @@ class GitHubTicketsStore:
                         _serialize_datetime(protection_until),
                         next_action.value if next_action is not None else None,
                         _serialize_optional_datetime(next_action_at),
+                        _serialize_datetime(updated_at),
                         _serialize_datetime(updated_at),
                         ticket_id,
                         target_user_id,
@@ -1717,6 +1772,7 @@ class GitHubTicketsStore:
             SET next_action = NULL, next_action_at = NULL,
                 pending_target_id = NULL, pending_presence_tier = NULL,
                 pending_ping_automatic = NULL,
+                pending_ping_reserved_at = NULL,
                 pending_response_deadline = NULL,
                 updated_at = ?, transition_version = transition_version + 1
             WHERE ticket_id = ? AND state = 'open' AND next_action = ?
@@ -1788,8 +1844,7 @@ class GitHubTicketsStore:
                     UNION ALL
                     SELECT projection_sync_at AS deadline
                     FROM tickets
-                    WHERE state IN ('open', 'claimed')
-                        AND projection_sync_at IS NOT NULL
+                    WHERE projection_sync_at IS NOT NULL
                 )
                 """
             ).fetchone()
@@ -1803,7 +1858,7 @@ class GitHubTicketsStore:
                 WHERE (
                     state = 'open' AND next_action_at <= ?
                 ) OR (
-                    state IN ('open', 'claimed') AND projection_sync_at <= ?
+                    projection_sync_at <= ?
                 )
                 ORDER BY CASE
                     WHEN projection_sync_at IS NOT NULL THEN projection_sync_at
@@ -1901,6 +1956,21 @@ class GitHubTicketsStore:
                 (user_id,) * 8,
             ).fetchall()
         return tuple(int(row["guild_id"]) for row in rows)
+
+    def _user_reference_ticket_ids_sync(self, user_id: int) -> tuple[int, ...]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT ticket_id FROM tickets
+                WHERE author_id <> ? AND (
+                    direct_target_id = ? OR current_target_id = ?
+                    OR pending_target_id = ? OR assignee_id = ?
+                )
+                ORDER BY ticket_id
+                """,
+                (user_id, user_id, user_id, user_id, user_id),
+            ).fetchall()
+        return tuple(int(row["ticket_id"]) for row in rows)
 
     def _redact_user_sync(
         self,
@@ -2010,8 +2080,10 @@ class GitHubTicketsStore:
                             pending_target_id = NULL,
                             pending_presence_tier = NULL,
                             pending_ping_automatic = NULL,
+                            pending_ping_reserved_at = NULL,
                             pending_response_deadline = NULL,
                             protection_until = ?,
+                            projection_sync_at = ?,
                             next_action = CASE
                                 WHEN routing_mode IN (
                                     'automatic', 'direct_automatic'
@@ -2033,7 +2105,13 @@ class GitHubTicketsStore:
                                 WHERE reopen = 1
                             )
                         """,
-                        (deadline, deadline, updated_timestamp, guild_id),
+                        (
+                            deadline,
+                            updated_timestamp,
+                            deadline,
+                            updated_timestamp,
+                            guild_id,
+                        ),
                     )
 
                 connection.execute(
@@ -2069,6 +2147,10 @@ class GitHubTicketsStore:
                             WHEN pending_target_id = ? THEN NULL
                             ELSE pending_ping_automatic
                         END,
+                        pending_ping_reserved_at = CASE
+                            WHEN pending_target_id = ? THEN NULL
+                            ELSE pending_ping_reserved_at
+                        END,
                         pending_response_deadline = CASE
                             WHEN pending_target_id = ? THEN NULL
                             ELSE pending_response_deadline
@@ -2083,6 +2165,7 @@ class GitHubTicketsStore:
                         )
                     """,
                     (
+                        user_id,
                         user_id,
                         user_id,
                         user_id,
@@ -2165,6 +2248,7 @@ class GitHubTicketsStore:
                         pending_target_id = NULL,
                         pending_presence_tier = NULL,
                         pending_ping_automatic = NULL,
+                        pending_ping_reserved_at = NULL,
                         pending_response_deadline = NULL,
                         updated_at = ?, transition_version = transition_version + 1
                     WHERE ticket_id = ? AND author_id = ?
@@ -2182,15 +2266,31 @@ class GitHubTicketsStore:
                 connection.rollback()
                 raise
 
-    def _begin_finishing_sync(self, ticket_id: int, updated_at: datetime) -> bool:
+    def _begin_finishing_sync(
+        self,
+        ticket_id: int,
+        updated_at: datetime,
+        message_absent: bool,
+        thread_absent: bool,
+    ) -> bool:
         changed = self._update_ticket_state(
             """
             UPDATE tickets
             SET state = 'finishing', next_action = NULL, next_action_at = NULL,
-                updated_at = ?, transition_version = transition_version + 1
-            WHERE ticket_id = ? AND state IN ('open', 'claimed')
+                message_id = CASE WHEN ? THEN NULL ELSE message_id END,
+                thread_id = CASE WHEN ? THEN NULL ELSE thread_id END,
+                projection_sync_at = ?, updated_at = ?,
+                transition_version = transition_version + 1
+            WHERE ticket_id = ?
+                AND state IN ('creating', 'open', 'claimed', 'finishing')
             """,
-            (_serialize_datetime(updated_at), ticket_id),
+            (
+                int(message_absent),
+                int(thread_absent),
+                _serialize_datetime(updated_at),
+                _serialize_datetime(updated_at),
+                ticket_id,
+            ),
         )
         return changed > 0
 

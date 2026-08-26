@@ -35,6 +35,10 @@ def _install_discord_stub():
         def none(cls):
             return cls(everyone=False, users=False, roles=False, replied_user=False)
 
+    class Embed:
+        def __init__(self, *, description=None):
+            self.description = description
+
     class Item:
         pass
 
@@ -141,6 +145,7 @@ def _install_discord_stub():
     discord.ui = ui
     discord.ButtonStyle = ButtonStyle
     discord.AllowedMentions = AllowedMentions
+    discord.Embed = Embed
     discord.SelectOption = SelectOption
     discord.RadioGroupOption = RadioGroupOption
     discord.Interaction = type("Interaction", (), {})
@@ -182,8 +187,11 @@ class FakeResponse:
         self.edits = []
         self.defer_calls = 0
 
-    async def send_message(self, content, **kwargs):
+    async def send_message(self, content=None, **kwargs):
         self.messages.append((content, kwargs))
+
+    def is_done(self):
+        return self.defer_calls > 0 or bool(self.messages) or bool(self.modals)
 
     async def send_modal(self, modal):
         self.modals.append(modal)
@@ -315,6 +323,54 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             submit_interaction.response.messages[0][0],
             presentation.CANNOT_USE_ACTION,
         )
+
+    async def test_developer_profile_uses_one_embed_when_valid_content_exceeds_2000(self):
+        store = FakeStore()
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        store.categories = [
+            models.Category(index, 100, f"category-{index}-" + "x" * 80, now)
+            for index in range(1, 26)
+        ]
+        store.profiles[(100, 10)] = models.Profile(
+            100,
+            10,
+            "developer-name",
+            True,
+            tuple(range(1, 26)),
+            now,
+        )
+        interaction = FakeInteraction()
+
+        await dashboard_module.send_developer_profile(
+            interaction,
+            store,
+            guild_id=100,
+            user_id=10,
+        )
+
+        content, kwargs = interaction.response.messages[0]
+        self.assertIsNone(content)
+        self.assertLessEqual(
+            len(kwargs["embed"].description),
+            presentation.DISCORD_EMBED_DESCRIPTION_LIMIT,
+        )
+        self.assertTrue(kwargs["ephemeral"])
+
+    async def test_dashboard_error_boundary_returns_only_generic_copy(self):
+        view, _store, _actor = self.make_dashboard()
+        interaction = FakeInteraction()
+        failure = RuntimeError("private database detail")
+        handler = getattr(view, "on_error", None)
+
+        self.assertIsNotNone(handler)
+        await handler(interaction, failure, view.children[0])
+
+        self.assertEqual(
+            interaction.response.messages[0][0],
+            presentation.COULD_NOT_COMPLETE_ACTION,
+        )
+        self.assertNotIn("private database detail", interaction.response.messages[0][0])
+        self.assertTrue(interaction.response.messages[0][1]["ephemeral"])
 
     async def test_edit_profile_modal_uses_exact_components_and_saves_silently(self):
         store = FakeStore()
@@ -638,7 +694,14 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
                 presentation.DIRECT_REVIEWER,
             ],
         )
-        self.assertEqual([label.description for label in modal.children], [None] * 5)
+        ping_label = next(
+            label for label in modal.children if label.text == presentation.PING_BEHAVIOR
+        )
+        self.assertEqual(ping_label.description, presentation.SELECT_PING_BEHAVIOR)
+        self.assertEqual(
+            [label.description for label in modal.children],
+            [None, None, None, presentation.SELECT_PING_BEHAVIOR, None],
+        )
         self.assertIsInstance(modal.pr_title, discord.ui.TextInput)
         self.assertTrue(modal.pr_title.required)
         self.assertEqual(modal.pr_title.placeholder, presentation.ENTER_PR_TITLE)

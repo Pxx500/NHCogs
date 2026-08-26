@@ -4,7 +4,7 @@ import importlib
 import sys
 import types
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -164,6 +164,9 @@ class FakeChannel:
         self.fetch_calls = 0
         self.partial_calls = []
         self.error = None
+        self.history_messages = []
+        self.history_after = []
+        self.fetched_message = None
 
     async def send(self, content, **kwargs):
         if self.error is not None:
@@ -178,31 +181,104 @@ class FakeChannel:
 
     async def fetch_message(self, _message_id):
         self.fetch_calls += 1
+        if self.fetched_message is not None:
+            return self.fetched_message
         raise AssertionError("fetch_message must not be called")
+
+    async def history(self, *, after, oldest_first, limit):
+        self.history_after.append(after)
+        for message in self.history_messages[:limit]:
+            if message.created_at > after:
+                yield message
 
 
 class FakeBot:
     def __init__(self, channels):
         self.channels = channels
         self.fetch_calls = 0
+        self.partial_messageables = {}
+        self.fetched_channels = {}
+        self.user = types.SimpleNamespace(id=999)
 
     def get_channel(self, channel_id):
         return self.channels.get(channel_id)
 
-    async def fetch_channel(self, _channel_id):
+    def get_partial_messageable(self, channel_id):
+        if channel_id in self.channels:
+            return self.channels[channel_id]
+        return self.partial_messageables.setdefault(channel_id, FakeThread(channel_id))
+
+    async def fetch_channel(self, channel_id):
         self.fetch_calls += 1
+        if channel_id in self.fetched_channels:
+            return self.fetched_channels[channel_id]
         raise AssertionError("fetch_channel must not be called")
 
 
 class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_recovery_history_uses_lookback_but_keeps_exact_correlations(self):
+        now = datetime(2026, 8, 26, 10, 0, tzinfo=timezone.utc)
+        channel = FakeChannel()
+        thread = FakeChannel(66)
+        bot = FakeBot({channel.id: channel, thread.id: thread})
+        adapter = adapter_module.DiscordTicketProjection(bot, lambda _ticket: object())
+        current = ticket(created_at=now, public_token="opaque-token")
+        main = types.SimpleNamespace(
+            id=77,
+            created_at=now - timedelta(seconds=2),
+            author=types.SimpleNamespace(id=bot.user.id),
+            components=(
+                types.SimpleNamespace(
+                    children=(
+                        types.SimpleNamespace(
+                            custom_id="githubtickets:opaque-token:claim"
+                        ),
+                    )
+                ),
+            ),
+            content="unrelated visible copy",
+        )
+        ping = types.SimpleNamespace(
+            id=78,
+            created_at=now - timedelta(seconds=2),
+            author=types.SimpleNamespace(id=bot.user.id),
+            components=(),
+            content=presentation.automatic_review_notification("<@41>"),
+        )
+        channel.history_messages = [main]
+        thread.history_messages = [ping]
+
+        message_id = await adapter.find_ticket_message(current)
+        ping_at = await adapter.find_ping(66, 41, True, now)
+
+        self.assertEqual(message_id, 77)
+        self.assertEqual(ping_at, ping.created_at)
+        self.assertLess(channel.history_after[0], now)
+        self.assertLess(thread.history_after[0], now)
+
+    async def test_thread_recovery_fetches_saved_message_only_in_recovery_path(self):
+        channel = FakeChannel()
+        channel.fetched_message = types.SimpleNamespace(
+            thread=types.SimpleNamespace(id=88)
+        )
+        adapter = adapter_module.DiscordTicketProjection(
+            FakeBot({channel.id: channel}),
+            lambda _ticket: object(),
+        )
+
+        thread_id = await adapter.find_ticket_thread(ticket(message_id=55))
+
+        self.assertEqual(thread_id, 88)
+        self.assertEqual(channel.fetch_calls, 1)
+
     async def test_send_and_thread_creation_use_exact_projection_without_fetches(self):
         channel = FakeChannel()
         bot = FakeBot({channel.id: channel})
         view = object()
         view_tickets = []
 
-        def view_factory(ticket_id, claimed):
-            view_tickets.append((ticket_id, claimed))
+        def view_factory(current):
+            view_tickets.append((current.ticket_id, current.state is models.TicketState.CLAIMED))
             return view
 
         adapter = adapter_module.DiscordTicketProjection(bot, view_factory)
@@ -241,8 +317,8 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
         view = object()
         view_tickets = []
 
-        def view_factory(ticket_id, claimed):
-            view_tickets.append((ticket_id, claimed))
+        def view_factory(current):
+            view_tickets.append((current.ticket_id, current.state is models.TicketState.CLAIMED))
             return view
 
         adapter = adapter_module.DiscordTicketProjection(bot, view_factory)
@@ -281,7 +357,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
         bot = FakeBot({channel.id: channel})
         adapter = adapter_module.DiscordTicketProjection(
             bot,
-            lambda _ticket_id, _claimed: object(),
+            lambda _ticket: object(),
         )
         current = ticket(
             message_id=55,
@@ -306,7 +382,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_ping_uses_exact_copy_and_allows_only_the_new_target_mention(self):
         thread = FakeThread(66)
         bot = FakeBot({thread.id: thread})
-        adapter = adapter_module.DiscordTicketProjection(bot, lambda _ticket_id, _claimed: object())
+        adapter = adapter_module.DiscordTicketProjection(bot, lambda _ticket: object())
 
         await adapter.ping_reviewer(66, 41, False)
         await adapter.ping_reviewer(66, 42, True)
@@ -330,7 +406,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
         channel = FakeChannel()
         thread = FakeThread(66)
         bot = FakeBot({channel.id: channel, thread.id: thread})
-        adapter = adapter_module.DiscordTicketProjection(bot, lambda _ticket_id, _claimed: object())
+        adapter = adapter_module.DiscordTicketProjection(bot, lambda _ticket: object())
 
         await adapter.delete_message(channel.id, 55)
         await adapter.delete_thread(thread.id)
@@ -348,7 +424,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
             channel = FakeChannel()
             channel.error = error
             adapter = adapter_module.DiscordTicketProjection(
-                FakeBot({channel.id: channel}), lambda _ticket_id, _claimed: object()
+                FakeBot({channel.id: channel}), lambda _ticket: object()
             )
             with self.assertRaises(projection_module.ProjectionNotFound):
                 await adapter.send_ticket(ticket())
@@ -358,7 +434,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
                 channel = FakeChannel()
                 channel.message.error = error
                 adapter = adapter_module.DiscordTicketProjection(
-                    FakeBot({channel.id: channel}), lambda _ticket_id, _claimed: object()
+                    FakeBot({channel.id: channel}), lambda _ticket: object()
                 )
                 if operation == "create_thread":
                     with self.assertRaises(projection_module.ProjectionNotFound):
@@ -375,7 +451,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
                 thread = FakeThread(66)
                 thread.error = error
                 adapter = adapter_module.DiscordTicketProjection(
-                    FakeBot({thread.id: thread}), lambda _ticket_id, _claimed: object()
+                    FakeBot({thread.id: thread}), lambda _ticket: object()
                 )
                 if operation == "ping_reviewer":
                     with self.assertRaises(projection_module.ProjectionNotFound):
@@ -384,15 +460,17 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(projection_module.ProjectionNotFound):
                         await adapter.delete_thread(thread.id)
 
-    async def test_cache_miss_is_retryable_without_rest_lookup(self):
+    async def test_cache_miss_uses_partial_ping_and_targeted_thread_delete_fetch(self):
         bot = FakeBot({})
-        adapter = adapter_module.DiscordTicketProjection(bot, lambda _ticket_id, _claimed: object())
+        archived = FakeThread(66)
+        bot.fetched_channels[66] = archived
+        adapter = adapter_module.DiscordTicketProjection(bot, lambda _ticket: object())
 
         with self.assertRaises(projection_module.ProjectionUnavailable):
             await adapter.send_ticket(ticket())
-        with self.assertRaises(projection_module.ProjectionUnavailable):
-            await adapter.ping_reviewer(66, 41, True)
-        with self.assertRaises(projection_module.ProjectionUnavailable):
-            await adapter.delete_thread(66)
+        await adapter.ping_reviewer(67, 41, True)
+        await adapter.delete_thread(66)
 
-        self.assertEqual(bot.fetch_calls, 0)
+        self.assertEqual(len(bot.partial_messageables[67].send_calls), 1)
+        self.assertEqual(archived.delete_calls, 1)
+        self.assertEqual(bot.fetch_calls, 1)

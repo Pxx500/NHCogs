@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Literal
 
 import discord
@@ -11,7 +11,7 @@ from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
 
 from . import presentation, settings
-from .coordinator import TicketActor, TicketCoordinator
+from .coordinator import TicketActor, TicketCoordinator, TicketResult
 from .dashboard import GitHubTicketsDashboard, send_developer_profile
 from .discord_projection import DiscordTicketProjection
 from .models import (
@@ -22,7 +22,6 @@ from .models import (
     Ticket,
     TicketState,
 )
-from .projection import ProjectionNotFound
 from .routing import CandidateFacts
 from .scheduler import DeadlineScheduler
 from .store import MAX_CATEGORY_NAME_LENGTH, GitHubTicketsStore
@@ -59,13 +58,14 @@ class GitHubTickets(commands.Cog):
         self._dashboard_command = discord.app_commands.Command(
             name="github-tickets",
             description=presentation.SLASH_DESCRIPTION,
-            callback=self._open_dashboard,
+            callback=self._safe_open_dashboard,
         )
         self._developer_profile_command = discord.app_commands.ContextMenu(
             name=presentation.DEVELOPER_PROFILE_COMMAND,
-            callback=self._open_developer_profile,
+            callback=self._safe_open_developer_profile,
         )
         self._application_commands_registered = False
+        self._restored_view_message_ids: set[int] = set()
 
     async def cog_check(self, ctx: commands.Context) -> bool:
         if ctx.guild is None:
@@ -100,23 +100,30 @@ class GitHubTickets(commands.Cog):
 
     async def _restore_runtime(self) -> None:
         await self.bot.wait_until_red_ready()
+        while True:
+            try:
+                await self._restore_runtime_once()
+                self.scheduler.start()
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("GitHub Tickets startup restore iteration failed")
+                self.scheduler.start()
+                await asyncio.sleep(1)
+
+    async def _restore_runtime_once(self) -> None:
         await self._refresh_participant_roles()
         for ticket in await self.store.list_projection_cleanup_tickets():
             await self.coordinator.recover_projection_cleanup(ticket.ticket_id)
         for ticket in await self.store.list_active_tickets():
-            if ticket.message_id is None:
+            if ticket.message_id is None or ticket.message_id in self._restored_view_message_ids:
                 continue
-            self.bot.add_view(
-                self._ticket_view(
-                    ticket.ticket_id,
-                    ticket.state is TicketState.CLAIMED,
-                ),
-                message_id=ticket.message_id,
-            )
+            self.bot.add_view(self._ticket_view(ticket), message_id=ticket.message_id)
+            self._restored_view_message_ids.add(ticket.message_id)
         now = datetime.now(timezone.utc)
         for ticket_id in await self.store.due_ticket_ids(now):
             await self.coordinator.process_due(ticket_id)
-        self.scheduler.start()
 
     @staticmethod
     def _observe_startup_task(task: asyncio.Task[None]) -> None:
@@ -135,8 +142,26 @@ class GitHubTickets(commands.Cog):
     def _register_application_commands(self) -> None:
         if self._application_commands_registered:
             return
-        self.bot.tree.add_command(self._dashboard_command, override=True)
-        self.bot.tree.add_command(self._developer_profile_command, override=True)
+        commands_to_add = (self._dashboard_command, self._developer_profile_command)
+        previous = {
+            (command.name, command.type): self.bot.tree.get_command(
+                command.name,
+                type=command.type,
+            )
+            for command in commands_to_add
+        }
+        try:
+            for command in commands_to_add:
+                self.bot.tree.add_command(command, override=True)
+        except Exception:
+            for command in commands_to_add:
+                existing = self.bot.tree.get_command(command.name, type=command.type)
+                if existing is command:
+                    self.bot.tree.remove_command(command.name, type=command.type)
+            for _key, command in previous.items():
+                if command is not None:
+                    self.bot.tree.add_command(command, override=True)
+            raise
         self._application_commands_registered = True
 
     def _unregister_application_commands(self) -> None:
@@ -166,6 +191,41 @@ class GitHubTickets(commands.Cog):
             create_ticket=self.coordinator.create_ticket,
             actor_factory=self._actor_from_interaction,
         ).send(interaction)
+
+    @discord.app_commands.guild_only()
+    async def _safe_open_dashboard(self, interaction: discord.Interaction) -> None:
+        try:
+            await self._open_dashboard(interaction)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("GitHub Tickets dashboard callback failed")
+            await self._send_interaction_failure(interaction)
+
+    @discord.app_commands.guild_only()
+    async def _safe_open_developer_profile(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+    ) -> None:
+        try:
+            await self._open_developer_profile(interaction, member)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("GitHub Tickets profile callback failed")
+            await self._send_interaction_failure(interaction)
+
+    @staticmethod
+    async def _send_interaction_failure(interaction: discord.Interaction) -> None:
+        response = interaction.response
+        is_done = getattr(response, "is_done", lambda: False)
+        sender = interaction.followup.send if is_done() else response.send_message
+        await sender(
+            presentation.COULD_NOT_COMPLETE_ACTION,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @discord.app_commands.guild_only()
     async def _open_developer_profile(
@@ -212,15 +272,38 @@ class GitHubTickets(commands.Cog):
             can_manage_messages=can_manage_messages,
         )
 
-    def _ticket_view(self, ticket_id: int, claimed: bool) -> TicketControls:
+    def _ticket_view(self, ticket: Ticket) -> TicketControls:
         return TicketControls(
-            ticket_id,
-            claimed=claimed,
+            ticket.ticket_id,
+            ticket.public_token,
+            claimed=ticket.state is TicketState.CLAIMED,
             actor_factory=self._actor_from_interaction,
-            claim=self.coordinator.claim,
-            decline=self.coordinator.decline,
-            unassign=self.coordinator.unassign,
-            mark_finished=self.coordinator.mark_finished,
+            claim=self._claim_ticket,
+            decline=self._decline_ticket,
+            unassign=self._unassign_ticket,
+            mark_finished=self._finish_ticket,
+        )
+
+    async def _ticket_action(self, action, public_token: str, actor: TicketActor):
+        ticket = await self.store.get_ticket_by_public_token(public_token)
+        if ticket is None:
+            return TicketResult(False, presentation.TICKET_NOT_ACTIVE)
+        return await action(ticket.ticket_id, actor)
+
+    async def _claim_ticket(self, public_token: str, actor: TicketActor):
+        return await self._ticket_action(self.coordinator.claim, public_token, actor)
+
+    async def _decline_ticket(self, public_token: str, actor: TicketActor):
+        return await self._ticket_action(self.coordinator.decline, public_token, actor)
+
+    async def _unassign_ticket(self, public_token: str, actor: TicketActor):
+        return await self._ticket_action(self.coordinator.unassign, public_token, actor)
+
+    async def _finish_ticket(self, public_token: str, actor: TicketActor):
+        return await self._ticket_action(
+            self.coordinator.mark_finished,
+            public_token,
+            actor,
         )
 
     async def _get_guild_settings(self, guild_id: int) -> settings.GuildSettings:
@@ -299,19 +382,48 @@ class GitHubTickets(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_message_delete(self, payload) -> None:
-        await self.coordinator.handle_message_deleted(int(payload.message_id))
+        await self._run_listener(
+            lambda: self.coordinator.handle_message_deleted(int(payload.message_id)),
+            "raw message deletion",
+        )
 
     @commands.Cog.listener()
     async def on_raw_bulk_message_delete(self, payload) -> None:
         for message_id in payload.message_ids:
-            await self.coordinator.handle_message_deleted(int(message_id))
+            await self._run_listener(
+                lambda message_id=message_id: self.coordinator.handle_message_deleted(
+                    int(message_id)
+                ),
+                "bulk message deletion",
+            )
 
     @commands.Cog.listener()
     async def on_thread_delete(self, thread: discord.Thread) -> None:
-        await self.coordinator.handle_thread_deleted(int(thread.id))
+        await self._run_listener(
+            lambda: self.coordinator.handle_thread_deleted(int(thread.id)),
+            "thread deletion",
+        )
+
+    async def _run_listener(self, operation, label: str) -> None:
+        for attempt in range(2):
+            try:
+                await operation()
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("GitHub Tickets %s failed", label)
+                if attempt == 0:
+                    await asyncio.sleep(1)
 
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
+        await self._run_listener(
+            lambda: self._handle_guild_channel_delete(channel),
+            "guild channel deletion",
+        )
+
+    async def _handle_guild_channel_delete(self, channel) -> None:
         guild_id = int(channel.guild.id)
         await self.store.delete_tickets_for_channel(guild_id, int(channel.id))
         guild_config = self.config.guild_from_id(guild_id)
@@ -324,6 +436,12 @@ class GitHubTickets(commands.Cog):
 
     @commands.Cog.listener()
     async def on_guild_role_delete(self, role: discord.Role) -> None:
+        await self._run_listener(
+            lambda: self._handle_guild_role_delete(role),
+            "guild role deletion",
+        )
+
+    async def _handle_guild_role_delete(self, role) -> None:
         guild_id = int(role.guild.id)
         guild_config = self.config.guild_from_id(guild_id)
         role_ids = list(await guild_config.get_raw("participant_role_ids", default=[]))
@@ -335,6 +453,12 @@ class GitHubTickets(commands.Cog):
 
     @commands.Cog.listener()
     async def on_guild_remove(self, guild: discord.Guild) -> None:
+        await self._run_listener(
+            lambda: self._handle_guild_remove(guild),
+            "guild removal",
+        )
+
+    async def _handle_guild_remove(self, guild) -> None:
         guild_id = int(guild.id)
         await self.store.delete_guild_state(guild_id)
         await self.config.guild_from_id(guild_id).clear()
@@ -348,37 +472,14 @@ class GitHubTickets(commands.Cog):
     ) -> None:
         del requester
         now = datetime.now(timezone.utc)
-        authored_tickets = await self.store.list_authored_tickets(user_id)
-        for ticket in authored_tickets:
-            cleanup = await self.store.begin_authored_ticket_cleanup(
-                ticket.ticket_id,
-                author_id=user_id,
-                updated_at=now,
-            )
-            if cleanup is not None:
-                await self.coordinator.recover_projection_cleanup(cleanup.ticket_id)
-
-        protection_until_by_guild = {}
-        for guild_id in await self.store.user_reference_guild_ids(user_id):
-            guild_settings = await self._get_guild_settings(guild_id)
-            protection_until_by_guild[guild_id] = now + timedelta(
-                seconds=guild_settings.protection_seconds
-            )
-        affected = await self.store.redact_user(
+        affected = await self.coordinator.redact_user(
             user_id,
-            protection_until_by_guild=protection_until_by_guild,
             updated_at=now,
         )
         for ticket in affected:
             if ticket.state is TicketState.CLAIMED:
                 continue
-            try:
-                await self.projection.edit_ticket(ticket)
-            except ProjectionNotFound:
-                if ticket.message_id is not None:
-                    await self.coordinator.handle_message_deleted(ticket.message_id)
-            except Exception:
-                pass
+            await self.coordinator.sync_projection(ticket.ticket_id)
         if any(ticket.next_action_at is not None for ticket in affected):
             self.scheduler.wake()
 
@@ -394,8 +495,7 @@ class GitHubTickets(commands.Cog):
             await self.config.guild(ctx.guild).all()
         )
         categories = await self.store.list_categories(ctx.guild.id)
-        await ctx.send(
-            presentation.configuration_overview(
+        content = presentation.configuration_overview(
                 ticket_channel=(
                     f"<#{guild_settings.ticket_channel_id}>"
                     if guild_settings.ticket_channel_id is not None
@@ -413,9 +513,12 @@ class GitHubTickets(commands.Cog):
                 dnd_response_seconds=guild_settings.dnd_response_seconds,
                 offline_response_seconds=guild_settings.offline_response_seconds,
                 direct_response_seconds=guild_settings.direct_response_seconds,
-            ),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+            )
+        for chunk in presentation.message_chunks(content):
+            await ctx.send(
+                chunk,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
     @githubtickets.group(name="channel", invoke_without_command=True)
     async def githubtickets_channel(self, ctx: commands.Context) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 DISCORD_MESSAGE_LIMIT = 2_000
+DISCORD_EMBED_DESCRIPTION_LIMIT = 4_096
 MAX_PR_TITLE_LENGTH = 256
 MAX_PR_URL_LENGTH = 1_024
 MAX_GITHUB_USERNAME_LENGTH = 100
@@ -219,6 +220,32 @@ def developer_profile(
     if not categories:
         return first_line
     return f"{first_line}\n{', '.join(categories)}"
+
+
+def message_chunks(
+    content: str,
+    *,
+    limit: int = DISCORD_MESSAGE_LIMIT,
+) -> tuple[str, ...]:
+    if not content:
+        return (content,)
+    chunks: list[str] = []
+    remaining = content
+    separators = (("\n", 1), (", ", 2), (" ", 1))
+    while len(remaining) > limit:
+        cut = 0
+        for separator, width in separators:
+            position = remaining.rfind(separator, 0, limit + 1)
+            if position > 0:
+                cut = position + width
+                break
+        if cut == 0:
+            cut = limit
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:]
+    if remaining:
+        chunks.append(remaining)
+    return tuple(chunks)
 
 
 def category_page(

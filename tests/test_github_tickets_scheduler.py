@@ -138,13 +138,18 @@ class DeadlineSchedulerTests(unittest.IsolatedAsyncioTestCase):
         await scheduler.close()
         await scheduler.close()
 
-    async def test_background_query_exception_is_observed(self):
-        queried = asyncio.Event()
+    async def test_background_query_exception_is_logged_and_retried(self):
+        recovered = asyncio.Event()
 
         class FailingSource:
+            def __init__(self):
+                self.calls = 0
+
             async def nearest_deadline(self):
-                queried.set()
-                raise RuntimeError("controlled query failure")
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("controlled query failure")
+                recovered.set()
 
             async def due_ticket_ids(self, _now):
                 return ()
@@ -152,11 +157,12 @@ class DeadlineSchedulerTests(unittest.IsolatedAsyncioTestCase):
         async def on_due(_ticket_id):
             self.fail("no ticket was due")
 
-        scheduler = scheduler_module.DeadlineScheduler(FailingSource(), on_due)
+        source = FailingSource()
+        scheduler = scheduler_module.DeadlineScheduler(source, on_due)
         with self.assertLogs(scheduler_module.log, level="ERROR") as captured:
             scheduler.start()
-            await asyncio.wait_for(queried.wait(), timeout=0.5)
-            await asyncio.sleep(0)
+            await asyncio.wait_for(recovered.wait(), timeout=1.5)
             await scheduler.close()
 
-        self.assertTrue(any("deadline scheduler failed" in message for message in captured.output))
+        self.assertEqual(source.calls, 2)
+        self.assertTrue(any("deadline scheduler iteration failed" in message for message in captured.output))
