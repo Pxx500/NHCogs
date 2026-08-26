@@ -178,7 +178,6 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
     def test_fallback_keeps_diagnostic_commands_on_cog_and_exposes_implementations(self):
         implementation_names = (
             "config_dump",
-            "console_dump",
             "honeypot_doctor",
             "honeypot_errors",
             "honeypot_errors_clear",
@@ -738,11 +737,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(getattr(cog, loop_name).started, loop_name)
                 self.assertEqual(cog.detection_case_loop.options, {"minutes": 1})
                 self.assertEqual(cog.detection_reconciliation_loop.options, {"seconds": 10})
-                root_logger = logging.getLogger()
-                self.assertEqual(root_logger.handlers.count(cog._console_log_buffer), 1)
-
                 await cog.cog_unload()
-                self.assertNotIn(cog._console_log_buffer, root_logger.handlers)
 
     async def test_unload_cancels_case_loops_and_case_restore(self):
         with TemporaryDirectory() as directory:

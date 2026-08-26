@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 import json
 import logging
 import math
@@ -24,7 +23,6 @@ from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import box, pagify
 
 from . import channel_routing
-from .console_dump import build_log_dump
 from .detection_cases import OperationType
 from .remote_media import media_decoder_support
 from .settings import (
@@ -37,17 +35,6 @@ from .settings import (
 _ = Translator("Honeypot", __file__)
 log = logging.getLogger("red.Honeypot")
 
-CONSOLE_DUMP_USAGE = (
-    "Usage: `consoledump <bot|honeypot> <hours 1-24> "
-    "[debug|info|warning|error|critical]`\n"
-    "Scope: `bot` includes all captured Python logs. `honeypot` includes Honeypot "
-    "logs and related tracebacks.\n"
-    "Hours: a whole number from 1 to 24.\n"
-    "Level (optional): the minimum log level to include. Omit it to include all "
-    "levels.\n"
-    "Examples: `consoledump bot 2`, `consoledump honeypot 1`, "
-    "`consoledump bot 6 error`"
-)
 REVIEW_DUMP_START = datetime(2026, 5, 1, tzinfo=timezone.utc)
 REVIEW_DUMP_MAX_ZIP_BYTES = 95 * 1024 * 1024
 REVIEW_DUMP_ATTACHMENT_DELAY_SECONDS = 1
@@ -253,69 +240,6 @@ async def _review_dump_update_progress(
         await progress_message.edit(content=content)
     except discord.HTTPException:
         log.debug("Failed to update review dump progress message %s", progress_message.id)
-
-
-async def console_dump(
-    cog,
-    ctx: commands.Context,
-    scope: str | None = None,
-    hours: str | None = None,
-    level: str | None = None,
-) -> None:
-    """Export recent sanitized Python logs to a private text channel."""
-    channel = ctx.channel
-    if not isinstance(channel, discord.TextChannel):
-        await ctx.send(_("Console dumps require a private text channel."))
-        return
-    if not channel.permissions_for(ctx.author).manage_messages:
-        await ctx.send(_("You need Manage Messages to use this command."))
-        return
-    if channel.permissions_for(ctx.guild.default_role).view_channel:
-        await ctx.send(_("Console dumps cannot be sent to a channel visible to @everyone."))
-        return
-    missing_permissions = cog._missing_channel_permissions(
-        ctx.guild,
-        channel,
-        attach_files=True,
-    )
-    if missing_permissions is not None:
-        await ctx.send(missing_permissions)
-        return
-
-    normalized_scope = scope.casefold() if scope is not None else None
-    normalized_level = level.casefold() if level is not None else None
-    try:
-        parsed_hours = int(hours) if hours is not None else None
-    except ValueError:
-        parsed_hours = None
-    levels = {
-        "debug": logging.DEBUG,
-        "info": logging.INFO,
-        "warning": logging.WARNING,
-        "error": logging.ERROR,
-        "critical": logging.CRITICAL,
-    }
-    if (
-        normalized_scope not in {"bot", "honeypot"}
-        or parsed_hours is None
-        or not 1 <= parsed_hours <= 24
-        or (normalized_level is not None and normalized_level not in levels)
-    ):
-        await ctx.send(CONSOLE_DUMP_USAGE)
-        return
-
-    dump = build_log_dump(
-        cog._console_log_buffer.snapshot(),
-        scope=normalized_scope,
-        hours=parsed_hours,
-        minimum_level=levels.get(normalized_level),
-        upload_limit=int(ctx.guild.filesize_limit),
-        now=datetime.now(timezone.utc),
-    )
-    await ctx.send(
-        file=discord.File(io.BytesIO(dump.content), filename=dump.filename),
-        allowed_mentions=discord.AllowedMentions.none(),
-    )
 
 
 async def review_dump(cog, ctx: commands.Context) -> None:

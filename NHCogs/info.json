@@ -5,7 +5,7 @@
   "name": "NHCogs",
   "install_msg": "Thank you for installing NHCogs.\nLoad it with `[p]load NHCogs`.",
   "short": "NewHorizons utility and moderation cogs in one extension.",
-  "description": "Loads NHMisc, Honeypot, GitHubTickets, and Custom Commands together while preserving their separate commands, configuration, and stored data",
+    "description": "Loads ConsoleDump, NHMisc, Honeypot, GitHubTickets, and Custom Commands together while preserving their separate commands, configuration, and stored data",
   "tags": [
     "misc",
     "utility",

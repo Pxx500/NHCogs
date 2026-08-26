@@ -558,7 +558,6 @@ def _isolated_honeypot_modules(data_path: Path):
             self.guild_only = bool(
                 getattr(callback, "__discord_app_commands_guild_only__", False)
             )
-            self.type = discord.AppCommandType.chat_input
 
     discord.AppCommandType.chat_input = "chat_input"
     def _app_guild_only():
@@ -803,7 +802,7 @@ class _AppCommandTree:
         return self.commands.get((name, type))
 
     def add_command(self, command, *, override=False):
-        command_type = getattr(command, "type", "message")
+        command_type = getattr(command, "type", "chat_input")
         self.commands[(command.name, command_type)] = command
 
     def remove_command(self, name, *, type):
