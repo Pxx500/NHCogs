@@ -737,7 +737,7 @@ class CustomCommandsListTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("·", first_page.description)
         self.assertEqual(
             [(item.label, item.emoji) for item in sent["view"].children],
-            [("Previous", None), (None, "❌"), ("Next", None)],
+            [("Previous", None), ("X", None), ("Next", None)],
         )
         self.assertIs(sent["view"].message, message)
         self.assertIsNone(sent["allowed_mentions"])

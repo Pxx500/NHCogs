@@ -57,7 +57,7 @@ class CommandListView(discord.ui.View):
             style=discord.ButtonStyle.secondary,
         )
         self._close_button = discord.ui.Button(
-            emoji="❌",
+            label="X",
             style=discord.ButtonStyle.danger,
         )
         self._next_button = discord.ui.Button(
