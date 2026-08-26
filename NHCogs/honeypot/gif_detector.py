@@ -1210,7 +1210,7 @@ async def gif_detector_message_set(
             )
         )
     await cog.config.guild(ctx.guild).gif_detector_secondary_message.set(text)
-    await ctx.send(_("✅ Secondary GIF warning updated."))
+    await ctx.send(_("✅ Secondary GIF warning updated"))
 
 
 async def gif_detector_message_reset(cog: Any, ctx: commands.Context) -> None:

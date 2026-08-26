@@ -237,7 +237,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(
                     expiration_message.edit.await_args.kwargs["embed"].fields[0].value,
-                    "Kicked.",
+                    "Kicked",
                 )
 
     async def test_successful_joinwatch_ban_records_daily_ban(self):

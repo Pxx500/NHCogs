@@ -779,7 +779,7 @@ async def imagescan_add(cog, ctx: commands.Context) -> None:
         if _imagescan_is_image_attachment(attachment)
     ][:IMAGE_SCAN_MAX_ATTACHMENTS]
     if not attachments:
-        await ctx.send(_("No images found."))
+        await ctx.send(_("No images found"))
         return
     inserted = duplicates = conflicts = errors = 0
     inserted_sample_ids: list[str] = []
@@ -827,7 +827,7 @@ async def imagescan_add(cog, ctx: commands.Context) -> None:
         parts.append(_("{count} conflict").format(count=conflicts))
     if errors:
         parts.append(_("{count} failed").format(count=errors))
-    await ctx.send(_("Imagescan add: {result}.").format(result=", ".join(parts) or _("no changes")))
+    await ctx.send(_("Imagescan add: {result}").format(result=", ".join(parts) or _("no changes")))
 
 
 def _delete_imagescan_sample_file(path: Path) -> bool:
@@ -1029,7 +1029,7 @@ async def imagescan_dump(cog, ctx: commands.Context) -> None:
     try:
         temp_root, archives = await _imagescan_create_dump_archives(cog, ctx.guild.id)
         if not archives:
-            await ctx.send(_("No image scan dump files were created."))
+            await ctx.send(_("No image scan dump files were created"))
             return
         await ctx.send(_("Image scan dump created. Sending {count} file(s).").format(count=len(archives)))
         for archive in archives:

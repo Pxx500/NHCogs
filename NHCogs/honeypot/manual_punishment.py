@@ -280,7 +280,7 @@ class PunishmentActionView(discord.ui.View):
     async def _cancel(self, interaction: discord.Interaction) -> None:
         self.stop()
         await interaction.response.edit_message(
-            content="Manual punishment cancelled.",
+            content="Manual punishment cancelled",
             embed=None,
             view=None,
         )
@@ -682,9 +682,9 @@ class ManualPunishmentController:
             )
 
         result_lines = [outcome.detail for outcome in outcomes]
-        summary = "Manual punishment completed."
+        summary = "Manual punishment completed"
         if not outcomes:
-            summary = "Evidence saved and the source message was deleted."
+            summary = "Evidence saved and the source message was deleted"
         if result_lines:
             summary += "\n" + "\n".join(result_lines)
         await interaction.followup.send(
@@ -1036,7 +1036,7 @@ async def role_nt_add(cog: Any, ctx: Any, role: Any, channels: list[Any]) -> Non
     labels = ", ".join(f"#{channel.name}" for channel in channels)
     await _send_pagified(
         ctx,
-        f"Role n’t {role.name} is available in {labels}.",
+        f"Role n’t {role.name} is available in {labels}",
     )
 
 
@@ -1070,7 +1070,7 @@ async def role_nt_remove_channels(
     labels = ", ".join(f"#{channel.name}" for channel in channels)
     await _send_pagified(
         ctx,
-        f"Removed {labels} from Role n’t {role.name}.",
+        f"Removed {labels} from Role n’t {role.name}",
     )
 
 
@@ -1093,7 +1093,7 @@ async def role_nt_notification(
             else "the source channel"
         )
         await ctx.send(
-            f"Role n’t {role.name} notifications use {label}.",
+            f"Role n’t {role.name} notifications use {label}",
             allowed_mentions=discord.AllowedMentions.none(),
         )
         return
@@ -1107,7 +1107,7 @@ async def role_nt_notification(
     )
     await setting.set(_role_nt_payload(configured))
     await ctx.send(
-        f"Role n’t {role.name} notifications will be sent to #{channel.name}.",
+        f"Role n’t {role.name} notifications will be sent to #{channel.name}",
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
@@ -1124,7 +1124,7 @@ async def role_nt_notification_clear(cog: Any, ctx: Any, role: Any) -> None:
     )
     await setting.set(_role_nt_payload(configured))
     await ctx.send(
-        f"Role n’t {role.name} notifications will use the source channel.",
+        f"Role n’t {role.name} notifications will use the source channel",
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
@@ -1135,7 +1135,7 @@ async def role_nt_remove(cog: Any, ctx: Any, role: Any) -> None:
         raise commands.UserFeedbackCheckFailure("That Role n’t is not configured.")
     await setting.set(_role_nt_payload(configured))
     await ctx.send(
-        f"Removed Role n’t {role.name}.",
+        f"Removed Role n’t {role.name}",
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
@@ -1143,7 +1143,7 @@ async def role_nt_remove(cog: Any, ctx: Any, role: Any) -> None:
 async def role_nt_list(cog: Any, ctx: Any) -> None:
     _, configured = await _configured_role_nt(cog, ctx.guild)
     if not configured:
-        await ctx.send("No Role n’t punishments are configured.")
+        await ctx.send("No Role n’t punishments are configured")
         return
     lines = []
     for role_id, entry in sorted(configured.items()):
