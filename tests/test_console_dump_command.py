@@ -1,9 +1,11 @@
-"""The `honeypot console` command surface: argument handling, the log dump
+"""The `consoledump` command surface: argument handling, the log dump
 attachment and the moderator-visible errors it reports.
 """
 
+import importlib
 import logging
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -13,10 +15,16 @@ from unittest import mock
 from tests.harness import _Bot, _isolated_honeypot_modules
 
 
+@contextmanager
+def _isolated_console_dump_modules(data_path: Path):
+    with _isolated_honeypot_modules(data_path):
+        yield importlib.import_module("NHCogs.consoledump.consoledump")
+
+
 class ConsoleDumpCommandTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _context(
-        honeypot,
+        console_dump,
         *,
         public=False,
         moderator=True,
@@ -42,8 +50,8 @@ class ConsoleDumpCommandTests(unittest.IsolatedAsyncioTestCase):
         class ThreadChannel:
             pass
 
-        honeypot.discord.TextChannel = TextChannel
-        honeypot.discord.Thread = ThreadChannel
+        console_dump.discord.TextChannel = TextChannel
+        console_dump.discord.Thread = ThreadChannel
         author = object()
         default_role = object()
         bot_member = object()
@@ -62,14 +70,14 @@ class ConsoleDumpCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_arguments_show_complete_usage_in_one_response(self):
         with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+            with _isolated_console_dump_modules(Path(directory)) as console_dump:
+                cog = console_dump.ConsoleDump(_Bot())
                 cog._console_log_buffer = SimpleNamespace(snapshot=mock.Mock())
-                ctx = self._context(honeypot)
+                ctx = self._context(console_dump)
 
                 await cog.console_dump(ctx)
 
-                ctx.send.assert_awaited_once_with(honeypot.CONSOLE_DUMP_USAGE)
+                ctx.send.assert_awaited_once_with(console_dump.CONSOLE_DUMP_USAGE)
                 response = ctx.send.await_args.args[0]
                 self.assertIn("consoledump <bot|honeypot> <hours 1-24>", response)
                 self.assertIn("Scope:", response)
@@ -87,14 +95,14 @@ class ConsoleDumpCommandTests(unittest.IsolatedAsyncioTestCase):
             ("bot", "1", "verbose"),
         )
         with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+            with _isolated_console_dump_modules(Path(directory)) as console_dump:
+                cog = console_dump.ConsoleDump(_Bot())
                 cog._console_log_buffer = SimpleNamespace(snapshot=mock.Mock())
                 for scope, hours, level in invalid_arguments:
                     with self.subTest(scope=scope, hours=hours, level=level):
-                        ctx = self._context(honeypot)
+                        ctx = self._context(console_dump)
                         await cog.console_dump(ctx, scope, hours, level)
-                        ctx.send.assert_awaited_once_with(honeypot.CONSOLE_DUMP_USAGE)
+                        ctx.send.assert_awaited_once_with(console_dump.CONSOLE_DUMP_USAGE)
                 cog._console_log_buffer.snapshot.assert_not_called()
 
     async def test_command_rejects_unauthorized_public_and_non_text_destinations(self):
@@ -104,20 +112,20 @@ class ConsoleDumpCommandTests(unittest.IsolatedAsyncioTestCase):
             ({"text_channel": False}, "private text channel"),
         )
         with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+            with _isolated_console_dump_modules(Path(directory)) as console_dump:
+                cog = console_dump.ConsoleDump(_Bot())
                 cog._console_log_buffer = SimpleNamespace(snapshot=mock.Mock())
                 for options, expected in cases:
                     with self.subTest(options=options):
-                        ctx = self._context(honeypot, **options)
+                        ctx = self._context(console_dump, **options)
                         await cog.console_dump(ctx, "bot", "1")
                         self.assertIn(expected, ctx.send.await_args.args[0])
                 cog._console_log_buffer.snapshot.assert_not_called()
 
     async def test_valid_command_sends_one_sanitized_file_using_guild_limit(self):
         with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+            with _isolated_console_dump_modules(Path(directory)) as console_dump:
+                cog = console_dump.ConsoleDump(_Bot())
                 created_at = datetime.now(timezone.utc)
                 cog._console_log_buffer.emit(
                     logging.LogRecord(
@@ -141,7 +149,7 @@ class ConsoleDumpCommandTests(unittest.IsolatedAsyncioTestCase):
                 )
                 error_record.created = created_at.timestamp()
                 cog._console_log_buffer.emit(error_record)
-                ctx = self._context(honeypot)
+                ctx = self._context(console_dump)
                 no_mentions = object()
 
                 class File:
@@ -149,8 +157,8 @@ class ConsoleDumpCommandTests(unittest.IsolatedAsyncioTestCase):
                         self.stream = stream
                         self.filename = filename
 
-                honeypot.discord.File = File
-                honeypot.discord.AllowedMentions = SimpleNamespace(
+                console_dump.discord.File = File
+                console_dump.discord.AllowedMentions = SimpleNamespace(
                     none=lambda: no_mentions
                 )
 
@@ -165,3 +173,16 @@ class ConsoleDumpCommandTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("excluded-info", content)
                 self.assertTrue(sent["file"].filename.startswith("console-bot-2h-"))
                 self.assertIs(sent["allowed_mentions"], no_mentions)
+
+    async def test_cog_owns_root_log_handler_for_its_lifetime(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_console_dump_modules(Path(directory)) as console_dump:
+                cog = console_dump.ConsoleDump(_Bot())
+                root_logger = logging.getLogger()
+
+                await cog.cog_load()
+                await cog.cog_load()
+                self.assertEqual(root_logger.handlers.count(cog._console_log_buffer), 1)
+
+                await cog.cog_unload()
+                self.assertNotIn(cog._console_log_buffer, root_logger.handlers)

@@ -236,8 +236,6 @@ Detection cases expire 24 hours after the first detection. This lifetime is fixe
 | `!honeypot stats channel [channel]` | Show or set the public daily statistics destination |
 | `!honeypot modstats` | Show detailed moderator statistics |
 | `!honeypot doctor` | Check config, channels, and permissions |
-| `!consoledump <bot\|honeypot> <1-24> [level]` | Export recent sanitized Python logs to a private text channel (requires Manage Messages) |
-
 ## Action & Fallback Logic
 
 ```

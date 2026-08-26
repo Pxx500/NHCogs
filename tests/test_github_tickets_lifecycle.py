@@ -193,6 +193,8 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with isolated_githubtickets_modules(self.data_path) as modules:
             bot = FakeBot(ready=False)
             cog = modules.githubtickets.GitHubTickets(bot)
+            self.assertFalse(hasattr(cog._new_ticket_command, "type"))
+            self.assertFalse(hasattr(cog._developer_profile_slash_command, "type"))
             await cog.config.guild_from_id(10).set_raw(
                 "participant_role_ids",
                 value=[99],
@@ -313,16 +315,18 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
             await cog.cog_load()
             try:
                 for command in previous_commands:
+                    command_type = getattr(command, "type", "chat_input")
                     self.assertIsNot(
-                        bot.tree.get_command(command.name, type=command.type),
+                        bot.tree.get_command(command.name, type=command_type),
                         command,
                     )
             finally:
                 await cog.cog_unload()
 
             for command in previous_commands:
+                command_type = getattr(command, "type", "chat_input")
                 self.assertIs(
-                    bot.tree.get_command(command.name, type=command.type),
+                    bot.tree.get_command(command.name, type=command_type),
                     command,
                 )
 

@@ -12,6 +12,7 @@ MAX_RECORDS = 20_000
 MAX_BUFFER_BYTES = 32 * 1024 * 1024
 MAX_RECORD_BYTES = 256 * 1024
 MAX_RETENTION = timedelta(hours=24)
+MAX_DUMP_HOURS = 24
 
 _REDACTED = "[REDACTED]"
 _AUTHORIZATION_PATTERN = re.compile(
@@ -164,11 +165,7 @@ def _is_honeypot_entry(entry: CapturedLogEntry) -> bool:
     logger_name = entry.logger_name.casefold()
     pathname = entry.pathname.replace("\\", "/").casefold()
     text = entry.text.replace("\\", "/").casefold()
-    return (
-        "honeypot" in logger_name
-        or "/honeypot/" in pathname
-        or "/honeypot/" in text
-    )
+    return "honeypot" in logger_name or "/honeypot/" in pathname or "/honeypot/" in text
 
 
 def _render_dump_header(
@@ -182,9 +179,7 @@ def _render_dump_header(
     included: list[CapturedLogEntry],
     omitted_count: int,
 ) -> str:
-    level_name = (
-        "all" if minimum_level is None else logging.getLevelName(minimum_level).lower()
-    )
+    level_name = "all" if minimum_level is None else logging.getLevelName(minimum_level).lower()
     oldest = included[0].created_at.isoformat() if included else "none"
     newest = included[-1].created_at.isoformat() if included else "none"
     return (
@@ -214,7 +209,7 @@ def build_log_dump(
 ) -> LogDump:
     if scope not in {"bot", "honeypot"}:
         raise ValueError("scope must be 'bot' or 'honeypot'")
-    if not 1 <= hours <= 24:
+    if not 1 <= hours <= MAX_DUMP_HOURS:
         raise ValueError("hours must be between 1 and 24")
     if upload_limit <= 0:
         raise ValueError("upload_limit must be positive")

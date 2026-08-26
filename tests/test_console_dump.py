@@ -5,8 +5,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-MODULE_PATH = Path(__file__).parents[1] / "NHCogs" / "honeypot" / "console_dump.py"
-SPEC = importlib.util.spec_from_file_location("honeypot_console_dump_test", MODULE_PATH)
+MODULE_PATH = Path(__file__).parents[1] / "NHCogs" / "consoledump" / "log_buffer.py"
+SPEC = importlib.util.spec_from_file_location("console_dump_test", MODULE_PATH)
 console_dump = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = console_dump
 SPEC.loader.exec_module(console_dump)
