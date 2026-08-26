@@ -165,6 +165,10 @@ FIXED_COPY = (
 )
 
 
+def _linked_title(title: str, url: str) -> str:
+    return f"[{title}](<{url}>)"
+
+
 def ticket_message(
     *,
     title: str,
@@ -182,7 +186,7 @@ def ticket_message(
         if reviewer_github:
             reviewer = f"{reviewer} | {reviewer_github}"
         metadata.append(reviewer)
-    return f"[{title}](<{url}>)\n{' | '.join(metadata)}"
+    return f"{_linked_title(title, url)}\n{' | '.join(metadata)}"
 
 
 def finished_ticket_log(
@@ -196,7 +200,7 @@ def finished_ticket_log(
     metadata = [f"Finished by <@{actor_id}>", f"Author <@{author_id}>"]
     if reviewer_id is not None:
         metadata.append(f"Reviewer <@{reviewer_id}>")
-    return f"[{title}]({url})\n{' | '.join(metadata)}"
+    return f"{_linked_title(title, url)}\n{' | '.join(metadata)}"
 
 
 def ticket_category_selection_limit(categories: Sequence[str]) -> int:
