@@ -277,13 +277,18 @@ class CustomCommandRuntimeTests(unittest.TestCase):
 
 class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
-    def invocation_context():
+    def invocation_context(
+        *,
+        command_name="weighted",
+        channel_id=200,
+        author_id=300,
+    ):
         ctx = SimpleNamespace(
             prefix="!",
-            invoked_with="weighted",
+            invoked_with=command_name,
             guild=SimpleNamespace(id=100),
-            channel=SimpleNamespace(id=200),
-            author=SimpleNamespace(id=300),
+            channel=SimpleNamespace(id=channel_id),
+            author=SimpleNamespace(id=author_id),
             args=[],
             kwargs={},
             command_failed=False,
@@ -293,7 +298,7 @@ class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
             guild=ctx.guild,
             author=SimpleNamespace(bot=False),
             channel=ctx.channel,
-            content="!weighted",
+            content=f"!{command_name}",
             id=400,
         )
         ctx.message = message
@@ -353,6 +358,123 @@ class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
 
         bot.invoke.assert_awaited_once_with(ctx)
         ctx.send.assert_awaited_once_with("Hello <@123>")
+        reporter.report.assert_not_awaited()
+
+    async def test_repeated_command_is_silent_until_five_seconds_have_elapsed(self):
+        first_ctx, first_message = self.invocation_context(author_id=300)
+        second_ctx, second_message = self.invocation_context(author_id=301)
+        command = command_with_weights(100)
+        bot = SimpleNamespace(
+            get_context=mock.AsyncMock(
+                side_effect=(first_ctx, second_ctx, second_ctx)
+            ),
+            invoke=mock.AsyncMock(),
+        )
+        reporter = SimpleNamespace(report=mock.AsyncMock())
+        engine = runtime.CustomCommandRuntime(
+            bot,
+            SimpleNamespace(get=mock.AsyncMock(return_value=command)),
+            reporter,
+            random_index=lambda _total: 0,
+            logger=mock.Mock(),
+        )
+
+        with mock.patch.object(
+            runtime.time,
+            "monotonic",
+            side_effect=(1_000, 1_000, 1_004.999, 1_005, 1_005),
+        ):
+            await engine.handle_message(first_message)
+            await engine.handle_message(second_message)
+            await engine.handle_message(second_message)
+
+        self.assertEqual(bot.invoke.await_count, 2)
+        first_ctx.send.assert_awaited_once_with("response 0")
+        second_ctx.send.assert_awaited_once_with("response 0")
+        reporter.report.assert_not_awaited()
+
+    async def test_rejected_member_cooldown_does_not_reserve_the_channel(self):
+        first_ctx, first_message = self.invocation_context(author_id=300)
+        blocked_ctx, blocked_message = self.invocation_context(author_id=300)
+        other_ctx, other_message = self.invocation_context(author_id=301)
+        command = command_with_weights(100)
+        command = catalog.CustomCommand(
+            **{**command.__dict__, "cooldowns": {"member": 60}}
+        )
+        bot = SimpleNamespace(
+            get_context=mock.AsyncMock(
+                side_effect=(first_ctx, blocked_ctx, other_ctx)
+            ),
+            invoke=mock.AsyncMock(),
+        )
+        reporter = SimpleNamespace(report=mock.AsyncMock())
+        engine = runtime.CustomCommandRuntime(
+            bot,
+            SimpleNamespace(get=mock.AsyncMock(return_value=command)),
+            reporter,
+            random_index=lambda _total: 0,
+            logger=mock.Mock(),
+        )
+
+        with mock.patch.object(
+            runtime.time,
+            "monotonic",
+            side_effect=(0, 0, 6, 6, 7, 7),
+        ):
+            await engine.handle_message(first_message)
+            await engine.handle_message(blocked_message)
+            await engine.handle_message(other_message)
+
+        self.assertEqual(bot.invoke.await_count, 2)
+        first_ctx.send.assert_awaited_once_with("response 0")
+        blocked_ctx.send.assert_awaited_once_with("Try again in 54 seconds")
+        other_ctx.send.assert_awaited_once_with("response 0")
+        reporter.report.assert_not_awaited()
+
+    async def test_invocation_cooldown_is_scoped_to_command_and_channel(self):
+        first_ctx, first_message = self.invocation_context()
+        other_channel_ctx, other_channel_message = self.invocation_context(
+            channel_id=201
+        )
+        other_command_ctx, other_command_message = self.invocation_context(
+            command_name="other"
+        )
+        other_command = command_with_weights(100)
+        other_command = catalog.CustomCommand(
+            **{**other_command.__dict__, "name": "other"}
+        )
+        bot = SimpleNamespace(
+            get_context=mock.AsyncMock(
+                side_effect=(first_ctx, other_channel_ctx, other_command_ctx)
+            ),
+            invoke=mock.AsyncMock(),
+        )
+        reporter = SimpleNamespace(report=mock.AsyncMock())
+        engine = runtime.CustomCommandRuntime(
+            bot,
+            SimpleNamespace(
+                get=mock.AsyncMock(
+                    side_effect=(
+                        command_with_weights(100),
+                        command_with_weights(100),
+                        other_command,
+                    )
+                )
+            ),
+            reporter,
+            random_index=lambda _total: 0,
+            logger=mock.Mock(),
+        )
+
+        with mock.patch.object(runtime.time, "monotonic", return_value=1_000):
+            await engine.handle_message(first_message)
+            await engine.handle_message(other_channel_message)
+            await engine.handle_message(other_command_message)
+
+        self.assertEqual(bot.invoke.await_count, 3)
+        first_ctx.send.assert_awaited_once_with("response 0")
+        other_channel_ctx.send.assert_awaited_once_with("response 0")
+        other_command_ctx.send.assert_awaited_once_with("response 0")
         reporter.report.assert_not_awaited()
 
     async def test_uppercase_invocation_does_not_match_lowercase_custom_command(self):
