@@ -146,6 +146,64 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(cleared)
         self.assertIsNone(await self.store.get_profile(10, 100))
 
+    async def test_delete_profile_is_guild_scoped_and_preserves_ticket_records(self):
+        await self.store.initialize()
+        category = await self.store.add_category(10, "python", self.now)
+        other_category = await self.store.add_category(20, "python", self.now)
+        for guild_id, category_id in (
+            (10, category.category_id),
+            (20, other_category.category_id),
+        ):
+            await self.store.save_profile(
+                guild_id=guild_id,
+                user_id=100,
+                github_username="nova",
+                category_ids=(category_id,),
+                automatic_pings=True,
+                updated_at=self.now,
+            )
+        ping_ticket = await self._create_open_ticket(author_id=100)
+        await self.store.reserve_ping(
+            ping_ticket.ticket_id,
+            target_user_id=100,
+            presence_tier=models.PresenceTier.ONLINE,
+            automatic=True,
+            reserved_at=self.now,
+            response_deadline=self.now,
+            maximum_pings=3,
+        )
+        await self.store.acknowledge_ping(ping_ticket.ticket_id, self.now)
+        exclusion_ticket = await self._create_open_ticket(author_id=200)
+        await self.store.decline(exclusion_ticket.ticket_id, 100, self.now)
+
+        deleted = await self.store.delete_profile(10, 100)
+
+        self.assertTrue(deleted)
+        self.assertFalse(await self.store.delete_profile(10, 100))
+        self.assertIsNone(await self.store.get_profile(10, 100))
+        self.assertIsNotNone(await self.store.get_profile(20, 100))
+        self.assertIsNotNone(await self.store.get_ticket(ping_ticket.ticket_id))
+        self.assertEqual(len(await self.store.list_pings(ping_ticket.ticket_id)), 1)
+        self.assertEqual(
+            tuple(
+                exclusion.user_id
+                for exclusion in await self.store.list_exclusions(
+                    exclusion_ticket.ticket_id
+                )
+            ),
+            (100,),
+        )
+        with closing(store_module.connect(self.path)) as connection:
+            remaining_links = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM profile_categories
+                WHERE guild_id = ? AND user_id = ?
+                """,
+                (10, 100),
+            ).fetchone()[0]
+        self.assertEqual(remaining_links, 0)
+
     async def _create_open_ticket(
         self,
         *,
@@ -278,11 +336,6 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(tuple(item.user_id for item in histories), (103, 101, 102, 104))
         by_user_id = {item.user_id: item for item in histories}
-        self.assertFalse(by_user_id[103].has_profile)
-        self.assertTrue(by_user_id[101].automatic_pings)
-        self.assertFalse(by_user_id[102].automatic_pings)
-        self.assertEqual(by_user_id[101].matching_category_count, 2)
-        self.assertEqual(by_user_id[104].matching_category_count, 1)
         self.assertEqual(by_user_id[101].active_assignment_count, 1)
         self.assertEqual(by_user_id[101].last_ping_at, last_ping_at)
         self.assertTrue(by_user_id[103].was_pinged)
@@ -319,6 +372,71 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tuple(profile.user_id for profile in profiles), (100, 200))
         self.assertEqual(profiles[1].category_ids, (other.category_id, category.category_id))
         self.assertEqual(await self.store.list_profiles_for_category(20, category.category_id), ())
+
+    async def test_list_profiles_by_github_username_is_exact_scoped_and_ordered(self):
+        await self.store.initialize()
+        for guild_id, user_id, github_username in (
+            (10, 300, "Nova"),
+            (10, 100, "NOVA"),
+            (10, 200, "nova-extra"),
+            (20, 50, "nova"),
+        ):
+            await self.store.save_profile(
+                guild_id=guild_id,
+                user_id=user_id,
+                github_username=github_username,
+                category_ids=(),
+                automatic_pings=False,
+                updated_at=self.now,
+            )
+
+        profiles = await self.store.list_profiles_by_github_username(10, "  nOvA  ")
+
+        self.assertEqual(tuple(profile.user_id for profile in profiles), (100, 300))
+        self.assertEqual(
+            await self.store.list_profiles_by_github_username(10, "nova-e"),
+            (),
+        )
+        self.assertEqual(
+            await self.store.list_profiles_by_github_username(10, "   "),
+            (),
+        )
+
+    async def test_list_matching_profiles_requires_all_categories_and_automatic_pings(self):
+        await self.store.initialize()
+        rendering = await self.store.add_category(10, "rendering", self.now)
+        python = await self.store.add_category(10, "python", self.now)
+        other_guild = await self.store.add_category(20, "rendering", self.now)
+        for guild_id, user_id, category_ids, automatic_pings in (
+            (10, 100, (rendering.category_id, python.category_id), True),
+            (10, 101, (rendering.category_id,), True),
+            (10, 102, (rendering.category_id, python.category_id), False),
+            (20, 100, (other_guild.category_id,), True),
+        ):
+            await self.store.save_profile(
+                guild_id=guild_id,
+                user_id=user_id,
+                github_username=str(user_id),
+                category_ids=category_ids,
+                automatic_pings=automatic_pings,
+                updated_at=self.now,
+            )
+
+        profiles = await self.store.list_matching_profiles(
+            10,
+            (python.category_id, rendering.category_id, python.category_id),
+        )
+
+        self.assertEqual(tuple(profile.user_id for profile in profiles), (100,))
+        self.assertEqual(
+            profiles[0].category_ids,
+            (python.category_id, rendering.category_id),
+        )
+        self.assertEqual(await self.store.list_matching_profiles(10, ()), ())
+        self.assertEqual(
+            await self.store.list_matching_profiles(10, (other_guild.category_id,)),
+            (),
+        )
 
     async def test_category_deletion_removes_routing_links_but_preserves_snapshot(self):
         await self.store.initialize()

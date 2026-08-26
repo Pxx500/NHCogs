@@ -1,7 +1,7 @@
 # GitHub Tickets
 
 GitHub Tickets publishes pull request review tickets in Discord. Developers can maintain
-expertise profiles, find people by category, request a specific reviewer, or let the bot
+profiles, find people by category or GitHub username, request a specific reviewer, or let the bot
 route a ticket to eligible reviewers over time.
 
 `[p]` means your bot prefix. If your bot prefix is `!`, then `[p]githubtickets` is typed as
@@ -38,7 +38,7 @@ The bot needs these permissions in the ticket channel:
 - Manage Threads
 
 Configure at least one participant role and the ticket channel before normal use. The log
-channel and expertise categories are optional.
+channel and categories are optional.
 
 ```ini
 [p]githubtickets role add @GTNH-Devs
@@ -58,7 +58,10 @@ channel and expertise categories are optional.
 Opens an ephemeral form for a pull request title, pull request link, optional categories,
 ping behavior, and an optional direct reviewer. The bot does not call GitHub or verify the
 link. Automatic routing requires at least one category. Direct routing requires a selected
-reviewer.
+reviewer. When automatic routing uses multiple categories, a second ephemeral page shows
+how many eligible reviewers have every selected category. Categories can be removed there
+before creating the ticket. For Direct then automatic, the count excludes the direct
+reviewer because that person cannot be selected again during automatic fallback.
 
 The available ping behaviors are:
 
@@ -74,14 +77,15 @@ The available ping behaviors are:
 `/developerprofile`
 
 Opens an ephemeral dashboard where a participant can edit their optional GitHub username,
-select expertise categories, allow or disable automatic pings, browse profiles by category,
-or clear their profile after confirmation. Saving an empty profile removes its stored row.
+select categories, allow or disable automatic pings, browse profiles by category, find
+Discord members by an exact GitHub username, or clear their profile after confirmation.
+Saving an empty profile removes its stored row.
 
 ### View another developer profile
 
 `Apps → Developer Profile`
 
-The user context menu shows the selected member's optional GitHub username and expertise
+The user context menu shows the selected member's optional GitHub username and
 categories in an ephemeral response. It does not show presence or automatic ping consent.
 
 ## Prefix command overviews
@@ -102,7 +106,7 @@ moderator channel. All overview output disables mentions.
 | `[p]githubtickets channel` | Show ticket-channel configuration and commands |
 | `[p]githubtickets logchannel` | Show log-channel configuration and commands |
 | `[p]githubtickets role` | Show participant-role configuration and commands |
-| `[p]githubtickets category` | Show expertise-category configuration and commands |
+| `[p]githubtickets category` | Show category configuration and commands |
 | `[p]githubtickets timing` | Show routing timing configuration and commands |
 | `[p]githubtickets profile` | Show developer-profile maintenance commands |
 
@@ -129,12 +133,12 @@ Members with Manage Messages always count as participants. Losing a participant 
 not cancel an existing assignment, but it prevents new participant-only actions unless the
 member is the ticket's direct target.
 
-## Expertise categories
+## Categories
 
 | Command | Description |
 |---|---|
-| `[p]githubtickets category add <name>` | Add an expertise category |
-| `[p]githubtickets category remove <name>` | Remove an expertise category |
+| `[p]githubtickets category add <name>` | Add a category |
+| `[p]githubtickets category remove <name>` | Remove a category |
 
 Category names are trimmed, converted to lowercase, limited to 100 characters, and unique
 per server. A server can have at most 25 categories. Removing a category removes it from
@@ -174,7 +178,9 @@ Defaults:
 
 Automatic routing prefers Online members, then Idle, Do Not Disturb, and Offline members.
 It considers only cached server members with a participant role or Manage Messages, a
-stored profile, automatic pings enabled, and at least one matching category. A reviewer who
+stored profile, automatic pings enabled, and every category selected on the ticket. The
+ticket author is never an automatic reviewer. If no eligible reviewer has every category,
+the ticket remains open without an automatic ping. A reviewer who
 declined, unassigned, timed out, or was already pinged cannot be selected again for the same
 ticket. When the ping limit is exhausted, the ticket remains open for a manual claim.
 
@@ -185,12 +191,16 @@ ticket. When the ping limit is exhausted, the ticket remains open for a manual c
 | `[p]githubtickets profile clear <user_id>` | Clear one member's stored developer profile |
 
 This command accepts a positive Discord user ID. Participants clear their own profile from
-the `/developerprofile` dashboard.
+the `/developerprofile` dashboard. Leaving the server removes the member's profile and
+profile categories, but does not rewrite or remove their existing ticket history.
 
 ## Ticket controls and cleanup
 
 Open tickets show Mark finished, Claim, and Decline. Claimed tickets show Mark finished and
 Unassign.
+
+A pinged target is only being asked to review. The main ticket shows Reviewer only after
+that person or another participant successfully claims the ticket.
 
 - A participant, a member with Manage Messages, or the selected direct reviewer can claim
   or decline an open ticket

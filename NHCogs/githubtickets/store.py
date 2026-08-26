@@ -388,6 +388,25 @@ class GitHubTicketsStore:
         async with self._lock:
             return await asyncio.to_thread(self._get_profile_sync, guild_id, user_id)
 
+    async def list_profiles_by_github_username(
+        self,
+        guild_id: int,
+        github_username: str,
+    ) -> tuple[Profile, ...]:
+        normalized_username = github_username.strip()
+        if not normalized_username:
+            return ()
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._list_profiles_by_github_username_sync,
+                guild_id,
+                normalized_username,
+            )
+
+    async def delete_profile(self, guild_id: int, user_id: int) -> bool:
+        async with self._lock:
+            return await asyncio.to_thread(self._delete_profile_sync, guild_id, user_id)
+
     async def list_profiles_for_category(
         self,
         guild_id: int,
@@ -398,6 +417,21 @@ class GitHubTicketsStore:
                 self._list_profiles_for_category_sync,
                 guild_id,
                 category_id,
+            )
+
+    async def list_matching_profiles(
+        self,
+        guild_id: int,
+        category_ids: Iterable[int],
+    ) -> tuple[Profile, ...]:
+        normalized_category_ids = tuple(dict.fromkeys(category_ids))
+        if not normalized_category_ids:
+            return ()
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._list_matching_profiles_sync,
+                guild_id,
+                normalized_category_ids,
             )
 
     async def candidate_history(
@@ -943,6 +977,37 @@ class GitHubTicketsStore:
                 return None
             return _decode_profile(connection, row)
 
+    def _list_profiles_by_github_username_sync(
+        self,
+        guild_id: int,
+        github_username: str,
+    ) -> tuple[Profile, ...]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM profiles
+                WHERE guild_id = ? AND github_username = ? COLLATE NOCASE
+                ORDER BY user_id
+                """,
+                (guild_id, github_username),
+            ).fetchall()
+            return tuple(_decode_profile(connection, row) for row in rows)
+
+    def _delete_profile_sync(self, guild_id: int, user_id: int) -> bool:
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = connection.execute(
+                    "DELETE FROM profiles WHERE guild_id = ? AND user_id = ?",
+                    (guild_id, user_id),
+                )
+                connection.commit()
+                return cursor.rowcount > 0
+            except Exception:
+                connection.rollback()
+                raise
+
     def _list_profiles_for_category_sync(
         self,
         guild_id: int,
@@ -997,6 +1062,42 @@ class GitHubTicketsStore:
             for row in rows
         )
 
+    def _list_matching_profiles_sync(
+        self,
+        guild_id: int,
+        category_ids: tuple[int, ...],
+    ) -> tuple[Profile, ...]:
+        requested_categories = ", ".join("(?)" for _ in category_ids)
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                f"""
+                WITH requested_categories (category_id) AS (
+                    VALUES {requested_categories}
+                )
+                SELECT profile.*
+                FROM profiles AS profile
+                WHERE profile.guild_id = ?
+                    AND profile.automatic_pings = 1
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM requested_categories AS requested
+                        WHERE NOT EXISTS (
+                            SELECT 1
+                            FROM profile_categories AS profile_category
+                            JOIN categories AS category
+                                ON category.category_id = profile_category.category_id
+                                AND category.guild_id = profile.guild_id
+                            WHERE profile_category.guild_id = profile.guild_id
+                                AND profile_category.user_id = profile.user_id
+                                AND profile_category.category_id = requested.category_id
+                        )
+                    )
+                ORDER BY profile.user_id
+                """,
+                (*category_ids, guild_id),
+            ).fetchall()
+            return tuple(_decode_profile(connection, row) for row in rows)
+
     def _candidate_history_sync(
         self,
         ticket_id: int,
@@ -1024,15 +1125,6 @@ class GitHubTicketsStore:
                     SELECT ticket_id, guild_id
                     FROM tickets
                     WHERE ticket_id = ?
-                ),
-                matches AS (
-                    SELECT pc.user_id, COUNT(*) AS matching_category_count
-                    FROM profile_categories AS pc
-                    JOIN ticket_categories AS tc
-                        ON tc.category_id = pc.category_id
-                    JOIN target ON target.ticket_id = tc.ticket_id
-                    WHERE pc.guild_id = target.guild_id
-                    GROUP BY pc.user_id
                 ),
                 assignments AS (
                     SELECT assignee_id AS user_id, COUNT(*) AS active_assignment_count
@@ -1065,10 +1157,6 @@ class GitHubTicketsStore:
                     GROUP BY user_id
                 )
                 SELECT input.user_id,
-                    profile.user_id IS NOT NULL AS has_profile,
-                    COALESCE(profile.automatic_pings, 0) AS automatic_pings,
-                    COALESCE(matches.matching_category_count, 0)
-                        AS matching_category_count,
                     COALESCE(assignments.active_assignment_count, 0)
                         AS active_assignment_count,
                     last_pings.last_ping_at,
@@ -1078,10 +1166,6 @@ class GitHubTicketsStore:
                     COALESCE(exclusion_facts.timed_out, 0) AS timed_out
                 FROM candidate_history_input AS input
                 CROSS JOIN target
-                LEFT JOIN profiles AS profile
-                    ON profile.guild_id = target.guild_id
-                    AND profile.user_id = input.user_id
-                LEFT JOIN matches ON matches.user_id = input.user_id
                 LEFT JOIN assignments ON assignments.user_id = input.user_id
                 LEFT JOIN last_pings ON last_pings.user_id = input.user_id
                 LEFT JOIN ticket_ping_facts
@@ -1094,9 +1178,6 @@ class GitHubTicketsStore:
         return tuple(
             CandidateHistory(
                 user_id=int(row["user_id"]),
-                has_profile=bool(row["has_profile"]),
-                automatic_pings=bool(row["automatic_pings"]),
-                matching_category_count=int(row["matching_category_count"]),
                 active_assignment_count=int(row["active_assignment_count"]),
                 last_ping_at=_deserialize_optional_datetime(row["last_ping_at"]),
                 was_pinged=bool(row["was_pinged"]),
