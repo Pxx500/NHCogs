@@ -252,7 +252,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
             assignee_id=40,
         )
 
-        await adapter.edit_ticket(current)
+        await adapter.edit_ticket(current, reviewer_github="nova-dev")
 
         self.assertEqual(channel.partial_calls, [55])
         self.assertEqual(len(channel.message.edit_calls), 1)
@@ -264,6 +264,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
                     author_mention="<@30>",
                     categories=("rendering, performance",),
                     reviewer_mention="<@40>",
+                    reviewer_github="nova-dev",
             ),
         )
         self.assertIs(channel.message.edit_calls[0]["view"], view)
@@ -274,6 +275,33 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(view_tickets, [(current.ticket_id, True)])
         self.assertEqual(channel.fetch_calls, 0)
         self.assertEqual(bot.fetch_calls, 0)
+
+    async def test_open_ticket_edit_displays_the_current_target_and_github_username(self):
+        channel = FakeChannel()
+        bot = FakeBot({channel.id: channel})
+        adapter = adapter_module.DiscordTicketProjection(
+            bot,
+            lambda _ticket_id, _claimed: object(),
+        )
+        current = ticket(
+            message_id=55,
+            state=models.TicketState.OPEN,
+            current_target_id=41,
+        )
+
+        await adapter.edit_ticket(current, reviewer_github="reviewer-gh")
+
+        self.assertEqual(
+            channel.message.edit_calls[0]["content"],
+            presentation.ticket_message(
+                title=current.pr_title,
+                url=current.pr_url,
+                author_mention="<@30>",
+                categories=("rendering, performance",),
+                reviewer_mention="<@41>",
+                reviewer_github="reviewer-gh",
+            ),
+        )
 
     async def test_ping_uses_exact_copy_and_allows_only_the_new_target_mention(self):
         thread = FakeThread(66)

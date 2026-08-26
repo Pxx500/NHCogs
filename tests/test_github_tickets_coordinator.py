@@ -56,8 +56,8 @@ class FakeProjection:
         self.not_found_operations: set[str] = set()
         self.errors: dict[str, Exception] = {}
 
-    async def send_ticket(self, ticket):
-        self.calls.append(("send_ticket", ticket.ticket_id))
+    async def send_ticket(self, ticket, *, reviewer_github=None):
+        self.calls.append(("send_ticket", ticket.ticket_id, reviewer_github))
         message_id = self.next_message_id
         self.next_message_id += 1
         return message_id
@@ -70,10 +70,14 @@ class FakeProjection:
         self.next_thread_id += 1
         return thread_id
 
-    async def edit_ticket(self, ticket):
-        self.calls.append(("edit_ticket", ticket.ticket_id, ticket.state))
+    async def edit_ticket(self, ticket, *, reviewer_github=None):
+        self.calls.append(
+            ("edit_ticket", ticket.ticket_id, ticket.state, reviewer_github)
+        )
         if "edit_ticket" in self.not_found_operations:
             raise projection_module.ProjectionNotFound
+        if error := self.errors.get("edit_ticket"):
+            raise error
 
     async def ping_reviewer(self, thread_id, target_user_id, automatic):
         self.calls.append(("ping_reviewer", thread_id, target_user_id, automatic))
@@ -101,9 +105,8 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.store = store_module.GitHubTicketsStore(
-            Path(self.directory.name) / "githubtickets.sqlite"
-        )
+        self.path = Path(self.directory.name) / "githubtickets.sqlite"
+        self.store = store_module.GitHubTicketsStore(self.path)
         await self.store.initialize()
         self.now = datetime(2026, 8, 26, 10, 0, tzinfo=timezone.utc)
         self.category = await self.store.add_category(10, "rendering", self.now)
@@ -121,22 +124,28 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         async def get_settings(_guild_id):
             return self.settings
 
+        self.get_settings = get_settings
+
         self.candidates = ()
 
         async def get_candidates(_ticket):
             return self.candidates
+
+        self.get_candidates = get_candidates
 
         self.wake_count = 0
 
         def wake_deadlines():
             self.wake_count += 1
 
+        self.wake_deadlines = wake_deadlines
+
         self.coordinator = coordinator_module.TicketCoordinator(
             self.store,
             self.projection,
-            get_settings=get_settings,
-            get_candidates=get_candidates,
-            wake_deadlines=wake_deadlines,
+            get_settings=self.get_settings,
+            get_candidates=self.get_candidates,
+            wake_deadlines=self.wake_deadlines,
             clock=lambda: self.now,
         )
 
@@ -206,7 +215,10 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tickets[0].message_id, 300)
         self.assertEqual(tickets[0].thread_id, 400)
         self.assertEqual(tickets[0].next_action, models.NextAction.AUTOMATIC_PING)
-        self.assertEqual(self.projection.calls, [("send_ticket", 1), ("create_thread", 1, 300)])
+        self.assertEqual(
+            self.projection.calls,
+            [("send_ticket", 1, None), ("create_thread", 1, 300)],
+        )
         self.assertEqual(self.wake_count, 1)
 
     async def test_creation_retains_known_message_when_cleanup_cannot_settle(self):
@@ -233,6 +245,14 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.projection.calls, [])
 
     async def test_claim_permissions_and_first_claim_wins(self):
+        await self.store.save_profile(
+            guild_id=10,
+            user_id=200,
+            github_username="reviewer-login",
+            category_ids=(self.category.category_id,),
+            automatic_pings=True,
+            updated_at=self.now,
+        )
         ticket = await self.create_active(
             routing_mode=models.RoutingMode.DIRECT_WAIT,
             direct_target_id=200,
@@ -260,7 +280,14 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(claimed.assignee_id, 200)
         self.assertEqual(
             self.projection.calls,
-            [("edit_ticket", ticket.ticket_id, models.TicketState.CLAIMED)],
+            [
+                (
+                    "edit_ticket",
+                    ticket.ticket_id,
+                    models.TicketState.CLAIMED,
+                    "reviewer-login",
+                )
+            ],
         )
 
     async def test_non_target_decline_is_silent_sql_only_and_idempotent(self):
@@ -297,7 +324,86 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reopened.next_action_at, self.now.replace(second=10))
         self.assertEqual(
             self.projection.calls,
-            [("edit_ticket", ticket.ticket_id, models.TicketState.OPEN)],
+            [("edit_ticket", ticket.ticket_id, models.TicketState.OPEN, None)],
+        )
+
+    async def test_claim_projection_recovers_durably_after_transient_edit_failure(self):
+        ticket = await self.create_active(routing_mode=models.RoutingMode.NONE)
+        self.projection.calls.clear()
+        self.projection.errors["edit_ticket"] = RuntimeError("controlled edit failure")
+
+        failed = await self.coordinator.claim(ticket.ticket_id, self.actor(200))
+
+        self.assertFalse(failed.success)
+        claimed = await self.store.get_ticket(ticket.ticket_id)
+        self.assertEqual(claimed.state, models.TicketState.CLAIMED)
+        retry_at = await self.store.nearest_deadline()
+        self.assertGreater(retry_at, self.now)
+
+        reopened = store_module.GitHubTicketsStore(self.path)
+        await reopened.initialize()
+        self.assertIn(ticket.ticket_id, await reopened.due_ticket_ids(retry_at))
+        self.now = retry_at
+        self.projection.errors.pop("edit_ticket")
+        restarted = coordinator_module.TicketCoordinator(
+            reopened,
+            self.projection,
+            get_settings=self.get_settings,
+            get_candidates=self.get_candidates,
+            wake_deadlines=self.wake_deadlines,
+            clock=lambda: self.now,
+        )
+
+        recovered = await restarted.process_due(ticket.ticket_id)
+
+        self.assertTrue(recovered.success)
+        self.assertNotIn(ticket.ticket_id, await reopened.due_ticket_ids(self.now))
+        self.assertEqual(
+            self.projection.calls,
+            [
+                ("edit_ticket", ticket.ticket_id, models.TicketState.CLAIMED, None),
+                ("edit_ticket", ticket.ticket_id, models.TicketState.CLAIMED, None),
+            ],
+        )
+
+    async def test_unassign_projection_recovers_durably_after_transient_edit_failure(self):
+        ticket = await self.create_active(routing_mode=models.RoutingMode.NONE)
+        await self.coordinator.claim(ticket.ticket_id, self.actor(200))
+        self.projection.calls.clear()
+        self.projection.errors["edit_ticket"] = RuntimeError("controlled edit failure")
+
+        failed = await self.coordinator.unassign(ticket.ticket_id, self.actor(200))
+
+        self.assertFalse(failed.success)
+        reopened_ticket = await self.store.get_ticket(ticket.ticket_id)
+        self.assertEqual(reopened_ticket.state, models.TicketState.OPEN)
+        retry_at = await self.store.nearest_deadline()
+        self.assertGreater(retry_at, self.now)
+
+        reopened = store_module.GitHubTicketsStore(self.path)
+        await reopened.initialize()
+        self.assertIn(ticket.ticket_id, await reopened.due_ticket_ids(retry_at))
+        self.now = retry_at
+        self.projection.errors.pop("edit_ticket")
+        restarted = coordinator_module.TicketCoordinator(
+            reopened,
+            self.projection,
+            get_settings=self.get_settings,
+            get_candidates=self.get_candidates,
+            wake_deadlines=self.wake_deadlines,
+            clock=lambda: self.now,
+        )
+
+        recovered = await restarted.process_due(ticket.ticket_id)
+
+        self.assertTrue(recovered.success)
+        self.assertNotIn(ticket.ticket_id, await reopened.due_ticket_ids(self.now))
+        self.assertEqual(
+            self.projection.calls,
+            [
+                ("edit_ticket", ticket.ticket_id, models.TicketState.OPEN, None),
+                ("edit_ticket", ticket.ticket_id, models.TicketState.OPEN, None),
+            ],
         )
 
     async def test_mark_finished_authority_deletes_thread_message_and_state(self):
@@ -325,6 +431,14 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_direct_due_ping_timeout_then_wait_uses_acknowledged_budget(self):
+        await self.store.save_profile(
+            guild_id=10,
+            user_id=200,
+            github_username="direct-reviewer",
+            category_ids=(self.category.category_id,),
+            automatic_pings=True,
+            updated_at=self.now,
+        )
         ticket = await self.create_active(
             routing_mode=models.RoutingMode.DIRECT_WAIT,
             direct_target_id=200,
@@ -343,7 +457,12 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             self.projection.calls,
             [
                 ("ping_reviewer", ticket.thread_id, 200, False),
-                ("edit_ticket", ticket.ticket_id, models.TicketState.OPEN),
+                (
+                    "edit_ticket",
+                    ticket.ticket_id,
+                    models.TicketState.OPEN,
+                    "direct-reviewer",
+                ),
             ],
         )
 
@@ -361,7 +480,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             self.projection.calls,
-            [("edit_ticket", ticket.ticket_id, models.TicketState.OPEN)],
+            [("edit_ticket", ticket.ticket_id, models.TicketState.OPEN, None)],
         )
 
         claimed = await self.coordinator.claim(
@@ -400,6 +519,34 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             waiting.next_action_at,
             expected_response_deadline,
+        )
+
+    async def test_successful_ping_is_not_repeated_after_acknowledgement_failure(self):
+        ticket = await self.create_active()
+        self.candidates = (self.candidate(500),)
+        self.now = ticket.next_action_at
+        self.projection.calls.clear()
+        acknowledge_ping = self.store.acknowledge_ping
+        attempts = 0
+
+        async def fail_once(ticket_id, sent_at):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("controlled settlement failure")
+            return await acknowledge_ping(ticket_id, sent_at)
+
+        self.store.acknowledge_ping = fail_once
+
+        with self.assertRaisesRegex(RuntimeError, "controlled settlement failure"):
+            await self.coordinator.process_due(ticket.ticket_id)
+        recovered = await self.coordinator.process_due(ticket.ticket_id)
+
+        self.assertTrue(recovered.success)
+        self.assertEqual(attempts, 2)
+        self.assertEqual(
+            [call for call in self.projection.calls if call[0] == "ping_reviewer"],
+            [("ping_reviewer", ticket.thread_id, 500, True)],
         )
 
     async def test_known_deletion_events_remove_only_the_remaining_projection(self):

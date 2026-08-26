@@ -67,6 +67,12 @@ class GitHubTickets(commands.Cog):
         )
         self._application_commands_registered = False
 
+    async def cog_check(self, ctx: commands.Context) -> bool:
+        if ctx.guild is None:
+            return False
+        permissions = ctx.channel.permissions_for(ctx.author)
+        return bool(permissions.manage_messages)
+
     async def cog_load(self) -> None:
         await self.store.initialize()
         await self._refresh_participant_roles()
@@ -341,11 +347,17 @@ class GitHubTickets(commands.Cog):
         user_id: int,
     ) -> None:
         del requester
+        now = datetime.now(timezone.utc)
         authored_tickets = await self.store.list_authored_tickets(user_id)
         for ticket in authored_tickets:
-            await self._delete_projection_best_effort(ticket)
+            cleanup = await self.store.begin_authored_ticket_cleanup(
+                ticket.ticket_id,
+                author_id=user_id,
+                updated_at=now,
+            )
+            if cleanup is not None:
+                await self.coordinator.recover_projection_cleanup(cleanup.ticket_id)
 
-        now = datetime.now(timezone.utc)
         protection_until_by_guild = {}
         for guild_id in await self.store.user_reference_guild_ids(user_id):
             guild_settings = await self._get_guild_settings(guild_id)
@@ -358,6 +370,8 @@ class GitHubTickets(commands.Cog):
             updated_at=now,
         )
         for ticket in affected:
+            if ticket.state is TicketState.CLAIMED:
+                continue
             try:
                 await self.projection.edit_ticket(ticket)
             except ProjectionNotFound:
@@ -367,18 +381,6 @@ class GitHubTickets(commands.Cog):
                 pass
         if any(ticket.next_action_at is not None for ticket in affected):
             self.scheduler.wake()
-
-    async def _delete_projection_best_effort(self, ticket: Ticket) -> None:
-        if ticket.thread_id is not None:
-            try:
-                await self.projection.delete_thread(ticket.thread_id)
-            except Exception:
-                pass
-        if ticket.message_id is not None:
-            try:
-                await self.projection.delete_message(ticket.channel_id, ticket.message_id)
-            except Exception:
-                pass
 
     @commands.group(name="githubtickets", invoke_without_command=True)
     @commands.guild_only()
@@ -424,9 +426,12 @@ class GitHubTickets(commands.Cog):
     async def githubtickets_channel_set(
         self,
         ctx: commands.Context,
-        channel: discord.TextChannel,
+        channel: discord.abc.GuildChannel,
     ) -> None:
         """Set the ticket channel"""
+        if not isinstance(channel, discord.TextChannel):
+            await ctx.send(presentation.TICKET_CHANNEL_MUST_BE_TEXT)
+            return
         await self.config.guild(ctx.guild).set_raw("ticket_channel_id", value=channel.id)
         await ctx.send(
             presentation.ticket_channel_set(channel.mention),

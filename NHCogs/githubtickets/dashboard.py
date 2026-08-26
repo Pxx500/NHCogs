@@ -18,6 +18,20 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+async def _check_participant(
+    interaction: discord.Interaction,
+    actor_factory: ActorFactory,
+) -> bool:
+    if actor_factory(interaction).can_participate:
+        return True
+    await interaction.response.send_message(
+        presentation.CANNOT_USE_ACTION,
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+    return False
+
+
 def _category_options(categories: Sequence[Category]) -> list[discord.SelectOption]:
     if categories:
         return [
@@ -84,6 +98,7 @@ class EditProfileModal(discord.ui.Modal):
         self.github_username = discord.ui.TextInput(
             default=profile.github_username if profile is not None else None,
             required=False,
+            max_length=presentation.MAX_GITHUB_USERNAME_LENGTH,
         )
         self.categories = discord.ui.Select(
             placeholder=presentation.SELECT_YOUR_CATEGORIES,
@@ -121,6 +136,8 @@ class EditProfileModal(discord.ui.Modal):
         )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await _check_participant(interaction, self._actor_factory):
+            return
         category_ids = tuple(int(value) for value in self.categories.values)
         if self.automatic_pings.value and not category_ids:
             await interaction.response.send_message(
@@ -173,16 +190,23 @@ class NewTicketModal(discord.ui.Modal):
         self.pr_title = discord.ui.TextInput(
             placeholder=presentation.ENTER_PR_TITLE,
             required=True,
+            max_length=presentation.MAX_PR_TITLE_LENGTH,
         )
         self.pr_link = discord.ui.TextInput(
             placeholder=presentation.ENTER_PR_LINK,
             required=True,
+            max_length=presentation.MAX_PR_URL_LENGTH,
         )
         self.categories = discord.ui.Select(
             placeholder=presentation.SELECT_CATEGORIES,
             options=_category_options(visible_categories),
             min_values=0,
-            max_values=max(1, len(visible_categories)),
+            max_values=min(
+                max(1, len(visible_categories)),
+                presentation.ticket_category_selection_limit(
+                    tuple(category.name for category in visible_categories)
+                ),
+            ),
             required=False,
             disabled=not visible_categories,
         )
@@ -223,6 +247,8 @@ class NewTicketModal(discord.ui.Modal):
             self.add_item(discord.ui.Label(text=label, component=component))
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not await _check_participant(interaction, self._actor_factory):
+            return
         routing_mode = RoutingMode(self.ping_behavior.value)
         category_ids = tuple(int(value) for value in self.categories.values)
         if routing_mode in (RoutingMode.AUTOMATIC, RoutingMode.DIRECT_AUTOMATIC) and not category_ids:
@@ -294,6 +320,9 @@ class ClearProfileConfirmation(discord.ui.View):
         button.callback = self._clear
         self.add_item(button)
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await _check_participant(interaction, self._actor_factory)
+
     async def _clear(self, interaction: discord.Interaction) -> None:
         actor = self._actor_factory(interaction)
         await self._store.save_profile(
@@ -318,12 +347,14 @@ class CategoryBrowser(discord.ui.View):
         guild_id: int,
         categories: Sequence[Category],
         back_view: GitHubTicketsDashboard,
+        actor_factory: ActorFactory,
     ) -> None:
         super().__init__()
         self._store = store
         self._guild_id = guild_id
         self._categories = {category.category_id: category for category in categories[:25]}
         self._back_view = back_view
+        self._actor_factory = actor_factory
         self._selected_category: Category | None = None
         self._profiles: Sequence[Profile] = ()
         self._page = 0
@@ -358,6 +389,9 @@ class CategoryBrowser(discord.ui.View):
         self.add_item(self.previous)
         self.add_item(self.next)
         self.add_item(back)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await _check_participant(interaction, self._actor_factory)
 
     async def _select_category(self, interaction: discord.Interaction) -> None:
         category_id = int(self.category_select.values[0])
@@ -455,6 +489,9 @@ class GitHubTicketsDashboard(discord.ui.View):
             button.callback = callback
             self.add_item(button)
 
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await _check_participant(interaction, self._actor_factory)
+
     async def send(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
             presentation.DASHBOARD_TITLE,
@@ -506,6 +543,7 @@ class GitHubTicketsDashboard(discord.ui.View):
                 guild_id=self._guild_id,
                 categories=categories,
                 back_view=self,
+                actor_factory=self._actor_factory,
             ),
             allowed_mentions=discord.AllowedMentions.none(),
         )

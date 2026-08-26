@@ -159,6 +159,97 @@ class GitHubTicketsStoreCleanupTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn(open_ticket.ticket_id, {ticket.ticket_id for ticket in pending})
 
+    async def test_authored_ticket_cleanup_redacts_content_before_projection_deletion(self):
+        user_id = 500
+        category = await self.store.add_category(10, "rendering", self.now)
+        ticket = await self.create_open_ticket(
+            guild_id=10,
+            channel_id=30,
+            author_id=user_id,
+            routing_mode=models.RoutingMode.DIRECT_AUTOMATIC,
+            direct_target_id=600,
+            category_ids=(category.category_id,),
+            category_display="private selection",
+        )
+        await self.target_ticket(ticket, 600, acknowledge=True)
+
+        cleanup = await self.store.begin_authored_ticket_cleanup(
+            ticket.ticket_id,
+            author_id=user_id,
+            updated_at=self.now,
+        )
+
+        self.assertIsNotNone(cleanup)
+        self.assertEqual(cleanup.state, models.TicketState.FINISHING)
+        self.assertEqual(cleanup.author_id, 0)
+        self.assertEqual(cleanup.pr_title, "")
+        self.assertEqual(cleanup.pr_url, "")
+        self.assertEqual(cleanup.category_display, "")
+        self.assertEqual(cleanup.routing_mode, models.RoutingMode.NONE)
+        self.assertEqual(cleanup.category_ids, ())
+        self.assertIsNone(cleanup.direct_target_id)
+        self.assertIsNone(cleanup.current_target_id)
+        self.assertIsNone(cleanup.assignee_id)
+        self.assertEqual(cleanup.ping_count, 0)
+        self.assertEqual(cleanup.message_id, ticket.message_id)
+        self.assertEqual(cleanup.thread_id, ticket.thread_id)
+        self.assertEqual(await self.store.list_pings(ticket.ticket_id), ())
+        self.assertEqual(await self.store.list_exclusions(ticket.ticket_id), ())
+        self.assertIn(
+            ticket.ticket_id,
+            {
+                item.ticket_id
+                for item in await self.store.list_projection_cleanup_tickets()
+            },
+        )
+
+        reopened = store_module.GitHubTicketsStore(self.path)
+        await reopened.initialize()
+        persisted = await reopened.get_ticket(ticket.ticket_id)
+        self.assertEqual(persisted.state, models.TicketState.FINISHING)
+        self.assertEqual(persisted.author_id, 0)
+        self.assertEqual(persisted.message_id, ticket.message_id)
+        self.assertEqual(persisted.thread_id, ticket.thread_id)
+
+    async def test_authored_ticket_cleanup_requires_matching_active_author(self):
+        ticket = await self.create_open_ticket(
+            guild_id=10,
+            channel_id=30,
+            author_id=500,
+        )
+
+        cleanup = await self.store.begin_authored_ticket_cleanup(
+            ticket.ticket_id,
+            author_id=501,
+            updated_at=self.now,
+        )
+
+        self.assertIsNone(cleanup)
+        self.assertEqual((await self.store.get_ticket(ticket.ticket_id)).author_id, 500)
+
+    async def test_authored_ticket_cleanup_redacts_existing_finishing_state(self):
+        user_id = 500
+        ticket = await self.create_open_ticket(
+            guild_id=10,
+            channel_id=30,
+            author_id=user_id,
+        )
+        self.assertTrue(await self.store.begin_finishing(ticket.ticket_id, self.now))
+
+        cleanup = await self.store.begin_authored_ticket_cleanup(
+            ticket.ticket_id,
+            author_id=user_id,
+            updated_at=self.now,
+        )
+
+        self.assertIsNotNone(cleanup)
+        self.assertEqual(cleanup.state, models.TicketState.FINISHING)
+        self.assertEqual(cleanup.author_id, 0)
+        self.assertEqual(cleanup.pr_title, "")
+        self.assertEqual(cleanup.pr_url, "")
+        self.assertEqual(cleanup.message_id, ticket.message_id)
+        self.assertEqual(cleanup.thread_id, ticket.thread_id)
+
     async def test_user_redaction_is_atomic_complete_and_persists_after_restart(self):
         user_id = 500
         category_10 = await self.store.add_category(10, "rendering", self.now)
@@ -294,6 +385,44 @@ class GitHubTicketsStoreCleanupTests(unittest.IsolatedAsyncioTestCase):
         )
         with closing(store_module.connect(self.path)) as connection:
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    async def test_redacting_obsolete_direct_target_preserves_current_assignee(self):
+        deleted_user_id = 500
+        assignee_id = 600
+        ticket = await self.create_open_ticket(
+            guild_id=10,
+            channel_id=30,
+            author_id=100,
+            routing_mode=models.RoutingMode.DIRECT_WAIT,
+            direct_target_id=deleted_user_id,
+        )
+        self.assertTrue(
+            await self.store.claim(
+                ticket.ticket_id,
+                assignee_id,
+                self.now + timedelta(minutes=1),
+                self.now,
+            )
+        )
+
+        affected = await self.store.redact_user(
+            deleted_user_id,
+            protection_until_by_guild={
+                10: self.now + timedelta(seconds=10),
+            },
+            updated_at=self.now,
+        )
+
+        self.assertEqual(
+            tuple(item.ticket_id for item in affected),
+            (ticket.ticket_id,),
+        )
+        preserved = await self.store.get_ticket(ticket.ticket_id)
+        self.assertEqual(preserved.state, models.TicketState.CLAIMED)
+        self.assertEqual(preserved.assignee_id, assignee_id)
+        self.assertIsNone(preserved.direct_target_id)
+        self.assertIsNone(preserved.next_action)
+        self.assertIsNone(preserved.next_action_at)
 
     async def test_user_redaction_requires_every_affected_guild_deadline_before_mutation(self):
         user_id = 500

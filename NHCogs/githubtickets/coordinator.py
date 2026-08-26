@@ -27,6 +27,7 @@ MISSING_AUTOMATIC_CATEGORIES = "Select at least one category for automatic pings
 MISSING_DIRECT_REVIEWER = "Select a reviewer for direct pings"
 CREATE_FAILED = "Could not create the ticket"
 ACTION_FAILED = "Could not complete this action"
+PROJECTION_RETRY_SECONDS = 5
 
 
 def _utc_now() -> datetime:
@@ -83,6 +84,10 @@ class TicketCoordinator:
         self._wake_deadlines = wake_deadlines
         self._clock = clock
         self._locks: dict[int, asyncio.Lock] = {}
+        self._sent_ping_settlements: dict[
+            int,
+            tuple[PingReservation, datetime],
+        ] = {}
 
     async def create_ticket(
         self,
@@ -117,7 +122,10 @@ class TicketCoordinator:
         except Exception:
             return TicketResult(False, CREATE_FAILED)
         try:
-            message_id = await self._projection.send_ticket(ticket)
+            message_id = await self._projection.send_ticket(
+                ticket,
+                reviewer_github=await self._reviewer_github(ticket),
+            )
             if not await self._store.record_ticket_message(
                 ticket.ticket_id,
                 message_id,
@@ -360,27 +368,36 @@ class TicketCoordinator:
 
     async def process_due(self, ticket_id: int) -> TicketResult:
         async with self._ticket_lock(ticket_id):
-            ticket = await self._store.get_ticket(ticket_id)
-            now = self._clock()
-            if ticket is None or ticket.state is not TicketState.OPEN:
-                return TicketResult(False, INACTIVE_TICKET)
-            if ticket.next_action is None or ticket.next_action_at is None:
-                return TicketResult(True)
-            if ticket.next_action_at > now:
-                return TicketResult(True)
+            projection_sync = await self._store.get_projection_sync_ticket(ticket_id)
+            if projection_sync is not None:
+                result = await self._edit_after_transition(projection_sync)
+                if result.success:
+                    self._wake_deadlines()
+                return result
+            return await self._process_due_routing(ticket_id)
 
-            settings = await self._get_settings(ticket.guild_id)
-            if ticket.next_action is NextAction.TARGET_TIMEOUT:
-                return await self._process_target_timeout(ticket, settings, now)
-            if ticket.protection_until is not None and ticket.protection_until > now:
-                await self._store.defer_due_ping(
-                    ticket.ticket_id,
-                    ticket.protection_until,
-                    now,
-                )
-                self._wake_deadlines()
-                return TicketResult(True)
-            return await self._process_due_ping(ticket, settings, now)
+    async def _process_due_routing(self, ticket_id: int) -> TicketResult:
+        ticket = await self._store.get_ticket(ticket_id)
+        now = self._clock()
+        if ticket is None or ticket.state is not TicketState.OPEN:
+            return TicketResult(False, INACTIVE_TICKET)
+        if ticket.next_action is None or ticket.next_action_at is None:
+            return TicketResult(True)
+        if ticket.next_action_at > now:
+            return TicketResult(True)
+
+        settings = await self._get_settings(ticket.guild_id)
+        if ticket.next_action is NextAction.TARGET_TIMEOUT:
+            return await self._process_target_timeout(ticket, settings, now)
+        if ticket.protection_until is not None and ticket.protection_until > now:
+            await self._store.defer_due_ping(
+                ticket.ticket_id,
+                ticket.protection_until,
+                now,
+            )
+            self._wake_deadlines()
+            return TicketResult(True)
+        return await self._process_due_ping(ticket, settings, now)
 
     async def _process_due_ping(
         self,
@@ -407,11 +424,24 @@ class TicketCoordinator:
                 now,
             )
             return TicketResult(True)
-        effect_result = await self._send_ping_effect(ticket, reservation, settings, now)
-        if effect_result is not None:
-            return effect_result
+        pending_settlement = self._sent_ping_settlements.get(ticket.ticket_id)
+        if pending_settlement is None or pending_settlement[0] != reservation:
+            effect_result = await self._send_ping_effect(
+                ticket,
+                reservation,
+                settings,
+                now,
+            )
+            if effect_result is not None:
+                return effect_result
+            pending_settlement = (reservation, now)
+            self._sent_ping_settlements[ticket.ticket_id] = pending_settlement
 
-        acknowledged = await self._store.acknowledge_ping(ticket.ticket_id, now)
+        acknowledged = await self._store.acknowledge_ping(
+            ticket.ticket_id,
+            pending_settlement[1],
+        )
+        self._sent_ping_settlements.pop(ticket.ticket_id, None)
         if acknowledged is None:
             return TicketResult(False, INACTIVE_TICKET)
         current = await self._store.get_ticket(ticket.ticket_id)
@@ -551,12 +581,37 @@ class TicketCoordinator:
 
     async def _edit_after_transition(self, ticket: Ticket) -> TicketResult:
         try:
-            await self._projection.edit_ticket(ticket)
+            await self._projection.edit_ticket(
+                ticket,
+                reviewer_github=await self._reviewer_github(ticket),
+            )
         except ProjectionNotFound:
             await self._delete_remaining_projection(ticket, message_absent=True)
         except Exception:
+            retry_at = self._clock() + timedelta(seconds=PROJECTION_RETRY_SECONDS)
+            if await self._store.defer_projection_sync(
+                ticket.ticket_id,
+                ticket.transition_version,
+                retry_at,
+            ):
+                self._wake_deadlines()
             return TicketResult(False, ACTION_FAILED)
+        await self._store.acknowledge_projection_sync(
+            ticket.ticket_id,
+            ticket.transition_version,
+        )
         return TicketResult(True)
+
+    async def _reviewer_github(self, ticket: Ticket) -> str | None:
+        reviewer_id = (
+            ticket.assignee_id
+            if ticket.state is TicketState.CLAIMED
+            else ticket.current_target_id
+        )
+        if reviewer_id is None:
+            return None
+        profile = await self._store.get_profile(ticket.guild_id, reviewer_id)
+        return profile.github_username if profile is not None else None
 
     @staticmethod
     def _release_schedule(

@@ -472,7 +472,13 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
             assigned_thread = CachedThread(51)
             bot.channels = {20: channel, 50: authored_thread, 51: assigned_thread}
 
-            async def active(author_id, message_id, thread_id):
+            async def active(
+                author_id,
+                message_id,
+                thread_id,
+                *,
+                direct_target_id=None,
+            ):
                 created = await cog.store.create_ticket(
                     modules.models.NewTicket(
                         guild_id=10,
@@ -482,7 +488,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         pr_url="https://example.test/pull/1",
                         category_display="",
                         routing_mode=modules.models.RoutingMode.AUTOMATIC,
-                        direct_target_id=None,
+                        direct_target_id=direct_target_id,
                         category_ids=(),
                         created_at=now,
                     )
@@ -501,6 +507,13 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
             authored = await active(500, 40, 50)
             assigned = await active(30, 41, 51)
             await cog.store.claim(assigned.ticket_id, 500, now, now)
+            obsolete_direct = await active(
+                30,
+                42,
+                52,
+                direct_target_id=500,
+            )
+            await cog.store.claim(obsolete_direct.ticket_id, 600, now, now)
             await cog.store.save_profile(
                 guild_id=10,
                 user_id=500,
@@ -520,6 +533,10 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     reopened.next_action,
                     modules.models.NextAction.AUTOMATIC_PING,
                 )
+                unchanged = await cog.store.get_ticket(obsolete_direct.ticket_id)
+                self.assertEqual(unchanged.state, modules.models.TicketState.CLAIMED)
+                self.assertEqual(unchanged.assignee_id, 600)
+                self.assertIsNone(unchanged.direct_target_id)
                 self.assertIsNone(await cog.store.get_profile(10, 500))
                 self.assertEqual(await cog.store.user_reference_guild_ids(500), ())
                 self.assertEqual(authored_thread.delete_calls, 1)
@@ -528,3 +545,61 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(bot.fetch_calls, 0)
             finally:
                 await cog.cog_unload()
+
+    async def test_red_privacy_deletion_keeps_existing_finishing_cleanup_ids(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            bot = FakeBot(ready=False)
+            channel = CachedChannel()
+            bot.channels = {20: channel}
+            cog = modules.githubtickets.GitHubTickets(bot)
+            await cog.store.initialize()
+            now = datetime.now(timezone.utc)
+            created = await cog.store.create_ticket(
+                modules.models.NewTicket(
+                    guild_id=10,
+                    channel_id=20,
+                    author_id=500,
+                    pr_title="private title",
+                    pr_url="https://example.test/private",
+                    category_display="private category",
+                    routing_mode=modules.models.RoutingMode.AUTOMATIC,
+                    direct_target_id=501,
+                    category_ids=(),
+                    created_at=now,
+                )
+            )
+            await cog.store.activate_ticket(
+                created.ticket_id,
+                message_id=40,
+                thread_id=50,
+                protection_until=now,
+                next_action=None,
+                next_action_at=None,
+                updated_at=now,
+            )
+            self.assertTrue(await cog.store.begin_finishing(created.ticket_id, now))
+
+            await cog.red_delete_data_for_user(requester="user", user_id=500)
+
+            cleanup = await cog.store.get_ticket(created.ticket_id)
+            self.assertEqual(cleanup.state, modules.models.TicketState.FINISHING)
+            self.assertEqual(cleanup.author_id, 0)
+            self.assertEqual(cleanup.pr_title, "")
+            self.assertEqual(cleanup.pr_url, "")
+            self.assertEqual(cleanup.category_display, "")
+            self.assertEqual(cleanup.message_id, 40)
+            self.assertEqual(cleanup.thread_id, 50)
+            self.assertEqual(channel.message.delete_calls, 0)
+            self.assertEqual(bot.fetch_calls, 0)
+
+            thread = CachedThread(50)
+            bot.channels[50] = thread
+            result = await cog.coordinator.recover_projection_cleanup(
+                created.ticket_id
+            )
+
+            self.assertTrue(result.success)
+            self.assertIsNone(await cog.store.get_ticket(created.ticket_id))
+            self.assertEqual(thread.delete_calls, 1)
+            self.assertEqual(channel.message.delete_calls, 1)
+            self.assertEqual(bot.fetch_calls, 0)

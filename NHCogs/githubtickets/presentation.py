@@ -2,6 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+DISCORD_MESSAGE_LIMIT = 2_000
+MAX_PR_TITLE_LENGTH = 256
+MAX_PR_URL_LENGTH = 1_024
+MAX_GITHUB_USERNAME_LENGTH = 100
+_MAX_USER_MENTION = "<@18446744073709551615>"
+
 SLASH_DESCRIPTION = "Open the GitHub Tickets dashboard"
 DEVELOPER_PROFILE_COMMAND = "Developer Profile"
 DASHBOARD_TITLE = "GitHub Tickets"
@@ -168,6 +174,26 @@ def ticket_message(
             reviewer = f"{reviewer} | {reviewer_github}"
         metadata.append(reviewer)
     return f"[{title}]({url})\n{' | '.join(metadata)}"
+
+
+def ticket_category_selection_limit(categories: Sequence[str]) -> int:
+    if not categories:
+        return 1
+    selected: list[str] = []
+    for category in sorted(categories, key=len, reverse=True):
+        candidate = [*selected, category]
+        content = ticket_message(
+            title="x" * MAX_PR_TITLE_LENGTH,
+            url="x" * MAX_PR_URL_LENGTH,
+            author_mention=_MAX_USER_MENTION,
+            categories=candidate,
+            reviewer_mention=_MAX_USER_MENTION,
+            reviewer_github="x" * MAX_GITHUB_USERNAME_LENGTH,
+        )
+        if len(content) > DISCORD_MESSAGE_LIMIT:
+            break
+        selected.append(category)
+    return max(1, len(selected))
 
 
 def direct_review_notification(target_mention: str) -> str:

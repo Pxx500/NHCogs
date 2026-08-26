@@ -14,11 +14,21 @@ class ProjectionUnavailable(RuntimeError):
 
 
 class TicketProjection(Protocol):
-    async def send_ticket(self, ticket: Ticket) -> int: ...
+    async def send_ticket(
+        self,
+        ticket: Ticket,
+        *,
+        reviewer_github: str | None = None,
+    ) -> int: ...
 
     async def create_thread(self, ticket: Ticket, message_id: int) -> int: ...
 
-    async def edit_ticket(self, ticket: Ticket) -> None: ...
+    async def edit_ticket(
+        self,
+        ticket: Ticket,
+        *,
+        reviewer_github: str | None = None,
+    ) -> None: ...
 
     async def ping_reviewer(
         self,

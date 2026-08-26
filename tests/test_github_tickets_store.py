@@ -67,9 +67,14 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
                     "SELECT name FROM sqlite_master WHERE type = 'table'"
                 )
             }
+            ticket_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(tickets)")
+            }
 
-        self.assertEqual(version, 1)
+        self.assertEqual(version, 2)
         self.assertEqual(foreign_keys, 1)
+        self.assertIn("projection_sync_at", ticket_columns)
         self.assertTrue(
             {
                 "categories",
@@ -85,9 +90,9 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
     async def test_initialize_rejects_newer_schema_version(self):
         self.assertIsNotNone(self.store, "the GitHub Tickets store interface is missing")
         with closing(sqlite3.connect(self.path)) as connection:
-            connection.execute("PRAGMA user_version = 2")
+            connection.execute("PRAGMA user_version = 3")
 
-        with self.assertRaisesRegex(ValueError, "newer than supported version 1"):
+        with self.assertRaisesRegex(ValueError, "newer than supported version 2"):
             await self.store.initialize()
 
     async def test_categories_normalize_validate_and_enforce_guild_limit(self):

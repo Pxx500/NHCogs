@@ -82,6 +82,7 @@ def _install_discord_stub():
             self.default = default
             self.required = required
             self.value = default or ""
+            self.__dict__.update(_kwargs)
 
     class Select(Item):
         def __init__(
@@ -266,6 +267,55 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(allowed_mentions.users)
         self.assertFalse(allowed_mentions.roles)
 
+    async def test_dashboard_descendants_recheck_participant_access_after_role_loss(self):
+        store = FakeStore()
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        store.categories = [models.Category(1, 100, "rendering", now)]
+        current_actor = [coordinator.TicketActor(10, True, False)]
+
+        async def create_ticket(_request, _actor):
+            return coordinator.TicketResult(True)
+
+        dashboard = dashboard_module.GitHubTicketsDashboard(
+            store,
+            guild_id=100,
+            create_ticket=create_ticket,
+            actor_factory=lambda _interaction: current_actor[0],
+        )
+
+        profile_open = FakeInteraction()
+        await dashboard.children[1].callback(profile_open)
+        profile_modal = profile_open.response.modals[0]
+
+        clear_open = FakeInteraction()
+        await dashboard.children[3].callback(clear_open)
+        clear_confirmation = clear_open.response.messages[0][1]["view"]
+
+        browse_open = FakeInteraction()
+        await dashboard.children[2].callback(browse_open)
+        category_browser = browse_open.response.edits[0]["view"]
+
+        current_actor[0] = coordinator.TicketActor(10, False, False)
+
+        for surface in (dashboard, clear_confirmation, category_browser):
+            with self.subTest(surface=type(surface).__name__):
+                interaction = FakeInteraction()
+                self.assertFalse(await surface.interaction_check(interaction))
+                self.assertEqual(
+                    interaction.response.messages[0][0],
+                    presentation.CANNOT_USE_ACTION,
+                )
+                self.assertTrue(interaction.response.messages[0][1]["ephemeral"])
+
+        submit_interaction = FakeInteraction()
+        await profile_modal.on_submit(submit_interaction)
+
+        self.assertEqual(store.save_calls, [])
+        self.assertEqual(
+            submit_interaction.response.messages[0][0],
+            presentation.CANNOT_USE_ACTION,
+        )
+
     async def test_edit_profile_modal_uses_exact_components_and_saves_silently(self):
         store = FakeStore()
         now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
@@ -304,6 +354,10 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(modal.github_username, discord.ui.TextInput)
         self.assertFalse(modal.github_username.required)
         self.assertEqual(modal.github_username.default, "old-name")
+        self.assertEqual(
+            modal.github_username.max_length,
+            presentation.MAX_GITHUB_USERNAME_LENGTH,
+        )
         self.assertIsInstance(modal.categories, discord.ui.Select)
         self.assertFalse(modal.categories.required)
         self.assertEqual(modal.categories.min_values, 0)
@@ -588,9 +642,11 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(modal.pr_title, discord.ui.TextInput)
         self.assertTrue(modal.pr_title.required)
         self.assertEqual(modal.pr_title.placeholder, presentation.ENTER_PR_TITLE)
+        self.assertEqual(modal.pr_title.max_length, presentation.MAX_PR_TITLE_LENGTH)
         self.assertIsInstance(modal.pr_link, discord.ui.TextInput)
         self.assertTrue(modal.pr_link.required)
         self.assertEqual(modal.pr_link.placeholder, presentation.ENTER_PR_LINK)
+        self.assertEqual(modal.pr_link.max_length, presentation.MAX_PR_URL_LENGTH)
         self.assertIsInstance(modal.categories, discord.ui.Select)
         self.assertFalse(modal.categories.required)
         self.assertEqual(modal.categories.min_values, 0)
@@ -615,6 +671,45 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(modal.direct_reviewer.required)
         self.assertEqual(modal.direct_reviewer.min_values, 0)
         self.assertEqual(modal.direct_reviewer.max_values, 1)
+
+    async def test_native_valid_ticket_input_always_fits_one_discord_message(self):
+        store = FakeStore()
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        store.categories = [
+            models.Category(category_id, 100, "x" * 100, now)
+            for category_id in range(1, 26)
+        ]
+        dashboard, _store, _actor = self.make_dashboard(store)
+        interaction = FakeInteraction()
+
+        await dashboard.children[0].callback(interaction)
+
+        modal = interaction.response.modals[0]
+        selected = [option.label for option in modal.categories.options[: modal.categories.max_values]]
+        content = presentation.ticket_message(
+            title="x" * modal.pr_title.max_length,
+            url="x" * modal.pr_link.max_length,
+            author_mention="<@18446744073709551615>",
+            categories=selected,
+            reviewer_mention="<@18446744073709551615>",
+            reviewer_github="x" * presentation.MAX_GITHUB_USERNAME_LENGTH,
+        )
+
+        self.assertLessEqual(len(content), presentation.DISCORD_MESSAGE_LIMIT)
+        self.assertLess(modal.categories.max_values, len(modal.categories.options))
+        self.assertGreater(
+            len(
+                presentation.ticket_message(
+                    title="x" * modal.pr_title.max_length,
+                    url="x" * modal.pr_link.max_length,
+                    author_mention="<@18446744073709551615>",
+                    categories=[*selected, "x" * 100],
+                    reviewer_mention="<@18446744073709551615>",
+                    reviewer_github="x" * presentation.MAX_GITHUB_USERNAME_LENGTH,
+                )
+            ),
+            presentation.DISCORD_MESSAGE_LIMIT,
+        )
 
     async def test_new_ticket_maps_all_routing_modes_and_only_trims_title_and_link(self):
         now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)

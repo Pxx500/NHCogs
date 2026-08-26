@@ -25,11 +25,16 @@ class DiscordTicketProjection:
         self._view_factory = view_factory
         self._sent_messages: dict[int, Any] = {}
 
-    async def send_ticket(self, ticket: Ticket) -> int:
+    async def send_ticket(
+        self,
+        ticket: Ticket,
+        *,
+        reviewer_github: str | None = None,
+    ) -> int:
         channel = self._cached_channel(ticket.channel_id)
         try:
             message = await channel.send(
-                self._ticket_content(ticket),
+                self._ticket_content(ticket, reviewer_github=reviewer_github),
                 view=self._ticket_view(ticket),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -55,13 +60,21 @@ class DiscordTicketProjection:
         self._sent_messages.pop(message_id, None)
         return thread.id
 
-    async def edit_ticket(self, ticket: Ticket) -> None:
+    async def edit_ticket(
+        self,
+        ticket: Ticket,
+        *,
+        reviewer_github: str | None = None,
+    ) -> None:
         if ticket.message_id is None:
             raise ProjectionNotFound
         message = self._partial_message(ticket.channel_id, ticket.message_id)
         try:
             await message.edit(
-                content=self._ticket_content(ticket),
+                content=self._ticket_content(
+                    ticket,
+                    reviewer_github=reviewer_github,
+                ),
                 view=self._ticket_view(ticket),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
@@ -124,15 +137,19 @@ class DiscordTicketProjection:
         return self._view_factory(ticket.ticket_id, ticket.state is TicketState.CLAIMED)
 
     @staticmethod
-    def _ticket_content(ticket: Ticket) -> str:
+    def _ticket_content(
+        ticket: Ticket,
+        *,
+        reviewer_github: str | None = None,
+    ) -> str:
         categories = (ticket.category_display,) if ticket.category_display else ()
-        reviewer_mention = (
-            f"<@{ticket.assignee_id}>" if ticket.assignee_id is not None else None
-        )
+        reviewer_id = ticket.assignee_id or ticket.current_target_id
+        reviewer_mention = f"<@{reviewer_id}>" if reviewer_id is not None else None
         return ticket_message(
             title=ticket.pr_title,
             url=ticket.pr_url,
             author_mention=f"<@{ticket.author_id}>",
             categories=categories,
             reviewer_mention=reviewer_mention,
+            reviewer_github=reviewer_github,
         )

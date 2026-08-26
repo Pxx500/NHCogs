@@ -9,8 +9,14 @@ from tests.githubtickets_loader import isolated_githubtickets_modules
 
 
 class FakeContext:
-    def __init__(self, guild_id=42):
-        self.guild = SimpleNamespace(id=guild_id)
+    def __init__(self, guild_id=42, *, manage_messages=True):
+        self.guild = SimpleNamespace(id=guild_id) if guild_id is not None else None
+        self.author = SimpleNamespace()
+        self.channel = SimpleNamespace(
+            permissions_for=lambda _author: SimpleNamespace(
+                manage_messages=manage_messages
+            )
+        )
         self.send = mock.AsyncMock()
 
 
@@ -62,6 +68,21 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             "Set the Do Not Disturb response time",
         )
 
+    async def test_cog_check_guards_every_prefix_command_in_guilds(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            commands = modules.githubtickets.GitHubTickets.__cog_commands__
+
+            for command in commands:
+                with self.subTest(command=command.qualified_name):
+                    self.assertFalse(
+                        await cog.cog_check(FakeContext(manage_messages=False))
+                    )
+                    self.assertFalse(await cog.cog_check(FakeContext(guild_id=None)))
+                    self.assertTrue(
+                        await cog.cog_check(FakeContext(manage_messages=True))
+                    )
+
     async def test_bare_group_renders_the_accepted_overview_without_mentions(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
@@ -96,7 +117,12 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
             await cog.store.initialize()
             ctx = FakeContext()
-            channel = SimpleNamespace(id=100, mention="#github-tickets")
+            class FakeTextChannel:
+                id = 100
+                mention = "#github-tickets"
+
+            modules.githubtickets.discord.TextChannel = FakeTextChannel
+            channel = FakeTextChannel()
             role = SimpleNamespace(id=200, mention="@GT:NH Devs")
 
             await cog.githubtickets_channel_set(ctx, channel)
@@ -124,6 +150,26 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 "Do Not Disturb response time set to 8 hours",
             ],
         )
+
+    async def test_channel_set_rejects_a_non_text_guild_channel_with_accepted_copy(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            await cog.store.initialize()
+            ctx = FakeContext()
+
+            class FakeTextChannel:
+                pass
+
+            modules.githubtickets.discord.TextChannel = FakeTextChannel
+            await cog.githubtickets_channel_set(
+                ctx,
+                SimpleNamespace(id=100, mention="#voice"),
+            )
+
+            config = await cog.config.guild_from_id(42).all()
+
+        self.assertIsNone(config["ticket_channel_id"])
+        ctx.send.assert_awaited_once_with("Ticket channel must be a text channel")
 
     async def test_configuration_errors_use_only_the_accepted_copy(self):
         with isolated_githubtickets_modules(self.data_path) as modules:

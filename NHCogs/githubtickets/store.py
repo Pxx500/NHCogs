@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_CATEGORIES = 25
 MAX_CATEGORY_NAME_LENGTH = 100
 
@@ -307,7 +307,11 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             connection.execute(statement)
 
 
-MIGRATIONS = (_create_schema,)
+def _add_projection_sync_deadline(connection: sqlite3.Connection) -> None:
+    connection.execute("ALTER TABLE tickets ADD COLUMN projection_sync_at TEXT")
+
+
+MIGRATIONS = (_create_schema, _add_projection_sync_deadline)
 
 
 class GitHubTicketsStore:
@@ -460,6 +464,39 @@ class GitHubTicketsStore:
     async def get_ticket(self, ticket_id: int) -> Ticket | None:
         async with self._lock:
             return await asyncio.to_thread(self._get_ticket_sync, ticket_id)
+
+    async def get_projection_sync_ticket(self, ticket_id: int) -> Ticket | None:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._get_projection_sync_ticket_sync,
+                ticket_id,
+            )
+
+    async def acknowledge_projection_sync(
+        self,
+        ticket_id: int,
+        transition_version: int,
+    ) -> bool:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._acknowledge_projection_sync_sync,
+                ticket_id,
+                transition_version,
+            )
+
+    async def defer_projection_sync(
+        self,
+        ticket_id: int,
+        transition_version: int,
+        retry_at: datetime,
+    ) -> bool:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._defer_projection_sync_sync,
+                ticket_id,
+                transition_version,
+                retry_at,
+            )
 
     async def get_ticket_by_message_id(self, message_id: int) -> Ticket | None:
         async with self._lock:
@@ -657,6 +694,21 @@ class GitHubTicketsStore:
     async def list_authored_tickets(self, user_id: int) -> tuple[Ticket, ...]:
         async with self._lock:
             return await asyncio.to_thread(self._list_authored_tickets_sync, user_id)
+
+    async def begin_authored_ticket_cleanup(
+        self,
+        ticket_id: int,
+        *,
+        author_id: int,
+        updated_at: datetime,
+    ) -> Ticket | None:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._begin_authored_ticket_cleanup_sync,
+                ticket_id,
+                author_id,
+                updated_at,
+            )
 
     async def user_reference_guild_ids(self, user_id: int) -> tuple[int, ...]:
         async with self._lock:
@@ -1165,6 +1217,55 @@ class GitHubTicketsStore:
             ).fetchone()
             return _decode_ticket(connection, row) if row is not None else None
 
+    def _get_projection_sync_ticket_sync(self, ticket_id: int) -> Ticket | None:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM tickets
+                WHERE ticket_id = ? AND state IN ('open', 'claimed')
+                    AND projection_sync_at IS NOT NULL
+                """,
+                (ticket_id,),
+            ).fetchone()
+            return _decode_ticket(connection, row) if row is not None else None
+
+    def _acknowledge_projection_sync_sync(
+        self,
+        ticket_id: int,
+        transition_version: int,
+    ) -> bool:
+        changed = self._update_ticket_state(
+            """
+            UPDATE tickets
+            SET projection_sync_at = NULL
+            WHERE ticket_id = ? AND transition_version = ?
+                AND projection_sync_at IS NOT NULL
+            """,
+            (ticket_id, transition_version),
+        )
+        return changed > 0
+
+    def _defer_projection_sync_sync(
+        self,
+        ticket_id: int,
+        transition_version: int,
+        retry_at: datetime,
+    ) -> bool:
+        changed = self._update_ticket_state(
+            """
+            UPDATE tickets
+            SET projection_sync_at = ?
+            WHERE ticket_id = ? AND transition_version = ?
+                AND projection_sync_at IS NOT NULL
+            """,
+            (
+                _serialize_datetime(retry_at),
+                ticket_id,
+                transition_version,
+            ),
+        )
+        return changed > 0
+
     def _get_ticket_by_projection_id_sync(
         self,
         column: str,
@@ -1216,12 +1317,14 @@ class GitHubTicketsStore:
                 pending_target_id = NULL, pending_presence_tier = NULL,
                 pending_ping_automatic = NULL,
                 pending_response_deadline = NULL,
-                updated_at = ?, transition_version = transition_version + 1
+                updated_at = ?, projection_sync_at = ?,
+                transition_version = transition_version + 1
             WHERE ticket_id = ? AND state = 'open'
             """,
             (
                 assignee_id,
                 _serialize_datetime(protection_until),
+                _serialize_datetime(updated_at),
                 _serialize_datetime(updated_at),
                 ticket_id,
             ),
@@ -1340,13 +1443,15 @@ class GitHubTicketsStore:
                         pending_target_id = NULL, pending_presence_tier = NULL,
                         pending_ping_automatic = NULL,
                         pending_response_deadline = NULL,
-                        updated_at = ?, transition_version = transition_version + 1
+                        updated_at = ?, projection_sync_at = ?,
+                        transition_version = transition_version + 1
                     WHERE ticket_id = ? AND state = 'claimed'
                     """,
                     (
                         _serialize_datetime(protection_until),
                         next_action.value if next_action is not None else None,
                         _serialize_optional_datetime(next_action_at),
+                        _serialize_datetime(updated_at),
                         _serialize_datetime(updated_at),
                         ticket_id,
                     ),
@@ -1675,9 +1780,17 @@ class GitHubTicketsStore:
         with closing(self._connect()) as connection:
             row = connection.execute(
                 """
-                SELECT MIN(next_action_at) AS deadline
-                FROM tickets
-                WHERE state = 'open' AND next_action_at IS NOT NULL
+                SELECT MIN(deadline) AS deadline
+                FROM (
+                    SELECT next_action_at AS deadline
+                    FROM tickets
+                    WHERE state = 'open' AND next_action_at IS NOT NULL
+                    UNION ALL
+                    SELECT projection_sync_at AS deadline
+                    FROM tickets
+                    WHERE state IN ('open', 'claimed')
+                        AND projection_sync_at IS NOT NULL
+                )
                 """
             ).fetchone()
         return _deserialize_optional_datetime(row["deadline"])
@@ -1687,10 +1800,17 @@ class GitHubTicketsStore:
             rows = connection.execute(
                 """
                 SELECT ticket_id FROM tickets
-                WHERE state = 'open' AND next_action_at <= ?
-                ORDER BY next_action_at, ticket_id
+                WHERE (
+                    state = 'open' AND next_action_at <= ?
+                ) OR (
+                    state IN ('open', 'claimed') AND projection_sync_at <= ?
+                )
+                ORDER BY CASE
+                    WHEN projection_sync_at IS NOT NULL THEN projection_sync_at
+                    ELSE next_action_at
+                END, ticket_id
                 """,
-                (_serialize_datetime(now),),
+                (_serialize_datetime(now), _serialize_datetime(now)),
             ).fetchall()
         return tuple(int(row["ticket_id"]) for row in rows)
 
@@ -1793,7 +1913,15 @@ class GitHubTicketsStore:
             try:
                 affected_rows = connection.execute(
                     """
-                    SELECT ticket_id, guild_id
+                    SELECT ticket_id, guild_id,
+                        CASE
+                            WHEN state = 'open'
+                                OR current_target_id = ?
+                                OR pending_target_id = ?
+                                OR assignee_id = ?
+                            THEN 1
+                            ELSE 0
+                        END AS reopen
                     FROM tickets
                     WHERE author_id <> ? AND state IN ('open', 'claimed')
                         AND (
@@ -1804,11 +1932,21 @@ class GitHubTicketsStore:
                         )
                     ORDER BY ticket_id
                     """,
-                    (user_id, user_id, user_id, user_id, user_id),
+                    (
+                        user_id,
+                        user_id,
+                        user_id,
+                        user_id,
+                        user_id,
+                        user_id,
+                        user_id,
+                        user_id,
+                    ),
                 ).fetchall()
                 affected_guild_ids = {
                     int(row["guild_id"])
                     for row in affected_rows
+                    if bool(row["reopen"])
                 }
                 missing_deadlines = affected_guild_ids.difference(
                     protection_until_by_guild
@@ -1827,16 +1965,20 @@ class GitHubTicketsStore:
                 connection.execute(
                     """
                     CREATE TEMP TABLE redacted_user_affected_tickets (
-                        ticket_id INTEGER PRIMARY KEY
+                        ticket_id INTEGER PRIMARY KEY,
+                        reopen INTEGER NOT NULL CHECK (reopen IN (0, 1))
                     )
                     """
                 )
                 connection.executemany(
                     """
-                    INSERT INTO redacted_user_affected_tickets (ticket_id)
-                    VALUES (?)
+                    INSERT INTO redacted_user_affected_tickets (ticket_id, reopen)
+                    VALUES (?, ?)
                     """,
-                    ((int(row["ticket_id"]),) for row in affected_rows),
+                    (
+                        (int(row["ticket_id"]), int(row["reopen"]))
+                        for row in affected_rows
+                    ),
                 )
 
                 connection.execute(
@@ -1888,10 +2030,21 @@ class GitHubTicketsStore:
                             AND ticket_id IN (
                                 SELECT ticket_id
                                 FROM redacted_user_affected_tickets
+                                WHERE reopen = 1
                             )
                         """,
                         (deadline, deadline, updated_timestamp, guild_id),
                     )
+
+                connection.execute(
+                    """
+                    UPDATE tickets
+                    SET direct_target_id = NULL, updated_at = ?,
+                        transition_version = transition_version + 1
+                    WHERE state IN ('open', 'claimed') AND direct_target_id = ?
+                    """,
+                    (updated_timestamp, user_id),
+                )
 
                 connection.execute(
                     """
@@ -1964,6 +2117,67 @@ class GitHubTicketsStore:
                 affected = tuple(_decode_ticket(connection, row) for row in rows)
                 connection.commit()
                 return affected
+            except Exception:
+                connection.rollback()
+                raise
+
+    def _begin_authored_ticket_cleanup_sync(
+        self,
+        ticket_id: int,
+        author_id: int,
+        updated_at: datetime,
+    ) -> Ticket | None:
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    """
+                    SELECT 1 FROM tickets
+                    WHERE ticket_id = ? AND author_id = ?
+                    """,
+                    (ticket_id, author_id),
+                ).fetchone()
+                if row is None:
+                    connection.rollback()
+                    return None
+
+                connection.execute(
+                    "DELETE FROM ticket_categories WHERE ticket_id = ?",
+                    (ticket_id,),
+                )
+                connection.execute(
+                    "DELETE FROM ticket_exclusions WHERE ticket_id = ?",
+                    (ticket_id,),
+                )
+                connection.execute(
+                    "DELETE FROM ticket_pings WHERE ticket_id = ?",
+                    (ticket_id,),
+                )
+                connection.execute(
+                    """
+                    UPDATE tickets
+                    SET state = 'finishing', author_id = 0,
+                        pr_title = '', pr_url = '', category_display = '',
+                        routing_mode = 'none', direct_target_id = NULL,
+                        current_target_id = NULL, assignee_id = NULL,
+                        ping_count = 0, protection_until = NULL,
+                        next_action = NULL, next_action_at = NULL,
+                        pending_target_id = NULL,
+                        pending_presence_tier = NULL,
+                        pending_ping_automatic = NULL,
+                        pending_response_deadline = NULL,
+                        updated_at = ?, transition_version = transition_version + 1
+                    WHERE ticket_id = ? AND author_id = ?
+                    """,
+                    (_serialize_datetime(updated_at), ticket_id, author_id),
+                )
+                updated = connection.execute(
+                    "SELECT * FROM tickets WHERE ticket_id = ?",
+                    (ticket_id,),
+                ).fetchone()
+                cleanup = _decode_ticket(connection, updated)
+                connection.commit()
+                return cleanup
             except Exception:
                 connection.rollback()
                 raise
