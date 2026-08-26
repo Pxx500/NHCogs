@@ -355,6 +355,27 @@ class CustomCommandsStartupTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CustomCommandsSurfaceTests(unittest.TestCase):
+    def test_transient_views_expire_after_thirty_seconds(self):
+        views = (
+            cog.CommandListView(
+                object(),
+                requester_id=200,
+                pages=(cog.discord.Embed(description="page"),),
+            ),
+            cog.RawResponseView(
+                object(),
+                requester_id=200,
+                pages=(cog.discord.Embed(description="page"),),
+            ),
+            cog.DeleteConfirmationView(
+                object(),
+                command=types.SimpleNamespace(name="ben"),
+                opener_id=200,
+            ),
+        )
+
+        self.assertEqual([view.timeout for view in views], [30, 30, 30])
+
     def test_management_and_read_only_paths_preserve_customcom_interface(self):
         root = cog.CustomCommands.customcom
         self.assertEqual(root.name, "customcom")
@@ -737,7 +758,7 @@ class CustomCommandsListTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("·", first_page.description)
         self.assertEqual(
             [(item.label, item.emoji) for item in sent["view"].children],
-            [("Previous", None), (None, "❌"), ("Next", None)],
+            [("Previous", None), ("X", None), ("Next", None)],
         )
         self.assertIs(sent["view"].message, message)
         self.assertIsNone(sent["allowed_mentions"])
