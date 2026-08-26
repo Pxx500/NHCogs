@@ -33,9 +33,13 @@ class FakeBot(_Bot):
 class FakeInteractionResponse:
     def __init__(self):
         self.messages = []
+        self.modals = []
 
     async def send_message(self, content, **kwargs):
         self.messages.append((content, kwargs))
+
+    async def send_modal(self, modal):
+        self.modals.append(modal)
 
 
 class FakeInteraction:
@@ -83,6 +87,17 @@ class CachedThread:
 
     async def delete(self):
         self.delete_calls += 1
+
+
+class CachedLogChannel:
+    def __init__(self, *, error=None):
+        self.send_calls = []
+        self.error = error
+
+    async def send(self, content, **kwargs):
+        self.send_calls.append((content, kwargs))
+        if self.error is not None:
+            raise self.error
 
 
 class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -184,21 +199,38 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
             )
             await cog.cog_load()
             try:
-                dashboard_command = bot.tree.get_command(
-                    "github-tickets",
+                new_ticket_command = bot.tree.get_command(
+                    "newticket",
                     type="chat_input",
                 )
-                profile_command = bot.tree.get_command(
+                developer_profile_command = bot.tree.get_command(
+                    "developerprofile",
+                    type="chat_input",
+                )
+                context_profile_command = bot.tree.get_command(
                     "Developer Profile",
                     type="user",
                 )
-                self.assertIs(dashboard_command, cog._dashboard_command)
-                self.assertIs(profile_command, cog._developer_profile_command)
-                self.assertTrue(dashboard_command.guild_only)
-                self.assertTrue(profile_command.guild_only)
+                self.assertIsNotNone(new_ticket_command)
+                self.assertIsNotNone(developer_profile_command)
+                self.assertIsNotNone(context_profile_command)
+                self.assertIsNone(
+                    bot.tree.get_command("github-tickets", type="chat_input")
+                )
+                self.assertEqual(
+                    new_ticket_command.description,
+                    "Create a new GitHub ticket",
+                )
+                self.assertEqual(
+                    developer_profile_command.description,
+                    "Manage your developer profile",
+                )
+                self.assertTrue(new_ticket_command.guild_only)
+                self.assertTrue(developer_profile_command.guild_only)
+                self.assertTrue(context_profile_command.guild_only)
 
                 rejected = FakeInteraction()
-                await dashboard_command.callback(rejected)
+                await new_ticket_command.callback(rejected)
                 self.assertEqual(
                     rejected.response.messages[0][0],
                     modules.presentation.CANNOT_USE_ACTION,
@@ -206,16 +238,25 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(rejected.response.messages[0][1]["ephemeral"])
 
                 accepted = FakeInteraction(role_ids=(99,))
-                await dashboard_command.callback(accepted)
-                self.assertEqual(
-                    accepted.response.messages[0][0],
-                    modules.presentation.DASHBOARD_TITLE,
+                await new_ticket_command.callback(accepted)
+                self.assertIsInstance(
+                    accepted.response.modals[0],
+                    modules.dashboard.NewTicketModal,
                 )
-                self.assertTrue(accepted.response.messages[0][1]["ephemeral"])
+
+                profile_dashboard_interaction = FakeInteraction(role_ids=(99,))
+                await developer_profile_command.callback(profile_dashboard_interaction)
+                self.assertEqual(
+                    profile_dashboard_interaction.response.messages[0][0],
+                    modules.presentation.DEVELOPER_PROFILE_COMMAND,
+                )
+                self.assertTrue(
+                    profile_dashboard_interaction.response.messages[0][1]["ephemeral"]
+                )
 
                 target = SimpleNamespace(id=500)
                 profile_interaction = FakeInteraction(manage_messages=True)
-                await profile_command.callback(profile_interaction, target)
+                await context_profile_command.callback(profile_interaction, target)
                 self.assertEqual(
                     profile_interaction.response.messages[0][0],
                     modules.presentation.NO_PROFILE,
@@ -224,11 +265,66 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await cog.cog_unload()
 
             self.assertIsNone(
-                bot.tree.get_command("github-tickets", type="chat_input")
+                bot.tree.get_command("newticket", type="chat_input")
+            )
+            self.assertIsNone(
+                bot.tree.get_command("developerprofile", type="chat_input")
             )
             self.assertIsNone(
                 bot.tree.get_command("Developer Profile", type="user")
             )
+
+    async def test_application_commands_restore_displaced_commands_on_unload(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            bot = FakeBot(ready=False)
+
+            async def chat_callback(_interaction):
+                return None
+
+            async def user_callback(
+                _interaction,
+                _member: modules.githubtickets.discord.Member,
+            ):
+                return None
+
+            previous_commands = (
+                modules.githubtickets.discord.app_commands.Command(
+                    name="newticket",
+                    description="Previous new ticket command",
+                    callback=chat_callback,
+                ),
+                modules.githubtickets.discord.app_commands.Command(
+                    name="developerprofile",
+                    description="Previous developer profile command",
+                    callback=chat_callback,
+                ),
+                modules.githubtickets.discord.app_commands.ContextMenu(
+                    name="Developer Profile",
+                    callback=user_callback,
+                ),
+            )
+            previous_commands[-1].type = (
+                modules.githubtickets.discord.AppCommandType.user
+            )
+            for command in previous_commands:
+                bot.tree.add_command(command)
+            cog = modules.githubtickets.GitHubTickets(bot)
+
+            await cog.cog_load()
+            try:
+                for command in previous_commands:
+                    self.assertIsNot(
+                        bot.tree.get_command(command.name, type=command.type),
+                        command,
+                    )
+            finally:
+                await cog.cog_unload()
+
+            for command in previous_commands:
+                self.assertIs(
+                    bot.tree.get_command(command.name, type=command.type),
+                    command,
+                )
 
     async def test_raw_message_and_thread_deletions_cleanup_without_fetches(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
@@ -404,6 +500,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
             cog = modules.githubtickets.GitHubTickets(bot)
             guild_config = cog.config.guild_from_id(10)
             await guild_config.set_raw("ticket_channel_id", value=20)
+            await guild_config.set_raw("log_channel_id", value=20)
             await guild_config.set_raw("participant_role_ids", value=[99, 100])
             await cog.cog_load()
             now = datetime.now(timezone.utc)
@@ -451,6 +548,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     SimpleNamespace(id=20, guild=guild)
                 )
                 self.assertIsNone(await guild_config.get_raw("ticket_channel_id"))
+                self.assertIsNone(await guild_config.get_raw("log_channel_id"))
                 self.assertIsNone(await cog.store.get_ticket(ticket.ticket_id))
                 self.assertIsNotNone(await cog.store.get_profile(10, 200))
 
@@ -463,6 +561,255 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 )
             finally:
                 await cog.cog_unload()
+
+    async def test_deleted_log_channel_is_cleared_even_when_ticket_cleanup_fails(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            bot = FakeBot(ready=False)
+            cog = modules.githubtickets.GitHubTickets(bot)
+            guild_config = cog.config.guild_from_id(10)
+            await guild_config.set_raw("log_channel_id", value=20)
+            await cog.cog_load()
+
+            async def fail_cleanup(_guild_id, _channel_id):
+                raise RuntimeError("database unavailable")
+
+            cog.store.delete_tickets_for_channel = fail_cleanup
+            try:
+                with self.assertRaisesRegex(RuntimeError, "database unavailable"):
+                    await cog._handle_guild_channel_delete(
+                        SimpleNamespace(id=20, guild=SimpleNamespace(id=10))
+                    )
+                self.assertIsNone(await guild_config.get_raw("log_channel_id"))
+            finally:
+                await cog.cog_unload()
+
+    async def test_deleted_channel_ticket_cleanup_runs_even_when_config_fails(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            bot = FakeBot(ready=False)
+            cog = modules.githubtickets.GitHubTickets(bot)
+            await cog.cog_load()
+            now = datetime.now(timezone.utc)
+            created = await cog.store.create_ticket(
+                modules.models.NewTicket(
+                    guild_id=10,
+                    channel_id=20,
+                    author_id=30,
+                    pr_title="Improve rendering",
+                    pr_url="https://example.test/pull/1",
+                    category_display="",
+                    routing_mode=modules.models.RoutingMode.NONE,
+                    direct_target_id=None,
+                    category_ids=(),
+                    created_at=now,
+                )
+            )
+
+            class FailingGuildConfig:
+                async def get_raw(self, _key, *, default=None):
+                    del default
+                    raise RuntimeError("config unavailable")
+
+            cog.config.guild_from_id = lambda _guild_id: FailingGuildConfig()
+            try:
+                with self.assertRaisesRegex(RuntimeError, "config unavailable"):
+                    await cog._handle_guild_channel_delete(
+                        SimpleNamespace(id=20, guild=SimpleNamespace(id=10))
+                    )
+                self.assertIsNone(await cog.store.get_ticket(created.ticket_id))
+            finally:
+                await cog.cog_unload()
+
+    async def test_mark_finished_writes_the_exact_best_effort_audit_log(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            bot = FakeBot(ready=False)
+            cog = modules.githubtickets.GitHubTickets(bot)
+            await cog.cog_load()
+            now = datetime.now(timezone.utc)
+            created = await cog.store.create_ticket(
+                modules.models.NewTicket(
+                    guild_id=10,
+                    channel_id=20,
+                    author_id=30,
+                    pr_title="Improve rendering",
+                    pr_url="https://github.com/example/repository/pull/123",
+                    category_display="rendering",
+                    routing_mode=modules.models.RoutingMode.NONE,
+                    direct_target_id=None,
+                    category_ids=(),
+                    created_at=now,
+                )
+            )
+            await cog.store.activate_ticket(
+                created.ticket_id,
+                message_id=40,
+                thread_id=50,
+                protection_until=now,
+                next_action=None,
+                next_action_at=None,
+                updated_at=now,
+            )
+            original_mark_finished = cog.coordinator.mark_finished
+
+            async def claim_then_finish(ticket_id, actor):
+                claimed = await cog.store.claim(
+                    ticket_id,
+                    assignee_id=200,
+                    protection_until=now,
+                    updated_at=now,
+                )
+                self.assertTrue(claimed)
+                return await original_mark_finished(ticket_id, actor)
+
+            cog.coordinator.mark_finished = claim_then_finish
+            log_channel = CachedLogChannel()
+            bot.channels = {
+                20: CachedChannel(),
+                50: CachedThread(),
+                60: log_channel,
+            }
+            await cog.config.guild_from_id(10).set_raw("log_channel_id", value=60)
+
+            try:
+                result = await cog._finish_ticket(
+                    created.public_token,
+                    modules.coordinator.TicketActor(
+                        user_id=30,
+                        is_participant=False,
+                        can_manage_messages=False,
+                    ),
+                )
+            finally:
+                await cog.cog_unload()
+
+            self.assertTrue(result.success)
+            self.assertEqual(
+                log_channel.send_calls[0][0],
+                "[Improve rendering](https://github.com/example/repository/pull/123)\n"
+                "Finished by <@30> | Author <@30> | Reviewer <@200>",
+            )
+            allowed_mentions = log_channel.send_calls[0][1]["allowed_mentions"]
+            self.assertFalse(allowed_mentions.users)
+            self.assertFalse(allowed_mentions.roles)
+            self.assertFalse(allowed_mentions.everyone)
+            self.assertEqual(bot.fetch_calls, 0)
+
+    async def test_mark_finished_logging_never_changes_the_action_result(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            bot = FakeBot(ready=False)
+            cog = modules.githubtickets.GitHubTickets(bot)
+            await cog.cog_load()
+            now = datetime.now(timezone.utc)
+
+            async def finish(message_id, thread_id, *, log_channel_id=None):
+                created = await cog.store.create_ticket(
+                    modules.models.NewTicket(
+                        guild_id=10,
+                        channel_id=20,
+                        author_id=30,
+                        pr_title="Small fix",
+                        pr_url="https://github.com/example/repository/pull/124",
+                        category_display="",
+                        routing_mode=modules.models.RoutingMode.NONE,
+                        direct_target_id=None,
+                        category_ids=(),
+                        created_at=now,
+                    )
+                )
+                await cog.store.activate_ticket(
+                    created.ticket_id,
+                    message_id=message_id,
+                    thread_id=thread_id,
+                    protection_until=now,
+                    next_action=None,
+                    next_action_at=None,
+                    updated_at=now,
+                )
+                if log_channel_id is None:
+                    await cog.config.guild_from_id(10).clear_raw("log_channel_id")
+                else:
+                    await cog.config.guild_from_id(10).set_raw(
+                        "log_channel_id", value=log_channel_id
+                    )
+                return await cog._finish_ticket(
+                    created.public_token,
+                    modules.coordinator.TicketActor(
+                        user_id=30,
+                        is_participant=False,
+                        can_manage_messages=False,
+                    ),
+                )
+
+            ticket_channel = CachedChannel()
+            bot.channels = {
+                20: ticket_channel,
+                50: CachedThread(),
+                51: CachedThread(),
+                52: CachedThread(),
+                61: CachedLogChannel(error=RuntimeError("send failed")),
+            }
+            try:
+                unset = await finish(40, 50)
+                cache_miss = await finish(41, 51, log_channel_id=62)
+                send_failure = await finish(42, 52, log_channel_id=61)
+            finally:
+                await cog.cog_unload()
+
+            self.assertTrue(unset.success)
+            self.assertTrue(cache_miss.success)
+            self.assertTrue(send_failure.success)
+            self.assertEqual(bot.fetch_calls, 0)
+
+    async def test_failed_mark_finished_does_not_write_an_audit_log(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            bot = FakeBot(ready=False)
+            cog = modules.githubtickets.GitHubTickets(bot)
+            await cog.cog_load()
+            now = datetime.now(timezone.utc)
+            created = await cog.store.create_ticket(
+                modules.models.NewTicket(
+                    guild_id=10,
+                    channel_id=20,
+                    author_id=30,
+                    pr_title="Improve rendering",
+                    pr_url="https://github.com/example/repository/pull/123",
+                    category_display="",
+                    routing_mode=modules.models.RoutingMode.NONE,
+                    direct_target_id=None,
+                    category_ids=(),
+                    created_at=now,
+                )
+            )
+            await cog.store.activate_ticket(
+                created.ticket_id,
+                message_id=40,
+                thread_id=50,
+                protection_until=now,
+                next_action=None,
+                next_action_at=None,
+                updated_at=now,
+            )
+            log_channel = CachedLogChannel()
+            bot.channels = {
+                20: CachedChannel(),
+                50: CachedThread(),
+                60: log_channel,
+            }
+            await cog.config.guild_from_id(10).set_raw("log_channel_id", value=60)
+
+            try:
+                result = await cog._finish_ticket(
+                    created.public_token,
+                    modules.coordinator.TicketActor(
+                        user_id=999,
+                        is_participant=True,
+                        can_manage_messages=False,
+                    ),
+                )
+            finally:
+                await cog.cog_unload()
+
+            self.assertFalse(result.success)
+            self.assertEqual(log_channel.send_calls, [])
 
     async def test_red_privacy_deletion_removes_authored_projection_and_reopens_assignments(self):
         with isolated_githubtickets_modules(self.data_path) as modules:

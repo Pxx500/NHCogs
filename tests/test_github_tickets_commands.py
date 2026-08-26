@@ -40,6 +40,9 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 "githubtickets channel",
                 "githubtickets channel set",
                 "githubtickets channel clear",
+                "githubtickets logchannel",
+                "githubtickets logchannel set",
+                "githubtickets logchannel clear",
                 "githubtickets role",
                 "githubtickets role add",
                 "githubtickets role remove",
@@ -93,6 +96,9 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             await cog.config.guild_from_id(42).set_raw(
                 "participant_role_ids", value=[200, 201]
             )
+            await cog.config.guild_from_id(42).set_raw(
+                "log_channel_id", value=101
+            )
             await cog.store.add_category(
                 42,
                 "Rendering",
@@ -104,6 +110,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
 
         content = ctx.send.await_args.args[0]
         self.assertIn("Ticket channel: <#100>", content)
+        self.assertIn("Log channel: <#101>", content)
         self.assertIn("Participant roles: <@&200>, <@&201>", content)
         self.assertIn("Categories: rendering", content)
         self.assertIn("Maximum pings: 3", content)
@@ -126,15 +133,18 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             role = SimpleNamespace(id=200, mention="@GT:NH Devs")
 
             await cog.githubtickets_channel_set(ctx, channel)
+            await cog.githubtickets_logchannel_set(ctx, channel)
             await cog.githubtickets_role_add(ctx, role)
             await cog.githubtickets_category_add(ctx, name="Rendering")
             await cog.githubtickets_maxpings(ctx, count=5)
             await cog.githubtickets_timing_donotdisturb(ctx, duration="8h")
+            await cog.githubtickets_logchannel_clear(ctx)
 
             config = await cog.config.guild_from_id(42).all()
             categories = await cog.store.list_categories(42)
 
         self.assertEqual(config["ticket_channel_id"], 100)
+        self.assertIsNone(config["log_channel_id"])
         self.assertEqual(config["participant_role_ids"], [200])
         self.assertEqual(config["max_pings"], 5)
         self.assertEqual(config["dnd_response_seconds"], 8 * 60 * 60)
@@ -144,10 +154,12 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             messages,
             [
                 "Ticket channel set to #github-tickets",
+                "Log channel set to #github-tickets",
                 "Participant role added: @GT:NH Devs",
                 "Category added: rendering",
                 "Maximum pings set to 5",
                 "Do Not Disturb response time set to 8 hours",
+                "Log channel cleared",
             ],
         )
 

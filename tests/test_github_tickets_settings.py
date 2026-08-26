@@ -51,6 +51,7 @@ class GitHubTicketsSettingsTests(unittest.TestCase):
             settings.DEFAULTS,
             {
                 "ticket_channel_id": None,
+                "log_channel_id": None,
                 "participant_role_ids": [],
                 "protection_seconds": 10,
                 "volunteer_seconds": 2 * 60 * 60,
@@ -73,6 +74,7 @@ class GitHubTicketsSettingsTests(unittest.TestCase):
         snapshot = settings.GuildSettings.from_mapping(
             {
                 "ticket_channel_id": "42",
+                "log_channel_id": "43",
                 "participant_role_ids": [3, "2", 3, -1, None],
                 "protection_seconds": 0,
                 "volunteer_seconds": 0,
@@ -82,6 +84,7 @@ class GitHubTicketsSettingsTests(unittest.TestCase):
         )
 
         self.assertEqual(snapshot.ticket_channel_id, 42)
+        self.assertEqual(snapshot.log_channel_id, 43)
         self.assertEqual(snapshot.participant_role_ids, (3, 2))
         self.assertEqual(snapshot.protection_seconds, 0)
         self.assertEqual(snapshot.volunteer_seconds, 0)
@@ -93,6 +96,7 @@ class GitHubTicketsSettingsTests(unittest.TestCase):
         snapshot = settings.GuildSettings.from_mapping(
             {
                 "ticket_channel_id": "not-an-id",
+                "log_channel_id": "not-an-id",
                 "participant_role_ids": "not-a-list",
                 "protection_seconds": -1,
                 "volunteer_seconds": "later",
