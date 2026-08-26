@@ -162,7 +162,7 @@ class GitHubTicketsPresentationTests(unittest.TestCase):
                 author_id=30,
                 reviewer_id=None,
             ),
-            "[Improve rendering](https://github.com/example/repository/pull/123)\n"
+            "[Improve rendering](<https://github.com/example/repository/pull/123>)\n"
             "Finished by <@40> | Author <@30>",
         )
 

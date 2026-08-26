@@ -688,7 +688,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result.success)
             self.assertEqual(
                 log_channel.send_calls[0][0],
-                "[Improve rendering](https://github.com/example/repository/pull/123)\n"
+                "[Improve rendering](<https://github.com/example/repository/pull/123>)\n"
                 "Finished by <@30> | Author <@30> | Reviewer <@200>",
             )
             allowed_mentions = log_channel.send_calls[0][1]["allowed_mentions"]
