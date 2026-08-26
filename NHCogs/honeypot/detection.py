@@ -1663,7 +1663,7 @@ async def _execute_action(
     )
     if action not in ("kick", "ban"):
         return ModerationEffectResult(
-            _("No action configured."),
+            _("No action configured"),
             None,
             EffectStatus.NOT_CONFIGURED,
         )
@@ -1761,7 +1761,7 @@ async def _execute_action(
     except Exception:
         log.exception("Failed to create modlog case in _execute_action")
         modlog_failed = True
-    label = _("The member has been kicked.") if action == "kick" else _("The member has been banned.")
+    label = _("The member has been kicked") if action == "kick" else _("The member has been banned")
     return ModerationEffectResult(
         label,
         None,
@@ -2151,7 +2151,7 @@ async def roles_add(cog, ctx: commands.Context, role: discord.Role) -> None:
         if role.id in roles:
             raise commands.UserFeedbackCheckFailure(_("That role is already whitelisted."))
         roles.append(role.id)
-    await ctx.send(_("✅ {role} added to the whitelist.").format(role=role.mention))
+    await ctx.send(_("✅ {role} added to the whitelist").format(role=role.mention))
 
 
 async def roles_remove(cog, ctx: commands.Context, role: discord.Role) -> None:
@@ -2159,17 +2159,17 @@ async def roles_remove(cog, ctx: commands.Context, role: discord.Role) -> None:
         if role.id not in roles:
             raise commands.UserFeedbackCheckFailure(_("That role is not in the whitelist."))
         roles.remove(role.id)
-    await ctx.send(_("✅ {role} removed from the whitelist.").format(role=role.mention))
+    await ctx.send(_("✅ {role} removed from the whitelist").format(role=role.mention))
 
 
 async def roles_list(cog, ctx: commands.Context) -> None:
     role_ids = await cog.config.guild(ctx.guild).whitelisted_roles()
     if not role_ids:
-        await ctx.send(_("No whitelisted roles."))
+        await ctx.send(_("No whitelisted roles"))
         return
     roles = [ctx.guild.get_role(rid) for rid in role_ids if ctx.guild.get_role(rid) is not None]
     if not roles:
-        await ctx.send(_("No valid roles found (deleted?)."))
+        await ctx.send(_("No valid roles found (deleted?)"))
         return
     await ctx.send(_("**Whitelisted roles:**\n{lines}").format(lines="\n".join(f"- {r.mention}" for r in roles)))
 
@@ -2199,14 +2199,14 @@ async def keywords_remove(cog, ctx: commands.Context, *, keyword: str) -> None:
 async def keywords_list(cog, ctx: commands.Context) -> None:
     keywords = await cog.config.guild(ctx.guild).scam_keywords()
     if not keywords:
-        await ctx.send(_("No keywords configured."))
+        await ctx.send(_("No keywords configured"))
         return
     await ctx.send(_("**Scam keywords:**\n{lines}").format(lines="\n".join(f"`{i}.` {kw}" for i, kw in enumerate(keywords, 1))))
 
 
 async def keywords_reset(cog, ctx: commands.Context) -> None:
     await cog.config.guild(ctx.guild).scam_keywords.set(SCAM_KEYWORDS.copy())
-    await ctx.send(_("✅ Keywords reset to defaults."))
+    await ctx.send(_("✅ Keywords reset to defaults"))
 
 
 async def keyword_attachments_add(cog, ctx: commands.Context, *, pattern: str) -> None:
@@ -2232,14 +2232,14 @@ async def keyword_attachments_remove(cog, ctx: commands.Context, *, pattern: str
 async def keyword_attachments_list(cog, ctx: commands.Context) -> None:
     patterns = await cog.config.guild(ctx.guild).attachment_patterns()
     if not patterns:
-        await ctx.send(_("No attachment patterns configured."))
+        await ctx.send(_("No attachment patterns configured"))
         return
     await ctx.send(_("**Attachment patterns:**\n{lines}").format(lines="\n".join(f"`{i}.` {pattern}" for i, pattern in enumerate(patterns, 1))))
 
 
 async def keyword_attachments_reset(cog, ctx: commands.Context) -> None:
     await cog.config.guild(ctx.guild).attachment_patterns.set(DEFAULT_ATTACHMENT_PATTERNS.copy())
-    await ctx.send(_("✅ Attachment patterns reset to defaults."))
+    await ctx.send(_("✅ Attachment patterns reset to defaults"))
 
 
 async def bait_toggle(cog, ctx: commands.Context, value: bool = None) -> None:

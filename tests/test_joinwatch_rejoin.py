@@ -332,7 +332,7 @@ class JoinwatchRejoinTests(unittest.IsolatedAsyncioTestCase):
                         runtime.cog,
                         runtime.guild,
                         incident,
-                        "Banned.",
+                        "Banned",
                     )
 
                 runtime.alert_channel.fetch_message.assert_not_awaited()
@@ -343,7 +343,7 @@ class JoinwatchRejoinTests(unittest.IsolatedAsyncioTestCase):
                     field for field in edited_embed.fields if field.name == "Auto-role:"
                 ]
                 self.assertEqual(len(status_fields), 1)
-                self.assertEqual(status_fields[0].value, "Banned.")
+                self.assertEqual(status_fields[0].value, "Banned")
                 runtime.cog._record_daily_stat.assert_awaited_once_with(
                     runtime.guild,
                     mock.ANY,
@@ -448,7 +448,7 @@ class JoinwatchRejoinTests(unittest.IsolatedAsyncioTestCase):
                         runtime.cog,
                         runtime.guild,
                         incident,
-                        "Role manually removed.",
+                        "Role manually removed",
                     )
 
                 self.assertTrue(incident.get("alert_updates_disabled", False))
@@ -496,7 +496,7 @@ class JoinwatchRejoinTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(status_fields), 1)
                 self.assertEqual(
                     status_fields[0].value,
-                    "Auto-role timer expired.",
+                    "Auto-role timer expired",
                 )
 
     async def test_rejoins_after_delayed_role_application_share_one_counter(self):

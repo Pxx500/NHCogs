@@ -35,7 +35,7 @@ def _result(
 ) -> CleanupResult:
     message = (
         f"Cleanup complete: requested {requested}, selected {selected}, "
-        f"deleted {deleted}, already missing {missing}, failed {failed}."
+        f"deleted {deleted}, already missing {missing}, failed {failed}"
     )
     return CleanupResult(requested, selected, deleted, missing, failed, message)
 
