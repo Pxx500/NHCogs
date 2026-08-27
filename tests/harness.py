@@ -309,6 +309,8 @@ class _CommandStub:
         self.name = name
         self.parent = parent
         self.invoke_without_command = invoke_without_command
+        self.commands = []
+        self.usage = None
         self.qualified_name = (
             name if parent is None else f"{parent.qualified_name} {name}"
         )
@@ -335,13 +337,17 @@ class _GroupStub(_CommandStub):
 def _command_decorator(kind, *, parent=None, **options):
     def apply(function):
         command_type = _GroupStub if kind == "group" else _CommandStub
-        return command_type(
+        command = command_type(
             function,
             kind=kind,
             name=options.get("name") or function.__name__,
             parent=parent,
             invoke_without_command=options.get("invoke_without_command", False),
         )
+        command.usage = options.get("usage")
+        if parent is not None:
+            parent.commands.append(command)
+        return command
 
     return apply
 
@@ -694,18 +700,44 @@ def _isolated_honeypot_modules(data_path: Path):
     )
     discord.ext.tasks = tasks
 
+    class _Converter:
+        pass
+
+    class _RawUserIdConverter(int):
+        pass
+
+    class _BadArgument(Exception):
+        pass
+
+    def _guild_only():
+        def apply(function):
+            function.guild_only = True
+            return function
+
+        return apply
+
+    def _mod_or_permissions(**permissions):
+        def apply(function):
+            function.mod_or_permissions = permissions
+            return function
+
+        return apply
+
     commands = SimpleNamespace(
+        BadArgument=_BadArgument,
         Cog=_Cog,
         Context=object,
+        Converter=_Converter,
         Greedy=list,
         Group=_GroupStub,
+        RawUserIdConverter=_RawUserIdConverter,
         UserFeedbackCheckFailure=Exception,
         group=lambda *args, **kwargs: _command_decorator("group", **kwargs),
         command=lambda *args, **kwargs: _command_decorator("command", **kwargs),
-        guild_only=lambda: (lambda function: function),
+        guild_only=_guild_only,
         has_permissions=lambda **kwargs: (lambda function: function),
         admin_or_permissions=lambda **kwargs: (lambda function: function),
-        mod_or_permissions=lambda **kwargs: (lambda function: function),
+        mod_or_permissions=_mod_or_permissions,
         bot_has_guild_permissions=lambda **kwargs: (lambda function: function),
         permissions_check=lambda predicate: (lambda function: function),
     )

@@ -511,19 +511,20 @@ channel, author, and message IDs observed through Discord Gateway events. It
 stores the observation timestamp, latest observed pin state, author kind, and an
 optional one-way spam fingerprint. It does not store message content or
 attachments. The registry powers automatic purge, duplicate-spam detection, and
-NHMisc's cleanup commands. User-data deletion, guild removal, and channel or
+the managed Cleanup commands. User-data deletion, guild removal, and channel or
 thread deletion remove the matching registry rows.
 
 ## Operational Notes
 
 - Bot owners, mods, admins, users with `Manage Server`, and users at or above the bot's top role are ignored
-- Purge and `[p]nhmisc cleanup` use the durable Gateway-observed message registry;
+- Purge and `[p]cleanup` use the durable Gateway-observed message registry;
   they never scan channel history
-- `[p]nhmisc cleanup <1-100>` removes observed messages before the command in the
-  current channel; `[p]nhmisc cleanup user <mention-or-id> <1-100>` removes the
+- `[p]cleanup messages <1-1000>` removes observed messages before the command in the
+  current channel; `[p]cleanup user <mention-or-id> <1-1000>` removes the
   user's latest observed messages across the server
 - Cleanup covers only messages observed while Honeypot was loaded and enabled for
-  the guild, skips messages last observed as pinned, and requires NHMisc to be loaded
+  the guild, skips messages last observed as pinned by default, and requires the
+  consolidated NHCogs extension
 - When using review mode, a mute role is used as temporary containment until moderators decide
 - `!honeypot doctor` checks all permissions and configuration at once
 - Stats are per-server

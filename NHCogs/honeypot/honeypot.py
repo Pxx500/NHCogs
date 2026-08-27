@@ -322,6 +322,52 @@ class Honeypot(Cog):
     ) -> CleanupResult:
         return await cleanup.cleanup_user(self, ctx, user_id, count)
 
+    async def cleanup_after(
+        self,
+        ctx: commands.Context,
+        boundary_id: int,
+        *,
+        delete_pinned: bool = False,
+    ) -> CleanupResult:
+        return await cleanup.cleanup_after(
+            self,
+            ctx,
+            boundary_id,
+            delete_pinned=delete_pinned,
+        )
+
+    async def cleanup_before(
+        self,
+        ctx: commands.Context,
+        boundary_id: int,
+        count: int,
+        *,
+        delete_pinned: bool = False,
+    ) -> CleanupResult:
+        return await cleanup.cleanup_before(
+            self,
+            ctx,
+            boundary_id,
+            count,
+            delete_pinned=delete_pinned,
+        )
+
+    async def cleanup_between(
+        self,
+        ctx: commands.Context,
+        older_id: int,
+        newer_id: int,
+        *,
+        delete_pinned: bool = False,
+    ) -> CleanupResult:
+        return await cleanup.cleanup_between(
+            self,
+            ctx,
+            older_id,
+            newer_id,
+            delete_pinned=delete_pinned,
+        )
+
     async def _increment_stat(self, guild: discord.Guild, key: str, amount: int = 1) -> None:
         guild_config = getattr(self.config, "guild", None)
         if not callable(guild_config):

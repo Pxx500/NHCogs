@@ -1,4 +1,5 @@
 import importlib
+import inspect
 import sqlite3
 import sys
 import types
@@ -57,8 +58,7 @@ class MessageRegistryTests(unittest.IsolatedAsyncioTestCase):
             guild_id=guild_id,
             channel_id=channel_id,
             author_id=author_id,
-            created_at=created_at
-            or datetime(2026, 7, 30, 8, minute, tzinfo=timezone.utc),
+            created_at=created_at or datetime(2026, 7, 30, 8, minute, tzinfo=timezone.utc),
             pinned=pinned,
             author_kind="member",
             fingerprint=fingerprint,
@@ -127,6 +127,50 @@ class MessageRegistryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(selected, (records[2], records[0]))
 
+    async def test_channel_range_uses_snowflake_bounds_retention_and_pin_state(self):
+        registry = self.registry()
+        await registry.initialize()
+        self.assertIn(
+            "after_message_id",
+            inspect.signature(registry.recent_in_channel).parameters,
+        )
+        records = (
+            self.record(100, minute=1),
+            self.record(200, minute=2),
+            self.record(300, minute=3, pinned=True),
+            self.record(400, minute=4),
+            self.record(500, minute=5),
+            self.record(350, channel_id=21, minute=3),
+        )
+        for record in records:
+            await registry.observe(record)
+        cutoff = datetime(2026, 7, 30, 8, 1, 30, tzinfo=timezone.utc)
+
+        selected = await registry.recent_in_channel(
+            10,
+            20,
+            limit=1001,
+            after_message_id=100,
+            before_message_id=500,
+            since_utc=cutoff,
+        )
+        boundary = await registry.get_in_channel(
+            10,
+            20,
+            200,
+            since_utc=cutoff,
+        )
+        expired_boundary = await registry.get_in_channel(
+            10,
+            20,
+            100,
+            since_utc=cutoff,
+        )
+
+        self.assertEqual(selected, (records[3], records[1]))
+        self.assertEqual(boundary, records[1])
+        self.assertIsNone(expired_boundary)
+
     async def test_author_selection_supports_window_exclusion_limit_and_pins(self):
         registry = self.registry()
         await registry.initialize()
@@ -149,6 +193,24 @@ class MessageRegistryTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(selected, (records[1],))
+
+    async def test_author_selection_excludes_messages_after_invocation(self):
+        registry = self.registry()
+        await registry.initialize()
+        records = (
+            self.record(900, minute=1),
+            self.record(1001, minute=2),
+        )
+        for record in records:
+            await registry.observe(record)
+
+        selected = await registry.recent_by_author(
+            10,
+            30,
+            before_message_id=999,
+        )
+
+        self.assertEqual(selected, (records[0],))
 
     async def test_matching_channel_count_counts_distinct_channels_in_window(self):
         registry = self.registry()

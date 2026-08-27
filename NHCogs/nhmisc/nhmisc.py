@@ -105,7 +105,6 @@ DEFAULT_VCJUMPING_WINDOW_SECONDS = 30
 ACHIEVEMENT_INTERACTION_DB_TIMEOUT_SECONDS = 15
 DEFAULT_ACTIVITY_DETAIL_RETENTION_DAYS = 31
 DEFAULT_ACTIVITY_HISTORY_RETENTION_DAYS = -1
-CLEANUP_RESPONSE_TTL_SECONDS = 10
 RETENTION_CONFIRMATION = "I understand"
 
 
@@ -3743,10 +3742,8 @@ class NHMisc(commands.Cog):
                     "vcjumping",
                     "forumautopin",
                     "stickyroles",
-                    "cleanup",
                     "activity",
                     "usermodstats",
-                    "chatchart",
                     "topyapper",
                     "roleanalytics",
                 ),
@@ -3857,84 +3854,6 @@ class NHMisc(commands.Cog):
         """Clear the operational error maintainer."""
         await self.config.guild(ctx.guild).error_maintainer_id.clear()
         await ctx.send("Operational error maintainer cleared.")
-
-    def _loaded_honeypot(self):
-        honeypot = self.bot.get_cog("Honeypot")
-        if honeypot is None:
-            return None
-        if not callable(getattr(honeypot, "cleanup_channel", None)):
-            return None
-        if not callable(getattr(honeypot, "cleanup_user", None)):
-            return None
-        return honeypot
-
-    @nhmisc.group(name="cleanup", invoke_without_command=True)
-    @commands.mod_or_permissions(manage_messages=True)
-    async def nhmisc_cleanup(self, ctx: commands.Context, count: int) -> None:
-        """Delete recently observed messages from the current channel."""
-        if not 1 <= count <= 100:
-            raise commands.UserFeedbackCheckFailure(
-                "Count must be between 1 and 100."
-            )
-        honeypot = self._loaded_honeypot()
-        if honeypot is None:
-            await ctx.send("Honeypot is not loaded, so cleanup is unavailable.")
-            return
-        try:
-            result = await honeypot.cleanup_channel(ctx, count)
-        except Exception as error:
-            log.exception("Honeypot channel cleanup failed")
-            await self.report_operational_error(
-                guild_id=ctx.guild.id,
-                source="NHMisc",
-                action="clean up Honeypot channel",
-                error=error,
-                channel_id=ctx.channel.id,
-                message_id=ctx.message.id,
-            )
-            await ctx.send("Cleanup failed. Check the private error channel and try again.")
-            return
-        await ctx.send(
-            result.public_message,
-            delete_after=CLEANUP_RESPONSE_TTL_SECONDS,
-        )
-
-    @nhmisc_cleanup.command(name="user")
-    @commands.mod_or_permissions(manage_messages=True)
-    async def nhmisc_cleanup_user(
-        self,
-        ctx: commands.Context,
-        target: str,
-        count: int,
-    ) -> None:
-        """Delete recently observed messages from a user across this server."""
-        if not 1 <= count <= 100:
-            raise commands.UserFeedbackCheckFailure(
-                "Count must be between 1 and 100."
-            )
-        user_id = self._parse_user_id(target)
-        honeypot = self._loaded_honeypot()
-        if honeypot is None:
-            await ctx.send("Honeypot is not loaded, so cleanup is unavailable.")
-            return
-        try:
-            result = await honeypot.cleanup_user(ctx, user_id, count)
-        except Exception as error:
-            log.exception("Honeypot user cleanup failed")
-            await self.report_operational_error(
-                guild_id=ctx.guild.id,
-                source="NHMisc",
-                action="clean up Honeypot user messages",
-                error=error,
-                channel_id=ctx.channel.id,
-                message_id=ctx.message.id,
-            )
-            await ctx.send("Cleanup failed. Check the private error channel and try again.")
-            return
-        await ctx.send(
-            result.public_message,
-            delete_after=CLEANUP_RESPONSE_TTL_SECONDS,
-        )
 
     @nhmisc.group(name="roleanalytics", invoke_without_command=True)
     @commands.admin_or_permissions(administrator=True)
@@ -5516,7 +5435,9 @@ class NHMisc(commands.Cog):
             embed=self._build_user_channel_distribution_embed(ctx.guild, title, distribution, days)
         )
 
-    @nhmisc.command(name="chatchart")
+    @commands.command(name="chatchart")
+    @commands.guild_only()
+    @commands.mod_or_permissions(manage_messages=True)
     async def nhmisc_chatchart(
         self,
         ctx: commands.Context,

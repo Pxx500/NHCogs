@@ -97,6 +97,25 @@ async def _load_custom_commands(bot: Red, nhmisc):
     return custom_commands
 
 
+async def _load_cleanup(bot: Red, nhmisc, honeypot):
+    if nhmisc is None or honeypot is None:
+        log.error("NHCogs subcog Cleanup skipped because its dependencies are unavailable")
+        return None
+    cleanup = None
+    try:
+        module = import_module(".cleanup", __name__)
+        module.assert_safe_to_replace(bot)
+        cleanup = await module.build_cleanup_component(bot, nhmisc, honeypot)
+    except Exception:
+        log.exception("NHCogs subcog Cleanup failed during startup")
+        return None
+    if bot.get_cog(cleanup.qualified_name) is cleanup:
+        return cleanup
+    if not await _add_subcog(bot, cleanup, "Cleanup"):
+        return None
+    return cleanup
+
+
 async def _cleanup_cancelled_setup(bot: Red, loaded: list) -> None:
     for cog in reversed(loaded):
         if bot.get_cog(cog.qualified_name) is not cog:
@@ -115,8 +134,11 @@ async def setup(bot: Red) -> None:
         nhmisc = await _load_subcog(bot, ".nhmisc", "NHMisc")
         if nhmisc is not None:
             loaded.append(nhmisc)
-        if honeypot := await _load_subcog(bot, ".honeypot", "Honeypot"):
+        honeypot = await _load_subcog(bot, ".honeypot", "Honeypot")
+        if honeypot is not None:
             loaded.append(honeypot)
+        if cleanup := await _load_cleanup(bot, nhmisc, honeypot):
+            loaded.append(cleanup)
         if githubtickets := await _load_subcog(bot, ".githubtickets", "GitHubTickets"):
             loaded.append(githubtickets)
         if custom_commands := await _load_custom_commands(bot, nhmisc):
@@ -127,10 +149,10 @@ async def setup(bot: Red) -> None:
 
 
 async def teardown(bot: Red) -> None:
-    for name in ("CustomCommands", "CustomCommandsMigration"):
+    for name in ("Cleanup", "CustomCommands", "CustomCommandsMigration"):
         cog = bot.get_cog(name)
         if cog is None:
             continue
-        if not type(cog).__module__.startswith("NHCogs.custom_commands"):
+        if not type(cog).__module__.startswith(("NHCogs.cleanup", "NHCogs.custom_commands")):
             continue
         await bot.remove_cog(name)

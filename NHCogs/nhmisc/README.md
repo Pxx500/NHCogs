@@ -13,26 +13,6 @@ is typed as `!nhmisc log`.
 [p]load NHMisc
 ```
 
-## Message Cleanup
-
-NHMisc exposes moderator commands backed by Honeypot's durable message registry:
-
-```ini
-[p]nhmisc cleanup <1-100>
-[p]nhmisc cleanup user <member-mention-or-id> <1-100>
-```
-
-The first command removes the requested number of recently observed, unpinned
-messages before the command in the current channel. The second removes a user's
-latest observed, unpinned messages across the server, including messages from a
-user who has already left. Both require Manage Messages or Red moderator status.
-
-Honeypot must be loaded. Cleanup uses only messages seen through Gateway events
-while Honeypot was active for the guild; it never fetches channel history, so it
-cannot remove messages sent while the bot was offline. The bot needs View Channel
-and Manage Messages in every affected channel. Red's top-level Cleanup cog can
-remain loaded because these commands are nested under `nhmisc`.
-
 ## Forum Autopin
 
 NHMisc can automatically pin the starter message of each new post in selected Discord
@@ -478,8 +458,8 @@ shown as separate locations. The output includes total messages, active days, lo
 used, top locations in the range, and the dominant location for each retained day.
 
 ```ini
-[p]nhmisc chatchart 7 [amount]
-[p]nhmisc chatchart #general 7 [amount]
+[p]chatchart 7 [amount]
+[p]chatchart #general 7 [amount]
 ```
 
 Creates a chart of message activity for the current or selected channel. The optional first
@@ -595,9 +575,6 @@ Administrators can disable role analytics and delete the guild's analytics data:
 ## Permissions
 
 Configuration commands require Manage Server or bot admin permissions.
-
-`[p]nhmisc cleanup` and its `user` subcommand require Manage Messages or Red moderator
-status. The bot needs View Channel and Manage Messages in affected channels.
 
 Sticky-role commands require Manage Server or bot admin permissions.
 

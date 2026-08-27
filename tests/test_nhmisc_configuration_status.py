@@ -189,22 +189,6 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("`?nhmisc stickyroles debuglogging`", commands)
         self.assertNotIn("internal", commands)
 
-    async def test_group_commands_keep_distinct_bare_actions(self):
-        child = command_metadata("nhmisc cleanup user", "<target> <count>")
-        cleanup = command_metadata(
-            "nhmisc cleanup",
-            "<count>",
-            children=(child,),
-        )
-        self.ctx.command = types.SimpleNamespace(commands=(cleanup,))
-
-        await nhmisc.NHMisc.nhmisc.callback(self.cog, self.ctx)
-
-        embed = self.ctx.send.await_args.kwargs["embed"]
-        fields = {field.name: field.value for field in embed.fields}
-        self.assertIn("!nhmisc cleanup <count>", fields["Commands"])
-        self.assertNotIn("cleanup user", fields["Commands"])
-
     async def test_log_group_shows_all_destinations_and_complete_commands(self):
         self.channels.update(
             {

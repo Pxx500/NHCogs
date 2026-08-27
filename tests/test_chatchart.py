@@ -183,6 +183,16 @@ class FakeContext:
 
 
 class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
+    def test_chatchart_is_a_top_level_moderator_command(self):
+        command = nhmisc.NHMisc.nhmisc_chatchart
+
+        self.assertEqual(command.attrs["name"], "chatchart")
+        self.assertTrue(command.callback.guild_only)
+        self.assertEqual(
+            command.callback.mod_or_permissions,
+            {"manage_messages": True},
+        )
+
     def _command_fixture(self, *targets):
         channels = {target.id: target for target in targets}
         guild = types.SimpleNamespace(
