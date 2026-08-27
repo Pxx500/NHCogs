@@ -5435,17 +5435,23 @@ class NHMisc(commands.Cog):
             embed=self._build_user_channel_distribution_embed(ctx.guild, title, distribution, days)
         )
 
-    @commands.command(name="chatchart")
+    @commands.command(
+        name="chatchart",
+        usage="<days> [amount] | <channel_or_thread> <days> [amount]",
+    )
     @commands.guild_only()
     @commands.mod_or_permissions(manage_messages=True)
     async def nhmisc_chatchart(
         self,
         ctx: commands.Context,
-        target_or_days: str,
+        target_or_days: str | None = None,
         days_or_amount: int | None = None,
         amount: int | None = None,
     ) -> None:
         """Render a chart of user activity in the selected or current channel."""
+        if target_or_days is None:
+            await ctx.send_help(ctx.command)
+            return
         await self._require_activity_staff(ctx)
         target, days, amount = self._resolve_chatchart_request(
             ctx,
