@@ -175,6 +175,7 @@ class FakeContext:
         self.channel = FakeTextChannel(456, "test-channel")
         self.author = object()
         self.sent = []
+        self.send_help = mock.AsyncMock()
 
     async def send(self, content=None, **kwargs):
         if content is not None:
@@ -192,6 +193,19 @@ class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
             command.callback.mod_or_permissions,
             {"manage_messages": True},
         )
+        self.assertEqual(
+            command.attrs["usage"],
+            "<days> [amount] | <channel_or_thread> <days> [amount]",
+        )
+
+    async def test_bare_chatchart_shows_its_runtime_help(self):
+        cog, ctx = self._command_fixture()
+        ctx.command = nhmisc.NHMisc.nhmisc_chatchart
+
+        await nhmisc.NHMisc.nhmisc_chatchart.callback(cog, ctx)
+
+        ctx.send_help.assert_awaited_once_with(ctx.command)
+        cog._activity_store.get_channel_user_counts.assert_not_awaited()
 
     def _command_fixture(self, *targets):
         channels = {target.id: target for target in targets}
