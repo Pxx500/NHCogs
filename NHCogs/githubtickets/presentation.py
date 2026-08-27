@@ -91,6 +91,7 @@ HELP_COPY = (
     "Remove a participant role",
     "Configure categories",
     "Add a category",
+    "Rename a category",
     "Remove a category",
     "Set the maximum pings per ticket",
     "Configure ticket timing",
@@ -380,6 +381,10 @@ def participant_role_removed(role_mention: str) -> str:
 
 def category_added(category: str) -> str:
     return f"Category added: {category}"
+
+
+def category_renamed(old_name: str, new_name: str) -> str:
+    return f"Category renamed from {old_name} to {new_name}"
 
 
 def category_removed(category: str) -> str:

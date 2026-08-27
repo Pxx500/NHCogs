@@ -138,11 +138,19 @@ member is the ticket's direct target.
 | Command | Description |
 |---|---|
 | `[p]githubtickets category add <name>` | Add a category |
+| `[p]githubtickets category rename <old_name> <new_name>` | Rename a category |
 | `[p]githubtickets category remove <name>` | Remove a category |
 
 Category names are trimmed, converted to lowercase, limited to 100 characters, and unique
-per server. A server can have at most 25 categories. Removing a category removes it from
-stored profiles and active routing state. Existing ticket text is not rewritten.
+per server. A server can have at most 25 categories. Renaming a category preserves its ID,
+profile assignments, and active routing links. Removing a category removes it from stored
+profiles and active routing state. Existing ticket text is not rewritten.
+
+Quote the old name when it contains spaces:
+
+```text
+[p]githubtickets category rename "old name" corrected name
+```
 
 Categories are optional for manual and direct tickets. A ticket without categories cannot
 use automatic routing.

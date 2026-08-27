@@ -13,6 +13,7 @@ COMMAND_SIGNATURES = {
     "githubtickets role add": "<role>",
     "githubtickets role remove": "<role>",
     "githubtickets category add": "<name>",
+    "githubtickets category rename": "<old_name> <new_name>",
     "githubtickets category remove": "<name>",
     "githubtickets maxpings": "<count>",
     "githubtickets timing protection": "<duration>",
@@ -115,6 +116,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 "githubtickets role remove",
                 "githubtickets category",
                 "githubtickets category add",
+                "githubtickets category rename",
                 "githubtickets category remove",
                 "githubtickets maxpings",
                 "githubtickets timing",
@@ -313,7 +315,12 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             await cog.githubtickets_channel_set(ctx, channel)
             await cog.githubtickets_logchannel_set(ctx, channel)
             await cog.githubtickets_role_add(ctx, role)
-            await cog.githubtickets_category_add(ctx, name="Rendering")
+            await cog.githubtickets_category_add(ctx, name="Rendring")
+            await cog.githubtickets_category_rename(
+                ctx,
+                "Rendring",
+                new_name="Rendering",
+            )
             await cog.githubtickets_maxpings(ctx, count=5)
             await cog.githubtickets_timing_donotdisturb(ctx, duration="8h")
             await cog.githubtickets_logchannel_clear(ctx)
@@ -334,7 +341,8 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 "Ticket channel set to #github-tickets",
                 "Log channel set to #github-tickets",
                 "Participant role added: @GT:NH Devs",
-                "Category added: rendering",
+                "Category added: rendring",
+                "Category renamed from rendring to rendering",
                 "Maximum pings set to 5",
                 "Do Not Disturb response time set to 8 hours",
                 "Log channel cleared",
@@ -367,9 +375,32 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             await cog.store.initialize()
             ctx = FakeContext()
             role = SimpleNamespace(id=200, mention="@GT:NH Devs")
+            now = datetime.now(timezone.utc)
+            await cog.store.add_category(42, "rendering", now)
+            await cog.store.add_category(42, "python", now)
 
             await cog.githubtickets_role_remove(ctx, role)
             await cog.githubtickets_category_add(ctx, name=" ")
+            await cog.githubtickets_category_rename(
+                ctx,
+                "missing",
+                new_name="scala",
+            )
+            await cog.githubtickets_category_rename(
+                ctx,
+                "rendering",
+                new_name="python",
+            )
+            await cog.githubtickets_category_rename(
+                ctx,
+                "rendering",
+                new_name=" ",
+            )
+            await cog.githubtickets_category_rename(
+                ctx,
+                "rendering",
+                new_name="x" * 101,
+            )
             await cog.githubtickets_maxpings(ctx, count=-1)
             await cog.githubtickets_timing_direct(ctx, duration="later")
 
@@ -378,6 +409,10 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             [
                 "Participant role is not configured",
                 "Category name cannot be empty",
+                "Category not found",
+                "Category already exists",
+                "Category name cannot be empty",
+                "Category name cannot exceed 100 characters",
                 "Maximum pings cannot be negative",
                 "Invalid duration",
             ],
