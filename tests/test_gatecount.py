@@ -117,7 +117,10 @@ def _load_nhmisc():
     data_manager = types.ModuleType("redbot.core.data_manager")
     data_manager.cog_data_path = lambda cog: Path(".")
 
-    package_name = "_gatecount_nhmisc"
+    root_package_name = "_gatecount_root"
+    package_name = f"{root_package_name}.nhmisc"
+    root_package = types.ModuleType(root_package_name)
+    root_package.__path__ = [str(NHMISC_PATH.parent.parent)]
     package = types.ModuleType(package_name)
     package.__path__ = [str(NHMISC_PATH.parent)]
     module_name = f"{package_name}.nhmisc"
@@ -130,6 +133,7 @@ def _load_nhmisc():
         "redbot.core": redbot_core,
         "redbot.core.commands": commands,
         "redbot.core.data_manager": data_manager,
+        root_package_name: root_package,
         package_name: package,
         module_name: module,
     }

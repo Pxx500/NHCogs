@@ -8,8 +8,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-PACKAGE_NAME = "nhmisc_role_analytics_commands_test_package"
-PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs" / "nhmisc"
+ROOT_PACKAGE_NAME = "nhmisc_role_analytics_commands_test_root"
+PACKAGE_NAME = f"{ROOT_PACKAGE_NAME}.nhmisc"
+ROOT_PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs"
+PACKAGE_PATH = ROOT_PACKAGE_PATH / "nhmisc"
 
 
 class UserFeedbackCheckFailure(Exception):
@@ -114,6 +116,8 @@ def load_nhmisc_module():
     data_manager = types.ModuleType("redbot.core.data_manager")
     data_manager.cog_data_path = lambda cog: Path(".")
 
+    root_package = types.ModuleType(ROOT_PACKAGE_NAME)
+    root_package.__path__ = [str(ROOT_PACKAGE_PATH)]
     package = types.ModuleType(PACKAGE_NAME)
     package.__path__ = [str(PACKAGE_PATH)]
     module_names = (
@@ -122,6 +126,7 @@ def load_nhmisc_module():
         "redbot.core",
         "redbot.core.commands",
         "redbot.core.data_manager",
+        ROOT_PACKAGE_NAME,
         PACKAGE_NAME,
         f"{PACKAGE_NAME}.nhmisc",
     )
@@ -133,6 +138,7 @@ def load_nhmisc_module():
             "redbot.core": core,
             "redbot.core.commands": commands,
             "redbot.core.data_manager": data_manager,
+            ROOT_PACKAGE_NAME: root_package,
             PACKAGE_NAME: package,
         }
     )

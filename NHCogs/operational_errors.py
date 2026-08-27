@@ -309,6 +309,15 @@ class OperationalErrorReporter:
     async def active_count(self, guild_id: int) -> int:
         return await asyncio.to_thread(self._active_count_sync, guild_id)
 
+    async def delete_guild(self, guild_id: int) -> None:
+        await asyncio.to_thread(self._delete_guild_sync, guild_id)
+
+    def _delete_guild_sync(self, guild_id: int) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                "DELETE FROM operational_failures WHERE guild_id = ?", (guild_id,)
+            )
+
     def _active_count_sync(self, guild_id: int) -> int:
         with closing(self._connect()) as connection:
             row = connection.execute(

@@ -11,7 +11,7 @@ from unittest import mock
 from tests.test_chatchart import nhmisc
 
 MODULE_PATH = (
-    Path(__file__).parents[1] / "NHCogs" / "nhmisc" / "operational_errors.py"
+    Path(__file__).parents[1] / "NHCogs" / "operational_errors.py"
 )
 
 

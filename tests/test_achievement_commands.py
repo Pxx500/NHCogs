@@ -358,16 +358,16 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.requester_id = requester_id
                 self.command_mention = command_mention
 
-        package = ModuleType("_gatecount_nhmisc")
+        package = ModuleType("_gatecount_root.nhmisc")
         package.__path__ = []
-        views = ModuleType("_gatecount_nhmisc.achievement_views")
+        views = ModuleType("_gatecount_root.nhmisc.achievement_views")
         views.AchievementProfileView = FakeAchievementProfileView
 
         with mock.patch.dict(
             sys.modules,
             {
-                "_gatecount_nhmisc": package,
-                "_gatecount_nhmisc.achievement_views": views,
+                "_gatecount_root.nhmisc": package,
+                "_gatecount_root.nhmisc.achievement_views": views,
             },
         ):
             await cog._achievements_slash(interaction, target)
@@ -414,16 +414,16 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.requester_id = requester_id
                 self.command_mention = command_mention
 
-        package = ModuleType("_gatecount_nhmisc")
+        package = ModuleType("_gatecount_root.nhmisc")
         package.__path__ = []
-        views = ModuleType("_gatecount_nhmisc.achievement_views")
+        views = ModuleType("_gatecount_root.nhmisc.achievement_views")
         views.AchievementProfileView = FakeAchievementProfileView
 
         with mock.patch.dict(
             sys.modules,
             {
-                "_gatecount_nhmisc": package,
-                "_gatecount_nhmisc.achievement_views": views,
+                "_gatecount_root.nhmisc": package,
+                "_gatecount_root.nhmisc.achievement_views": views,
             },
         ):
             await cog._achievements_user_context_action(interaction, target)
@@ -617,15 +617,15 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             def render_embed(self):
                 return SimpleNamespace()
 
-        package = ModuleType("_gatecount_nhmisc")
+        package = ModuleType("_gatecount_root.nhmisc")
         package.__path__ = []
-        views = ModuleType("_gatecount_nhmisc.achievement_views")
+        views = ModuleType("_gatecount_root.nhmisc.achievement_views")
         views.AchievementRoleBindView = FakeAchievementRoleBindView
         with mock.patch.dict(
             sys.modules,
             {
-                "_gatecount_nhmisc": package,
-                "_gatecount_nhmisc.achievement_views": views,
+                "_gatecount_root.nhmisc": package,
+                "_gatecount_root.nhmisc.achievement_views": views,
             },
         ):
             await nhmisc.NHMisc.achievement_role_bind(cog, ctx, role)
@@ -979,16 +979,16 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             def render_embed(self):
                 return SimpleNamespace()
 
-        package = ModuleType("_gatecount_nhmisc")
+        package = ModuleType("_gatecount_root.nhmisc")
         package.__path__ = []
-        views = ModuleType("_gatecount_nhmisc.achievement_views")
+        views = ModuleType("_gatecount_root.nhmisc.achievement_views")
         views.AchievementDeleteView = FakeAchievementDeleteView
 
         with mock.patch.dict(
             sys.modules,
             {
-                "_gatecount_nhmisc": package,
-                "_gatecount_nhmisc.achievement_views": views,
+                "_gatecount_root.nhmisc": package,
+                "_gatecount_root.nhmisc.achievement_views": views,
             },
         ):
             await nhmisc.NHMisc.achievement_delete(cog, ctx, "achievement_123")
@@ -1257,16 +1257,16 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             def render_embed(self):
                 return SimpleNamespace()
 
-        package = ModuleType("_gatecount_nhmisc")
+        package = ModuleType("_gatecount_root.nhmisc")
         package.__path__ = []
-        views = ModuleType("_gatecount_nhmisc.achievement_views")
+        views = ModuleType("_gatecount_root.nhmisc.achievement_views")
         views.AchievementRoleReplaceView = FakeAchievementRoleReplaceView
 
         with mock.patch.dict(
             sys.modules,
             {
-                "_gatecount_nhmisc": package,
-                "_gatecount_nhmisc.achievement_views": views,
+                "_gatecount_root.nhmisc": package,
+                "_gatecount_root.nhmisc.achievement_views": views,
             },
         ):
             await nhmisc.NHMisc.achievement_role_replace(
