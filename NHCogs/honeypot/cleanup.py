@@ -5,15 +5,18 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 import discord
 
-from .message_registry import MessageRecord
+from .message_registry import MESSAGE_REGISTRY_RETENTION_DAYS, MessageRecord
 
-DELETE_REASON = "NHMisc cleanup"
+DELETE_REASON = "NHCogs managed cleanup"
 BULK_DELETE_LIMIT = 100
 HTTP_BAD_REQUEST = 400
 MIN_CLEANUP_COUNT = 1
+MAX_CLEANUP_COUNT = 1000
+RANGE_QUERY_LIMIT = MAX_CLEANUP_COUNT + 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,18 +92,14 @@ async def _delete_channel_records(
     totals = [0, 0, 0]
     for offset in range(0, len(records), BULK_DELETE_LIMIT):
         batch = records[offset : offset + BULK_DELETE_LIMIT]
-        messages = tuple(
-            (record, get_partial_message(record.message_id)) for record in batch
-        )
+        messages = tuple((record, get_partial_message(record.message_id)) for record in batch)
         try:
             await delete_messages(
                 tuple(partial for _, partial in messages),
                 reason=DELETE_REASON,
             )
         except discord.NotFound:
-            await cog._message_registry.forget_many(
-                tuple(record.message_id for record in batch)
-            )
+            await cog._message_registry.forget_many(tuple(record.message_id for record in batch))
             outcomes = (0, len(batch), 0)
         except discord.Forbidden:
             outcomes = (0, 0, len(batch))
@@ -111,9 +110,7 @@ async def _delete_channel_records(
                 else (0, 0, len(batch))
             )
         else:
-            await cog._message_registry.forget_many(
-                tuple(record.message_id for record in batch)
-            )
+            await cog._message_registry.forget_many(tuple(record.message_id for record in batch))
             outcomes = (len(batch), 0, 0)
         for index, value in enumerate(outcomes):
             totals[index] += value
@@ -132,8 +129,46 @@ async def _delete_invocation(cog, message) -> None:
 
 
 def _validate_count(count: int) -> None:
-    if not MIN_CLEANUP_COUNT <= count <= BULK_DELETE_LIMIT:
-        raise ValueError("count must be between 1 and 100")
+    if not MIN_CLEANUP_COUNT <= count <= MAX_CLEANUP_COUNT:
+        raise ValueError("count must be between 1 and 1000")
+
+
+def _retention_cutoff() -> datetime:
+    return datetime.now(timezone.utc) - timedelta(days=MESSAGE_REGISTRY_RETENTION_DAYS)
+
+
+async def _require_channel_boundary(cog, ctx, message_id: int) -> MessageRecord:
+    if message_id >= ctx.message.id:
+        raise ValueError("boundary must be older than the cleanup command")
+    record = await cog._message_registry.get_in_channel(
+        ctx.guild.id,
+        ctx.channel.id,
+        message_id,
+        since_utc=_retention_cutoff(),
+    )
+    if record is None:
+        raise ValueError("boundary is not retained in this channel")
+    return record
+
+
+def _reject_oversized_range(records: tuple[MessageRecord, ...]) -> None:
+    if len(records) > MAX_CLEANUP_COUNT:
+        raise ValueError("cleanup range contains more than 1000 messages")
+
+
+async def _finish_channel_cleanup(
+    cog,
+    ctx,
+    records: tuple[MessageRecord, ...],
+    requested: int,
+) -> CleanupResult:
+    deleted, missing, failed = await _delete_channel_records(
+        cog,
+        ctx.channel,
+        records,
+    )
+    await _delete_invocation(cog, ctx.message)
+    return _result(requested, len(records), deleted, missing, failed)
 
 
 async def cleanup_channel(cog, ctx, count: int) -> CleanupResult:
@@ -143,14 +178,9 @@ async def cleanup_channel(cog, ctx, count: int) -> CleanupResult:
         ctx.channel.id,
         limit=count,
         before_message_id=ctx.message.id,
+        since_utc=_retention_cutoff(),
     )
-    deleted, missing, failed = await _delete_channel_records(
-        cog,
-        ctx.channel,
-        records,
-    )
-    await _delete_invocation(cog, ctx.message)
-    return _result(count, len(records), deleted, missing, failed)
+    return await _finish_channel_cleanup(cog, ctx, records, count)
 
 
 async def cleanup_user(cog, ctx, user_id: int, count: int) -> CleanupResult:
@@ -159,6 +189,7 @@ async def cleanup_user(cog, ctx, user_id: int, count: int) -> CleanupResult:
         ctx.guild.id,
         user_id,
         limit=count,
+        since_utc=_retention_cutoff(),
         exclude_message_id=ctx.message.id,
     )
     by_channel: dict[int, list[MessageRecord]] = defaultdict(list)
@@ -177,3 +208,70 @@ async def cleanup_user(cog, ctx, user_id: int, count: int) -> CleanupResult:
         failed += outcomes[2]
     await _delete_invocation(cog, ctx.message)
     return _result(count, len(records), deleted, missing, failed)
+
+
+async def cleanup_after(
+    cog,
+    ctx,
+    boundary_id: int,
+    *,
+    delete_pinned: bool = False,
+) -> CleanupResult:
+    await _require_channel_boundary(cog, ctx, boundary_id)
+    records = await cog._message_registry.recent_in_channel(
+        ctx.guild.id,
+        ctx.channel.id,
+        limit=RANGE_QUERY_LIMIT,
+        before_message_id=ctx.message.id,
+        after_message_id=boundary_id,
+        since_utc=_retention_cutoff(),
+        exclude_pinned=not delete_pinned,
+    )
+    _reject_oversized_range(records)
+    return await _finish_channel_cleanup(cog, ctx, records, len(records))
+
+
+async def cleanup_before(
+    cog,
+    ctx,
+    boundary_id: int,
+    count: int,
+    *,
+    delete_pinned: bool = False,
+) -> CleanupResult:
+    _validate_count(count)
+    await _require_channel_boundary(cog, ctx, boundary_id)
+    records = await cog._message_registry.recent_in_channel(
+        ctx.guild.id,
+        ctx.channel.id,
+        limit=count,
+        before_message_id=boundary_id,
+        since_utc=_retention_cutoff(),
+        exclude_pinned=not delete_pinned,
+    )
+    return await _finish_channel_cleanup(cog, ctx, records, count)
+
+
+async def cleanup_between(
+    cog,
+    ctx,
+    older_id: int,
+    newer_id: int,
+    *,
+    delete_pinned: bool = False,
+) -> CleanupResult:
+    if older_id >= newer_id:
+        raise ValueError("older boundary must precede newer boundary")
+    await _require_channel_boundary(cog, ctx, older_id)
+    await _require_channel_boundary(cog, ctx, newer_id)
+    records = await cog._message_registry.recent_in_channel(
+        ctx.guild.id,
+        ctx.channel.id,
+        limit=RANGE_QUERY_LIMIT,
+        before_message_id=newer_id,
+        after_message_id=older_id,
+        since_utc=_retention_cutoff(),
+        exclude_pinned=not delete_pinned,
+    )
+    _reject_oversized_range(records)
+    return await _finish_channel_cleanup(cog, ctx, records, len(records))

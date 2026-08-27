@@ -55,6 +55,17 @@ class StubHoneypot(StubLifecycle):
         _record_construction(bot, self.qualified_name)
 
 
+class StubCleanup(StubLifecycle):
+    qualified_name = "Cleanup"
+
+    def __init__(self, bot):
+        self.bot = bot
+        _record_construction(bot, self.qualified_name)
+
+
+StubCleanup.__module__ = "NHCogs.cleanup.cog"
+
+
 class StubGitHubTickets(StubLifecycle):
     qualified_name = "GitHubTickets"
     CONFIG_IDENTIFIER = 228724500916148494760637198509440112622
@@ -85,6 +96,7 @@ def load_suite_module():
         "NHCogs.consoledump",
         "NHCogs.nhmisc",
         "NHCogs.honeypot",
+        "NHCogs.cleanup",
         "NHCogs.githubtickets",
         "NHCogs.custom_commands",
     )
@@ -101,6 +113,19 @@ def load_suite_module():
     nhmisc.NHMisc = StubNHMisc
     honeypot = types.ModuleType("NHCogs.honeypot")
     honeypot.Honeypot = StubHoneypot
+    cleanup = types.ModuleType("NHCogs.cleanup")
+
+    async def build_cleanup_component(bot, _nhmisc, _honeypot):
+        return StubCleanup(bot)
+
+    def assert_cleanup_safe_to_replace(bot):
+        bot.cleanup_preflight_calls += 1
+        if bot.failure == ("cleanup_preflight", "before"):
+            raise RuntimeError("cleanup ownership conflict")
+
+    cleanup.build_cleanup_component = build_cleanup_component
+    cleanup.assert_safe_to_replace = assert_cleanup_safe_to_replace
+    cleanup.Cleanup = StubCleanup
     githubtickets = types.ModuleType("NHCogs.githubtickets")
     githubtickets.GitHubTickets = StubGitHubTickets
     custom_commands = types.ModuleType("NHCogs.custom_commands")
@@ -136,6 +161,7 @@ def load_suite_module():
                 "NHCogs.consoledump": console_dump,
                 "NHCogs.nhmisc": nhmisc,
                 "NHCogs.honeypot": honeypot,
+                "NHCogs.cleanup": cleanup,
                 "NHCogs.githubtickets": githubtickets,
                 "NHCogs.custom_commands": custom_commands,
             }
@@ -160,6 +186,7 @@ class FakeBot:
         self.started = []
         self.unloaded = []
         self.preflight_calls = 0
+        self.cleanup_preflight_calls = 0
 
     async def add_cog(self, cog):
         name = cog.qualified_name
@@ -200,6 +227,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
                 "ConsoleDump",
                 "NHMisc",
                 "Honeypot",
+                "Cleanup",
                 "GitHubTickets",
                 "CustomCommandsMigration",
             ],
@@ -210,12 +238,14 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
                 "ConsoleDump",
                 "NHMisc",
                 "Honeypot",
+                "Cleanup",
                 "GitHubTickets",
                 "CustomCommandsMigration",
             },
         )
         self.assertEqual(bot.removed, [])
         self.assertEqual(bot.preflight_calls, 1)
+        self.assertEqual(bot.cleanup_preflight_calls, 1)
 
     async def test_custom_commands_conflict_does_not_block_other_subcogs(self):
         with load_suite_module() as suite:
@@ -227,9 +257,31 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.preflight_calls, 1)
         self.assertEqual(
             set(bot.cogs),
-            {"ConsoleDump", "NHMisc", "Honeypot", "GitHubTickets"},
+            {"ConsoleDump", "NHMisc", "Honeypot", "Cleanup", "GitHubTickets"},
         )
         self.assertIn("custom commands ownership conflict", "\n".join(captured.output))
+        self.assertEqual(bot.removed, [])
+
+    async def test_cleanup_conflict_does_not_block_other_subcogs(self):
+        with load_suite_module() as suite:
+            bot = FakeBot(("cleanup_preflight", "before"))
+
+            with self.assertLogs("red.NHCogs", level="ERROR") as captured:
+                await suite.setup(bot)
+
+        self.assertEqual(bot.cleanup_preflight_calls, 1)
+        self.assertEqual(bot.preflight_calls, 1)
+        self.assertEqual(
+            set(bot.cogs),
+            {
+                "ConsoleDump",
+                "NHMisc",
+                "Honeypot",
+                "GitHubTickets",
+                "CustomCommandsMigration",
+            },
+        )
+        self.assertIn("cleanup ownership conflict", "\n".join(captured.output))
         self.assertEqual(bot.removed, [])
 
     async def test_each_subcog_add_failure_is_isolated_and_logged(self):
@@ -240,6 +292,8 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
             ("NHMisc", "after"),
             ("Honeypot", "before"),
             ("Honeypot", "after"),
+            ("Cleanup", "before"),
+            ("Cleanup", "after"),
             ("GitHubTickets", "before"),
             ("GitHubTickets", "after"),
             ("CustomCommandsMigration", "before"),
@@ -256,8 +310,16 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertNotIn(failure[0], bot.cogs)
                 if failure[0] != "CustomCommandsMigration":
-                    for name in ("ConsoleDump", "NHMisc", "Honeypot", "GitHubTickets"):
+                    for name in (
+                        "ConsoleDump",
+                        "NHMisc",
+                        "Honeypot",
+                        "Cleanup",
+                        "GitHubTickets",
+                    ):
                         if name != failure[0]:
+                            if name == "Cleanup" and failure[0] in {"NHMisc", "Honeypot"}:
+                                continue
                             self.assertIn(name, bot.cogs)
                 self.assertIn(expected_error, "\n".join(captured.output))
                 self.assertEqual(
@@ -266,7 +328,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
                 )
 
     async def test_each_subcog_construction_failure_is_isolated_and_logged(self):
-        for name in ("ConsoleDump", "NHMisc", "Honeypot", "GitHubTickets"):
+        for name in ("ConsoleDump", "NHMisc", "Honeypot", "Cleanup", "GitHubTickets"):
             with self.subTest(name=name):
                 with load_suite_module() as suite:
                     bot = FakeBot((name, "construct"))
@@ -275,8 +337,16 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
                         await suite.setup(bot)
 
                 self.assertNotIn(name, bot.cogs)
-                for other in ("ConsoleDump", "NHMisc", "Honeypot", "GitHubTickets"):
+                for other in (
+                    "ConsoleDump",
+                    "NHMisc",
+                    "Honeypot",
+                    "Cleanup",
+                    "GitHubTickets",
+                ):
                     if other != name:
+                        if other == "Cleanup" and name in {"NHMisc", "Honeypot"}:
+                            continue
                         self.assertIn(other, bot.cogs)
                 self.assertIn(
                     f"failed constructing {name}",
@@ -284,7 +354,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
                 )
 
     async def test_each_subcog_cog_load_failure_is_cleaned_up_and_isolated(self):
-        for name in ("ConsoleDump", "NHMisc", "Honeypot", "GitHubTickets"):
+        for name in ("ConsoleDump", "NHMisc", "Honeypot", "Cleanup", "GitHubTickets"):
             with self.subTest(name=name):
                 with load_suite_module() as suite:
                     bot = FakeBot((name, "cog_load"))
@@ -295,8 +365,16 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(name, bot.cogs)
                 self.assertEqual(bot.unloaded.count(name), 1)
                 self.assertIn(f"failed loading {name}", "\n".join(captured.output))
-                for other in ("ConsoleDump", "NHMisc", "Honeypot", "GitHubTickets"):
+                for other in (
+                    "ConsoleDump",
+                    "NHMisc",
+                    "Honeypot",
+                    "Cleanup",
+                    "GitHubTickets",
+                ):
                     if other != name:
+                        if other == "Cleanup" and name in {"NHMisc", "Honeypot"}:
+                            continue
                         self.assertIn(other, bot.cogs)
 
     async def test_setup_cancellation_cleans_loaded_and_partial_cogs_then_reraises(self):
@@ -337,7 +415,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("GitHubTickets", bot.cogs)
         self.assertEqual(
             set(bot.cogs),
-            {"ConsoleDump", "NHMisc", "Honeypot", "CustomCommandsMigration"},
+            {"ConsoleDump", "NHMisc", "Honeypot", "Cleanup", "CustomCommandsMigration"},
         )
         log_output = "\n".join(captured.output)
         self.assertIn("githubtickets import exploded", log_output)
@@ -359,6 +437,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
                 "ConsoleDump",
                 "NHMisc",
                 "Honeypot",
+                "Cleanup",
                 "GitHubTickets",
                 "CustomCommandsMigration",
             },
@@ -372,7 +451,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata["name"], "NHCogs")
         self.assertEqual(
             metadata["description"],
-            "Loads ConsoleDump, NHMisc, Honeypot, GitHubTickets, and Custom Commands together "
+            "Loads ConsoleDump, NHMisc, Honeypot, Cleanup, GitHubTickets, and Custom Commands together "
             "while preserving their separate commands, configuration, and stored data",
         )
         self.assertEqual(metadata["min_bot_version"], "3.5.23")
@@ -402,3 +481,5 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("CustomCommandsMigration", bot.removed)
         self.assertNotIn("CustomCommandsMigration", bot.cogs)
+        self.assertIn("Cleanup", bot.removed)
+        self.assertNotIn("Cleanup", bot.cogs)

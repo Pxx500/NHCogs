@@ -47,7 +47,7 @@ from .effects import (
     ModerationEffectResult,
     ModerationOrigin,
 )
-from .message_registry import MessageRecord
+from .message_registry import MESSAGE_REGISTRY_RETENTION_DAYS, MessageRecord
 from .operations import executor_operation_policy
 from .operations.context import (
     DETECTION_CACHED_PURGE_ATTEMPT_LIMIT,
@@ -85,7 +85,6 @@ PURGE_PERMISSION_REQUIREMENTS = (
 )
 POST_BAN_SWEEP_DELAY_SECONDS = 5
 PURGE_MIN_RETENTION_SECONDS = 60
-MESSAGE_REGISTRY_RETENTION_DAYS = 14
 PURGE_BACKWARD_MAX_SECONDS = 3600
 PURGE_FORWARD_MAX_SECONDS = 300
 SPAM_WINDOW_MIN_SECONDS = 3

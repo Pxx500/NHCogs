@@ -10,6 +10,8 @@ from pathlib import Path
 
 from NHCogs.storage import Migrations, apply_migrations, connect
 
+MESSAGE_REGISTRY_RETENTION_DAYS = 14
+
 
 def _create_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
@@ -167,7 +169,7 @@ class MessageRegistry:
         query = f"""
             SELECT *
             FROM observed_messages
-            WHERE {' AND '.join(conditions)}
+            WHERE {" AND ".join(conditions)}
             ORDER BY message_id DESC
         """
         if limit is not None:
@@ -183,7 +185,9 @@ class MessageRegistry:
         channel_id: int,
         *,
         limit: int,
-        before_message_id: int,
+        before_message_id: int | None = None,
+        after_message_id: int | None = None,
+        since_utc: datetime | None = None,
         exclude_pinned: bool = True,
     ) -> tuple[MessageRecord, ...]:
         async with self._lock:
@@ -193,33 +197,87 @@ class MessageRegistry:
                 channel_id,
                 limit,
                 before_message_id,
+                after_message_id,
+                since_utc,
                 exclude_pinned,
             )
 
-    def _recent_in_channel_sync(
+    def _recent_in_channel_sync(  # noqa: PLR0917 - mirrors the public query contract
         self,
         guild_id: int,
         channel_id: int,
         limit: int,
-        before_message_id: int,
+        before_message_id: int | None,
+        after_message_id: int | None,
+        since_utc: datetime | None,
         exclude_pinned: bool,
     ) -> tuple[MessageRecord, ...]:
-        pinned_filter = " AND pinned = 0" if exclude_pinned else ""
+        conditions = ["guild_id = ?", "channel_id = ?"]
+        parameters: list[int] = [guild_id, channel_id]
+        if before_message_id is not None:
+            conditions.append("message_id < ?")
+            parameters.append(before_message_id)
+        if after_message_id is not None:
+            conditions.append("message_id > ?")
+            parameters.append(after_message_id)
+        if since_utc is not None:
+            conditions.append("created_at_utc >= ?")
+            parameters.append(_to_timestamp(since_utc))
+        if exclude_pinned:
+            conditions.append("pinned = 0")
+        parameters.append(limit)
         with closing(connect(self.database_path)) as connection:
             rows = connection.execute(
                 f"""
                 SELECT *
                 FROM observed_messages
-                WHERE guild_id = ?
-                  AND channel_id = ?
-                  AND message_id < ?
-                  {pinned_filter}
+                WHERE {" AND ".join(conditions)}
                 ORDER BY message_id DESC
                 LIMIT ?
                 """,
-                (guild_id, channel_id, before_message_id, limit),
+                parameters,
             ).fetchall()
         return tuple(_record_from_row(row) for row in rows)
+
+    async def get_in_channel(
+        self,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        *,
+        since_utc: datetime | None = None,
+    ) -> MessageRecord | None:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._get_in_channel_sync,
+                guild_id,
+                channel_id,
+                message_id,
+                since_utc,
+            )
+
+    def _get_in_channel_sync(
+        self,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        since_utc: datetime | None,
+    ) -> MessageRecord | None:
+        conditions = ["guild_id = ?", "channel_id = ?", "message_id = ?"]
+        parameters = [guild_id, channel_id, message_id]
+        if since_utc is not None:
+            conditions.append("created_at_utc >= ?")
+            parameters.append(_to_timestamp(since_utc))
+        with closing(connect(self.database_path)) as connection:
+            row = connection.execute(
+                f"""
+                SELECT *
+                FROM observed_messages
+                WHERE {" AND ".join(conditions)}
+                """,
+                parameters,
+            ).fetchone()
+        return None if row is None else _record_from_row(row)
 
     async def matching_channel_count(
         self,
