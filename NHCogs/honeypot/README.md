@@ -519,7 +519,7 @@ thread deletion remove the matching registry rows.
 - Bot owners, mods, admins, users with `Manage Server`, and users at or above the bot's top role are ignored
 - Purge and `[p]cleanup` use the durable Gateway-observed message registry;
   they never scan channel history
-- `[p]cleanup <1-1000>` removes observed messages before the command in the
+- `[p]cleanup messages <1-1000>` removes observed messages before the command in the
   current channel; `[p]cleanup user <mention-or-id> <1-1000>` removes the
   user's latest observed messages across the server
 - Cleanup covers only messages observed while Honeypot was loaded and enabled for

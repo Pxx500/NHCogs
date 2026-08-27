@@ -7,6 +7,7 @@ import discord
 from redbot.core import commands
 from redbot.core.commands import RawUserIdConverter
 
+from NHCogs.command_overview import send_group_overview
 from NHCogs.honeypot.cleanup import CleanupResult
 
 from .converters import RawMessageId, parse_raw_message_id
@@ -30,11 +31,17 @@ class Cleanup(commands.Cog):
     @commands.group(
         name="cleanup",
         invoke_without_command=True,
-        usage="<count>",
     )
     @commands.guild_only()
     @commands.mod_or_permissions(manage_messages=True)
-    async def cleanup(self, ctx: commands.Context, count: int) -> None:
+    async def cleanup(self, ctx: commands.Context) -> None:
+        """Delete recently observed messages without fetching channel history."""
+        await send_group_overview(ctx, title="Cleanup")
+
+    @cleanup.command(name="messages", usage="<count>")
+    @commands.guild_only()
+    @commands.mod_or_permissions(manage_messages=True)
+    async def cleanup_messages(self, ctx: commands.Context, count: int) -> None:
         """Delete recently observed messages from the current channel."""
         await self._run_cleanup(
             ctx,
@@ -80,7 +87,10 @@ class Cleanup(commands.Cog):
             ),
         )
 
-    @cleanup.command(name="before")
+    @cleanup.command(
+        name="before",
+        usage="[message_id] <count> [delete_pinned]",
+    )
     @commands.guild_only()
     @commands.mod_or_permissions(manage_messages=True)
     async def cleanup_before(

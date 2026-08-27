@@ -42,32 +42,55 @@ class ReplacementActivator:
     async def activate(self) -> Cleanup:
         async with self._activation_lock:
             assert_safe_to_replace(self.bot)
-            await self.bot.add_loaded_package("NHCogs")
-            await self.bot.remove_loaded_package("cleanup")
             packages = await self.bot._config.packages()
-            if "cleanup" in packages:
-                raise CleanupReplacementError("cleanup remains in Red's package list")
-            await self._remove_official_extension()
-            active = self.bot.get_cog("Cleanup")
-            if isinstance(active, Cleanup):
-                self._verify_command(active)
-                return active
-            if active is not None:
-                raise CleanupReplacementError("Another cog owns the Cleanup name")
-            runtime = Cleanup(self.bot, self.nhmisc, self.honeypot)
+            official_package_was_loaded = "cleanup" in packages
+            official_extension_was_loaded = self.bot.extensions.get("cleanup") is not None
+            runtime = None
             try:
+                await self.bot.add_loaded_package("NHCogs")
+                await self.bot.remove_loaded_package("cleanup")
+                packages = await self.bot._config.packages()
+                if "cleanup" in packages:
+                    raise CleanupReplacementError("cleanup remains in Red's package list")
+                await self._remove_official_extension()
+                active = self.bot.get_cog("Cleanup")
+                if isinstance(active, Cleanup):
+                    self._verify_command(active)
+                    return active
+                if active is not None:
+                    raise CleanupReplacementError("Another cog owns the Cleanup name")
+                runtime = Cleanup(self.bot, self.nhmisc, self.honeypot)
                 await self.bot.add_cog(runtime)
                 self._verify_command(runtime)
             except Exception:
-                if self.bot.get_cog("Cleanup") is runtime:
-                    try:
+                try:
+                    if runtime is not None and self.bot.get_cog("Cleanup") is runtime:
                         await self.bot.remove_cog(runtime.qualified_name)
-                    except Exception as cleanup_error:
-                        raise CleanupReplacementError(
-                            "Partial Cleanup replacement could not be removed"
-                        ) from cleanup_error
+                    await self._restore_official_cleanup(
+                        package_was_loaded=official_package_was_loaded,
+                        extension_was_loaded=official_extension_was_loaded,
+                    )
+                except Exception as rollback_error:
+                    raise CleanupReplacementError(
+                        "Cleanup replacement rollback failed"
+                    ) from rollback_error
                 raise
+            if runtime is None:
+                raise CleanupReplacementError("Cleanup replacement was not constructed")
             return runtime
+
+    async def _restore_official_cleanup(
+        self,
+        *,
+        package_was_loaded: bool,
+        extension_was_loaded: bool,
+    ) -> None:
+        if extension_was_loaded and self.bot.extensions.get("cleanup") is None:
+            await self.bot.load_extension("cleanup")
+        if package_was_loaded:
+            packages = await self.bot._config.packages()
+            if "cleanup" not in packages:
+                await self.bot.add_loaded_package("cleanup")
 
     async def _remove_official_extension(self) -> None:
         extension = self.bot.extensions.get("cleanup")

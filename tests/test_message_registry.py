@@ -194,6 +194,24 @@ class MessageRegistryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(selected, (records[1],))
 
+    async def test_author_selection_excludes_messages_after_invocation(self):
+        registry = self.registry()
+        await registry.initialize()
+        records = (
+            self.record(900, minute=1),
+            self.record(1001, minute=2),
+        )
+        for record in records:
+            await registry.observe(record)
+
+        selected = await registry.recent_by_author(
+            10,
+            30,
+            before_message_id=999,
+        )
+
+        self.assertEqual(selected, (records[0],))
+
     async def test_matching_channel_count_counts_distinct_channels_in_window(self):
         registry = self.registry()
         await registry.initialize()

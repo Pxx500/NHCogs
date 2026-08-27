@@ -134,6 +134,7 @@ class MessageRegistry:
         limit: int | None = None,
         since_utc: datetime | None = None,
         exclude_message_id: int | None = None,
+        before_message_id: int | None = None,
         exclude_pinned: bool = True,
     ) -> tuple[MessageRecord, ...]:
         async with self._lock:
@@ -144,6 +145,7 @@ class MessageRegistry:
                 limit,
                 since_utc,
                 exclude_message_id,
+                before_message_id,
                 exclude_pinned,
             )
 
@@ -154,6 +156,7 @@ class MessageRegistry:
         limit: int | None,
         since_utc: datetime | None,
         exclude_message_id: int | None,
+        before_message_id: int | None,
         exclude_pinned: bool,
     ) -> tuple[MessageRecord, ...]:
         conditions = ["guild_id = ?", "author_id = ?"]
@@ -164,6 +167,9 @@ class MessageRegistry:
         if exclude_message_id is not None:
             conditions.append("message_id != ?")
             parameters.append(exclude_message_id)
+        if before_message_id is not None:
+            conditions.append("message_id < ?")
+            parameters.append(before_message_id)
         if exclude_pinned:
             conditions.append("pinned = 0")
         query = f"""

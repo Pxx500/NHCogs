@@ -310,6 +310,7 @@ class _CommandStub:
         self.parent = parent
         self.invoke_without_command = invoke_without_command
         self.commands = []
+        self.usage = None
         self.qualified_name = (
             name if parent is None else f"{parent.qualified_name} {name}"
         )
@@ -343,6 +344,7 @@ def _command_decorator(kind, *, parent=None, **options):
             parent=parent,
             invoke_without_command=options.get("invoke_without_command", False),
         )
+        command.usage = options.get("usage")
         if parent is not None:
             parent.commands.append(command)
         return command

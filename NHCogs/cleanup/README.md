@@ -9,14 +9,15 @@ boundary messages from Discord.
 ## Commands
 
 ```ini
-[p]cleanup <count>
+[p]cleanup messages <count>
 [p]cleanup user <user> <count>
 [p]cleanup after [message_id] [delete_pinned]
 [p]cleanup before [message_id] <count> [delete_pinned]
 [p]cleanup between <older_id> <newer_id> [delete_pinned]
 ```
 
-All commands require Red moderator status or Manage Messages. Counts must be from
+Running `[p]cleanup` shows the complete command overview. All actions require
+Red moderator status or Manage Messages. Counts must be from
 1 through 1000. `after`, `before`, and `between` accept only message IDs retained
 for the current channel. For `after` and `before`, reply to a retained message to
 omit `message_id`.

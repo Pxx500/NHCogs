@@ -247,6 +247,13 @@ class CleanupOrchestrationTests(unittest.IsolatedAsyncioTestCase):
 
                 result = await honeypot.cleanup.cleanup_user(cog, ctx, 30, 2)
 
+                cog._message_registry.recent_by_author.assert_awaited_once_with(
+                    10,
+                    30,
+                    limit=2,
+                    since_utc=mock.ANY,
+                    before_message_id=999,
+                )
                 available.delete_messages.assert_awaited_once()
                 self.assertEqual((result.deleted, result.failed), (1, 1))
                 self.assertNotIn("21", result.public_message)
@@ -433,7 +440,27 @@ class CleanupCommandAdapterTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertEqual(
                         {command.name for command in root.commands},
-                        {"user", "after", "before", "between"},
+                        {"messages", "user", "after", "before", "between"},
+                    )
+                    before = next(command for command in root.commands if command.name == "before")
+                    self.assertEqual(
+                        before.usage,
+                        "[message_id] <count> [delete_pinned]",
+                    )
+
+    async def test_bare_cleanup_group_renders_registered_command_overview(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)):
+                with loaded_managed_cleanup() as managed:
+                    cog = managed.Cleanup(object(), SimpleNamespace(), SimpleNamespace())
+                    ctx = SimpleNamespace()
+                    managed.send_group_overview = mock.AsyncMock()
+
+                    await managed.Cleanup.cleanup.callback(cog, ctx)
+
+                    managed.send_group_overview.assert_awaited_once_with(
+                        ctx,
+                        title="Cleanup",
                     )
 
     async def test_channel_command_delegates_to_loaded_honeypot(self):
@@ -447,7 +474,7 @@ class CleanupCommandAdapterTests(unittest.IsolatedAsyncioTestCase):
                     cog = managed.Cleanup(object(), SimpleNamespace(), honeypot)
                     ctx = SimpleNamespace(send=mock.AsyncMock())
 
-                    await managed.Cleanup.cleanup.callback(cog, ctx, 25)
+                    await managed.Cleanup.cleanup_messages.callback(cog, ctx, 25)
 
                     honeypot.cleanup_channel.assert_awaited_once_with(ctx, 25)
                     ctx.send.assert_awaited_once_with(
@@ -495,7 +522,7 @@ class CleanupCommandAdapterTests(unittest.IsolatedAsyncioTestCase):
                         send=mock.AsyncMock(),
                     )
 
-                    await managed.Cleanup.cleanup.callback(cog, ctx, 10)
+                    await managed.Cleanup.cleanup_messages.callback(cog, ctx, 10)
 
                     nhmisc.report_operational_error.assert_awaited_once_with(
                         guild_id=100,

@@ -190,7 +190,7 @@ async def cleanup_user(cog, ctx, user_id: int, count: int) -> CleanupResult:
         user_id,
         limit=count,
         since_utc=_retention_cutoff(),
-        exclude_message_id=ctx.message.id,
+        before_message_id=ctx.message.id,
     )
     by_channel: dict[int, list[MessageRecord]] = defaultdict(list)
     for record in records:

@@ -77,6 +77,16 @@ class Bot:
         self.cogs.pop("Cleanup", None)
         self.commands.pop("cleanup", None)
 
+    async def load_extension(self, name):
+        self.events.append(("load", name))
+        official_extension = types.ModuleType("redbot.cogs.cleanup")
+        official_type = type("OfficialCleanup", (), {})
+        official_type.__module__ = "redbot.cogs.cleanup.cleanup"
+        official = official_type()
+        self.extensions[name] = official_extension
+        self.cogs["Cleanup"] = official
+        self.commands["cleanup"] = SimpleNamespace(cog=official)
+
     async def add_cog(self, runtime):
         self.events.append(("add cog", runtime.qualified_name))
         self.cogs[runtime.qualified_name] = runtime
@@ -142,7 +152,7 @@ class CleanupReplacementTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(bot.get_cog("Cleanup"), unknown)
         self.assertEqual(bot.events, [])
 
-    async def test_missing_registered_command_removes_partial_replacement(self):
+    async def test_missing_registered_command_restores_official_cleanup(self):
         bot = Bot()
 
         async def add_without_command(runtime):
@@ -156,7 +166,31 @@ class CleanupReplacementTests(unittest.IsolatedAsyncioTestCase):
         ):
             await lifecycle.ReplacementActivator(bot, object(), object()).activate()
 
-        self.assertIsNone(bot.get_cog("Cleanup"))
+        self.assertEqual(
+            type(bot.get_cog("Cleanup")).__module__,
+            "redbot.cogs.cleanup.cleanup",
+        )
+        self.assertIn("cleanup", bot.packages)
+
+    async def test_registration_failure_restores_official_cleanup_and_autoload(self):
+        bot = Bot()
+
+        async def fail_registration(runtime):
+            bot.events.append(("add cog", runtime.qualified_name))
+            raise RuntimeError("registration failed")
+
+        bot.add_cog = fail_registration
+
+        with self.assertRaisesRegex(RuntimeError, "registration failed"):
+            await lifecycle.ReplacementActivator(bot, object(), object()).activate()
+
+        self.assertIn("cleanup", bot.packages)
+        self.assertIn("cleanup", bot.extensions)
+        self.assertEqual(
+            type(bot.get_cog("Cleanup")).__module__,
+            "redbot.cogs.cleanup.cleanup",
+        )
+        self.assertIs(bot.get_command("cleanup").cog, bot.get_cog("Cleanup"))
 
 
 if __name__ == "__main__":
