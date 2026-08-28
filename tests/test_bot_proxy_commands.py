@@ -47,27 +47,77 @@ class _Config:
 
 
 class BotProxyCommandTests(unittest.IsolatedAsyncioTestCase):
-    async def test_enabled_setting_shows_state_and_disables_through_manager(
+    async def test_toggle_setting_shows_state_and_disables_through_manager(
         self,
     ) -> None:
         guild = types.SimpleNamespace(id=10)
-        ctx = types.SimpleNamespace(guild=guild, send=mock.AsyncMock())
+        ctx = types.SimpleNamespace(
+            guild=guild,
+            channel=types.SimpleNamespace(id=30),
+            send=mock.AsyncMock(),
+        )
         manager = types.SimpleNamespace(
             enabled=mock.AsyncMock(return_value=False),
             set_enabled=mock.AsyncMock(),
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._ensure_bot_proxy = mock.Mock(return_value=manager)
+        cog._channel_allows_everyone = mock.Mock(return_value=False)
 
-        await nhmisc.NHMisc.botproxy_enabled.callback(cog, ctx, False)
+        await nhmisc.NHMisc.botproxy_toggle.callback(cog, ctx, False)
 
         manager.set_enabled.assert_awaited_once_with(guild, False)
         ctx.send.assert_not_awaited()
 
-        await nhmisc.NHMisc.botproxy_enabled.callback(cog, ctx, None)
+        await nhmisc.NHMisc.botproxy_toggle.callback(cog, ctx, None)
 
         manager.enabled.assert_awaited_once_with(guild)
         self.assertIn("disabled", ctx.send.await_args.args[0])
+
+    async def test_toggle_configuration_is_not_read_publicly(self) -> None:
+        guild = types.SimpleNamespace(id=10)
+        ctx = types.SimpleNamespace(
+            guild=guild,
+            channel=types.SimpleNamespace(id=30),
+            send=mock.AsyncMock(),
+        )
+        manager = types.SimpleNamespace(
+            enabled=mock.AsyncMock(return_value=False),
+            set_enabled=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._ensure_bot_proxy = mock.Mock(return_value=manager)
+        cog._channel_allows_everyone = mock.Mock(return_value=True)
+
+        with self.assertRaises(nhmisc.commands.UserFeedbackCheckFailure):
+            await nhmisc.NHMisc.botproxy_toggle.callback(cog, ctx, None)
+
+        manager.enabled.assert_not_awaited()
+        manager.set_enabled.assert_not_awaited()
+
+    async def test_public_create_does_not_reveal_disabled_state(self) -> None:
+        ctx = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=10),
+            channel=types.SimpleNamespace(id=40),
+            author=types.SimpleNamespace(id=20),
+            message=types.SimpleNamespace(id=50, delete=mock.AsyncMock()),
+            send=mock.AsyncMock(),
+        )
+        manager = types.SimpleNamespace(
+            require_enabled=mock.AsyncMock(),
+            workspace_channel=mock.AsyncMock(),
+            create_session=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._ensure_bot_proxy = mock.Mock(return_value=manager)
+        cog._channel_allows_everyone = mock.Mock(return_value=True)
+
+        with self.assertRaises(nhmisc.commands.UserFeedbackCheckFailure):
+            await nhmisc.NHMisc.botproxy_create.callback(cog, ctx)
+
+        cog._ensure_bot_proxy.assert_not_called()
+        manager.workspace_channel.assert_not_awaited()
+        manager.require_enabled.assert_not_awaited()
 
     async def test_create_reports_preflight_failure_directly_without_deleting_command(
         self,
@@ -89,6 +139,7 @@ class BotProxyCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._ensure_bot_proxy = mock.Mock(return_value=manager)
+        cog._channel_allows_everyone = mock.Mock(return_value=False)
 
         await nhmisc.NHMisc.botproxy_create.callback(cog, ctx)
 
@@ -135,6 +186,7 @@ class BotProxyCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._ensure_bot_proxy = mock.Mock(return_value=manager)
+        cog._channel_allows_everyone = mock.Mock(return_value=False)
 
         await nhmisc.NHMisc.botproxy_create.callback(cog, ctx)
 
