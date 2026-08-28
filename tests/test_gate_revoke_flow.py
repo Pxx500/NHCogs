@@ -174,14 +174,14 @@ class GateRevokeEntryPointTests(unittest.IsolatedAsyncioTestCase):
         )
 
         views, _fake_select = _load_achievement_views()
-        package = ModuleType("_gatecount_nhmisc")
+        package = ModuleType("_gatecount_root.nhmisc")
         package.__path__ = []
         with (
             mock.patch.dict(
                 sys.modules,
                 {
-                    "_gatecount_nhmisc": package,
-                    "_gatecount_nhmisc.achievement_views": views,
+                    "_gatecount_root.nhmisc": package,
+                    "_gatecount_root.nhmisc.achievement_views": views,
                 },
             ),
             mock.patch.object(

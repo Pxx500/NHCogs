@@ -11,7 +11,7 @@ from unittest import mock
 from tests.test_chatchart import nhmisc
 
 MODULE_PATH = (
-    Path(__file__).parents[1] / "NHCogs" / "nhmisc" / "operational_errors.py"
+    Path(__file__).parents[1] / "NHCogs" / "operational_errors.py"
 )
 
 
@@ -179,6 +179,60 @@ class OperationalErrorReporterTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             self.assertEqual(await reporter.active_count(guild_id), 0)
+
+    async def test_action_recovery_closes_all_active_fingerprints(self):
+        guild_id = 100
+        channel = _Channel(200)
+        with TemporaryDirectory() as directory:
+            reporter = operational_errors.OperationalErrorReporter(
+                _Bot(guild_id, _Guild(channel, None)),
+                _Config(channel_id=None, maintainer_id=None),
+                Path(directory) / "operational_errors.sqlite",
+                logger=logging.getLogger("test.operational-errors"),
+            )
+            await reporter.initialize()
+            for summary in ("first failure", "second failure"):
+                await reporter.report(
+                    guild_id=guild_id,
+                    source="NHModeration",
+                    action="weekly reconciliation",
+                    error=RuntimeError(summary),
+                )
+
+            self.assertEqual(await reporter.active_count(guild_id), 2)
+            self.assertEqual(
+                await reporter.mark_action_recovered(
+                    guild_id=guild_id,
+                    source="NHModeration",
+                    action="weekly reconciliation",
+                ),
+                2,
+            )
+            self.assertEqual(await reporter.active_count(guild_id), 0)
+
+    async def test_alert_failure_stays_persisted_and_is_logged(self):
+        guild_id = 100
+        channel = _Channel(200)
+        channel.send.side_effect = RuntimeError("Discord unavailable")
+        logger = mock.Mock()
+        with TemporaryDirectory() as directory:
+            reporter = operational_errors.OperationalErrorReporter(
+                _Bot(guild_id, _Guild(channel, None)),
+                _Config(channel_id=channel.id, maintainer_id=None),
+                Path(directory) / "operational_errors.sqlite",
+                logger=logger,
+            )
+            await reporter.initialize()
+
+            await reporter.report(
+                guild_id=guild_id,
+                source="NHModeration",
+                action="weekly reconciliation",
+                error=RuntimeError("failed"),
+            )
+
+            self.assertEqual(await reporter.active_count(guild_id), 1)
+            logger.exception.assert_called_once()
 
     async def test_achievement_interaction_failure_is_reported(self):
         cog = object.__new__(nhmisc.NHMisc)
