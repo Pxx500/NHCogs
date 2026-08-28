@@ -49,6 +49,7 @@ from .activity_storage import (
     UserChannelDistribution,
     UserStats,
 )
+from .bot_proxy_store import BotProxyStore
 from .forum_autopin import ForumAutopinService
 from .gate_increment_store import (
     GateIncrementMemberPlan,
@@ -463,6 +464,7 @@ class NHMisc(commands.Cog):
             alert_channel=None,
             maintenance_channel=None,
             moderation_log_channel=None,
+            bot_proxy_channel=None,
             error_channel=None,
             error_maintainer_id=None,
             vcjumping_visit_count=DEFAULT_VCJUMPING_VISIT_COUNT,
@@ -479,6 +481,8 @@ class NHMisc(commands.Cog):
             cog_data_path(self) / "operational_errors.sqlite",
             logger=log,
         )
+        self._bot_proxy_store = BotProxyStore(cog_data_path(self) / "bot_proxy.sqlite")
+        self._bot_proxy = None
         self._voice_visits = VoiceChannelVisitTracker()
         self._audit_log_tasks: set[asyncio.Task] = set()
         self._forum_autopin = ForumAutopinService(
@@ -559,6 +563,15 @@ class NHMisc(commands.Cog):
             discord.Permissions(manage_messages=True)
         )
         self._add_gate_proof_context_menu.guild_only = True
+        self._bot_proxy_context_menu = discord.app_commands.ContextMenu(
+            name="Bot Proxy",
+            callback=self._bot_proxy_context_action,
+        )
+        self._bot_proxy_context_menu.default_permissions = discord.Permissions(
+            manage_messages=True
+        )
+        self._bot_proxy_context_menu.guild_only = True
+        self._bot_proxy_context_registered = False
         self._achievement_commands_registered = False
 
     async def cog_load(self) -> None:
@@ -568,7 +581,10 @@ class NHMisc(commands.Cog):
         await self._role_analytics_store.initialize()
         await self._achievement_store.initialize()
         await self._gate_increment_store.initialize()
+        await self._bot_proxy_store.initialize()
+        await self._recover_bot_proxy_sessions()
         self._register_gate_increment_context_menu()
+        self._register_bot_proxy_context_menu()
         self._register_achievement_commands()
         self._activity_task = asyncio.create_task(self._activity_midnight_loop())
         self._role_analytics_startup_task = asyncio.create_task(
@@ -660,6 +676,47 @@ class NHMisc(commands.Cog):
                 error=error,
             )
 
+    def _ensure_bot_proxy(self):
+        if self._bot_proxy is None:
+            from .bot_proxy_avatar import AvatarLoader
+            from .bot_proxy_manager import BotProxyWorkflowManager
+
+            self._bot_proxy = BotProxyWorkflowManager(
+                config=self.config,
+                store=self._bot_proxy_store,
+                moderation_log=self.send_moderation_log,
+                error_reporter=self.report_operational_error,
+                avatar_loader=AvatarLoader(),
+            )
+        return self._bot_proxy
+
+    async def _recover_bot_proxy_sessions(self) -> None:
+        for record in await self._bot_proxy_store.list_active_sessions():
+            try:
+                thread = self.bot.get_channel(record.thread_id)
+                if thread is None:
+                    thread = await self.bot.fetch_channel(record.thread_id)
+                try:
+                    dashboard = await thread.fetch_message(record.dashboard_message_id)
+                    await dashboard.edit(
+                        content="Bot Proxy session: Interrupted",
+                        view=None,
+                    )
+                finally:
+                    await thread.edit(archived=True, locked=True)
+            except Exception as error:
+                await self.report_operational_error(
+                    guild_id=record.guild_id,
+                    source="NHMisc",
+                    action="recover Bot Proxy session",
+                    error=error,
+                    channel_id=record.launcher_channel_id,
+                    thread_id=record.thread_id,
+                    message_id=record.dashboard_message_id,
+                )
+            else:
+                await self._bot_proxy_store.remove_active_session(record.session_id)
+
     def runtime_health_issues(self) -> tuple[str, ...]:
         required_tasks = (
             (self._activity_task, "activity midnight task"),
@@ -684,13 +741,20 @@ class NHMisc(commands.Cog):
             if task is not None
         )
         self._unregister_gate_increment_context_menu()
+        self._unregister_bot_proxy_context_menu()
         self._unregister_achievement_commands()
         for task in tasks:
             task.cancel()
         analytics_shutdown = asyncio.create_task(self._role_analytics.shutdown())
+        bot_proxy = getattr(self, "_bot_proxy", None)
+        bot_proxy_shutdown = (
+            asyncio.create_task(bot_proxy.shutdown()) if bot_proxy is not None else None
+        )
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         await analytics_shutdown
+        if bot_proxy_shutdown is not None:
+            await bot_proxy_shutdown
         self._audit_log_tasks.clear()
         self._activity_task = None
         self._role_analytics_startup_task = None
@@ -726,6 +790,33 @@ class NHMisc(commands.Cog):
                 type=command_type,
             )
         self._gate_increment_context_registered = False
+
+    def _register_bot_proxy_context_menu(self) -> None:
+        command_type = discord.AppCommandType.message
+        existing = self.bot.tree.get_command(
+            self._bot_proxy_context_menu.name,
+            type=command_type,
+        )
+        if existing is self._bot_proxy_context_menu:
+            self._bot_proxy_context_registered = True
+            return
+        self.bot.tree.add_command(self._bot_proxy_context_menu, override=True)
+        self._bot_proxy_context_registered = True
+
+    def _unregister_bot_proxy_context_menu(self) -> None:
+        if not getattr(self, "_bot_proxy_context_registered", False):
+            return
+        command_type = discord.AppCommandType.message
+        existing = self.bot.tree.get_command(
+            self._bot_proxy_context_menu.name,
+            type=command_type,
+        )
+        if existing is self._bot_proxy_context_menu:
+            self.bot.tree.remove_command(
+                self._bot_proxy_context_menu.name,
+                type=command_type,
+            )
+        self._bot_proxy_context_registered = False
 
     def _register_achievement_commands(self) -> None:
         for command in (
@@ -1747,6 +1838,49 @@ class NHMisc(commands.Cog):
                 error,
                 public_defer=False,
             )
+
+    async def _bot_proxy_context_action(
+        self,
+        interaction: discord.Interaction,
+        source_message: discord.Message,
+    ) -> None:
+        permissions = interaction.permissions
+        if (
+            interaction.guild is None
+            or permissions is None
+            or not permissions.manage_messages
+        ):
+            await interaction.response.send_message(
+                "You need Manage Messages permission",
+                ephemeral=True,
+            )
+            return
+        try:
+            await self._ensure_bot_proxy().route_message(interaction, source_message)
+        except ValueError as error:
+            if interaction.response.is_done():
+                await interaction.edit_original_response(content=str(error), view=None)
+            else:
+                await interaction.response.send_message(str(error), ephemeral=True)
+        except Exception as error:
+            await self.report_operational_error(
+                guild_id=interaction.guild.id,
+                source="NHMisc",
+                action="open Bot Proxy from message",
+                error=error,
+                channel_id=source_message.channel.id,
+                message_id=source_message.id,
+            )
+            if interaction.response.is_done():
+                await interaction.edit_original_response(
+                    content="Bot Proxy failed",
+                    view=None,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Bot Proxy failed",
+                    ephemeral=True,
+                )
 
     async def _add_gate_proof_context_action(
         self,
@@ -3722,6 +3856,112 @@ class NHMisc(commands.Cog):
         if channel is None:
             return "Configured channel is missing"
         return channel.mention
+
+    @commands.group(name="botproxy", invoke_without_command=True)
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def botproxy(self, ctx: commands.Context) -> None:
+        """Create and configure private Bot Proxy sessions."""
+        embed = discord.Embed(
+            title="Bot Proxy",
+            description="Private moderator workflows for messages sent by the bot.",
+        )
+        embed.add_field(
+            name="Commands",
+            value=self._format_direct_commands(
+                ctx,
+                preferred_order=("create", "channel"),
+            ),
+            inline=False,
+        )
+        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+    @botproxy.command(name="create")
+    async def botproxy_create(self, ctx: commands.Context) -> None:
+        """Create an additional empty Bot Proxy session."""
+        manager = self._ensure_bot_proxy()
+        try:
+            workspace = await manager.workspace_channel(ctx.guild)
+        except ValueError as error:
+            raise commands.UserFeedbackCheckFailure(str(error)) from error
+        if ctx.channel.id != workspace.id:
+            raise commands.UserFeedbackCheckFailure(
+                "Run this command in the configured private Bot Proxy channel"
+            )
+        try:
+            await ctx.message.delete()
+        except discord.HTTPException as error:
+            await self.report_operational_error(
+                guild_id=ctx.guild.id,
+                source="NHMisc",
+                action="delete Bot Proxy create command",
+                error=error,
+                channel_id=ctx.channel.id,
+                message_id=ctx.message.id,
+            )
+        try:
+            await manager.create_session(ctx.guild, ctx.author)
+        except ValueError as error:
+            raise commands.UserFeedbackCheckFailure(str(error)) from error
+        except Exception as error:
+            await self.report_operational_error(
+                guild_id=ctx.guild.id,
+                source="NHMisc",
+                action="create Bot Proxy session",
+                error=error,
+                channel_id=ctx.channel.id,
+            )
+            raise commands.UserFeedbackCheckFailure("Bot Proxy failed") from error
+
+    @botproxy.command(
+        name="channel",
+        usage="[channel|clear]",
+    )
+    async def botproxy_channel(
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel | str | None = None,
+    ) -> None:
+        """Show, set, or clear the private Bot Proxy session channel."""
+        if self._channel_allows_everyone(ctx.channel, ctx.guild):
+            raise commands.UserFeedbackCheckFailure(
+                "Run this command in a private moderator channel"
+            )
+        if isinstance(channel, str):
+            if channel.casefold() != "clear":
+                raise commands.UserFeedbackCheckFailure(
+                    "Provide a channel or use clear"
+                )
+            await self.config.guild(ctx.guild).bot_proxy_channel.clear()
+            await ctx.send("Bot Proxy channel cleared")
+            return
+        if channel is None:
+            channel_id = await self.config.guild(ctx.guild).bot_proxy_channel()
+            await ctx.send(
+                f"Bot Proxy channel: "
+                f"{self._configured_channel_label(ctx.guild, channel_id)}",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        if self._channel_allows_everyone(channel, ctx.guild):
+            raise commands.UserFeedbackCheckFailure(
+                "Configure a channel that is private from @everyone"
+            )
+        permissions = channel.permissions_for(ctx.guild.me)
+        required = (
+            ("view_channel", "View Channel"),
+            ("send_messages", "Send Messages"),
+            ("create_public_threads", "Create Public Threads"),
+            ("send_messages_in_threads", "Send Messages in Threads"),
+            ("manage_threads", "Manage Threads"),
+        )
+        missing = [label for attr, label in required if not getattr(permissions, attr)]
+        if missing:
+            raise commands.UserFeedbackCheckFailure(
+                f"Bot is missing {', '.join(missing)} in {channel.mention}"
+            )
+        await self.config.guild(ctx.guild).bot_proxy_channel.set(channel.id)
+        await ctx.send(f"Bot Proxy channel set to {channel.mention}")
 
     @commands.group(name="nhmisc", invoke_without_command=True)
     @commands.guild_only()
@@ -5894,6 +6134,23 @@ class NHMisc(commands.Cog):
             return
         if message.author.bot or message.webhook_id is not None:
             return
+        try:
+            if self._bot_proxy is not None:
+                await self._bot_proxy.handle_message(message)
+        except Exception as error:
+            await self.report_operational_error(
+                guild_id=guild.id,
+                source="NHMisc",
+                action="process Bot Proxy workflow input",
+                error=error,
+                channel_id=message.channel.id,
+                thread_id=(
+                    message.channel.id
+                    if isinstance(message.channel, discord.Thread)
+                    else None
+                ),
+                message_id=message.id,
+            )
         if message.type not in {discord.MessageType.default, discord.MessageType.reply}:
             return
 
