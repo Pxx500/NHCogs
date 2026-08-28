@@ -128,7 +128,7 @@ class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
 
         pull_request = await client.get_pull_request("GTNewHorizons", "Example", 42)
 
-        self.assertEqual(pull_request.node_id, 9001)
+        self.assertEqual(pull_request.pull_request_id, 9001)
         self.assertEqual(pull_request.number, 42)
         self.assertEqual(pull_request.title, "Make the machine faster")
         self.assertEqual(pull_request.author_login, "author")
@@ -154,6 +154,10 @@ class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
                 "User-Agent": "NHCogs-GitHubTickets",
             },
         )
+        for request in session.requests:
+            timeout = request[2]["timeout"]
+            self.assertEqual(timeout.total, 30)
+            self.assertEqual(timeout.connect, 10)
         self.assertNotIn("webhook-secret", repr(credentials))
         self.assertNotIn(self.private_pem.decode(), repr(credentials))
 
@@ -285,7 +289,7 @@ class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
             FakeResponse(
                 403,
                 {"message": "sensitive upstream response body"},
-                headers={"Retry-After": "120"},
+                headers={"retry-after": "120"},
             ),
         )
         now = datetime(2026, 8, 29, tzinfo=timezone.utc)

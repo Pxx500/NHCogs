@@ -22,6 +22,7 @@ _HTTP_UNAUTHORIZED = 401
 _HTTP_FORBIDDEN = 403
 _HTTP_TOO_MANY_REQUESTS = 429
 _TRANSIENT_STATUSES = frozenset({500, 502, 503, 504})
+_REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +36,7 @@ class GitHubAppCredentials:
 
 @dataclass(frozen=True, slots=True)
 class PullRequestSnapshot:
-    node_id: int
+    pull_request_id: int
     number: int
     title: str
     url: str
@@ -110,7 +111,7 @@ class GitHubAppClient:
             operation="read pull request",
         )
         return PullRequestSnapshot(
-            node_id=_integer(payload["id"]),
+            pull_request_id=_integer(payload["id"]),
             number=_integer(payload["number"]),
             title=str(payload["title"]),
             url=str(payload["html_url"]),
@@ -274,8 +275,11 @@ class GitHubAppClient:
                 f"{_API_ROOT}{path}",
                 headers=headers,
                 json=json,
+                timeout=_REQUEST_TIMEOUT,
             ) as response:
-                response_headers = dict(response.headers)
+                response_headers = {
+                    str(name).casefold(): str(value) for name, value in response.headers.items()
+                }
                 payload = (
                     await response.json(content_type=None)
                     if read_json and _HTTP_SUCCESS_MIN <= response.status < _HTTP_REDIRECT_MIN
@@ -353,8 +357,8 @@ def _response_error(
     headers: Mapping[str, str],
     now: datetime,
 ) -> GitHubRequestError:
-    retry_after = headers.get("Retry-After")
-    rate_limit_reset = headers.get("X-RateLimit-Reset")
+    retry_after = headers.get("retry-after")
+    rate_limit_reset = headers.get("x-ratelimit-reset")
     rate_limited = status == _HTTP_TOO_MANY_REQUESTS or (
         status == _HTTP_FORBIDDEN and (retry_after is not None or rate_limit_reset is not None)
     )
