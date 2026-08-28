@@ -463,6 +463,22 @@ class ModerationStore:
     async def observations(self, guild_id: int) -> list[StoredObservation]:
         return await asyncio.to_thread(self._observations_sync, guild_id)
 
+    async def observation_count_for_batch(self, guild_id: int, batch_id: str) -> int:
+        return await asyncio.to_thread(
+            self._observation_count_for_batch_sync,
+            guild_id,
+            batch_id,
+        )
+
+    def _observation_count_for_batch_sync(self, guild_id: int, batch_id: str) -> int:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """SELECT COUNT(*) AS count FROM moderation_observations
+                   WHERE guild_id = ? AND import_batch_id = ?""",
+                (guild_id, batch_id),
+            ).fetchone()
+        return int(row["count"]) if row is not None else 0
+
     def _observations_sync(self, guild_id: int) -> list[StoredObservation]:
         with closing(self._connect()) as connection:
             rows = connection.execute(

@@ -62,7 +62,8 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
     async def test_bare_nhmod_groups_use_runtime_overviews(self):
         with loaded_nhmoderation() as module:
             subject = object.__new__(module.NHModeration)
-            ctx = object()
+            subject._mark_operational_recovered = mock.AsyncMock()
+            ctx = SimpleNamespace(guild=SimpleNamespace(id=10))
 
             with mock.patch.object(
                 module, "send_group_overview", new=mock.AsyncMock()
@@ -77,11 +78,19 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                     mock.call(ctx),
                 ],
             )
+            self.assertEqual(
+                subject._mark_operational_recovered.await_args_list,
+                [
+                    mock.call(ctx.guild, "nhmod"),
+                    mock.call(ctx.guild, "nhmod migrate"),
+                ],
+            )
 
     async def test_banchart_reads_history_and_sends_shared_chart(self):
         with loaded_nhmoderation() as module:
             subject = object.__new__(module.NHModeration)
             subject._require_private_channel = mock.Mock()
+            subject._mark_operational_recovered = mock.AsyncMock()
             subject.history = SimpleNamespace(
                 status=mock.AsyncMock(
                     return_value=SimpleNamespace(migration_state="complete")
@@ -116,11 +125,16 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
             renderer.assert_called_once()
             ctx.send.assert_awaited_once()
             self.assertIs(ctx.send.await_args.kwargs["file"], chart)
+            subject._mark_operational_recovered.assert_awaited_once_with(
+                guild,
+                "banchart",
+            )
 
     async def test_banchart_rejects_incomplete_migration_without_reading_chart(self):
         with loaded_nhmoderation() as module:
             subject = object.__new__(module.NHModeration)
             subject._require_private_channel = mock.Mock()
+            subject._mark_operational_recovered = mock.AsyncMock()
             subject.history = SimpleNamespace(
                 status=mock.AsyncMock(
                     return_value=SimpleNamespace(migration_state="running")
@@ -149,11 +163,13 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                 "Run `!nhmod migrate run` before using banchart.",
             )
             self.assertIn("allowed_mentions", ctx.send.await_args.kwargs)
+            subject._mark_operational_recovered.assert_not_awaited()
 
     async def test_migrate_plan_reports_cached_source_and_command_readiness(self):
         with loaded_nhmoderation() as module:
             subject = object.__new__(module.NHModeration)
             subject._require_private_channel = mock.Mock()
+            subject._mark_operational_recovered = mock.AsyncMock()
             subject.history = SimpleNamespace(
                 status=mock.AsyncMock(
                     return_value=SimpleNamespace(migration_state="running")
@@ -191,11 +207,16 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                     )
                 ),
             )
+            subject._mark_operational_recovered.assert_awaited_once_with(
+                guild,
+                "nhmod migrate plan",
+            )
 
     async def test_migrate_run_reports_when_initial_import_is_already_complete(self):
         with loaded_nhmoderation() as module:
             subject = object.__new__(module.NHModeration)
             subject._require_private_channel = mock.Mock()
+            subject._mark_operational_recovered = mock.AsyncMock()
             subject.history = SimpleNamespace(
                 status=mock.AsyncMock(
                     return_value=SimpleNamespace(migration_state="complete")
@@ -214,12 +235,17 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                 ctx.send.await_args.args[0],
                 "Initial migration is already complete.",
             )
+            subject._mark_operational_recovered.assert_awaited_once_with(
+                ctx.guild,
+                "nhmod migrate run",
+            )
 
     async def test_status_reports_possible_historical_gap(self):
         with loaded_nhmoderation() as module:
             subject = object.__new__(module.NHModeration)
             subject._require_private_channel = mock.Mock()
             subject._sync_tasks = {}
+            subject._mark_operational_recovered = mock.AsyncMock()
             subject.history = SimpleNamespace(
                 status=mock.AsyncMock(
                     return_value=SimpleNamespace(
@@ -250,6 +276,46 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
             embed = ctx.send.await_args.kwargs["embed"]
             fields = {field.name: field.value for field in embed.fields}
             self.assertEqual(fields["Historical coverage gap"], "possible")
+            subject._mark_operational_recovered.assert_awaited_once_with(
+                ctx.guild,
+                "nhmod status",
+            )
+
+    async def test_successful_migration_sync_and_repair_recover_command_failures(self):
+        with loaded_nhmoderation() as module:
+            subject = object.__new__(module.NHModeration)
+            subject._require_private_channel = mock.Mock()
+            subject._mark_operational_recovered = mock.AsyncMock()
+            subject._run_sync = mock.AsyncMock(
+                return_value=SimpleNamespace(inserted_observations=2)
+            )
+            subject.history = SimpleNamespace(
+                status=mock.AsyncMock(
+                    return_value=SimpleNamespace(migration_state="pending")
+                )
+            )
+            ctx = SimpleNamespace(
+                guild=SimpleNamespace(id=10),
+                clean_prefix="!",
+                send=mock.AsyncMock(),
+            )
+
+            await module.NHModeration.nhmod_migrate_run.callback(subject, ctx)
+            await module.NHModeration.nhmod_sync.callback(subject, ctx)
+            await module.NHModeration.nhmod_repair.callback(
+                subject,
+                ctx,
+                confirmation="confirm",
+            )
+
+            self.assertEqual(
+                subject._mark_operational_recovered.await_args_list,
+                [
+                    mock.call(ctx.guild, "nhmod migrate run"),
+                    mock.call(ctx.guild, "nhmod sync"),
+                    mock.call(ctx.guild, "nhmod repair"),
+                ],
+            )
 
     async def test_unexpected_command_error_is_reported_and_acknowledged(self):
         with loaded_nhmoderation() as module:
@@ -382,3 +448,6 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             self.assertEqual(subject._sync_tasks, {})
+            self.assertIsNone(subject._scheduler_task)
+            self.assertIsNone(subject._startup_task)
+            self.assertIsNone(subject._gateway_catchup_task)

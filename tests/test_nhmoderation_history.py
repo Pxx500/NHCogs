@@ -254,6 +254,40 @@ class ModerationHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(datetime.fromisoformat(occurred_at), NOW)
         self.assertEqual(current_state, "active")
 
+    async def test_unban_ends_earlier_undated_snapshot_state(self):
+      with TemporaryDirectory() as directory:
+        database_path = Path(directory) / "moderation.sqlite"
+        history = NHModerationHistory(database_path)
+        await history.initialize()
+        await history.observe(
+            observation(
+                source_kind="discord_ban_snapshot",
+                source_key="batch:100",
+                occurred_at=None,
+                observed_at=NOW,
+                import_batch_id="batch",
+            )
+        )
+        ended_at = NOW + timedelta(days=1)
+        await history.observe(
+            observation(
+                source_kind="discord_audit",
+                source_key="unban-1",
+                action_hint="unban",
+                occurred_at=ended_at,
+                observed_at=ended_at,
+            )
+        )
+
+        with closing(sqlite3.connect(database_path)) as connection:
+            occurred_at, current_state, stored_ended_at = connection.execute(
+                """SELECT occurred_at, current_state, ended_at
+                   FROM moderation_actions WHERE action_kind = 'ban'"""
+            ).fetchone()
+        self.assertIsNone(occurred_at)
+        self.assertEqual(current_state, "ended")
+        self.assertEqual(datetime.fromisoformat(stored_ended_at), ended_at)
+
     async def test_initialize_rebuilds_a_stale_projection_from_observations(self):
       with TemporaryDirectory() as directory:
         database_path = Path(directory) / "moderation.sqlite"

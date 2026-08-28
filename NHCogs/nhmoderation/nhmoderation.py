@@ -87,6 +87,7 @@ class NHModeration(commands.Cog):
             await asyncio.gather(*tasks, return_exceptions=True)
         self._scheduler_task = None
         self._startup_task = None
+        self._gateway_catchup_task = None
         self._sync_tasks.clear()
 
     async def red_delete_data_for_user(self, *, requester: str, user_id: int) -> None:
@@ -176,7 +177,7 @@ class NHModeration(commands.Cog):
             error=error,
         )
 
-    async def _mark_background_recovered(
+    async def _mark_operational_recovered(
         self, guild: discord.Guild, action: str
     ) -> None:
         try:
@@ -258,7 +259,7 @@ class NHModeration(commands.Cog):
                 if state.migration_state != "complete":
                     continue
                 await self._run_sync(guild, SyncMode.INCREMENTAL)
-                await self._mark_background_recovered(guild, "startup sync")
+                await self._mark_operational_recovered(guild, "startup sync")
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -272,7 +273,7 @@ class NHModeration(commands.Cog):
                 if state.migration_state != "complete":
                     continue
                 await self._run_sync(guild, SyncMode.INCREMENTAL)
-                await self._mark_background_recovered(guild, "gateway catch-up")
+                await self._mark_operational_recovered(guild, "gateway catch-up")
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -304,7 +305,7 @@ class NHModeration(commands.Cog):
                     if state.migration_state != "complete":
                         continue
                     await self._run_sync(guild, SyncMode.WEEKLY)
-                    await self._mark_background_recovered(
+                    await self._mark_operational_recovered(
                         guild, "weekly reconciliation"
                     )
                 except asyncio.CancelledError:
@@ -331,7 +332,7 @@ class NHModeration(commands.Cog):
                     observed_at=now,
                 )
             )
-            await self._mark_background_recovered(guild, "member ban event")
+            await self._mark_operational_recovered(guild, "member ban event")
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -354,7 +355,7 @@ class NHModeration(commands.Cog):
                     observed_at=now,
                 )
             )
-            await self._mark_background_recovered(guild, "member unban event")
+            await self._mark_operational_recovered(guild, "member unban event")
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -377,7 +378,7 @@ class NHModeration(commands.Cog):
                     now,
                 )
             )
-            await self._mark_background_recovered(guild, "audit event")
+            await self._mark_operational_recovered(guild, "audit event")
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -399,7 +400,7 @@ class NHModeration(commands.Cog):
             return
         try:
             await self.history.observe(item)
-            await self._mark_background_recovered(guild, "modlog event")
+            await self._mark_operational_recovered(guild, "modlog event")
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -449,6 +450,7 @@ class NHModeration(commands.Cog):
                 "No retained bans match this chart.",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+            await self._mark_operational_recovered(ctx.guild, "banchart")
             return
         rows = []
         for row in data.rows:
@@ -478,6 +480,7 @@ class NHModeration(commands.Cog):
                 "Matplotlib is required for banchart but is not installed"
             ) from error
         await ctx.send(file=chart, allowed_mentions=discord.AllowedMentions.none())
+        await self._mark_operational_recovered(ctx.guild, "banchart")
 
     @commands.group(name="nhmod", invoke_without_command=True)
     @commands.guild_only()
@@ -485,6 +488,7 @@ class NHModeration(commands.Cog):
     async def nhmod(self, ctx: commands.Context) -> None:
         """Manage NHModeration history and synchronization."""
         await send_group_overview(ctx, include_descendants=False)
+        await self._mark_operational_recovered(ctx.guild, "nhmod")
 
     @nhmod.command(name="status")
     async def nhmod_status(self, ctx: commands.Context) -> None:
@@ -517,11 +521,13 @@ class NHModeration(commands.Cog):
         )
         embed.add_field(name="Next weekly reconciliation", value=next_run.isoformat(), inline=False)
         await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        await self._mark_operational_recovered(ctx.guild, "nhmod status")
 
     @nhmod.group(name="migrate", invoke_without_command=True)
     async def nhmod_migrate(self, ctx: commands.Context) -> None:
         """Plan or run the initial moderation history import."""
         await send_group_overview(ctx)
+        await self._mark_operational_recovered(ctx.guild, "nhmod migrate")
 
     @nhmod_migrate.command(name="plan")
     async def nhmod_migrate_plan(self, ctx: commands.Context) -> None:
@@ -559,6 +565,7 @@ class NHModeration(commands.Cog):
             f"BanChart command: {command_status}",
         ]
         await ctx.send("\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
+        await self._mark_operational_recovered(ctx.guild, "nhmod migrate plan")
 
     @nhmod_migrate.command(name="run")
     @commands.admin_or_permissions(administrator=True)
@@ -571,12 +578,14 @@ class NHModeration(commands.Cog):
                 "Initial migration is already complete.",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+            await self._mark_operational_recovered(ctx.guild, "nhmod migrate run")
             return
         report = await self._run_sync(ctx.guild, SyncMode.INITIAL)
         await ctx.send(
             f"Migration complete. Imported {report.inserted_observations} new observations.",
             allowed_mentions=discord.AllowedMentions.none(),
         )
+        await self._mark_operational_recovered(ctx.guild, "nhmod migrate run")
 
     @nhmod.command(name="sync")
     @commands.admin_or_permissions(administrator=True)
@@ -588,6 +597,7 @@ class NHModeration(commands.Cog):
             f"Synchronization complete. Imported {report.inserted_observations} new observations.",
             allowed_mentions=discord.AllowedMentions.none(),
         )
+        await self._mark_operational_recovered(ctx.guild, "nhmod sync")
 
     @nhmod.command(name="repair", usage="[confirm]")
     @commands.admin_or_permissions(administrator=True)
@@ -605,3 +615,4 @@ class NHModeration(commands.Cog):
             f"Repair complete. Imported {report.inserted_observations} new observations.",
             allowed_mentions=discord.AllowedMentions.none(),
         )
+        await self._mark_operational_recovered(ctx.guild, "nhmod repair")

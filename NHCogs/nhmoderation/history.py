@@ -62,6 +62,9 @@ class NHModerationHistory:
     async def migration_run(self, guild_id: int) -> MigrationRun | None:
         return await self._store.migration_run(guild_id)
 
+    async def migration_observation_count(self, guild_id: int, run_id: str) -> int:
+        return await self._store.observation_count_for_batch(guild_id, run_id)
+
     async def observe(self, item: ModerationObservation) -> bool:
         stored = StoredObservation(**item.__dict__)
         async with self._guild_locks[item.guild_id]:

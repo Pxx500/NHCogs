@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, time, timedelta, timezone
 from enum import Enum
 from typing import Any
@@ -188,6 +188,7 @@ class ModerationSynchronizer:
         cursor_floor: int | None,
         bot_user_id: int,
         observed_at: datetime,
+        import_batch_id: str | None = None,
     ) -> tuple[list[ModerationObservation], int | None, int]:
         inserted = 0
         max_entry_id = cursor_floor or 0
@@ -199,12 +200,15 @@ class ModerationSynchronizer:
             )
             inserted += await self._history.observe_many(
                 [
-                    audit_observation(
-                        guild.id,
-                        entry,
-                        action,
-                        bot_user_id,
-                        observed_at,
+                    replace(
+                        audit_observation(
+                            guild.id,
+                            entry,
+                            action,
+                            bot_user_id,
+                            observed_at,
+                        ),
+                        import_batch_id=import_batch_id,
                     )
                     for entry in entries
                 ]
@@ -220,12 +224,15 @@ class ModerationSynchronizer:
             [max_entry_id, *(_id(entry.id) or 0 for entry in remaining)]
         )
         observations = [
-            audit_observation(
-                guild.id,
-                entry,
-                action,
-                bot_user_id,
-                observed_at,
+            replace(
+                audit_observation(
+                    guild.id,
+                    entry,
+                    action,
+                    bot_user_id,
+                    observed_at,
+                ),
+                import_batch_id=import_batch_id,
             )
             for entry in remaining
         ]
@@ -242,8 +249,6 @@ class ModerationSynchronizer:
             uuid4().hex,
             started_at,
         )
-        inserted_total = 0
-
         if "red_modlog" not in run.completed_steps:
             cases = await self._modlog_fetcher(guild, after_case=None)
             observations = [
@@ -251,19 +256,19 @@ class ModerationSynchronizer:
                 for case in cases
                 if (
                     item := modlog_observation(
-                        guild.id,
-                        case,
-                        bot_user_id,
-                        started_at,
+                        guild.id, case, bot_user_id, started_at
                     )
                 )
                 is not None
+            ]
+            observations = [
+                replace(item, import_batch_id=run.run_id) for item in observations
             ]
             red_cursor = max(
                 (_id(getattr(case, "case_number", None)) or 0 for case in cases),
                 default=0,
             ) or None
-            inserted_total += await self._history.ingest_batch(
+            await self._history.ingest_batch(
                 guild.id,
                 observations,
                 audit_ban_cursor=None,
@@ -278,16 +283,16 @@ class ModerationSynchronizer:
         for action, step in (("ban", "audit_ban"), ("unban", "audit_unban")):
             if step in run.completed_steps:
                 continue
-            observations, cursor, partial_inserted = await self._fetch_audit_source(
+            observations, cursor, _partial_inserted = await self._fetch_audit_source(
                 guild,
                 action=action,
                 after_id=None,
                 cursor_floor=None,
                 bot_user_id=bot_user_id,
                 observed_at=started_at,
+                import_batch_id=run.run_id,
             )
-            inserted_total += partial_inserted
-            inserted_total += await self._history.ingest_batch(
+            await self._history.ingest_batch(
                 guild.id,
                 observations,
                 audit_ban_cursor=cursor if action == "ban" else None,
@@ -316,7 +321,7 @@ class ModerationSynchronizer:
                         import_batch_id=run.run_id,
                     )
                 )
-            inserted_total += await self._history.ingest_batch(
+            await self._history.ingest_batch(
                 guild.id,
                 observations,
                 audit_ban_cursor=None,
@@ -330,6 +335,10 @@ class ModerationSynchronizer:
 
         completed_at = self._clock()
         historical_gap = _possible_historical_gap(guild, started_at)
+        inserted_total = await self._history.migration_observation_count(
+            guild.id,
+            run.run_id,
+        )
         await self._history.complete_initial_migration(
             guild.id,
             run.run_id,

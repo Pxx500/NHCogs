@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from .models import ProjectedAction, StoredObservation
 
 CORRELATION_WINDOW = timedelta(minutes=5)
-PROJECTION_VERSION = 2
+PROJECTION_VERSION = 3
 BAN_ACTIONS = {"ban", "hackban", "tempban"}
 ATTRIBUTION_SOURCE_PRIORITY = {
     "nhmoderation": 4,
@@ -131,6 +131,18 @@ def _project_action(
         current_state = "active"
     elif kind in {"softban", "unban"}:
         current_state = "ended"
+    occurred_at = next(
+        (item.occurred_at for item in [richest, *observations] if item.occurred_at),
+        None,
+    )
+    snapshot_observed_at = max(
+        (
+            item.observed_at
+            for item in observations
+            if item.source_kind == "discord_ban_snapshot"
+        ),
+        default=None,
+    )
     return ProjectedAction(
         action_kind=kind,
         action_variant=variant,
@@ -138,9 +150,11 @@ def _project_action(
         moderator_user_id=moderator,
         attribution_kind=attribution,
         attribution_confidence=confidence,
-        occurred_at=next(
-            (item.occurred_at for item in [richest, *observations] if item.occurred_at),
-            None,
+        occurred_at=occurred_at,
+        lifecycle_at=(
+            snapshot_observed_at
+            or occurred_at
+            or max(item.observed_at for item in observations)
         ),
         expiry_at=next((item.expiry_at for item in observations if item.expiry_at), None),
         ended_at=ended_at,
@@ -157,10 +171,7 @@ def _apply_lifecycle(actions: list[ProjectedAction]) -> list[ProjectedAction]:
     active_by_target: dict[int, int] = {}
     indices = sorted(
         range(len(projected)),
-        key=lambda index: (
-            projected[index].occurred_at or datetime.max.replace(tzinfo=timezone.utc),
-            index,
-        ),
+        key=lambda index: (projected[index].lifecycle_at, index),
     )
     for index in indices:
         action = projected[index]

@@ -299,6 +299,54 @@ class ModerationSynchronizationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(modlog_fetcher.await_count, 1)
             self.assertEqual((await history.status(10)).migration_state, "complete")
 
+    async def test_resumed_initial_report_includes_observations_before_restart(self):
+        with TemporaryDirectory() as directory:
+            database_path = Path(directory) / "moderation.sqlite"
+            now = datetime(2026, 8, 28, tzinfo=timezone.utc)
+            history = NHModerationHistory(database_path)
+            await history.initialize()
+            case = SimpleNamespace(
+                action_type="ban",
+                case_number=5,
+                user=1,
+                moderator=55,
+                reason="valid ban",
+                created_at=now,
+                until=None,
+                channel=None,
+            )
+            first = ModerationSynchronizer(
+                history,
+                bot_user_id=999,
+                audit_fetcher=mock.AsyncMock(
+                    side_effect=RuntimeError("audit unavailable")
+                ),
+                modlog_fetcher=mock.AsyncMock(return_value=[case]),
+                snapshot_fetcher=mock.AsyncMock(return_value=[]),
+                clock=lambda: now,
+            )
+            guild = SimpleNamespace(id=10, created_at=now)
+
+            with self.assertRaisesRegex(RuntimeError, "audit unavailable"):
+                await first.synchronize(guild, SyncMode.INITIAL)
+
+            resumed_history = NHModerationHistory(database_path)
+            await resumed_history.initialize()
+            resumed = ModerationSynchronizer(
+                resumed_history,
+                bot_user_id=999,
+                audit_fetcher=mock.AsyncMock(return_value=[]),
+                modlog_fetcher=mock.AsyncMock(return_value=[]),
+                snapshot_fetcher=mock.AsyncMock(return_value=[]),
+                clock=lambda: now,
+            )
+            report = await resumed.synchronize(guild, SyncMode.INITIAL)
+            migration = await resumed_history.migration_run(10)
+
+            self.assertEqual(report.inserted_observations, 1)
+            self.assertIsNotNone(migration)
+            self.assertEqual(json.loads(migration.report)["inserted_observations"], 1)
+
     async def test_initial_migration_resumes_after_restart_at_each_source(self):
         scenarios = {
             "red_modlog": (2, 2, 1),

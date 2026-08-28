@@ -37,6 +37,7 @@ class ProjectedAction:
     attribution_kind: str
     attribution_confidence: str
     occurred_at: datetime | None
+    lifecycle_at: datetime
     expiry_at: datetime | None
     ended_at: datetime | None
     reason: str | None
