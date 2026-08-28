@@ -7,7 +7,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..storage import apply_migrations, connect
-from .models import ProjectedAction, StoredObservation, SynchronizationState
+from .models import (
+    MigrationRun,
+    ProjectedAction,
+    StoredObservation,
+    SynchronizationState,
+)
+
+MIGRATION_STEP_COLUMNS = {
+    "red_modlog": "red_modlog_complete",
+    "audit_ban": "audit_ban_complete",
+    "audit_unban": "audit_unban_complete",
+    "ban_snapshot": "ban_snapshot_complete",
+}
 
 
 def _timestamp(value: datetime | None) -> str | None:
@@ -90,10 +102,14 @@ def _migration_1(connection: sqlite3.Connection) -> None:
 
         CREATE TABLE moderation_migration_runs (
             run_id TEXT PRIMARY KEY,
-            guild_id INTEGER NOT NULL,
+            guild_id INTEGER NOT NULL UNIQUE,
             state TEXT NOT NULL,
             started_at TEXT NOT NULL,
             completed_at TEXT,
+            red_modlog_complete INTEGER NOT NULL DEFAULT 0,
+            audit_ban_complete INTEGER NOT NULL DEFAULT 0,
+            audit_unban_complete INTEGER NOT NULL DEFAULT 0,
+            ban_snapshot_complete INTEGER NOT NULL DEFAULT 0,
             report TEXT
         );
         """
@@ -119,6 +135,168 @@ class ModerationStore:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as connection:
             apply_migrations(connection, MIGRATIONS, label="NHModeration")
+
+    async def guilds_needing_projection(self, projection_version: int) -> tuple[int, ...]:
+        return await asyncio.to_thread(
+            self._guilds_needing_projection_sync,
+            projection_version,
+        )
+
+    def _guilds_needing_projection_sync(
+        self, projection_version: int
+    ) -> tuple[int, ...]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """SELECT observations.guild_id
+                   FROM moderation_observations AS observations
+                   LEFT JOIN moderation_sync_state AS state
+                     ON state.guild_id = observations.guild_id
+                   GROUP BY observations.guild_id
+                   HAVING COALESCE(state.projection_version, 0) != ?
+                      OR COALESCE(state.projection_checkpoint, 0)
+                         != MAX(observations.observation_id)""",
+                (projection_version,),
+            ).fetchall()
+        return tuple(int(row[0]) for row in rows)
+
+    async def start_migration(
+        self, guild_id: int, run_id: str, started_at: datetime
+    ) -> MigrationRun:
+        return await asyncio.to_thread(
+            self._start_migration_sync, guild_id, run_id, started_at
+        )
+
+    def _start_migration_sync(
+        self, guild_id: int, run_id: str, started_at: datetime
+    ) -> MigrationRun:
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                """INSERT OR IGNORE INTO moderation_migration_runs
+                   (run_id, guild_id, state, started_at)
+                   VALUES (?, ?, 'running', ?)""",
+                (run_id, guild_id, _timestamp(started_at)),
+            )
+            connection.execute(
+                """INSERT INTO moderation_sync_state(guild_id, migration_state)
+                   VALUES (?, 'running')
+                   ON CONFLICT(guild_id) DO UPDATE SET
+                     migration_state = CASE
+                       WHEN moderation_sync_state.migration_state = 'complete'
+                         THEN 'complete' ELSE 'running' END""",
+                (guild_id,),
+            )
+            row = connection.execute(
+                "SELECT * FROM moderation_migration_runs WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()
+        return self._migration_run_from_row(row)
+
+    async def migration_run(self, guild_id: int) -> MigrationRun | None:
+        return await asyncio.to_thread(self._migration_run_sync, guild_id)
+
+    def _migration_run_sync(self, guild_id: int) -> MigrationRun | None:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM moderation_migration_runs WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()
+        return self._migration_run_from_row(row) if row is not None else None
+
+    @staticmethod
+    def _migration_run_from_row(row: sqlite3.Row) -> MigrationRun:
+        completed_steps = frozenset(
+            step
+            for step, column in MIGRATION_STEP_COLUMNS.items()
+            if bool(row[column])
+        )
+        return MigrationRun(
+            run_id=row["run_id"],
+            guild_id=row["guild_id"],
+            state=row["state"],
+            started_at=_required_datetime(row["started_at"], "Migration start"),
+            completed_at=_datetime(row["completed_at"]),
+            completed_steps=completed_steps,
+            report=row["report"],
+        )
+
+    async def mark_migration_step(
+        self, guild_id: int, run_id: str, step: str
+    ) -> MigrationRun:
+        return await asyncio.to_thread(
+            self._mark_migration_step_sync, guild_id, run_id, step
+        )
+
+    def _mark_migration_step_sync(
+        self, guild_id: int, run_id: str, step: str
+    ) -> MigrationRun:
+        column = MIGRATION_STEP_COLUMNS.get(step)
+        if column is None:
+            raise ValueError(f"Unknown migration step: {step}")
+        with closing(self._connect()) as connection, connection:
+            cursor = connection.execute(
+                f"UPDATE moderation_migration_runs SET {column} = 1 "
+                "WHERE guild_id = ? AND run_id = ? AND state = 'running'",
+                (guild_id, run_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Active moderation migration run was not found")
+            row = connection.execute(
+                "SELECT * FROM moderation_migration_runs WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()
+        return self._migration_run_from_row(row)
+
+    async def complete_migration(
+        self,
+        guild_id: int,
+        run_id: str,
+        completed_at: datetime,
+        report: str,
+        historical_gap: bool,
+    ) -> None:
+        await asyncio.to_thread(
+            self._complete_migration_sync,
+            guild_id,
+            run_id,
+            completed_at,
+            report,
+            historical_gap,
+        )
+
+    def _complete_migration_sync(
+        self,
+        guild_id: int,
+        run_id: str,
+        completed_at: datetime,
+        report: str,
+        historical_gap: bool,
+    ) -> None:
+        with closing(self._connect()) as connection, connection:
+            cursor = connection.execute(
+                """UPDATE moderation_migration_runs
+                   SET state = 'complete', completed_at = ?, report = ?
+                   WHERE guild_id = ? AND run_id = ?
+                     AND red_modlog_complete = 1
+                     AND audit_ban_complete = 1
+                     AND audit_unban_complete = 1
+                     AND ban_snapshot_complete = 1""",
+                (_timestamp(completed_at), report, guild_id, run_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Moderation migration has incomplete source steps")
+            connection.execute(
+                """INSERT INTO moderation_sync_state
+                   (guild_id, migration_state, last_sync_at, historical_gap)
+                   VALUES (?, 'complete', ?, ?)
+                   ON CONFLICT(guild_id) DO UPDATE SET
+                      migration_state = 'complete',
+                      last_sync_at = excluded.last_sync_at,
+                      historical_gap = MAX(
+                        moderation_sync_state.historical_gap,
+                        excluded.historical_gap
+                      )""",
+                (guild_id, _timestamp(completed_at), int(historical_gap)),
+            )
 
     async def append(self, item: StoredObservation) -> bool:
         return await asyncio.to_thread(self._append_sync, item)
@@ -205,9 +383,10 @@ class ModerationStore:
         audit_ban_cursor: int | None,
         audit_unban_cursor: int | None,
         red_modlog_cursor: int | None,
-        completed_at: datetime,
+        completed_at: datetime | None,
         reconciliation: bool,
         migration_complete: bool,
+        historical_gap: bool | None,
     ) -> None:
         await asyncio.to_thread(
             self._update_sync_state_sync,
@@ -218,6 +397,7 @@ class ModerationStore:
             completed_at=completed_at,
             reconciliation=reconciliation,
             migration_complete=migration_complete,
+            historical_gap=historical_gap,
         )
 
     def _update_sync_state_sync(
@@ -227,27 +407,45 @@ class ModerationStore:
         audit_ban_cursor: int | None,
         audit_unban_cursor: int | None,
         red_modlog_cursor: int | None,
-        completed_at: datetime,
+        completed_at: datetime | None,
         reconciliation: bool,
         migration_complete: bool,
+        historical_gap: bool | None,
     ) -> None:
         timestamp = _timestamp(completed_at)
         with closing(self._connect()) as connection, connection:
             connection.execute(
                 """INSERT INTO moderation_sync_state
                    (guild_id, audit_ban_cursor, audit_unban_cursor, red_modlog_cursor,
-                    last_sync_at, last_reconciliation_at, migration_state)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                     last_sync_at, last_reconciliation_at, historical_gap,
+                     migration_state)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(guild_id) DO UPDATE SET
-                     audit_ban_cursor = excluded.audit_ban_cursor,
-                     audit_unban_cursor = excluded.audit_unban_cursor,
-                     red_modlog_cursor = excluded.red_modlog_cursor,
-                     last_sync_at = excluded.last_sync_at,
-                     last_reconciliation_at = COALESCE(
-                       excluded.last_reconciliation_at,
-                       moderation_sync_state.last_reconciliation_at
+                     audit_ban_cursor = COALESCE(
+                       excluded.audit_ban_cursor,
+                       moderation_sync_state.audit_ban_cursor
                      ),
-                     migration_state = CASE
+                     audit_unban_cursor = COALESCE(
+                       excluded.audit_unban_cursor,
+                       moderation_sync_state.audit_unban_cursor
+                     ),
+                     red_modlog_cursor = COALESCE(
+                       excluded.red_modlog_cursor,
+                       moderation_sync_state.red_modlog_cursor
+                     ),
+                     last_sync_at = COALESCE(
+                       excluded.last_sync_at,
+                       moderation_sync_state.last_sync_at
+                     ),
+                      last_reconciliation_at = COALESCE(
+                        excluded.last_reconciliation_at,
+                        moderation_sync_state.last_reconciliation_at
+                      ),
+                      historical_gap = MAX(
+                        moderation_sync_state.historical_gap,
+                        excluded.historical_gap
+                      ),
+                      migration_state = CASE
                        WHEN excluded.migration_state = 'complete' THEN 'complete'
                        ELSE moderation_sync_state.migration_state END""",
                 (
@@ -257,6 +455,7 @@ class ModerationStore:
                     red_modlog_cursor,
                     timestamp,
                     timestamp if reconciliation else None,
+                    int(bool(historical_gap)),
                     "complete" if migration_complete else "pending",
                 ),
             )
@@ -305,6 +504,14 @@ class ModerationStore:
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
+                """DELETE FROM moderation_action_observations
+                   WHERE observation_id IN (
+                     SELECT observation_id FROM moderation_observations
+                     WHERE guild_id = ?
+                   )""",
+                (guild_id,),
+            )
+            connection.execute(
                 "DELETE FROM moderation_actions WHERE guild_id = ?", (guild_id,)
             )
             for action in actions:
@@ -312,8 +519,9 @@ class ModerationStore:
                     """INSERT INTO moderation_actions
                        (guild_id, action_kind, action_variant, target_user_id,
                         credited_moderator_id, attribution_kind, attribution_confidence,
-                        occurred_at, expiry_at, reason, current_state, projection_version)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        occurred_at, expiry_at, ended_at, reason, current_state,
+                        projection_version)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         guild_id,
                         action.action_kind,
@@ -324,6 +532,7 @@ class ModerationStore:
                         action.attribution_confidence,
                         _timestamp(action.occurred_at),
                         _timestamp(action.expiry_at),
+                        _timestamp(action.ended_at),
                         action.reason,
                         action.current_state,
                         projection_version,
@@ -394,6 +603,9 @@ class ModerationStore:
             }
             connection.execute(
                 """UPDATE moderation_observations SET
+                     source_key = CASE
+                       WHEN source_kind = 'discord_ban_snapshot' AND target_user_id = ?
+                         THEN 'deleted:' || observation_id ELSE source_key END,
                      target_user_id = CASE WHEN target_user_id = ? THEN NULL ELSE target_user_id END,
                      executor_user_id = CASE WHEN executor_user_id = ? THEN NULL ELSE executor_user_id END,
                      credited_moderator_hint = CASE
@@ -405,7 +617,19 @@ class ModerationStore:
                          OR credited_moderator_hint = ? THEN NULL ELSE reason END
                    WHERE target_user_id = ? OR executor_user_id = ?
                       OR credited_moderator_hint = ?""",
-                (user_id, user_id, user_id, user_id, user_id, user_id, user_id, user_id, user_id, user_id),
+                (
+                    user_id,
+                    user_id,
+                    user_id,
+                    user_id,
+                    user_id,
+                    user_id,
+                    user_id,
+                    user_id,
+                    user_id,
+                    user_id,
+                    user_id,
+                ),
             )
         return guild_ids
 
@@ -438,6 +662,8 @@ class ModerationStore:
             red_modlog_cursor=row["red_modlog_cursor"],
             last_sync_at=_datetime(row["last_sync_at"]),
             last_reconciliation_at=_datetime(row["last_reconciliation_at"]),
+            historical_gap=bool(row["historical_gap"]),
             migration_state=row["migration_state"],
+            projection_checkpoint=row["projection_checkpoint"],
             projection_version=row["projection_version"],
         )

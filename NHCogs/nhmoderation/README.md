@@ -29,6 +29,7 @@ Then import all available Red ModLog cases, Discord ban and unban audit entries,
 ```
 
 The import is idempotent and can be retried. Discord audit history is retained for a limited time, so old actions missing from Red ModLog may not be recoverable.
+The migration report and `[p]nhmod status` record when a historical coverage gap is possible. This diagnostic is not shown on BanChart.
 
 ## BanChart
 
@@ -47,17 +48,12 @@ Names are resolved only from the Discord cache. The command does not call `fetch
 | Command | Description |
 |---|---|
 | `[p]nhmod` | Show the NHModeration command overview |
-| `[p]nhmod status` | Show private migration, synchronization, schedule, and operational health |
+| `[p]nhmod status` | Show private migration, historical coverage, synchronization, and schedule health |
 | `[p]nhmod migrate` | Show migration commands |
 | `[p]nhmod migrate plan` | Check cached permissions and local readiness without importing history |
 | `[p]nhmod migrate run` | Start or resume the initial import |
 | `[p]nhmod sync` | Fetch only entries after committed cursors |
 | `[p]nhmod repair [confirm]` | Re-import all available sources, read the active ban list, and rebuild the projection |
-| `[p]nhmod errors` | Show private error configuration and registered error commands |
-| `[p]nhmod errors channel [channel]` | Show or set the private operational error channel |
-| `[p]nhmod errors channel clear` | Clear the operational error channel |
-| `[p]nhmod errors maintainer [member]` | Show or set the maintainer notified about operational failures |
-| `[p]nhmod errors maintainer clear` | Clear the operational error maintainer |
 
 The `nhmod` root requires Red moderator status or Manage Messages. Migration run, sync, and repair require administrator authorization. BanChart requires Red moderator status or Ban Members.
 
@@ -71,7 +67,7 @@ Weekly reconciliation runs every Sunday at `04:20 UTC`. It re-reads a 14-day aud
 
 ## Operational errors
 
-Unexpected command, event, migration, synchronization, repair, scheduler, database, and rendering failures are stored in SQLite. Alerts and traceback attachments are sent only to the configured private error channel. Only the configured maintainer may be mentioned.
+Unexpected command, event, migration, synchronization, repair, scheduler, database, and rendering failures are stored in SQLite and written to the Python logger. NHModeration does not own separate error channel or maintainer commands.
 
 Expected input and permission errors return a short useful response. Public output never includes raw exceptions, audit IDs, case numbers, source keys, reasons, or database identifiers.
 

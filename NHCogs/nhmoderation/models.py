@@ -38,6 +38,7 @@ class ProjectedAction:
     attribution_confidence: str
     occurred_at: datetime | None
     expiry_at: datetime | None
+    ended_at: datetime | None
     reason: str | None
     current_state: str | None
     observation_ids: tuple[int, ...]
@@ -73,5 +74,18 @@ class SynchronizationState:
     red_modlog_cursor: int | None
     last_sync_at: datetime | None
     last_reconciliation_at: datetime | None
+    historical_gap: bool
     migration_state: str
+    projection_checkpoint: int
     projection_version: int
+
+
+@dataclass(frozen=True)
+class MigrationRun:
+    run_id: str
+    guild_id: int
+    state: str
+    started_at: datetime
+    completed_at: datetime | None
+    completed_steps: frozenset[str]
+    report: str | None

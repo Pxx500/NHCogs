@@ -9,6 +9,7 @@ from .models import (
     BanChartData,
     BanChartQuery,
     BanChartRow,
+    MigrationRun,
     ModerationObservation,
     StoredObservation,
     SynchronizationState,
@@ -24,6 +25,42 @@ class NHModerationHistory:
 
     async def initialize(self) -> None:
         await self._store.initialize()
+        for guild_id in await self._store.guilds_needing_projection(
+            PROJECTION_VERSION
+        ):
+            await self.rebuild(guild_id)
+
+    async def start_initial_migration(
+        self, guild_id: int, run_id: str, started_at: datetime
+    ) -> MigrationRun:
+        async with self._guild_locks[guild_id]:
+            return await self._store.start_migration(guild_id, run_id, started_at)
+
+    async def complete_migration_step(
+        self, guild_id: int, run_id: str, step: str
+    ) -> MigrationRun:
+        async with self._guild_locks[guild_id]:
+            return await self._store.mark_migration_step(guild_id, run_id, step)
+
+    async def complete_initial_migration(
+        self,
+        guild_id: int,
+        run_id: str,
+        completed_at: datetime,
+        report: str,
+        historical_gap: bool,
+    ) -> None:
+        async with self._guild_locks[guild_id]:
+            await self._store.complete_migration(
+                guild_id,
+                run_id,
+                completed_at,
+                report,
+                historical_gap,
+            )
+
+    async def migration_run(self, guild_id: int) -> MigrationRun | None:
+        return await self._store.migration_run(guild_id)
 
     async def observe(self, item: ModerationObservation) -> bool:
         stored = StoredObservation(**item.__dict__)
@@ -57,9 +94,10 @@ class NHModerationHistory:
         audit_ban_cursor: int | None,
         audit_unban_cursor: int | None,
         red_modlog_cursor: int | None,
-        completed_at: datetime,
+        completed_at: datetime | None,
         reconciliation: bool = False,
         migration_complete: bool = False,
+        historical_gap: bool | None = None,
     ) -> int:
         async with self._guild_locks[guild_id]:
             inserted = await self._store.append_batch(
@@ -74,6 +112,7 @@ class NHModerationHistory:
                 completed_at=completed_at,
                 reconciliation=reconciliation,
                 migration_complete=migration_complete,
+                historical_gap=historical_gap,
             )
             return inserted
 

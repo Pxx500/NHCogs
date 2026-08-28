@@ -306,6 +306,21 @@ class OperationalErrorReporter:
             recovered_at=datetime.now(timezone.utc),
         )
 
+    async def mark_action_recovered(
+        self,
+        *,
+        guild_id: int,
+        source: str,
+        action: str,
+    ) -> int:
+        return await asyncio.to_thread(
+            self._mark_action_recovered_sync,
+            guild_id=guild_id,
+            source=source,
+            action=action,
+            recovered_at=datetime.now(timezone.utc),
+        )
+
     async def active_count(self, guild_id: int) -> int:
         return await asyncio.to_thread(self._active_count_sync, guild_id)
 
@@ -341,3 +356,20 @@ class OperationalErrorReporter:
                 (_timestamp(recovered_at), guild_id, fingerprint),
             )
             return cursor.rowcount > 0
+
+    def _mark_action_recovered_sync(
+        self,
+        *,
+        guild_id: int,
+        source: str,
+        action: str,
+        recovered_at: datetime,
+    ) -> int:
+        with closing(self._connect()) as connection, connection:
+            cursor = connection.execute(
+                """UPDATE operational_failures SET recovered_at = ?
+                   WHERE guild_id = ? AND source = ? AND action = ?
+                     AND recovered_at IS NULL""",
+                (_timestamp(recovered_at), guild_id, source, action),
+            )
+            return cursor.rowcount

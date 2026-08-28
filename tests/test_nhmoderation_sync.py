@@ -1,4 +1,8 @@
+import asyncio
+import json
+import sqlite3
 import unittest
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,6 +14,7 @@ from tests.storage_loader import load_shared_storage
 load_shared_storage()
 
 from NHCogs.nhmoderation.history import NHModerationHistory  # noqa: E402
+from NHCogs.nhmoderation.models import BanChartQuery  # noqa: E402
 from NHCogs.nhmoderation.synchronization import (  # noqa: E402
     ModerationSynchronizer,
     SyncMode,
@@ -66,6 +71,46 @@ class ModerationSynchronizationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(state.audit_ban_cursor)
             self.assertIsNone(state.last_sync_at)
 
+    async def test_partial_audit_fetch_keeps_observations_without_advancing_cursor(self):
+        with TemporaryDirectory() as directory:
+            history = NHModerationHistory(Path(directory) / "moderation.sqlite")
+            await history.initialize()
+            entry = SimpleNamespace(
+                id=100,
+                target=SimpleNamespace(id=1),
+                user=SimpleNamespace(id=55),
+                reason=None,
+                created_at=datetime(2026, 8, 28, tzinfo=timezone.utc),
+            )
+
+            async def audit_fetcher(
+                _guild, *, action, after_id, on_batch
+            ):
+                del after_id
+                if action == "ban":
+                    await on_batch([entry])
+                    raise RuntimeError("later audit page failed")
+                return []
+
+            synchronizer = ModerationSynchronizer(
+                history,
+                bot_user_id=999,
+                audit_fetcher=audit_fetcher,
+                modlog_fetcher=mock.AsyncMock(return_value=[]),
+                snapshot_fetcher=mock.AsyncMock(return_value=[]),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "later audit page failed"):
+                await synchronizer.synchronize(
+                    SimpleNamespace(id=10), SyncMode.INCREMENTAL
+                )
+
+            chart = await history.get_ban_chart(BanChartQuery(guild_id=10))
+            state = await history.status(10)
+            self.assertEqual(chart.total_count, 1)
+            self.assertIsNone(state.audit_ban_cursor)
+            self.assertIsNone(state.last_sync_at)
+
     async def test_weekly_sync_uses_overlap_without_snapshot(self):
         with TemporaryDirectory() as directory:
             history = NHModerationHistory(Path(directory) / "moderation.sqlite")
@@ -105,6 +150,313 @@ class ModerationSynchronizationTests(unittest.IsolatedAsyncioTestCase):
 
             snapshot_fetcher.assert_awaited_once_with(guild)
 
+    async def test_completed_initial_migration_is_a_noop(self):
+        with TemporaryDirectory() as directory:
+            history = NHModerationHistory(Path(directory) / "moderation.sqlite")
+            await history.initialize()
+            audit_fetcher = mock.AsyncMock(side_effect=[[], []])
+            modlog_fetcher = mock.AsyncMock(return_value=[])
+            snapshot_fetcher = mock.AsyncMock(
+                return_value=[
+                    SimpleNamespace(user=SimpleNamespace(id=1), reason=None)
+                ]
+            )
+            synchronizer = ModerationSynchronizer(
+                history,
+                bot_user_id=999,
+                audit_fetcher=audit_fetcher,
+                modlog_fetcher=modlog_fetcher,
+                snapshot_fetcher=snapshot_fetcher,
+            )
+            guild = SimpleNamespace(id=10)
+
+            first = await synchronizer.synchronize(guild, SyncMode.INITIAL)
+            second = await synchronizer.synchronize(guild, SyncMode.INITIAL)
+
+            self.assertEqual(first.inserted_observations, 1)
+            self.assertEqual(second.inserted_observations, 0)
+            self.assertEqual(audit_fetcher.await_count, 2)
+            self.assertEqual(modlog_fetcher.await_count, 1)
+            self.assertEqual(snapshot_fetcher.await_count, 1)
+
+    async def test_initial_migration_records_possible_historical_gap(self):
+        with TemporaryDirectory() as directory:
+            history = NHModerationHistory(Path(directory) / "moderation.sqlite")
+            await history.initialize()
+            now = datetime(2026, 8, 28, tzinfo=timezone.utc)
+            synchronizer = ModerationSynchronizer(
+                history,
+                bot_user_id=999,
+                audit_fetcher=mock.AsyncMock(side_effect=[[], []]),
+                modlog_fetcher=mock.AsyncMock(return_value=[]),
+                snapshot_fetcher=mock.AsyncMock(return_value=[]),
+                clock=lambda: now,
+            )
+
+            await synchronizer.synchronize(
+                SimpleNamespace(
+                    id=10,
+                    created_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+                ),
+                SyncMode.INITIAL,
+            )
+
+            state = await history.status(10)
+            run = await history.migration_run(10)
+            self.assertTrue(state.historical_gap)
+            self.assertIsNotNone(run)
+            self.assertTrue(json.loads(run.report)["historical_gap"])
+
+    async def test_repeated_repair_preserves_gap_and_one_active_snapshot_action(self):
+        with TemporaryDirectory() as directory:
+            database_path = Path(directory) / "moderation.sqlite"
+            history = NHModerationHistory(database_path)
+            await history.initialize()
+            now = datetime(2026, 8, 28, tzinfo=timezone.utc)
+            current_time = now
+
+            def clock():
+                return current_time
+
+            snapshot_fetcher = mock.AsyncMock(
+                return_value=[SimpleNamespace(user=SimpleNamespace(id=1), reason=None)]
+            )
+            synchronizer = ModerationSynchronizer(
+                history,
+                bot_user_id=999,
+                audit_fetcher=mock.AsyncMock(return_value=[]),
+                modlog_fetcher=mock.AsyncMock(return_value=[]),
+                snapshot_fetcher=snapshot_fetcher,
+                clock=clock,
+            )
+
+            await synchronizer.synchronize(
+                SimpleNamespace(
+                    id=10,
+                    created_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+                ),
+                SyncMode.REPAIR,
+            )
+            current_time = datetime(2026, 10, 28, tzinfo=timezone.utc)
+            await synchronizer.synchronize(
+                SimpleNamespace(id=10, created_at=current_time),
+                SyncMode.REPAIR,
+            )
+
+            state = await history.status(10)
+            with closing(sqlite3.connect(database_path)) as connection:
+                total_actions, current_actions = connection.execute(
+                    """SELECT COUNT(*),
+                              SUM(CASE WHEN current_state = 'active' THEN 1 ELSE 0 END)
+                       FROM moderation_actions
+                       WHERE guild_id = ? AND target_user_id = ?
+                         AND action_kind = 'ban'""",
+                    (10, 1),
+                ).fetchone()
+            self.assertTrue(state.historical_gap)
+            self.assertEqual(state.last_sync_at, current_time)
+            self.assertEqual(total_actions, 1)
+            self.assertEqual(current_actions, 1)
+
+    async def test_initial_migration_resumes_after_completed_modlog_step(self):
+        with TemporaryDirectory() as directory:
+            history = NHModerationHistory(Path(directory) / "moderation.sqlite")
+            await history.initialize()
+            case = SimpleNamespace(
+                action_type="ban",
+                case_number=5,
+                user=1,
+                moderator=55,
+                reason="valid ban",
+                created_at=datetime(2026, 8, 28, tzinfo=timezone.utc),
+                until=None,
+                channel=None,
+            )
+            modlog_fetcher = mock.AsyncMock(return_value=[case])
+            audit_fetcher = mock.AsyncMock(
+                side_effect=[RuntimeError("audit unavailable"), [], []]
+            )
+            synchronizer = ModerationSynchronizer(
+                history,
+                bot_user_id=999,
+                audit_fetcher=audit_fetcher,
+                modlog_fetcher=modlog_fetcher,
+                snapshot_fetcher=mock.AsyncMock(return_value=[]),
+            )
+            guild = SimpleNamespace(id=10)
+
+            with self.assertRaisesRegex(RuntimeError, "audit unavailable"):
+                await synchronizer.synchronize(guild, SyncMode.INITIAL)
+
+            self.assertEqual((await history.status(10)).migration_state, "running")
+            self.assertEqual(
+                (await history.get_ban_chart(BanChartQuery(guild_id=10))).total_count,
+                1,
+            )
+
+            await synchronizer.synchronize(guild, SyncMode.INITIAL)
+
+            self.assertEqual(modlog_fetcher.await_count, 1)
+            self.assertEqual((await history.status(10)).migration_state, "complete")
+
+    async def test_initial_migration_resumes_after_restart_at_each_source(self):
+        scenarios = {
+            "red_modlog": (2, 2, 1),
+            "audit_ban": (1, 3, 1),
+            "audit_unban": (1, 3, 1),
+            "ban_snapshot": (1, 2, 2),
+        }
+        for failed_source, expected_counts in scenarios.items():
+            with self.subTest(source=failed_source), TemporaryDirectory() as directory:
+                database_path = Path(directory) / "moderation.sqlite"
+                history = NHModerationHistory(database_path)
+                await history.initialize()
+                modlog_fetcher = mock.AsyncMock(
+                    side_effect=(
+                        [RuntimeError("source unavailable"), []]
+                        if failed_source == "red_modlog"
+                        else None
+                    ),
+                    return_value=[],
+                )
+                if failed_source == "audit_ban":
+                    audit_side_effect = [RuntimeError("source unavailable"), [], []]
+                elif failed_source == "audit_unban":
+                    audit_side_effect = [[], RuntimeError("source unavailable"), []]
+                else:
+                    audit_side_effect = [[], []]
+                audit_fetcher = mock.AsyncMock(side_effect=audit_side_effect)
+                snapshot_fetcher = mock.AsyncMock(
+                    side_effect=(
+                        [RuntimeError("source unavailable"), []]
+                        if failed_source == "ban_snapshot"
+                        else None
+                    ),
+                    return_value=[],
+                )
+                synchronizer = ModerationSynchronizer(
+                    history,
+                    bot_user_id=999,
+                    audit_fetcher=audit_fetcher,
+                    modlog_fetcher=modlog_fetcher,
+                    snapshot_fetcher=snapshot_fetcher,
+                )
+                guild = SimpleNamespace(id=10)
+
+                with self.assertRaisesRegex(RuntimeError, "source unavailable"):
+                    await synchronizer.synchronize(guild, SyncMode.INITIAL)
+                self.assertEqual(
+                    (await history.status(10)).migration_state,
+                    "running",
+                )
+
+                resumed_history = NHModerationHistory(database_path)
+                await resumed_history.initialize()
+                resumed = ModerationSynchronizer(
+                    resumed_history,
+                    bot_user_id=999,
+                    audit_fetcher=audit_fetcher,
+                    modlog_fetcher=modlog_fetcher,
+                    snapshot_fetcher=snapshot_fetcher,
+                )
+                await resumed.synchronize(guild, SyncMode.INITIAL)
+
+                self.assertEqual(
+                    (await resumed_history.status(10)).migration_state,
+                    "complete",
+                )
+                self.assertEqual(
+                    (
+                        modlog_fetcher.await_count,
+                        audit_fetcher.await_count,
+                        snapshot_fetcher.await_count,
+                    ),
+                    expected_counts,
+                )
+
+    async def test_cancelled_initial_migration_remains_resumable(self):
+        with TemporaryDirectory() as directory:
+            database_path = Path(directory) / "moderation.sqlite"
+            history = NHModerationHistory(database_path)
+            await history.initialize()
+            cancelled_modlog = mock.AsyncMock(side_effect=asyncio.CancelledError)
+            synchronizer = ModerationSynchronizer(
+                history,
+                bot_user_id=999,
+                audit_fetcher=mock.AsyncMock(return_value=[]),
+                modlog_fetcher=cancelled_modlog,
+                snapshot_fetcher=mock.AsyncMock(return_value=[]),
+            )
+            guild = SimpleNamespace(id=10)
+
+            with self.assertRaises(asyncio.CancelledError):
+                await synchronizer.synchronize(guild, SyncMode.INITIAL)
+            self.assertEqual((await history.status(10)).migration_state, "running")
+
+            resumed_history = NHModerationHistory(database_path)
+            await resumed_history.initialize()
+            resumed = ModerationSynchronizer(
+                resumed_history,
+                bot_user_id=999,
+                audit_fetcher=mock.AsyncMock(return_value=[]),
+                modlog_fetcher=mock.AsyncMock(return_value=[]),
+                snapshot_fetcher=mock.AsyncMock(return_value=[]),
+            )
+            await resumed.synchronize(guild, SyncMode.INITIAL)
+
+            self.assertEqual(
+                (await resumed_history.status(10)).migration_state,
+                "complete",
+            )
+
+    async def test_initial_snapshot_retry_reuses_source_identity(self):
+        with TemporaryDirectory() as directory:
+            database_path = Path(directory) / "moderation.sqlite"
+            history = NHModerationHistory(database_path)
+            await history.initialize()
+            complete_step = history.complete_migration_step
+
+            async def interrupt_after_snapshot(guild_id, run_id, step):
+                if step == "ban_snapshot":
+                    raise RuntimeError("interrupted after snapshot")
+                return await complete_step(guild_id, run_id, step)
+
+            history.complete_migration_step = interrupt_after_snapshot
+            snapshot_fetcher = mock.AsyncMock(
+                return_value=[SimpleNamespace(user=SimpleNamespace(id=1), reason=None)]
+            )
+            synchronizer = ModerationSynchronizer(
+                history,
+                bot_user_id=999,
+                audit_fetcher=mock.AsyncMock(return_value=[]),
+                modlog_fetcher=mock.AsyncMock(return_value=[]),
+                snapshot_fetcher=snapshot_fetcher,
+            )
+            guild = SimpleNamespace(id=10)
+
+            with self.assertRaisesRegex(RuntimeError, "interrupted after snapshot"):
+                await synchronizer.synchronize(guild, SyncMode.INITIAL)
+
+            resumed_history = NHModerationHistory(database_path)
+            await resumed_history.initialize()
+            resumed = ModerationSynchronizer(
+                resumed_history,
+                bot_user_id=999,
+                audit_fetcher=mock.AsyncMock(return_value=[]),
+                modlog_fetcher=mock.AsyncMock(return_value=[]),
+                snapshot_fetcher=snapshot_fetcher,
+            )
+            await resumed.synchronize(guild, SyncMode.INITIAL)
+
+            with closing(sqlite3.connect(database_path)) as connection:
+                snapshot_count = connection.execute(
+                    """SELECT COUNT(*) FROM moderation_observations
+                       WHERE guild_id = ? AND source_kind = 'discord_ban_snapshot'
+                         AND target_user_id = ?""",
+                    (10, 1),
+                ).fetchone()[0]
+            self.assertEqual(snapshot_count, 1)
+
     async def test_bot_identity_is_resolved_when_sync_runs_after_startup(self):
         with TemporaryDirectory() as directory:
             history = NHModerationHistory(Path(directory) / "moderation.sqlite")
@@ -135,6 +487,35 @@ class ModerationSynchronizationTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             self.assertEqual(default_chart.total_count, 0)
+
+    async def test_red_audit_reason_credits_human_behind_bot_action(self):
+        with TemporaryDirectory() as directory:
+            history = NHModerationHistory(Path(directory) / "moderation.sqlite")
+            await history.initialize()
+            entry = SimpleNamespace(
+                id=100,
+                target=SimpleNamespace(id=1),
+                user=SimpleNamespace(id=999),
+                reason="Action requested by Moderator (ID 55). Reason: valid ban",
+                created_at=datetime(2026, 8, 28, tzinfo=timezone.utc),
+            )
+            synchronizer = ModerationSynchronizer(
+                history,
+                bot_user_id=999,
+                audit_fetcher=mock.AsyncMock(side_effect=[[entry], []]),
+                modlog_fetcher=mock.AsyncMock(return_value=[]),
+                snapshot_fetcher=mock.AsyncMock(return_value=[]),
+            )
+
+            await synchronizer.synchronize(
+                SimpleNamespace(id=10), SyncMode.INCREMENTAL
+            )
+
+            chart = await history.get_ban_chart(BanChartQuery(guild_id=10))
+            self.assertEqual(
+                [(row.moderator_user_id, row.count) for row in chart.rows],
+                [(55, 1)],
+            )
 
     def test_next_weekly_reconciliation_is_sunday_0420_utc(self):
         now = datetime(2026, 8, 28, 20, 0, tzinfo=timezone.utc)

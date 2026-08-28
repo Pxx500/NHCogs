@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -25,6 +26,7 @@ from .synchronization import (
 )
 
 log = logging.getLogger("red.NHModeration")
+AUDIT_BATCH_SIZE = 100
 
 
 class NHModeration(commands.Cog):
@@ -48,6 +50,7 @@ class NHModeration(commands.Cog):
         self._synchronizer: ModerationSynchronizer | None = None
         self._scheduler_task: asyncio.Task[None] | None = None
         self._startup_task: asyncio.Task[None] | None = None
+        self._gateway_catchup_task: asyncio.Task[None] | None = None
         self._sync_tasks: dict[int, asyncio.Task[Any]] = {}
 
     async def cog_load(self) -> None:
@@ -73,6 +76,7 @@ class NHModeration(commands.Cog):
             for task in (
                 self._scheduler_task,
                 self._startup_task,
+                self._gateway_catchup_task,
                 *self._sync_tasks.values(),
             )
             if task is not None
@@ -104,6 +108,12 @@ class NHModeration(commands.Cog):
         channel_id: int | None = None,
         message_id: int | None = None,
     ) -> OperationalFailure | None:
+        log.error(
+            "NHModeration operational error during %s for guild %s",
+            action,
+            guild_id,
+            exc_info=(type(error), error, error.__traceback__),
+        )
         try:
             return await self._operational_errors.report(
                 guild_id=guild_id,
@@ -151,7 +161,7 @@ class NHModeration(commands.Cog):
             )
         try:
             await ctx.send(
-                "Something went wrong while running this command. The error was logged for the maintainer.",
+                "Something went wrong while running this command. The error was logged.",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except Exception:
@@ -166,8 +176,28 @@ class NHModeration(commands.Cog):
             error=error,
         )
 
+    async def _mark_background_recovered(
+        self, guild: discord.Guild, action: str
+    ) -> None:
+        try:
+            await self._operational_errors.mark_action_recovered(
+                guild_id=guild.id,
+                source="NHModeration",
+                action=action,
+            )
+        except Exception:
+            log.exception(
+                "Failed to mark NHModeration action recovered for guild %s",
+                guild.id,
+            )
+
     async def _fetch_audit_entries(
-        self, guild: discord.Guild, *, action: str, after_id: int | None
+        self,
+        guild: discord.Guild,
+        *,
+        action: str,
+        after_id: int | None,
+        on_batch: Callable[[Sequence[discord.AuditLogEntry]], Awaitable[None]],
     ) -> list[discord.AuditLogEntry]:
         audit_action = (
             discord.AuditLogAction.ban
@@ -175,15 +205,18 @@ class NHModeration(commands.Cog):
             else discord.AuditLogAction.unban
         )
         after = discord.Object(id=after_id) if after_id is not None else None
-        return [
-            entry
-            async for entry in guild.audit_logs(
-                limit=None,
-                action=audit_action,
-                after=after,
-                oldest_first=True,
-            )
-        ]
+        pending: list[discord.AuditLogEntry] = []
+        async for entry in guild.audit_logs(
+            limit=None,
+            action=audit_action,
+            after=after,
+            oldest_first=True,
+        ):
+            pending.append(entry)
+            if len(pending) >= AUDIT_BATCH_SIZE:
+                await on_batch(tuple(pending))
+                pending.clear()
+        return pending
 
     async def _fetch_modlog_cases(
         self, guild: discord.Guild, *, after_case: int | None
@@ -225,10 +258,39 @@ class NHModeration(commands.Cog):
                 if state.migration_state != "complete":
                     continue
                 await self._run_sync(guild, SyncMode.INCREMENTAL)
+                await self._mark_background_recovered(guild, "startup sync")
             except asyncio.CancelledError:
                 raise
             except Exception as error:
                 await self._report_background_error(guild, "startup sync", error)
+
+    async def _debounced_gateway_catchup(self) -> None:
+        await asyncio.sleep(5)
+        for guild in getattr(self.bot, "guilds", ()):
+            try:
+                state = await self.history.status(guild.id)
+                if state.migration_state != "complete":
+                    continue
+                await self._run_sync(guild, SyncMode.INCREMENTAL)
+                await self._mark_background_recovered(guild, "gateway catch-up")
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                await self._report_background_error(
+                    guild,
+                    "gateway catch-up",
+                    error,
+                )
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        task = self._gateway_catchup_task
+        if task is not None and not task.done():
+            return
+        self._gateway_catchup_task = asyncio.create_task(
+            self._debounced_gateway_catchup(),
+            name="nhmoderation-gateway-catchup",
+        )
 
     async def _weekly_scheduler(self) -> None:
         await self.bot.wait_until_red_ready()
@@ -242,6 +304,9 @@ class NHModeration(commands.Cog):
                     if state.migration_state != "complete":
                         continue
                     await self._run_sync(guild, SyncMode.WEEKLY)
+                    await self._mark_background_recovered(
+                        guild, "weekly reconciliation"
+                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
@@ -266,6 +331,7 @@ class NHModeration(commands.Cog):
                     observed_at=now,
                 )
             )
+            await self._mark_background_recovered(guild, "member ban event")
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -288,6 +354,7 @@ class NHModeration(commands.Cog):
                     observed_at=now,
                 )
             )
+            await self._mark_background_recovered(guild, "member unban event")
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -310,6 +377,7 @@ class NHModeration(commands.Cog):
                     now,
                 )
             )
+            await self._mark_background_recovered(guild, "audit event")
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -331,6 +399,7 @@ class NHModeration(commands.Cog):
             return
         try:
             await self.history.observe(item)
+            await self._mark_background_recovered(guild, "modlog event")
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -351,6 +420,13 @@ class NHModeration(commands.Cog):
     async def banchart(self, ctx: commands.Context, *, arguments: str = "") -> None:
         """Render bans by credited moderator from local history."""
         self._require_private_channel(ctx)
+        state = await self.history.status(ctx.guild.id)
+        if state.migration_state != "complete":
+            await ctx.send(
+                f"Run `{ctx.clean_prefix}nhmod migrate run` before using banchart.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
         try:
             parsed = parse_banchart_arguments(arguments)
         except ValueError as error:
@@ -417,9 +493,13 @@ class NHModeration(commands.Cog):
         state = await self.history.status(ctx.guild.id)
         next_run = next_weekly_reconciliation(datetime.now(timezone.utc))
         running = ctx.guild.id in self._sync_tasks
-        active_failures = await self._operational_errors.active_count(ctx.guild.id)
         embed = discord.Embed(title="NHModeration status")
         embed.add_field(name="Migration", value=state.migration_state, inline=False)
+        embed.add_field(
+            name="Historical coverage gap",
+            value="possible" if state.historical_gap else "none detected",
+            inline=False,
+        )
         embed.add_field(name="Sync running", value="yes" if running else "no", inline=False)
         embed.add_field(
             name="Last sync",
@@ -436,7 +516,6 @@ class NHModeration(commands.Cog):
             inline=False,
         )
         embed.add_field(name="Next weekly reconciliation", value=next_run.isoformat(), inline=False)
-        embed.add_field(name="Active operational failures", value=str(active_failures), inline=False)
         await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
     @nhmod.group(name="migrate", invoke_without_command=True)
@@ -445,22 +524,40 @@ class NHModeration(commands.Cog):
         await send_group_overview(ctx)
 
     @nhmod_migrate.command(name="plan")
-    @commands.admin_or_permissions(administrator=True)
     async def nhmod_migrate_plan(self, ctx: commands.Context) -> None:
         """Check readiness without importing Discord history."""
         self._require_private_channel(ctx)
         permissions = ctx.guild.me.guild_permissions
-        missing = []
-        if not permissions.view_audit_log:
-            missing.append("View Audit Log")
-        if not permissions.ban_members:
-            missing.append("Ban Members")
         state = await self.history.status(ctx.guild.id)
-        lines = [f"Migration: {state.migration_state}"]
-        lines.append(
-            "Permissions: ready" if not missing else f"Missing permissions: {', '.join(missing)}"
-        )
-        lines.append("Database: ready")
+        command = self.bot.get_command("banchart")
+        owner = getattr(command, "cog", None)
+        if command is None:
+            command_status = "not registered"
+        elif owner is self:
+            command_status = "ready"
+        else:
+            owner_name = getattr(owner, "qualified_name", None) or type(owner).__name__
+            command_status = f"conflict with {owner_name}"
+        lines = [
+            f"Migration: {state.migration_state}",
+            "Database: ready",
+            (
+                "Discord audit history: ready"
+                if permissions.view_audit_log
+                else "Discord audit history: missing View Audit Log"
+            ),
+            (
+                "Active ban snapshot: ready"
+                if permissions.ban_members
+                else "Active ban snapshot: missing Ban Members"
+            ),
+            (
+                "Red ModLog: ready"
+                if callable(getattr(modlog, "get_all_cases", None))
+                else "Red ModLog: unavailable"
+            ),
+            f"BanChart command: {command_status}",
+        ]
         await ctx.send("\n".join(lines), allowed_mentions=discord.AllowedMentions.none())
 
     @nhmod_migrate.command(name="run")
@@ -468,6 +565,13 @@ class NHModeration(commands.Cog):
     async def nhmod_migrate_run(self, ctx: commands.Context) -> None:
         """Start or resume the initial moderation history import."""
         self._require_private_channel(ctx)
+        state = await self.history.status(ctx.guild.id)
+        if state.migration_state == "complete":
+            await ctx.send(
+                "Initial migration is already complete.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
         report = await self._run_sync(ctx.guild, SyncMode.INITIAL)
         await ctx.send(
             f"Migration complete. Imported {report.inserted_observations} new observations.",
@@ -501,104 +605,3 @@ class NHModeration(commands.Cog):
             f"Repair complete. Imported {report.inserted_observations} new observations.",
             allowed_mentions=discord.AllowedMentions.none(),
         )
-
-    @nhmod.group(name="errors", invoke_without_command=True)
-    async def nhmod_errors(self, ctx: commands.Context) -> None:
-        """Configure private operational error reporting."""
-        await send_group_overview(
-            ctx,
-            lambda: self._send_error_configuration(ctx),
-        )
-
-    async def _send_error_configuration(self, ctx: commands.Context) -> None:
-        guild_config = self.config.guild(ctx.guild)
-        channel_id = await guild_config.error_channel()
-        maintainer_id = await guild_config.error_maintainer_id()
-        channel = ctx.guild.get_channel(channel_id) if channel_id else None
-        maintainer = ctx.guild.get_member(maintainer_id) if maintainer_id else None
-        active = await self._operational_errors.active_count(ctx.guild.id)
-        embed = discord.Embed(title="Operational errors")
-        embed.add_field(
-            name="Current configuration",
-            value=(
-                f"Channel: {channel.mention if channel else 'Not configured'}\n"
-                f"Maintainer: {maintainer.mention if maintainer else 'Not configured'}\n"
-                f"Active failures: {active}"
-            ),
-            inline=False,
-        )
-        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-
-    @nhmod_errors.group(name="channel", invoke_without_command=True)
-    async def nhmod_errors_channel(
-        self, ctx: commands.Context, channel: discord.TextChannel | None = None
-    ) -> None:
-        """Show or set the private operational error channel."""
-        self._require_private_channel(ctx)
-        setting = self.config.guild(ctx.guild).error_channel
-        if channel is None:
-            channel_id = await setting()
-            current = ctx.guild.get_channel(channel_id) if channel_id else None
-            await ctx.send(
-                f"Operational error channel: {current.mention if current else 'Not configured'}",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-        if not channel_is_private(ctx.guild, channel):
-            raise commands.UserFeedbackCheckFailure(
-                "Configure a channel that is private from @everyone"
-            )
-        permissions = channel.permissions_for(ctx.guild.me)
-        missing = [
-            label
-            for attribute, label in (
-                ("view_channel", "View Channel"),
-                ("send_messages", "Send Messages"),
-                ("attach_files", "Attach Files"),
-            )
-            if not getattr(permissions, attribute, False)
-        ]
-        if missing:
-            raise commands.UserFeedbackCheckFailure(
-                f"The bot is missing these permissions: {', '.join(missing)}"
-            )
-        await setting.set(channel.id)
-        await ctx.send(
-            f"Operational error channel set to {channel.mention}.",
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-
-    @nhmod_errors_channel.command(name="clear")
-    async def nhmod_errors_channel_clear(self, ctx: commands.Context) -> None:
-        """Clear the operational error channel."""
-        self._require_private_channel(ctx)
-        await self.config.guild(ctx.guild).error_channel.clear()
-        await ctx.send("Operational error channel cleared.")
-
-    @nhmod_errors.group(name="maintainer", invoke_without_command=True)
-    async def nhmod_errors_maintainer(
-        self, ctx: commands.Context, member: discord.Member | None = None
-    ) -> None:
-        """Show or set the operational error maintainer."""
-        self._require_private_channel(ctx)
-        setting = self.config.guild(ctx.guild).error_maintainer_id
-        if member is not None:
-            await setting.set(member.id)
-            await ctx.send(
-                f"Operational error maintainer set to {member.mention}.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-        maintainer_id = await setting()
-        maintainer = ctx.guild.get_member(maintainer_id) if maintainer_id else None
-        await ctx.send(
-            f"Operational error maintainer: {maintainer.mention if maintainer else 'Not configured'}",
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-
-    @nhmod_errors_maintainer.command(name="clear")
-    async def nhmod_errors_maintainer_clear(self, ctx: commands.Context) -> None:
-        """Clear the operational error maintainer."""
-        self._require_private_channel(ctx)
-        await self.config.guild(ctx.guild).error_maintainer_id.clear()
-        await ctx.send("Operational error maintainer cleared.")
