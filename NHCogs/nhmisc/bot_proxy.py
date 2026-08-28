@@ -77,7 +77,6 @@ class SessionRouteKind(str, Enum):
 
 
 class SessionStatus(str, Enum):
-    SENT = "Sent"
     CANCELLED = "Cancelled"
     TIMED_OUT = "Timed out"
     RELOADED = "Reloaded"
@@ -133,6 +132,19 @@ def _user_only_mentions() -> Any:
     )
 
 
+def _no_mentions() -> Any:
+    discord = import_module("discord")
+    return discord.AllowedMentions.none()
+
+
+def _is_discord_not_found(error: Exception) -> bool:
+    try:
+        discord = import_module("discord")
+    except ModuleNotFoundError:
+        return False
+    return isinstance(error, discord.NotFound)
+
+
 def _store_sender(identity_type: IdentityType) -> Any:
     store_module = import_module(".bot_proxy_store", package=__package__)
     return store_module.ProxySender(identity_type.value)
@@ -180,6 +192,25 @@ class BotProxyPublisher:
             character_preset_name=None,
             character_display_name=None,
             avatar_sha256=None,
+        )
+        return message
+
+    async def preview(self, *, draft: BotProxyDraft, channel: Any) -> Any:
+        """Render an untracked, non-notifying copy of a frozen draft."""
+        errors = draft.validation_errors()
+        if errors:
+            raise ValueError(errors[0])
+        if draft.content is None:
+            raise RuntimeError("validated Bot Proxy draft has no content")
+        if draft.identity.kind is IdentityType.BOT:
+            return await channel.send(
+                content=draft.content,
+                allowed_mentions=_no_mentions(),
+            )
+        message, _webhook_id = await self._send_character(
+            draft=draft,
+            channel=channel,
+            allowed_mentions=_no_mentions(),
         )
         return message
 
@@ -364,41 +395,55 @@ class BotProxyPublisher:
         identity = draft.identity
         if destination is None or draft.content is None or identity.display_name is None:
             raise RuntimeError("validated Bot Proxy character draft is incomplete")
+        message, webhook_id = await self._send_character(
+            draft=draft,
+            channel=channel,
+            allowed_mentions=_user_only_mentions(),
+        )
+        avatar_sha256 = identity.avatar_sha256
+        if avatar_sha256 is None and identity.avatar_bytes is not None:
+            avatar_sha256 = hashlib.sha256(identity.avatar_bytes).hexdigest()
+        await self._track_or_compensate(
+            message,
+            guild_id=destination.guild_id,
+            channel_id=destination.channel_id,
+            moderator_id=moderator_id,
+            sender=_store_sender(identity.kind),
+            webhook_id=webhook_id,
+            content=draft.content,
+            reply_message_id=None,
+            character_preset_name=identity.preset_name,
+            character_display_name=identity.display_name,
+            avatar_sha256=avatar_sha256,
+        )
+        return message
+
+    async def _send_character(
+        self,
+        *,
+        draft: BotProxyDraft,
+        channel: Any,
+        allowed_mentions: Any,
+    ) -> tuple[Any, int]:
+        destination = draft.destination
+        identity = draft.identity
+        if destination is None or draft.content is None or identity.display_name is None:
+            raise RuntimeError("validated Bot Proxy character draft is incomplete")
         parent_channel = getattr(channel, "parent", None) or channel
-        lock_key = (destination.guild_id, parent_channel.id)
+        lock_key = (channel.guild.id, parent_channel.id)
         lock = self._webhook_locks.setdefault(lock_key, asyncio.Lock())
         async with lock:
-            webhook = await self._owned_webhook(
-                destination.guild_id,
-                parent_channel,
-            )
+            webhook = await self._owned_webhook(channel.guild.id, parent_channel)
             webhook = await webhook.edit(avatar=identity.avatar_bytes)
             send_kwargs = {
                 "content": draft.content,
                 "username": identity.display_name,
-                "allowed_mentions": _user_only_mentions(),
+                "allowed_mentions": allowed_mentions,
                 "wait": True,
             }
             if parent_channel is not channel:
                 send_kwargs["thread"] = channel
-            message = await webhook.send(**send_kwargs)
-            avatar_sha256 = identity.avatar_sha256
-            if avatar_sha256 is None and identity.avatar_bytes is not None:
-                avatar_sha256 = hashlib.sha256(identity.avatar_bytes).hexdigest()
-            await self._track_or_compensate(
-                message,
-                guild_id=destination.guild_id,
-                channel_id=destination.channel_id,
-                moderator_id=moderator_id,
-                sender=_store_sender(identity.kind),
-                webhook_id=webhook.id,
-                content=draft.content,
-                reply_message_id=None,
-                character_preset_name=identity.preset_name,
-                character_display_name=identity.display_name,
-                avatar_sha256=avatar_sha256,
-            )
-            return message
+            return await webhook.send(**send_kwargs), webhook.id
 
     async def _owned_webhook(self, guild_id: int, parent_channel: Any) -> Any:
         webhook_id = await self._store.get_webhook_id(guild_id, parent_channel.id)
@@ -444,12 +489,45 @@ class BotProxySession:
         self.status: SessionStatus | None = None
         self._cleanup_complete = False
 
-    async def finish(self, status: SessionStatus) -> None:
+    async def finish(
+        self,
+        status: SessionStatus,
+        *,
+        launcher: Any | None = None,
+        delete: bool = False,
+    ) -> None:
         if self._cleanup_complete:
             return
         if self.status is None:
             self.status = status
         self._registry.remove(self.active.session_id)
+        if delete:
+            if launcher is None:
+                raise RuntimeError("Bot Proxy launcher is required for deletion")
+            failure = await self._delete_discord_state(launcher)
+        else:
+            failure = await self._archive_discord_state(status)
+        if failure is not None:
+            raise failure
+        await self._store.remove_active_session(self.active.session_id)
+        self._cleanup_complete = True
+
+    async def _delete_discord_state(self, launcher: Any) -> Exception | None:
+        failure: Exception | None = None
+        for resource in (self._thread, launcher):
+            try:
+                await resource.delete()
+            except Exception as error:  # noqa: BLE001
+                if _is_discord_not_found(error):
+                    continue
+                if failure is None:
+                    failure = error
+        return failure
+
+    async def _archive_discord_state(
+        self,
+        status: SessionStatus,
+    ) -> Exception | None:
         failure: Exception | None = None
         try:
             await self._dashboard.edit(
@@ -463,7 +541,4 @@ class BotProxySession:
         except Exception as error:  # noqa: BLE001
             if failure is None:
                 failure = error
-        if failure is not None:
-            raise failure
-        await self._store.remove_active_session(self.active.session_id)
-        self._cleanup_complete = True
+        return failure

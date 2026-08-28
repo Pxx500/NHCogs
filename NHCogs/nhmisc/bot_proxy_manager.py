@@ -33,7 +33,15 @@ MESSAGE_LINK_PATTERN = re.compile(
     r"^https://(?:canary\.|ptb\.)?discord\.com/channels/(\d+)/(\d+)/(\d+)$"
 )
 CHANNEL_MENTION_PATTERN = re.compile(r"^<#(\d+)>$")
+LOG_CONTENT_PREVIEW_LENGTH = 300
 log = logging.getLogger(__name__)
+
+
+def _compact_content_preview(content: str) -> str:
+    preview = " ".join(content.split())
+    if len(preview) <= LOG_CONTENT_PREVIEW_LENGTH:
+        return preview
+    return f"{preview[: LOG_CONTENT_PREVIEW_LENGTH - 3]}..."
 
 @dataclass(slots=True)
 class AvatarData:
@@ -153,6 +161,8 @@ class BotProxyWorkflowManager:
             ("create_public_threads", "Create Public Threads"),
             ("send_messages_in_threads", "Send Messages in Threads"),
             ("manage_threads", "Manage Threads"),
+            ("manage_messages", "Manage Messages"),
+            ("manage_webhooks", "Manage Webhooks"),
         )
         missing = [label for attr, label in required if not getattr(permissions, attr)]
         if missing:
@@ -160,6 +170,20 @@ class BotProxyWorkflowManager:
                 f"Bot is missing {', '.join(missing)} in {channel.mention}"
             )
         return channel
+
+    async def delete_closed_sessions(self, guild: discord.Guild) -> bool:
+        guild_config_factory = getattr(self.config, "guild", None)
+        if guild_config_factory is None:
+            return False
+        setting = getattr(
+            guild_config_factory(guild),
+            "bot_proxy_delete_closed_sessions",
+            None,
+        )
+        if setting is None:
+            return False
+        value = await setting()
+        return bool(value)
 
     async def route_message(
         self,
@@ -240,20 +264,36 @@ class BotProxyWorkflowManager:
         channel_match = CHANNEL_MENTION_PATTERN.fullmatch(value)
         if channel_match is not None:
             channel_id = int(channel_match.group(1))
+        elif value.isdigit():
+            channel_id = int(value)
+        else:
+            channel_id = None
+        if channel_id is not None:
             channel = _get_channel_or_thread(guild, channel_id)
             if channel is None:
                 raise WorkflowInputError("Channel is unavailable")
-            if isinstance(channel, (discord.ForumChannel, discord.MediaChannel)):
+            forum_or_media = tuple(
+                channel_type
+                for name in ("ForumChannel", "MediaChannel")
+                if (channel_type := getattr(discord, name, None)) is not None
+            )
+            if forum_or_media and isinstance(channel, forum_or_media):
                 raise WorkflowInputError("Choose an existing forum or media post")
+            if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+                raise WorkflowInputError("Choose a text channel or thread")
             return ProxyDestination(guild.id, channel.id)
         message_match = MESSAGE_LINK_PATTERN.fullmatch(value)
         if message_match is None or int(message_match.group(1)) != guild.id:
-            raise WorkflowInputError("Send a channel mention or same-server message link")
+            raise WorkflowInputError(
+                "Send a channel mention, channel ID, or same-server message link"
+            )
         channel_id = int(message_match.group(2))
         message_id = int(message_match.group(3))
         channel = _get_channel_or_thread(guild, channel_id)
         if channel is None:
             raise WorkflowInputError("Message channel is unavailable")
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            raise WorkflowInputError("Choose a message in a text channel or thread")
         try:
             await channel.fetch_message(message_id)
         except discord.NotFound as error:
@@ -337,30 +377,17 @@ class BotProxyWorkflowManager:
     ) -> None:
         published_draft = session.draft if draft is None else draft
         identity = published_draft.identity
-        destination = published_draft.destination
-        destination_link = message.jump_url
-        source_line = ""
-        if destination is not None and destination.message_id is not None:
-            source_line = (
-                "\nReply target: https://discord.com/channels/"
-                f"{destination.guild_id}/{destination.channel_id}/"
-                f"{destination.message_id}"
-            )
-        metadata = (
-            f"Bot Proxy send by {moderator.mention}\n"
-            f"Message: {message.jump_url}\n"
-            f"Destination: {destination_link}{source_line}\n"
-            f"Sender: {identity.kind.value}\n"
-            f"Character preset: {identity.preset_name or 'none'}\n"
-            f"Character name: {identity.display_name or 'none'}\n"
-            f"Avatar digest: {identity.avatar_sha256 or 'none'}"
+        identity_suffix = ""
+        if identity.kind is IdentityType.CHARACTER:
+            identity_suffix = f" as {identity.display_name or 'character'}"
+        content_preview = _compact_content_preview(published_draft.content or "")
+        notification = (
+            f"{moderator.mention} sent Bot Proxy{identity_suffix}: {message.jump_url}"
         )
+        if content_preview:
+            notification = f"{notification}\n{content_preview}"
         try:
-            await self._write_moderation_log(session.guild, metadata)
-            await self._write_moderation_log(
-                session.guild,
-                published_draft.content or "",
-            )
+            await self._write_moderation_log(session.guild, notification)
         except Exception as error:  # noqa: BLE001
             await self.report_session_error(
                 session,
@@ -378,9 +405,8 @@ class BotProxyWorkflowManager:
         try:
             await self._write_moderation_log(
                 guild,
-                f"Bot Proxy character {action} by {moderator.mention}: "
-                f"{preset.preset_name} as {preset.display_name}\n"
-                f"Avatar digest: {preset.avatar_sha256 or 'none'}",
+                f"{moderator.mention} {action} Bot Proxy character "
+                f"{preset.preset_name} as {preset.display_name}",
             )
         except Exception as error:  # noqa: BLE001
             await self._error_reporter(
@@ -397,18 +423,21 @@ class BotProxyWorkflowManager:
         action: str,
         record: Any,
     ) -> None:
+        identity_suffix = ""
+        if record.sender.value == IdentityType.CHARACTER.value:
+            identity_suffix = f" as {record.character_display_name or 'character'}"
+        message_link = (
+            f"https://discord.com/channels/{record.guild_id}/"
+            f"{record.channel_id}/{record.message_id}"
+        )
+        notification = (
+            f"{moderator.mention} {action} Bot Proxy{identity_suffix}: {message_link}"
+        )
+        content_preview = _compact_content_preview(record.content)
+        if content_preview:
+            notification = f"{notification}\n{content_preview}"
         try:
-            await self._write_moderation_log(
-                guild,
-                f"Bot Proxy message {action} by {moderator.mention}: "
-                f"https://discord.com/channels/{record.guild_id}/"
-                f"{record.channel_id}/{record.message_id}\n"
-                f"Sender: {record.sender.value}\n"
-                f"Revision: {record.revision}\n"
-                f"Character preset: {record.character_preset_name or 'none'}\n"
-                f"Avatar digest: {record.avatar_sha256 or 'none'}",
-            )
-            await self._write_moderation_log(guild, record.content)
+            await self._write_moderation_log(guild, notification)
         except Exception as error:  # noqa: BLE001
             await self._error_reporter(
                 guild_id=guild.id,

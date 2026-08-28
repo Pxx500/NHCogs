@@ -443,6 +443,7 @@ class NHMisc(commands.Cog):
             maintenance_channel=None,
             moderation_log_channel=None,
             bot_proxy_channel=None,
+            bot_proxy_delete_closed_sessions=False,
             error_channel=None,
             error_maintainer_id=None,
             vcjumping_visit_count=DEFAULT_VCJUMPING_VISIT_COUNT,
@@ -674,14 +675,13 @@ class NHMisc(commands.Cog):
                 thread = self.bot.get_channel(record.thread_id)
                 if thread is None:
                     thread = await self.bot.fetch_channel(record.thread_id)
-                try:
-                    dashboard = await thread.fetch_message(record.dashboard_message_id)
-                    await dashboard.edit(
-                        content="Bot Proxy session: Interrupted",
-                        view=None,
-                    )
-                finally:
-                    await thread.edit(archived=True, locked=True)
+                delete_closed = await self.config.guild_from_id(
+                    record.guild_id
+                ).bot_proxy_delete_closed_sessions()
+                if delete_closed:
+                    await self._delete_recovered_bot_proxy_session(record, thread)
+                else:
+                    await self._archive_recovered_bot_proxy_session(record, thread)
             except Exception as error:
                 await self.report_operational_error(
                     guild_id=record.guild_id,
@@ -694,6 +694,39 @@ class NHMisc(commands.Cog):
                 )
             else:
                 await self._bot_proxy_store.remove_active_session(record.session_id)
+
+    async def _archive_recovered_bot_proxy_session(self, record, thread) -> None:
+        try:
+            dashboard = await thread.fetch_message(record.dashboard_message_id)
+            await dashboard.edit(
+                content="Bot Proxy session: Interrupted",
+                view=None,
+            )
+        finally:
+            await thread.edit(archived=True, locked=True)
+
+    async def _delete_recovered_bot_proxy_session(self, record, thread) -> None:
+        failure: Exception | None = None
+        try:
+            await thread.delete()
+        except discord.NotFound:
+            pass
+        except Exception as error:  # noqa: BLE001
+            failure = error
+
+        try:
+            channel = self.bot.get_channel(record.launcher_channel_id)
+            if channel is None:
+                channel = await self.bot.fetch_channel(record.launcher_channel_id)
+            launcher = await channel.fetch_message(record.launcher_message_id)
+            await launcher.delete()
+        except discord.NotFound:
+            pass
+        except Exception as error:  # noqa: BLE001
+            if failure is None:
+                failure = error
+        if failure is not None:
+            raise failure
 
     def runtime_health_issues(self) -> tuple[str, ...]:
         required_tasks = (
@@ -3840,6 +3873,8 @@ class NHMisc(commands.Cog):
     @commands.has_permissions(manage_messages=True)
     async def botproxy(self, ctx: commands.Context) -> None:
         """Create and configure private Bot Proxy sessions."""
+        from .bot_proxy_workflow import BOT_PROXY_WORKFLOW_BUTTONS
+
         embed = discord.Embed(
             title="Bot Proxy",
             description="Private moderator workflows for messages sent by the bot.",
@@ -3848,8 +3883,13 @@ class NHMisc(commands.Cog):
             name="Commands",
             value=self._format_direct_commands(
                 ctx,
-                preferred_order=("create", "channel"),
+                preferred_order=("create", "channel", "deleteclosed"),
             ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Workflow buttons",
+            value=BOT_PROXY_WORKFLOW_BUTTONS,
             inline=False,
         )
         await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
@@ -3932,6 +3972,8 @@ class NHMisc(commands.Cog):
             ("create_public_threads", "Create Public Threads"),
             ("send_messages_in_threads", "Send Messages in Threads"),
             ("manage_threads", "Manage Threads"),
+            ("manage_messages", "Manage Messages"),
+            ("manage_webhooks", "Manage Webhooks"),
         )
         missing = [label for attr, label in required if not getattr(permissions, attr)]
         if missing:
@@ -3940,6 +3982,34 @@ class NHMisc(commands.Cog):
             )
         await self.config.guild(ctx.guild).bot_proxy_channel.set(channel.id)
         await ctx.send(f"Bot Proxy channel set to {channel.mention}")
+
+    @botproxy.command(
+        name="deleteclosed",
+        usage="[true|false]",
+    )
+    async def botproxy_deleteclosed(
+        self,
+        ctx: commands.Context,
+        enabled: bool | None = None,
+    ) -> None:
+        """Show or set whether closing a Bot Proxy session deletes its thread."""
+        if self._channel_allows_everyone(ctx.channel, ctx.guild):
+            raise commands.UserFeedbackCheckFailure(
+                "Run this command in a private moderator channel"
+            )
+        setting = self.config.guild(ctx.guild).bot_proxy_delete_closed_sessions
+        if enabled is None:
+            current = await setting()
+            await ctx.send(
+                f"Delete closed Bot Proxy sessions: {'enabled' if current else 'disabled'}",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        await setting.set(enabled)
+        await ctx.send(
+            f"Delete closed Bot Proxy sessions {'enabled' if enabled else 'disabled'}",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @commands.group(name="nhmisc", invoke_without_command=True)
     @commands.guild_only()

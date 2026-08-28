@@ -114,13 +114,17 @@ normal bot identity or a one-message webhook character.
 [p]botproxy channel
 [p]botproxy channel #moderator-channel
 [p]botproxy channel clear
+[p]botproxy deleteclosed [true|false]
 ```
 
 `[p]botproxy` shows the available operations. `create` deliberately opens an additional
 empty session and must be run in the configured Bot Proxy channel. The `channel`
 command shows, sets, or clears that private workflow channel. The bot needs View
-Channel, Send Messages, Create Public Threads, Send Messages in Threads, and Manage
-Threads there. Run channel configuration only from a private moderator channel. Bot
+Channel, Send Messages, Create Public Threads, Send Messages in Threads, Manage
+Threads, Manage Messages, and Manage Webhooks there. `deleteclosed` shows or changes
+whether closing a session deletes its
+launcher message and thread instead of archiving them. It defaults to disabled. Run
+channel configuration only from a private moderator channel. Bot
 Proxy rechecks the moderator's Manage Messages permission when controls and mutations
 are used, not only when the workflow is opened.
 
@@ -135,11 +139,30 @@ session, it updates that session's reply destination. With several sessions, it 
 an ephemeral paginated selector. Apps never opens the workflow on the public source
 channel and never creates an additional session implicitly.
 
-Each workflow has `Set destination`, `Set content`, `Identity`, `Preview`, `Send`, and
-`Cancel`. A channel mention selects a standalone destination. A same-server message
-link selects a native reply. Draft text is limited to 2000 characters. Only explicit
+`[p]botproxy` also explains the workflow buttons before a session is created. Each
+workflow repeats the instructions through `Help` and shows a Help hint in its dashboard.
+
+Each workflow has `Set destination`, `Set content`, `Identity`, `Help`,
+`Persistent Messaging`, `Send Confirmation`, `Send`, and `Cancel`. A channel mention
+or raw channel ID selects a standalone
+destination. A same-server message link selects a native reply. Draft text is limited
+to 2000 characters. Messages consumed as workflow input are deleted after being read.
+Successful input also removes its ephemeral prompt, while validation errors reuse that
+prompt. Only explicit
 user mentions can notify. Role mentions, `@everyone`, `@here`, and reply-author pings
 are suppressed.
+
+`Send` first freezes the draft and posts an exact non-notifying preview in the session
+thread. `Confirm sending` publishes that frozen draft, `Go back` returns to editing,
+and `Cancel` closes the session. Successful publication keeps the session open and
+resets the draft. `Persistent Messaging` is available for standalone channel
+destinations. When enabled, successful publication preserves the destination and
+identity while clearing only the content.
+
+`Send Confirmation` defaults to enabled. Disabling it makes `Send now` publish without
+a preview. Entering valid content also publishes immediately when the rest of the draft
+is ready. Combined with `Persistent Messaging`, this provides a rapid-fire mode where
+each submitted content message is published and then cleared.
 
 Bot identity supports standalone messages and native replies. Character identity uses
 an owned webhook with a one-time public name and optional avatar. Webhooks do not
@@ -156,8 +179,9 @@ Using Apps on a message previously sent by Bot Proxy offers `Use as destination`
 actions recheck Manage Messages in the destination and write a private moderation log.
 
 Only the moderator who opened a session can control it. Sessions time out after 10
-minutes of inactivity. Sent, cancelled, timed-out, reloaded, and interrupted sessions
-lose their controls and have their thread archived and locked.
+minutes of inactivity. Cancelled, timed-out, reloaded, and interrupted sessions lose
+their controls. They are archived and locked by default. When `deleteclosed` is enabled,
+Bot Proxy explicitly deletes both the thread and its launcher message.
 
 ## Gatecount
 

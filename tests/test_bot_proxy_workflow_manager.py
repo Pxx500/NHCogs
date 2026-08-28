@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import importlib.util
 import sys
 import types
@@ -92,6 +93,7 @@ def _fake_discord() -> types.ModuleType:
     discord.TextStyle = SimpleNamespace(paragraph=1)
     discord.Color = SimpleNamespace(blue=lambda: 1)
     discord.HTTPException = type("HTTPException", (Exception,), {})
+    discord.NotFound = type("NotFound", (Exception,), {})
     discord.TextChannel = TextChannel
     discord.Thread = Thread
     discord.ForumChannel = type("ForumChannel", (), {})
@@ -158,6 +160,8 @@ class _Workspace(discord.TextChannel):
             create_public_threads=True,
             send_messages_in_threads=True,
             manage_threads=True,
+            manage_messages=True,
+            manage_webhooks=True,
         )
 
 
@@ -319,13 +323,14 @@ class BotProxyWorkflowManagerTests(unittest.IsolatedAsyncioTestCase):
             await release.wait()
             return SimpleNamespace(id=70, jump_url="https://example.invalid/message")
 
-        manager.publisher.publish = mock.AsyncMock(side_effect=publish_once)
+        manager.publisher.preview = mock.AsyncMock(side_effect=publish_once)
         manager.resolve_publish_channel = mock.AsyncMock(
             return_value=SimpleNamespace()
         )
         manager.log_publication = mock.AsyncMock()
         dashboard = SimpleNamespace(id=60, edit=mock.AsyncMock())
-        thread = SimpleNamespace(id=50, edit=mock.AsyncMock())
+        control = SimpleNamespace(delete=mock.AsyncMock())
+        thread = SimpleNamespace(id=50, edit=mock.AsyncMock(), send=mock.AsyncMock(return_value=control))
         draft = manager_module.BotProxyDraft(
             destination=manager_module.ProxyDestination(10, 30),
             content="Hello",
@@ -346,21 +351,23 @@ class BotProxyWorkflowManagerTests(unittest.IsolatedAsyncioTestCase):
             user=user,
             response=SimpleNamespace(is_done=lambda: True),
             edit_original_response=mock.AsyncMock(),
+            delete_original_response=mock.AsyncMock(),
         )
         second = SimpleNamespace(
             user=user,
             response=SimpleNamespace(is_done=lambda: True),
             edit_original_response=mock.AsyncMock(),
+            delete_original_response=mock.AsyncMock(),
         )
 
-        first_task = asyncio.create_task(session.publish(first))
+        first_task = asyncio.create_task(session.prepare_preview(first))
         await asyncio.sleep(0)
-        second_task = asyncio.create_task(session.publish(second))
+        second_task = asyncio.create_task(session.prepare_preview(second))
         await asyncio.sleep(0)
         release.set()
         await asyncio.gather(first_task, second_task)
 
-        self.assertEqual(manager.publisher.publish.await_count, 1)
+        self.assertEqual(manager.publisher.preview.await_count, 1)
 
     async def test_cancel_waits_for_committed_publication_and_keeps_sent_status(
         self,
@@ -404,7 +411,12 @@ class BotProxyWorkflowManagerTests(unittest.IsolatedAsyncioTestCase):
             edit_original_response=mock.AsyncMock(),
         )
 
-        publish_task = asyncio.create_task(session.publish(interaction))
+        session._preview_draft = copy.deepcopy(session.draft)
+        session._preview_message = SimpleNamespace(delete=mock.AsyncMock())
+        session._preview_control = SimpleNamespace(delete=mock.AsyncMock())
+        session._publishing = True
+        interaction.delete_original_response = mock.AsyncMock()
+        publish_task = asyncio.create_task(session.confirm_publish(interaction))
         await entered.wait()
         cancel_task = asyncio.create_task(
             session.finish(workflow.SessionStatus.CANCELLED)
@@ -415,7 +427,7 @@ class BotProxyWorkflowManagerTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(publish_task, cancel_task)
 
         self.assertFalse(cancelled_before_publication)
-        self.assertEqual(session._terminal.status, workflow.SessionStatus.SENT)
+        self.assertEqual(session._terminal.status, workflow.SessionStatus.CANCELLED)
 
     def test_send_button_tracks_draft_validity(self) -> None:
         session = SimpleNamespace(
@@ -433,6 +445,28 @@ class BotProxyWorkflowManagerTests(unittest.IsolatedAsyncioTestCase):
         ready_view = workflow.DashboardView(session)
         ready_send = next(item for item in ready_view.children if item.label == "Send")
         self.assertFalse(ready_send.disabled)
+
+    async def test_component_defers_create_separate_ephemeral_response(self) -> None:
+        session = SimpleNamespace(
+            opener_id=20,
+            draft=manager_module.BotProxyDraft(
+                destination=manager_module.ProxyDestination(10, 30),
+                content="Ready",
+            ),
+            persistent_messaging=False,
+            send_confirmation=True,
+            prepare_preview=mock.AsyncMock(),
+        )
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(defer=mock.AsyncMock()),
+        )
+
+        await workflow.DashboardView(session)._send(interaction)
+
+        interaction.response.defer.assert_awaited_once_with(
+            ephemeral=True,
+            thinking=True,
+        )
 
     async def test_session_controls_recheck_manage_messages(self) -> None:
         session = SimpleNamespace(
@@ -488,18 +522,454 @@ class BotProxyWorkflowManagerTests(unittest.IsolatedAsyncioTestCase):
                 )
             ),
         )
-        session.input_mode = workflow.InputMode.AVATAR
+        prompt = SimpleNamespace(edit_original_response=mock.AsyncMock())
+        await session.begin_input(workflow.InputMode.AVATAR, prompt)
         message = SimpleNamespace(
             author=SimpleNamespace(id=20),
             channel=thread,
             attachments=(object(),),
+            delete=mock.AsyncMock(),
         )
 
         self.assertTrue(await session.handle_message(message))
 
-        thread.send.assert_awaited_once()
-        self.assertIn("unsupported avatar", thread.send.await_args.args[0])
+        thread.send.assert_not_awaited()
+        self.assertIn(
+            "unsupported avatar",
+            prompt.edit_original_response.await_args.kwargs["content"],
+        )
+        message.delete.assert_awaited_once()
         reporter.assert_not_awaited()
+
+    async def test_raw_channel_id_works_without_media_channel_class(self) -> None:
+        channel = discord.TextChannel()
+        channel.id = 30
+        guild = SimpleNamespace(
+            id=10,
+            get_channel=lambda channel_id: channel if channel_id == 30 else None,
+        )
+        manager = manager_module.BotProxyWorkflowManager(
+            config=SimpleNamespace(),
+            store=SimpleNamespace(),
+            moderation_log=mock.AsyncMock(),
+            error_reporter=mock.AsyncMock(),
+        )
+        media_channel = discord.MediaChannel
+        del discord.MediaChannel
+        try:
+            destination = await manager.resolve_destination(guild, "30")
+        finally:
+            discord.MediaChannel = media_channel
+
+        self.assertEqual(destination, manager_module.ProxyDestination(10, 30))
+
+    async def test_raw_category_id_is_rejected_before_publication(self) -> None:
+        category = SimpleNamespace(id=30)
+        guild = SimpleNamespace(id=10, get_channel=lambda _channel_id: category)
+        manager = manager_module.BotProxyWorkflowManager(
+            config=SimpleNamespace(),
+            store=SimpleNamespace(),
+            moderation_log=mock.AsyncMock(),
+            error_reporter=mock.AsyncMock(),
+        )
+
+        with self.assertRaisesRegex(workflow.WorkflowInputError, "text channel"):
+            await manager.resolve_destination(guild, "30")
+
+    async def test_character_and_reply_are_rejected_at_mutation_boundary(self) -> None:
+        manager = manager_module.BotProxyWorkflowManager(
+            config=SimpleNamespace(),
+            store=SimpleNamespace(),
+            moderation_log=mock.AsyncMock(),
+            error_reporter=mock.AsyncMock(),
+        )
+        session = workflow.BotProxyWorkflowSession(
+            manager,
+            active=manager_module.ActiveSession("session", 10, 20, 50),
+            guild=SimpleNamespace(id=10),
+            moderator=SimpleNamespace(id=20),
+            launcher=SimpleNamespace(),
+            thread=SimpleNamespace(id=50),
+            dashboard=SimpleNamespace(id=60),
+            draft=manager_module.BotProxyDraft(
+                destination=manager_module.ProxyDestination(10, 30, 40)
+            ),
+        )
+
+        with self.assertRaisesRegex(workflow.WorkflowInputError, "cannot reply"):
+            session.set_identity(
+                workflow.ProxyIdentity(
+                    manager_module.IdentityType.CHARACTER,
+                    display_name="Guide",
+                )
+            )
+
+        session.draft = manager_module.BotProxyDraft(
+            identity=workflow.ProxyIdentity(
+                manager_module.IdentityType.CHARACTER,
+                display_name="Guide",
+            )
+        )
+        with self.assertRaisesRegex(workflow.WorkflowInputError, "cannot reply"):
+            await session.set_destination(manager_module.ProxyDestination(10, 30, 40))
+
+    async def test_reply_rejects_character_modal_before_preset_is_saved(self) -> None:
+        store = SimpleNamespace(
+            create_character=mock.AsyncMock(),
+            update_character=mock.AsyncMock(),
+        )
+        manager = manager_module.BotProxyWorkflowManager(
+            config=SimpleNamespace(),
+            store=store,
+            moderation_log=mock.AsyncMock(),
+            error_reporter=mock.AsyncMock(),
+        )
+        session = workflow.BotProxyWorkflowSession(
+            manager,
+            active=manager_module.ActiveSession("session", 10, 20, 50),
+            guild=SimpleNamespace(id=10),
+            moderator=SimpleNamespace(id=20),
+            launcher=SimpleNamespace(),
+            thread=SimpleNamespace(id=50),
+            dashboard=SimpleNamespace(id=60),
+            draft=manager_module.BotProxyDraft(
+                destination=manager_module.ProxyDestination(10, 30, 40)
+            ),
+        )
+        modal = workflow.CharacterModal(session, save_preset=True)
+        modal.preset_name.value = "guide"
+        modal.display_name.value = "Guide"
+        modal.avatar_url.value = ""
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=20),
+            permissions=SimpleNamespace(manage_messages=True),
+            response=SimpleNamespace(
+                defer=mock.AsyncMock(),
+                is_done=lambda: True,
+            ),
+            edit_original_response=mock.AsyncMock(),
+        )
+
+        await modal.on_submit(interaction)
+
+        store.create_character.assert_not_awaited()
+        store.update_character.assert_not_awaited()
+        self.assertIn(
+            "cannot reply",
+            interaction.edit_original_response.await_args.kwargs["content"],
+        )
+
+    async def test_valid_queued_content_removes_input_and_ephemeral_prompt(self) -> None:
+        manager = manager_module.BotProxyWorkflowManager(
+            config=SimpleNamespace(),
+            store=SimpleNamespace(),
+            moderation_log=mock.AsyncMock(),
+            error_reporter=mock.AsyncMock(),
+        )
+        thread = SimpleNamespace(
+            id=50,
+            permissions_for=lambda _member: SimpleNamespace(manage_messages=True),
+        )
+        prompt = SimpleNamespace(delete_original_response=mock.AsyncMock())
+        session = workflow.BotProxyWorkflowSession(
+            manager,
+            active=manager_module.ActiveSession("session", 10, 20, 50),
+            guild=SimpleNamespace(id=10),
+            moderator=SimpleNamespace(id=20),
+            launcher=SimpleNamespace(),
+            thread=thread,
+            dashboard=SimpleNamespace(id=60, edit=mock.AsyncMock()),
+            draft=manager_module.BotProxyDraft(),
+        )
+        await session.begin_input(workflow.InputMode.CONTENT, prompt)
+        message = SimpleNamespace(
+            author=SimpleNamespace(id=20),
+            channel=thread,
+            content="New content",
+            delete=mock.AsyncMock(),
+        )
+
+        self.assertTrue(await session.handle_message(message))
+
+        self.assertEqual(session.draft.content, "New content")
+        message.delete.assert_awaited_once()
+        prompt.delete_original_response.assert_awaited_once()
+
+    async def test_revoked_permission_input_is_still_consumed_and_deleted(self) -> None:
+        manager = manager_module.BotProxyWorkflowManager(
+            config=SimpleNamespace(),
+            store=SimpleNamespace(),
+            moderation_log=mock.AsyncMock(),
+            error_reporter=mock.AsyncMock(),
+        )
+        thread = SimpleNamespace(
+            id=50,
+            send=mock.AsyncMock(),
+            permissions_for=lambda _member: SimpleNamespace(manage_messages=False),
+        )
+        session = workflow.BotProxyWorkflowSession(
+            manager,
+            active=manager_module.ActiveSession("session", 10, 20, 50),
+            guild=SimpleNamespace(id=10),
+            moderator=SimpleNamespace(id=20),
+            launcher=SimpleNamespace(),
+            thread=thread,
+            dashboard=SimpleNamespace(id=60, edit=mock.AsyncMock()),
+            draft=manager_module.BotProxyDraft(),
+        )
+        session.input_mode = workflow.InputMode.CONTENT
+        message = SimpleNamespace(
+            author=SimpleNamespace(id=20),
+            channel=thread,
+            content="Must not be accepted",
+            delete=mock.AsyncMock(),
+        )
+
+        self.assertTrue(await session.handle_message(message))
+
+        message.delete.assert_awaited_once()
+        self.assertIsNone(session.draft.content)
+
+    async def test_confirmation_off_publishes_valid_content_on_enter(self) -> None:
+        manager = manager_module.BotProxyWorkflowManager(
+            config=SimpleNamespace(),
+            store=SimpleNamespace(),
+            moderation_log=mock.AsyncMock(return_value=True),
+            error_reporter=mock.AsyncMock(),
+        )
+        manager.resolve_publish_channel = mock.AsyncMock(return_value=SimpleNamespace())
+        manager.publisher.publish = mock.AsyncMock(
+            return_value=SimpleNamespace(jump_url="https://example.invalid/message")
+        )
+        manager.log_publication = mock.AsyncMock()
+        thread = SimpleNamespace(
+            id=50,
+            permissions_for=lambda _member: SimpleNamespace(manage_messages=True),
+        )
+        moderator = SimpleNamespace(id=20)
+        prompt = SimpleNamespace(
+            user=moderator,
+            response=SimpleNamespace(is_done=lambda: True),
+            edit_original_response=mock.AsyncMock(),
+            delete_original_response=mock.AsyncMock(),
+        )
+        destination = manager_module.ProxyDestination(10, 30)
+        session = workflow.BotProxyWorkflowSession(
+            manager,
+            active=manager_module.ActiveSession("session", 10, 20, 50),
+            guild=SimpleNamespace(id=10),
+            moderator=moderator,
+            launcher=SimpleNamespace(),
+            thread=thread,
+            dashboard=SimpleNamespace(id=60, edit=mock.AsyncMock()),
+            draft=manager_module.BotProxyDraft(destination=destination),
+        )
+        session.send_confirmation = False
+        session.persistent_messaging = True
+        await session.begin_input(workflow.InputMode.CONTENT, prompt)
+        message = SimpleNamespace(
+            author=moderator,
+            channel=thread,
+            content="Rapid fire",
+            delete=mock.AsyncMock(),
+        )
+
+        await session.handle_message(message)
+
+        manager.publisher.publish.assert_awaited_once()
+        self.assertEqual(
+            manager.publisher.publish.await_args.kwargs["draft"].content,
+            "Rapid fire",
+        )
+        self.assertEqual(session.draft.destination, destination)
+        self.assertIsNone(session.draft.content)
+        message.delete.assert_awaited_once()
+        prompt.delete_original_response.assert_awaited_once()
+
+    async def test_preview_freezes_draft_without_publishing_destination(self) -> None:
+        manager = manager_module.BotProxyWorkflowManager(
+            config=SimpleNamespace(),
+            store=SimpleNamespace(),
+            moderation_log=mock.AsyncMock(),
+            error_reporter=mock.AsyncMock(),
+        )
+        preview = SimpleNamespace(delete=mock.AsyncMock())
+        control = SimpleNamespace(delete=mock.AsyncMock())
+        manager.publisher.preview = mock.AsyncMock(return_value=preview)
+        manager.publisher.publish = mock.AsyncMock()
+        manager.resolve_publish_channel = mock.AsyncMock(return_value=SimpleNamespace())
+        thread = SimpleNamespace(id=50, send=mock.AsyncMock(return_value=control))
+        session = workflow.BotProxyWorkflowSession(
+            manager,
+            active=manager_module.ActiveSession("session", 10, 20, 50),
+            guild=SimpleNamespace(id=10),
+            moderator=SimpleNamespace(id=20),
+            launcher=SimpleNamespace(),
+            thread=thread,
+            dashboard=SimpleNamespace(id=60, edit=mock.AsyncMock()),
+            draft=manager_module.BotProxyDraft(
+                destination=manager_module.ProxyDestination(10, 30),
+                content="First",
+            ),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=20),
+            response=SimpleNamespace(is_done=lambda: True),
+            edit_original_response=mock.AsyncMock(),
+            delete_original_response=mock.AsyncMock(),
+        )
+
+        await session.prepare_preview(interaction)
+        session.draft.content = "Changed"
+
+        manager.publisher.publish.assert_not_awaited()
+        self.assertEqual(session._preview_draft.content, "First")
+        self.assertIs(manager.publisher.preview.await_args.kwargs["draft"], session._preview_draft)
+
+    async def test_confirm_keeps_session_and_persistent_mode_clears_only_content(self) -> None:
+        manager = manager_module.BotProxyWorkflowManager(
+            config=SimpleNamespace(),
+            store=SimpleNamespace(remove_active_session=mock.AsyncMock()),
+            moderation_log=mock.AsyncMock(return_value=True),
+            error_reporter=mock.AsyncMock(),
+        )
+        manager.resolve_publish_channel = mock.AsyncMock(return_value=SimpleNamespace())
+        manager.publisher.publish = mock.AsyncMock(
+            return_value=SimpleNamespace(jump_url="https://example.invalid/message")
+        )
+        manager.log_publication = mock.AsyncMock()
+        draft = manager_module.BotProxyDraft(
+            destination=manager_module.ProxyDestination(10, 30),
+            content="First",
+            identity=workflow.ProxyIdentity(
+                manager_module.IdentityType.CHARACTER,
+                display_name="Guide",
+            ),
+        )
+        session = workflow.BotProxyWorkflowSession(
+            manager,
+            active=manager_module.ActiveSession("session", 10, 20, 50),
+            guild=SimpleNamespace(id=10),
+            moderator=SimpleNamespace(id=20),
+            launcher=SimpleNamespace(),
+            thread=SimpleNamespace(id=50),
+            dashboard=SimpleNamespace(id=60, edit=mock.AsyncMock()),
+            draft=draft,
+        )
+        manager.sessions["session"] = session
+        session.persistent_messaging = True
+        session._publishing = True
+        session._preview_draft = copy.deepcopy(draft)
+        session._preview_message = SimpleNamespace(delete=mock.AsyncMock())
+        session._preview_control = SimpleNamespace(delete=mock.AsyncMock())
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=20),
+            delete_original_response=mock.AsyncMock(),
+        )
+
+        await session.confirm_publish(interaction)
+
+        self.assertIsNone(session.draft.content)
+        self.assertEqual(session.draft.destination, draft.destination)
+        self.assertEqual(session.draft.identity, draft.identity)
+        self.assertIn("session", manager.sessions)
+        manager.store.remove_active_session.assert_not_awaited()
+
+    async def test_stale_confirm_cannot_publish_after_session_closes(self) -> None:
+        manager = manager_module.BotProxyWorkflowManager(
+            config=SimpleNamespace(),
+            store=SimpleNamespace(remove_active_session=mock.AsyncMock()),
+            moderation_log=mock.AsyncMock(return_value=True),
+            error_reporter=mock.AsyncMock(),
+        )
+        manager.publisher.publish = mock.AsyncMock()
+        manager.resolve_publish_channel = mock.AsyncMock()
+        session = workflow.BotProxyWorkflowSession(
+            manager,
+            active=manager_module.ActiveSession("session", 10, 20, 50),
+            guild=SimpleNamespace(id=10),
+            moderator=SimpleNamespace(id=20),
+            launcher=SimpleNamespace(),
+            thread=SimpleNamespace(id=50, edit=mock.AsyncMock()),
+            dashboard=SimpleNamespace(id=60, edit=mock.AsyncMock()),
+            draft=manager_module.BotProxyDraft(
+                destination=manager_module.ProxyDestination(10, 30),
+                content="Do not send",
+            ),
+        )
+        session._preview_draft = copy.deepcopy(session.draft)
+        await session.finish(workflow.SessionStatus.CANCELLED)
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=20),
+            response=SimpleNamespace(is_done=lambda: True),
+            edit_original_response=mock.AsyncMock(),
+        )
+
+        await session.confirm_publish(interaction)
+
+        manager.publisher.publish.assert_not_awaited()
+        self.assertIn("closed", interaction.edit_original_response.await_args.kwargs["content"])
+
+    async def test_session_picker_shows_character_reply_validation(self) -> None:
+        active = manager_module.ActiveSession("session", 10, 20, 50)
+        session = SimpleNamespace(
+            opener_id=20,
+            set_destination=mock.AsyncMock(
+                side_effect=workflow.WorkflowInputError(
+                    "Characters cannot reply to an existing message"
+                )
+            ),
+            thread=SimpleNamespace(mention="<#50>"),
+        )
+        manager = SimpleNamespace(sessions={"session": session})
+        view = workflow.SessionPickerView(
+            manager,
+            (active,),
+            manager_module.ProxyDestination(10, 30, 40),
+        )
+        interaction = SimpleNamespace(
+            data={"values": ["session"]},
+            user=SimpleNamespace(id=20),
+            response=SimpleNamespace(edit_message=mock.AsyncMock()),
+        )
+
+        await view._select(interaction)
+
+        self.assertIn(
+            "cannot reply",
+            interaction.response.edit_message.await_args.kwargs["content"],
+        )
+
+    async def test_prompt_cleanup_failure_does_not_block_session_close(self) -> None:
+        reporter = mock.AsyncMock()
+        manager = manager_module.BotProxyWorkflowManager(
+            config=SimpleNamespace(),
+            store=SimpleNamespace(remove_active_session=mock.AsyncMock()),
+            moderation_log=mock.AsyncMock(return_value=True),
+            error_reporter=reporter,
+        )
+        prompt = SimpleNamespace(
+            delete_original_response=mock.AsyncMock(
+                side_effect=RuntimeError("Discord unavailable")
+            )
+        )
+        session = workflow.BotProxyWorkflowSession(
+            manager,
+            active=manager_module.ActiveSession("session", 10, 20, 50),
+            guild=SimpleNamespace(id=10),
+            moderator=SimpleNamespace(id=20),
+            launcher=SimpleNamespace(),
+            thread=SimpleNamespace(id=50, edit=mock.AsyncMock()),
+            dashboard=SimpleNamespace(id=60, edit=mock.AsyncMock()),
+            draft=manager_module.BotProxyDraft(),
+        )
+        session._input_interaction = prompt
+
+        await session.finish(workflow.SessionStatus.CANCELLED)
+
+        self.assertEqual(session._terminal.status, workflow.SessionStatus.CANCELLED)
+        manager.store.remove_active_session.assert_awaited_once_with("session")
+        reporter.assert_awaited_once()
 
     async def test_undelivered_moderation_log_reports_operational_error(self) -> None:
         reporter = mock.AsyncMock()
@@ -534,9 +1004,10 @@ class BotProxyWorkflowManagerTests(unittest.IsolatedAsyncioTestCase):
         await manager.log_publication(session, moderator, message)
 
         metadata = moderation_log.await_args.args[1]
-        self.assertIn("Sender: character", metadata)
-        self.assertIn("Character preset: guide", metadata)
-        self.assertIn("Avatar digest: abc123", metadata)
+        self.assertIn("<@20> sent Bot Proxy as Guide", metadata)
+        self.assertNotIn("Character preset", metadata)
+        self.assertNotIn("Avatar digest", metadata)
+        self.assertLessEqual(len(metadata.splitlines()), 2)
         reporter.assert_awaited_once()
 
 

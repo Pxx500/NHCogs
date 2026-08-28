@@ -119,6 +119,34 @@ class BotProxySessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         store.remove_active_session.assert_not_awaited()
         thread.edit.assert_awaited_once_with(archived=True, locked=True)
 
+    async def test_delete_mode_removes_launcher_instead_of_archiving_thread(self) -> None:
+        registry = SessionRegistry()
+        active = ActiveSession("session", 10, 20, 30)
+        registry.add(active)
+        store = SimpleNamespace(remove_active_session=mock.AsyncMock())
+        thread = SimpleNamespace(edit=mock.AsyncMock(), delete=mock.AsyncMock())
+        dashboard = SimpleNamespace(edit=mock.AsyncMock())
+        launcher = SimpleNamespace(delete=mock.AsyncMock())
+        session = BotProxySession(
+            active=active,
+            registry=registry,
+            store=store,
+            thread=thread,
+            dashboard=dashboard,
+        )
+
+        await session.finish(
+            SessionStatus.CANCELLED,
+            launcher=launcher,
+            delete=True,
+        )
+
+        launcher.delete.assert_awaited_once()
+        thread.delete.assert_awaited_once()
+        thread.edit.assert_not_awaited()
+        dashboard.edit.assert_not_awaited()
+        store.remove_active_session.assert_awaited_once_with("session")
+
 
 if __name__ == "__main__":
     unittest.main()
