@@ -17,7 +17,7 @@ boundary messages from Discord.
 ```
 
 Running `[p]cleanup` shows the complete command overview. All actions require
-Red moderator status or Manage Messages. Counts must be from
+Manage Messages. Counts must be from
 1 through 1000. `after`, `before`, and `between` accept only message IDs retained
 for the current channel. For `after` and `before`, reply to a retained message to
 omit `message_id`.

@@ -3901,11 +3901,38 @@ class NHMisc(commands.Cog):
         try:
             workspace = await manager.workspace_channel(ctx.guild)
         except ValueError as error:
-            raise commands.UserFeedbackCheckFailure(str(error)) from error
-        if ctx.channel.id != workspace.id:
-            raise commands.UserFeedbackCheckFailure(
-                "Run this command in the configured private Bot Proxy channel"
+            await ctx.send(
+                str(error),
+                allowed_mentions=discord.AllowedMentions.none(),
             )
+            return
+        if ctx.channel.id != workspace.id:
+            await ctx.send(
+                "Run this command in the configured private Bot Proxy channel",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        try:
+            await manager.create_session(ctx.guild, ctx.author)
+        except ValueError as error:
+            await ctx.send(
+                str(error),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        except Exception as error:
+            await self.report_operational_error(
+                guild_id=ctx.guild.id,
+                source="NHMisc",
+                action="create Bot Proxy session",
+                error=error,
+                channel_id=ctx.channel.id,
+            )
+            await ctx.send(
+                "Bot Proxy failed",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
         try:
             await ctx.message.delete()
         except discord.HTTPException as error:
@@ -3917,19 +3944,6 @@ class NHMisc(commands.Cog):
                 channel_id=ctx.channel.id,
                 message_id=ctx.message.id,
             )
-        try:
-            await manager.create_session(ctx.guild, ctx.author)
-        except ValueError as error:
-            raise commands.UserFeedbackCheckFailure(str(error)) from error
-        except Exception as error:
-            await self.report_operational_error(
-                guild_id=ctx.guild.id,
-                source="NHMisc",
-                action="create Bot Proxy session",
-                error=error,
-                channel_id=ctx.channel.id,
-            )
-            raise commands.UserFeedbackCheckFailure("Bot Proxy failed") from error
 
     @botproxy.command(
         name="channel",
@@ -4013,7 +4027,7 @@ class NHMisc(commands.Cog):
 
     @commands.group(name="nhmisc", invoke_without_command=True)
     @commands.guild_only()
-    @commands.mod_or_permissions(manage_messages=True)
+    @commands.has_permissions(manage_messages=True)
     async def nhmisc(self, ctx: commands.Context) -> None:
         """Configure NHMisc."""
         embed = discord.Embed(
@@ -4144,7 +4158,7 @@ class NHMisc(commands.Cog):
         await ctx.send("Operational error maintainer cleared.")
 
     @nhmisc.group(name="roleanalytics", invoke_without_command=True)
-    @commands.admin_or_permissions(administrator=True)
+    @commands.has_permissions(manage_messages=True)
     async def nhmisc_roleanalytics(self, ctx: commands.Context) -> None:
         """Configure role analytics."""
         state = await self._role_analytics_store.get_state(ctx.guild.id)
@@ -4171,7 +4185,7 @@ class NHMisc(commands.Cog):
         await ctx.send("Role analytics disabled")
 
     @nhmisc.group(name="log", invoke_without_command=True)
-    @commands.admin_or_permissions(manage_guild=True)
+    @commands.has_permissions(manage_messages=True)
     async def nhmisc_log(self, ctx: commands.Context) -> None:
         """Configure NHMisc logging destinations."""
         config = await self.config.guild(ctx.guild).all()
@@ -4300,7 +4314,7 @@ class NHMisc(commands.Cog):
         await ctx.send(f"Moderator action channel set to {channel.mention}.")
 
     @nhmisc.group(name="vcjumping", invoke_without_command=True)
-    @commands.admin_or_permissions(manage_guild=True)
+    @commands.has_permissions(manage_messages=True)
     async def nhmisc_vcjumping(self, ctx: commands.Context) -> None:
         """Configure voice channel jumping detection."""
         config = await self.config.guild(ctx.guild).all()
@@ -4334,7 +4348,7 @@ class NHMisc(commands.Cog):
         await ctx.send(f"VC jumping window set to {seconds} seconds.")
 
     @nhmisc.group(name="forumautopin", invoke_without_command=True)
-    @commands.admin_or_permissions(manage_guild=True)
+    @commands.has_permissions(manage_messages=True)
     async def nhmisc_forumautopin(self, ctx: commands.Context) -> None:
         """Configure automatic pinning for new forum post starter messages."""
         configured = await self._forum_autopin.get_forum_ids(ctx.guild)
@@ -5728,7 +5742,7 @@ class NHMisc(commands.Cog):
         usage="<days> [amount] | <channel_or_thread> <days> [amount]",
     )
     @commands.guild_only()
-    @commands.mod_or_permissions(manage_messages=True)
+    @commands.has_permissions(manage_messages=True)
     async def nhmisc_chatchart(
         self,
         ctx: commands.Context,

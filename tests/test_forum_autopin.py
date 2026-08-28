@@ -294,9 +294,9 @@ class ForumAutopinCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         return cog
 
-    def test_group_requires_manage_guild_via_decorator(self):
+    def test_group_requires_manage_messages_via_decorator(self):
         callback = nhmisc.NHMisc.nhmisc_forumautopin.callback
-        self.assertEqual(callback.admin_or_permissions, {"manage_guild": True})
+        self.assertEqual(callback.required_permissions, {"manage_messages": True})
 
     async def test_add_rejects_forum_without_pin_messages_permission(self):
         cog = self.make_cog()

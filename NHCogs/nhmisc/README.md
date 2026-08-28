@@ -118,10 +118,11 @@ normal bot identity or a one-message webhook character.
 ```
 
 `[p]botproxy` shows the available operations. `create` deliberately opens an additional
-empty session and must be run in the configured Bot Proxy channel. The `channel`
-command shows, sets, or clears that private workflow channel. The bot needs View
-Channel, Send Messages, Create Public Threads, Send Messages in Threads, Manage
-Threads, Manage Messages, and Manage Webhooks there. `deleteclosed` shows or changes
+empty session and must be run in the configured Bot Proxy channel. Moderators need
+Manage Messages to use Bot Proxy. The `channel` command shows, sets, or clears the
+private workflow channel. In that channel, the bot account needs View Channel, Send
+Messages, Create Public Threads, Send Messages in Threads, Manage Threads, Manage
+Messages, and Manage Webhooks. `deleteclosed` shows or changes
 whether closing a session deletes its
 launcher message and thread instead of archiving them. It defaults to disabled. Run
 channel configuration only from a private moderator channel. Bot
@@ -641,14 +642,14 @@ that spreadsheet applications treat them as text instead of evaluating them as f
 
 For privacy, `roleusers` only works when the invocation channel is not visible to the
 guild's `@everyone` role and the bot can View Channel, Send Messages, and Attach Files
-there. The export is sent to that channel. `rolesync` and `rolestats` do not require a
-private channel.
+there. The export is sent to that channel. `rolesync` and `rolestats` may be used in
+public channels.
 
 All three top-level role analytics commands require the effective Manage Messages
 permission in the invocation channel. Role references in responses never notify role
 members.
 
-Administrators can disable role analytics and delete the guild's analytics data:
+Moderators with Manage Messages can disable role analytics and delete the guild's analytics data:
 
 ```ini
 [p]nhmisc roleanalytics disable

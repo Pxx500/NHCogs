@@ -327,6 +327,12 @@ class _CommandStub:
         command = self
         while command is not None:
             callback = command.callback
+            direct_permissions = getattr(callback, "has_permissions", None)
+            if direct_permissions is not None and not self._passes_permissions(
+                ctx,
+                direct_permissions,
+            ):
+                return False
             mod_permissions = getattr(callback, "mod_or_permissions", None)
             if mod_permissions is not None and not self._passes_permissions(
                 ctx,
@@ -762,6 +768,13 @@ def _isolated_honeypot_modules(data_path: Path):
 
         return apply
 
+    def _has_permissions(**permissions):
+        def apply(function):
+            function.has_permissions = permissions
+            return function
+
+        return apply
+
     commands = SimpleNamespace(
         BadArgument=_BadArgument,
         Cog=_Cog,
@@ -774,7 +787,7 @@ def _isolated_honeypot_modules(data_path: Path):
         group=lambda *args, **kwargs: _command_decorator("group", **kwargs),
         command=lambda *args, **kwargs: _command_decorator("command", **kwargs),
         guild_only=_guild_only,
-        has_permissions=lambda **kwargs: (lambda function: function),
+        has_permissions=_has_permissions,
         admin_or_permissions=_admin_or_permissions,
         mod_or_permissions=_mod_or_permissions,
         bot_has_guild_permissions=lambda **kwargs: (lambda function: function),
