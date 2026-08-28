@@ -3803,7 +3803,7 @@ class NHMisc(commands.Cog):
             name="Commands",
             value=self._format_direct_commands(
                 ctx,
-                preferred_order=("enabled", "create", "channel", "deleteclosed"),
+                preferred_order=("toggle", "create", "channel", "deleteclosed"),
             ),
             inline=False,
         )
@@ -3815,15 +3815,19 @@ class NHMisc(commands.Cog):
         await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
     @botproxy.command(
-        name="enabled",
+        name="toggle",
         usage="[true|false]",
     )
-    async def botproxy_enabled(
+    async def botproxy_toggle(
         self,
         ctx: commands.Context,
         enabled: bool | None = None,
     ) -> None:
         """Show or set whether Bot Proxy is enabled for this server."""
+        if self._channel_allows_everyone(ctx.channel, ctx.guild):
+            raise commands.UserFeedbackCheckFailure(
+                "Run this command in a private moderator channel"
+            )
         manager = self._ensure_bot_proxy()
         if enabled is None:
             current = await manager.enabled(ctx.guild)
@@ -3837,9 +3841,12 @@ class NHMisc(commands.Cog):
     @botproxy.command(name="create")
     async def botproxy_create(self, ctx: commands.Context) -> None:
         """Create an additional empty Bot Proxy session."""
+        if self._channel_allows_everyone(ctx.channel, ctx.guild):
+            raise commands.UserFeedbackCheckFailure(
+                "Run this command in a private moderator channel"
+            )
         manager = self._ensure_bot_proxy()
         try:
-            await manager.require_enabled(ctx.guild)
             workspace = await manager.workspace_channel(ctx.guild)
         except ValueError as error:
             await ctx.send(
@@ -3850,6 +3857,14 @@ class NHMisc(commands.Cog):
         if ctx.channel.id != workspace.id:
             await ctx.send(
                 "Run this command in the configured private Bot Proxy channel",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        try:
+            await manager.require_enabled(ctx.guild)
+        except ValueError as error:
+            await ctx.send(
+                str(error),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return

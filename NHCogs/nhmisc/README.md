@@ -110,7 +110,7 @@ normal bot identity or a one-message webhook character.
 
 ```ini
 [p]botproxy
-[p]botproxy enabled [true|false]
+[p]botproxy toggle [true|false]
 [p]botproxy create
 [p]botproxy channel
 [p]botproxy channel #moderator-channel
@@ -120,7 +120,7 @@ normal bot identity or a one-message webhook character.
 
 `[p]botproxy` shows the available operations. `create` deliberately opens an additional
 empty session and must be run in the configured Bot Proxy channel. Moderators need
-Manage Messages to use Bot Proxy. `enabled` shows or changes the per-server state and
+Manage Messages to use Bot Proxy. `toggle` shows or changes the per-server state and
 defaults to enabled. Disabling Bot Proxy closes every active session according to the
 `deleteclosed` setting and blocks new sessions until it is enabled again. The `channel`
 command shows, sets, or clears the private workflow channel. In that channel, the bot

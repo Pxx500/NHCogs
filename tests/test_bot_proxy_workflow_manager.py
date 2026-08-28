@@ -257,6 +257,69 @@ class BotProxyWorkflowManagerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(workflow.WorkflowInputError, "disabled"):
             manager.require_enabled_now(guild.id)
 
+    async def test_disable_waits_for_in_flight_publication_before_persisting(
+        self,
+    ) -> None:
+        publish_started = asyncio.Event()
+        release_publish = asyncio.Event()
+        events: list[str] = []
+        setting = mock.AsyncMock(return_value=True)
+        setting.set = mock.AsyncMock(
+            side_effect=lambda value: events.append(f"set:{value}")
+        )
+        guild = SimpleNamespace(id=10)
+        manager = manager_module.BotProxyWorkflowManager(
+            config=SimpleNamespace(
+                guild=lambda _guild: SimpleNamespace(bot_proxy_enabled=setting)
+            ),
+            store=SimpleNamespace(remove_active_session=mock.AsyncMock()),
+            moderation_log=mock.AsyncMock(return_value=True),
+            error_reporter=mock.AsyncMock(),
+        )
+
+        async def resolve_channel(*_args, **_kwargs):
+            publish_started.set()
+            await release_publish.wait()
+            return SimpleNamespace()
+
+        manager.resolve_publish_channel = mock.AsyncMock(side_effect=resolve_channel)
+        manager.publisher.publish = mock.AsyncMock(
+            side_effect=lambda **_kwargs: events.append("publish")
+            or SimpleNamespace()
+        )
+        manager.log_publication = mock.AsyncMock()
+        session = workflow.BotProxyWorkflowSession(
+            manager,
+            active=manager_module.ActiveSession("session", 10, 20, 50),
+            guild=guild,
+            moderator=SimpleNamespace(id=20),
+            launcher=SimpleNamespace(),
+            thread=SimpleNamespace(id=50),
+            dashboard=SimpleNamespace(id=60),
+            draft=manager_module.BotProxyDraft(
+                destination=manager_module.ProxyDestination(10, 30),
+                content="Hello",
+            ),
+        )
+        interaction = SimpleNamespace(user=SimpleNamespace(id=20))
+
+        publish_task = asyncio.create_task(
+            session._publish_frozen(
+                interaction,
+                copy.deepcopy(session.draft),
+                action="publish Bot Proxy message",
+            )
+        )
+        await publish_started.wait()
+        disable_task = asyncio.create_task(manager.set_enabled(guild, False))
+        await asyncio.sleep(0)
+
+        setting.set.assert_not_awaited()
+        release_publish.set()
+        self.assertTrue(await publish_task)
+        await disable_task
+        self.assertEqual(events, ["publish", "set:False"])
+
     async def test_disabled_session_rejects_stale_input_and_publication(self) -> None:
         active = manager_module.ActiveSession("session", 10, 20, 50)
         manager = manager_module.BotProxyWorkflowManager(
