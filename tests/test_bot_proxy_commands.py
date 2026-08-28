@@ -1,0 +1,163 @@
+from __future__ import annotations
+
+import types
+import unittest
+from unittest import mock
+
+from tests.test_chatchart import load_nhmisc_module
+
+nhmisc = load_nhmisc_module()
+
+
+class _ConfigValue:
+    def __init__(self, values, key):
+        self.values = values
+        self.key = key
+
+    async def __call__(self):
+        return self.values.get(self.key)
+
+    async def set(self, value):
+        self.values[self.key] = value
+
+    async def clear(self):
+        self.values[self.key] = None
+
+
+class _Config:
+    def __init__(self):
+        self.values = {"bot_proxy_channel": None}
+
+    def guild(self, _guild):
+        return types.SimpleNamespace(
+            bot_proxy_channel=_ConfigValue(self.values, "bot_proxy_channel")
+        )
+
+
+class BotProxyCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_create_deletes_invocation_and_always_opens_new_session(self) -> None:
+        channel = types.SimpleNamespace(id=30, mention="<#30>")
+        guild = types.SimpleNamespace(id=10)
+        author = types.SimpleNamespace(id=20)
+        ctx = types.SimpleNamespace(
+            guild=guild,
+            channel=channel,
+            author=author,
+            message=types.SimpleNamespace(id=40, delete=mock.AsyncMock()),
+        )
+        manager = types.SimpleNamespace(
+            workspace_channel=mock.AsyncMock(return_value=channel),
+            create_session=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._ensure_bot_proxy = mock.Mock(return_value=manager)
+
+        await nhmisc.NHMisc.botproxy_create.callback(cog, ctx)
+
+        ctx.message.delete.assert_awaited_once()
+        manager.create_session.assert_awaited_once_with(guild, author)
+
+    async def test_channel_set_requires_private_channel_and_clear_disables_it(self) -> None:
+        config = _Config()
+        guild = types.SimpleNamespace(id=10, me=object(), default_role=object())
+        invocation_channel = types.SimpleNamespace(id=30)
+        ctx = types.SimpleNamespace(
+            guild=guild,
+            channel=invocation_channel,
+            send=mock.AsyncMock(),
+        )
+        permissions = types.SimpleNamespace(
+            view_channel=True,
+            send_messages=True,
+            create_public_threads=True,
+            send_messages_in_threads=True,
+            manage_threads=True,
+        )
+        channel = types.SimpleNamespace(
+            id=30,
+            mention="<#30>",
+            permissions_for=lambda _member: permissions,
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog.config = config
+        cog._channel_allows_everyone = mock.Mock(return_value=False)
+
+        await nhmisc.NHMisc.botproxy_channel.callback(cog, ctx, channel)
+        self.assertEqual(config.values["bot_proxy_channel"], 30)
+
+        await nhmisc.NHMisc.botproxy_channel.callback(cog, ctx, "clear")
+        self.assertIsNone(config.values["bot_proxy_channel"])
+
+    async def test_channel_configuration_never_reveals_workspace_publicly(self) -> None:
+        config = _Config()
+        guild = types.SimpleNamespace(id=10, me=object(), default_role=object())
+        ctx = types.SimpleNamespace(
+            guild=guild,
+            channel=types.SimpleNamespace(id=99),
+            send=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog.config = config
+        cog._channel_allows_everyone = mock.Mock(return_value=True)
+
+        with self.assertRaisesRegex(
+            nhmisc.commands.UserFeedbackCheckFailure,
+            "private moderator channel",
+        ):
+            await nhmisc.NHMisc.botproxy_channel.callback(cog, ctx, None)
+
+        ctx.send.assert_not_awaited()
+
+    async def test_context_action_rechecks_manage_messages(self) -> None:
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=10),
+            permissions=types.SimpleNamespace(manage_messages=False),
+            response=types.SimpleNamespace(send_message=mock.AsyncMock()),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._ensure_bot_proxy = mock.Mock()
+        source = types.SimpleNamespace()
+
+        await nhmisc.NHMisc._bot_proxy_context_action(cog, interaction, source)
+
+        interaction.response.send_message.assert_awaited_once_with(
+            "You need Manage Messages permission",
+            ephemeral=True,
+        )
+        cog._ensure_bot_proxy.assert_not_called()
+
+    async def test_failed_startup_cleanup_keeps_session_for_next_recovery(self) -> None:
+        record = types.SimpleNamespace(
+            session_id="session",
+            guild_id=10,
+            launcher_channel_id=30,
+            thread_id=40,
+            dashboard_message_id=50,
+        )
+        dashboard = types.SimpleNamespace(
+            edit=mock.AsyncMock(side_effect=RuntimeError("Discord unavailable"))
+        )
+        thread = types.SimpleNamespace(
+            fetch_message=mock.AsyncMock(return_value=dashboard),
+            edit=mock.AsyncMock(),
+        )
+        store = types.SimpleNamespace(
+            list_active_sessions=mock.AsyncMock(return_value=(record,)),
+            remove_active_session=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._bot_proxy_store = store
+        cog.bot = types.SimpleNamespace(
+            get_channel=lambda _channel_id: thread,
+            fetch_channel=mock.AsyncMock(),
+        )
+        cog.report_operational_error = mock.AsyncMock()
+
+        await nhmisc.NHMisc._recover_bot_proxy_sessions(cog)
+
+        store.remove_active_session.assert_not_awaited()
+        cog.report_operational_error.assert_awaited_once()
+
+
+if __name__ == "__main__":
+    unittest.main()
