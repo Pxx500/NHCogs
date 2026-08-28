@@ -3901,11 +3901,38 @@ class NHMisc(commands.Cog):
         try:
             workspace = await manager.workspace_channel(ctx.guild)
         except ValueError as error:
-            raise commands.UserFeedbackCheckFailure(str(error)) from error
-        if ctx.channel.id != workspace.id:
-            raise commands.UserFeedbackCheckFailure(
-                "Run this command in the configured private Bot Proxy channel"
+            await ctx.send(
+                str(error),
+                allowed_mentions=discord.AllowedMentions.none(),
             )
+            return
+        if ctx.channel.id != workspace.id:
+            await ctx.send(
+                "Run this command in the configured private Bot Proxy channel",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        try:
+            await manager.create_session(ctx.guild, ctx.author)
+        except ValueError as error:
+            await ctx.send(
+                str(error),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        except Exception as error:
+            await self.report_operational_error(
+                guild_id=ctx.guild.id,
+                source="NHMisc",
+                action="create Bot Proxy session",
+                error=error,
+                channel_id=ctx.channel.id,
+            )
+            await ctx.send(
+                "Bot Proxy failed",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
         try:
             await ctx.message.delete()
         except discord.HTTPException as error:
@@ -3917,19 +3944,6 @@ class NHMisc(commands.Cog):
                 channel_id=ctx.channel.id,
                 message_id=ctx.message.id,
             )
-        try:
-            await manager.create_session(ctx.guild, ctx.author)
-        except ValueError as error:
-            raise commands.UserFeedbackCheckFailure(str(error)) from error
-        except Exception as error:
-            await self.report_operational_error(
-                guild_id=ctx.guild.id,
-                source="NHMisc",
-                action="create Bot Proxy session",
-                error=error,
-                channel_id=ctx.channel.id,
-            )
-            raise commands.UserFeedbackCheckFailure("Bot Proxy failed") from error
 
     @botproxy.command(
         name="channel",
@@ -3972,8 +3986,6 @@ class NHMisc(commands.Cog):
             ("create_public_threads", "Create Public Threads"),
             ("send_messages_in_threads", "Send Messages in Threads"),
             ("manage_threads", "Manage Threads"),
-            ("manage_messages", "Manage Messages"),
-            ("manage_webhooks", "Manage Webhooks"),
         )
         missing = [label for attr, label in required if not getattr(permissions, attr)]
         if missing:

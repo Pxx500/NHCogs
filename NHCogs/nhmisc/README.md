@@ -121,7 +121,9 @@ normal bot identity or a one-message webhook character.
 empty session and must be run in the configured Bot Proxy channel. The `channel`
 command shows, sets, or clears that private workflow channel. The bot needs View
 Channel, Send Messages, Create Public Threads, Send Messages in Threads, Manage
-Threads, Manage Messages, and Manage Webhooks there. `deleteclosed` shows or changes
+Threads there. Manage Messages enables automatic cleanup of moderator input, and
+Manage Webhooks is required only for character previews. Missing either optional
+permission does not prevent opening a session. `deleteclosed` shows or changes
 whether closing a session deletes its
 launcher message and thread instead of archiving them. It defaults to disabled. Run
 channel configuration only from a private moderator channel. Bot
