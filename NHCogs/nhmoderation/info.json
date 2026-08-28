@@ -1,0 +1,25 @@
+{
+  "author": [
+    "Pxx500"
+  ],
+  "name": "NHModeration",
+  "install_msg": "Thank you for installing NHModeration. Run `[p]nhmod` in a private moderator channel to get started.",
+  "short": "Store moderation history and render BanChart without live API reads.",
+  "description": "Import and retain moderation evidence in SQLite, reconcile missed ban events, and render a local BanChart by credited moderator.",
+  "tags": [
+    "moderation",
+    "statistics",
+    "chart",
+    "redbot"
+  ],
+  "requirements": [
+    "matplotlib"
+  ],
+  "min_bot_version": "3.5.23",
+  "min_python_version": [
+    3,
+    10,
+    0
+  ],
+  "end_user_data_statement": "NHModeration stores source observations and canonical moderation actions in SQLite. Observations may contain guild, target, technical executor, credited moderator, and channel IDs, action type, timestamps, reasons, expiry, source identity, migration run identity, and attribution hints. It also stores synchronization cursors, migration state, and operational failure records. User-data deletion anonymizes matching identities and reasons, then rebuilds affected projections. Guild removal deletes that guild's history, synchronization state, migration state, failures, and configuration. Tracebacks are written to the Python logger and are not stored in SQLite."
+}

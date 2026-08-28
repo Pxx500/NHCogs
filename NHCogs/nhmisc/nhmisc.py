@@ -17,6 +17,8 @@ import discord
 from redbot.core import Config, commands
 from redbot.core.data_manager import cog_data_path
 
+from ..operational_errors import OperationalErrorReporter, OperationalFailure
+from ..ranked_donut_chart import OTHER_COLOR, SERIES_COLORS, render_ranked_donut_chart
 from .achievement_definitions import (
     SOLO_GATER_DEFINITION,
     SOLO_GATER_KEY,
@@ -68,7 +70,6 @@ from .gate_roles import (
     build_role_ids_for_target,
     plan_gate_transition,
 )
-from .operational_errors import OperationalErrorReporter, OperationalFailure
 from .role_analytics_service import (
     FullMemberRequestCooldownError,
     MemberIntentRequiredError,
@@ -121,33 +122,10 @@ def _parse_sticky_db_decision(content: str) -> tuple[str, int | None, str]:
         role_id = None
     return command.lower(), role_id, argument.strip()
 
-# Categorical chart hues in fixed rank order, arranged so neighboring bars use
-# clearly different colors. The neutral tone is reserved for undisplayed users.
-CHATCHART_SERIES_COLORS = (
-    "#2a78d6",
-    "#eb6834",
-    "#1baf7a",
-    "#eda100",
-    "#e87ba4",
-    "#008300",
-    "#4a3aa7",
-    "#e34948",
-    "#00a6d6",
-    "#7a5c00",
-    "#a1c935",
-    "#9f55d4",
-    "#c44e9b",
-    "#006d77",
-    "#f48c06",
-    "#264653",
-    "#9b5de5",
-    "#ef476f",
-    "#118ab2",
-    "#6a994e",
-)
-CHATCHART_OTHER_COLOR = "#898781"
 DEFAULT_CHATCHART_USER_COUNT = 10
 MAX_CHATCHART_USER_COUNT = 20
+CHATCHART_SERIES_COLORS = SERIES_COLORS
+CHATCHART_OTHER_COLOR = OTHER_COLOR
 DISCORD_SNOWFLAKE_MIN_DIGITS = 15
 STARGATE_EMOJI_NAME = "stargate"
 STARGATE_EMOJI_ID = 769315278953381928
@@ -7583,48 +7561,6 @@ class NHMisc(commands.Cog):
         parent_name = getattr(getattr(channel, "parent", None), "name", None)
         return f"#{parent_name} / {name}" if parent_name else name
 
-    def _draw_chatchart_donut(
-        self,
-        donut_axis,
-        values: list[int],
-        bar_colors: list[str],
-        other_count: int,
-        total_count: int,
-    ) -> None:
-        donut_values = list(values)
-        donut_colors = list(bar_colors)
-        if other_count:
-            donut_values.append(other_count)
-            donut_colors.append(CHATCHART_OTHER_COLOR)
-        donut_labels = [""] * len(donut_values)
-        if other_count:
-            donut_labels[-1] = "Other"
-        _wedges, outside_labels, _percentages = donut_axis.pie(
-            donut_values,
-            labels=donut_labels,
-            colors=donut_colors,
-            autopct=lambda percent: f"{percent:.0f}%" if percent >= 6 else "",
-            pctdistance=0.79,
-            labeldistance=1.08,
-            startangle=90,
-            counterclock=False,
-            wedgeprops={"width": 0.38, "edgecolor": "white", "linewidth": 2},
-            textprops={"color": "white", "fontsize": 10, "fontweight": "bold"},
-        )
-        for outside_label in outside_labels:
-            outside_label.set_color("#52514e")
-            outside_label.set_fontweight("normal")
-        donut_axis.text(
-            0,
-            0,
-            f"{total_count:,}\nmessages",
-            ha="center",
-            va="center",
-            fontsize=11,
-        )
-        donut_axis.set_title("Share by user", pad=12)
-        donut_axis.axis("equal")
-
     def _build_chatchart_file(
         self,
         guild: discord.Guild,
@@ -7633,81 +7569,24 @@ class NHMisc(commands.Cog):
         location_label: str,
         amount: int,
     ) -> discord.File:
+        top_counts = counts[:amount]
+        other_count = sum(count.message_count for count in counts[len(top_counts):])
+        rows: list[tuple[str, int]] = []
+        for count in top_counts:
+            member = guild.get_member(count.user_id)
+            name = member.display_name if member is not None else str(count.user_id)
+            rows.append((name, count.message_count))
         try:
-            import matplotlib
-
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
+            return render_ranked_donut_chart(
+                rows,
+                other_count=other_count,
+                title=f"Messages by user - last {days} days",
+                context_label=location_label,
+                center_unit="messages",
+                donut_title="Share by user",
+                filename="chatchart.png",
+            )
         except ImportError as exc:
             raise commands.UserFeedbackCheckFailure(
                 "Matplotlib is required for chatchart but is not installed."
             ) from exc
-
-        top_counts = counts[:amount]
-        top_count = sum(count.message_count for count in top_counts)
-        other_count = sum(count.message_count for count in counts[len(top_counts):])
-        total_count = top_count + other_count
-        labels: list[str] = []
-        values: list[int] = []
-        for count in top_counts:
-            member = guild.get_member(count.user_id)
-            name = member.display_name if member is not None else str(count.user_id)
-            if len(name) > 32:
-                name = f"{name[:29]}..."
-            labels.append(name)
-            values.append(count.message_count)
-
-        bar_colors = list(CHATCHART_SERIES_COLORS[: len(values)])
-
-        figure_height = max(5.5, 1.5 + len(top_counts) * 0.5)
-        figure = plt.figure(figsize=(13, figure_height))
-        grid = figure.add_gridspec(1, 2, width_ratios=(3, 1.35), wspace=0.02)
-        ranking_axis = figure.add_subplot(grid[0, 0])
-        donut_axis = figure.add_subplot(grid[0, 1])
-
-        positions = list(range(len(values)))
-        ranking_axis.barh(positions, values, color=bar_colors, height=0.68)
-        ranking_axis.set_yticks(positions, labels=labels)
-        ranking_axis.invert_yaxis()
-        ranking_axis.xaxis.set_visible(False)
-        ranking_axis.tick_params(axis="y", length=0)
-        for spine in ranking_axis.spines.values():
-            spine.set_visible(False)
-
-        largest_value = max(values)
-        ranking_axis.set_xlim(0, largest_value * 1.24)
-        for position, value in zip(positions, values, strict=True):
-            percentage = value / total_count * 100
-            ranking_axis.text(
-                value + largest_value * 0.025,
-                position,
-                f"{value:,} · {percentage:.1f}%",
-                va="center",
-                fontsize=9,
-            )
-
-        self._draw_chatchart_donut(
-            donut_axis, values, bar_colors, other_count, total_count
-        )
-
-        title_y = 0.97
-        figure.suptitle(
-            f"Messages by user - last {days} days",
-            fontsize=16,
-            y=title_y,
-            va="center",
-        )
-        figure.text(
-            0.008,
-            title_y,
-            location_label,
-            ha="left",
-            va="center",
-            fontsize=12,
-            color="#52514e",
-        )
-        buffer = io.BytesIO()
-        figure.savefig(buffer, format="png", bbox_inches="tight", dpi=160)
-        plt.close(figure)
-        buffer.seek(0)
-        return discord.File(buffer, filename="chatchart.png")

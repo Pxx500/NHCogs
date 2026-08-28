@@ -124,6 +124,14 @@ ignore = [
 # PLR0917/PLR2004: NHMisc is outside this plan's scope and untested here.
 "NHCogs/nhmisc/nhmisc.py" = ["PLC0415", "PLR0917", "PLR2004", "TRY203"]
 
+# PLC0415: setup imports the cog lazily so storage-only tests can import the
+# NHModeration domain package without requiring Red or Discord.
+"NHCogs/nhmoderation/__init__.py" = ["PLC0415"]
+
+# PLC0415: Matplotlib remains optional and is imported only while rendering so
+# a missing extra degrades chart commands instead of preventing cog load.
+"NHCogs/ranked_donut_chart.py" = ["PLC0415"]
+
 # PLR0917: the fixture builder mirrors the store signature it wraps.
 "tests/detection_case_fixtures.py" = ["PLR0917"]
 

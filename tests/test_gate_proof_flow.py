@@ -637,15 +637,15 @@ class GateProofEntryPointTests(unittest.IsolatedAsyncioTestCase):
             def render_embed(self):
                 return "gate-proof-review"
 
-        package = ModuleType("_gatecount_nhmisc")
+        package = ModuleType("_gatecount_root.nhmisc")
         package.__path__ = []
-        views = ModuleType("_gatecount_nhmisc.achievement_views")
+        views = ModuleType("_gatecount_root.nhmisc.achievement_views")
         views.GateProofView = FakeGateProofView
         with mock.patch.dict(
             sys.modules,
             {
-                "_gatecount_nhmisc": package,
-                "_gatecount_nhmisc.achievement_views": views,
+                "_gatecount_root.nhmisc": package,
+                "_gatecount_root.nhmisc.achievement_views": views,
             },
         ):
             await cog._add_gate_proof_context_action(
@@ -731,15 +731,15 @@ class GateProofEntryPointTests(unittest.IsolatedAsyncioTestCase):
             def render_embed(self):
                 return "gate-proof-batch-review"
 
-        package = ModuleType("_gatecount_nhmisc")
+        package = ModuleType("_gatecount_root.nhmisc")
         package.__path__ = []
-        views = ModuleType("_gatecount_nhmisc.achievement_views")
+        views = ModuleType("_gatecount_root.nhmisc.achievement_views")
         views.GateProofBatchView = FakeGateProofBatchView
         with mock.patch.dict(
             sys.modules,
             {
-                "_gatecount_nhmisc": package,
-                "_gatecount_nhmisc.achievement_views": views,
+                "_gatecount_root.nhmisc": package,
+                "_gatecount_root.nhmisc.achievement_views": views,
             },
         ):
             await cog._add_gate_proof_context_action(

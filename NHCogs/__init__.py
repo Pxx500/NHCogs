@@ -141,6 +141,8 @@ async def setup(bot: Red) -> None:
             loaded.append(cleanup)
         if githubtickets := await _load_subcog(bot, ".githubtickets", "GitHubTickets"):
             loaded.append(githubtickets)
+        if nhmoderation := await _load_subcog(bot, ".nhmoderation", "NHModeration"):
+            loaded.append(nhmoderation)
         if custom_commands := await _load_custom_commands(bot, nhmisc):
             loaded.append(custom_commands)
     except asyncio.CancelledError:
