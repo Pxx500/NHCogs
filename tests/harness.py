@@ -323,6 +323,38 @@ class _CommandStub:
             return self
         return MethodType(self, instance)
 
+    async def can_run(self, ctx):
+        command = self
+        while command is not None:
+            callback = command.callback
+            mod_permissions = getattr(callback, "mod_or_permissions", None)
+            if mod_permissions is not None and not self._passes_permissions(
+                ctx,
+                mod_permissions,
+                "is_red_mod",
+                "is_red_admin",
+            ):
+                return False
+            admin_permissions = getattr(callback, "admin_or_permissions", None)
+            if admin_permissions is not None and not self._passes_permissions(
+                ctx,
+                admin_permissions,
+                "is_red_admin",
+            ):
+                return False
+            command = command.parent
+        return True
+
+    @staticmethod
+    def _passes_permissions(ctx, permissions, *privilege_flags):
+        if any(getattr(ctx, flag, False) for flag in privilege_flags):
+            return True
+        guild_permissions = ctx.author.guild_permissions
+        return all(
+            getattr(guild_permissions, name, False) is required
+            for name, required in permissions.items()
+        )
+
     def command(self, *args, **kwargs):
         return _command_decorator("command", parent=self, **kwargs)
 
@@ -723,6 +755,13 @@ def _isolated_honeypot_modules(data_path: Path):
 
         return apply
 
+    def _admin_or_permissions(**permissions):
+        def apply(function):
+            function.admin_or_permissions = permissions
+            return function
+
+        return apply
+
     commands = SimpleNamespace(
         BadArgument=_BadArgument,
         Cog=_Cog,
@@ -736,7 +775,7 @@ def _isolated_honeypot_modules(data_path: Path):
         command=lambda *args, **kwargs: _command_decorator("command", **kwargs),
         guild_only=_guild_only,
         has_permissions=lambda **kwargs: (lambda function: function),
-        admin_or_permissions=lambda **kwargs: (lambda function: function),
+        admin_or_permissions=_admin_or_permissions,
         mod_or_permissions=_mod_or_permissions,
         bot_has_guild_permissions=lambda **kwargs: (lambda function: function),
         permissions_check=lambda predicate: (lambda function: function),
