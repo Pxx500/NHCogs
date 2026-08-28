@@ -70,22 +70,11 @@ class ActiveSession:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class SessionRouteKind(str, Enum):
-    CREATE = "create"
-    USE = "use"
-    CHOOSE = "choose"
-
-
 class SessionStatus(str, Enum):
     CANCELLED = "Cancelled"
+    DISABLED = "Disabled"
     TIMED_OUT = "Timed out"
     RELOADED = "Reloaded"
-
-
-@dataclass(frozen=True, slots=True)
-class SessionRoute:
-    kind: SessionRouteKind
-    sessions: tuple[ActiveSession, ...]
 
 
 class SessionRegistry:
@@ -110,17 +99,6 @@ class SessionRegistry:
                 key=lambda session: (session.created_at, session.session_id),
             )
         )
-
-    def route_for_message(self, guild_id: int, moderator_id: int) -> SessionRoute:
-        sessions = self.sessions_for(guild_id, moderator_id)
-        if not sessions:
-            kind = SessionRouteKind.CREATE
-        elif len(sessions) == 1:
-            kind = SessionRouteKind.USE
-        else:
-            kind = SessionRouteKind.CHOOSE
-        return SessionRoute(kind, sessions)
-
 
 def _user_only_mentions() -> Any:
     discord = import_module("discord")
@@ -154,7 +132,6 @@ class BotProxyPublisher:
     def __init__(self, store: Any) -> None:
         self._store = store
         self._webhook_locks: dict[tuple[int, int], asyncio.Lock] = {}
-        self._message_locks: dict[tuple[int, int, int], asyncio.Lock] = {}
 
     async def publish(
         self,
@@ -213,159 +190,6 @@ class BotProxyPublisher:
             allowed_mentions=_no_mentions(),
         )
         return message
-
-    async def edit_tracked(
-        self,
-        *,
-        record: Any,
-        channel: Any,
-        content: str,
-        moderator_id: int,
-    ) -> Any:
-        lock = self._message_lock(record)
-        async with lock:
-            transition_token = await self._store.claim_message_transition(
-                guild_id=record.guild_id,
-                channel_id=record.channel_id,
-                message_id=record.message_id,
-                expected_revision=record.revision,
-            )
-            try:
-                return await self._edit_tracked_locked(
-                    record=record,
-                    channel=channel,
-                    content=content,
-                    moderator_id=moderator_id,
-                    transition_token=transition_token,
-                )
-            finally:
-                await self._store.release_message_transition(
-                    guild_id=record.guild_id,
-                    channel_id=record.channel_id,
-                    message_id=record.message_id,
-                    transition_token=transition_token,
-                )
-
-    async def _edit_tracked_locked(
-        self,
-        *,
-        record: Any,
-        channel: Any,
-        content: str,
-        moderator_id: int,
-        transition_token: str,
-    ) -> Any:
-        message = None
-        webhook = None
-        edit_kwargs = {
-            "content": content,
-            "allowed_mentions": _user_only_mentions(),
-        }
-        if record.sender.value == IdentityType.BOT.value:
-            message = await channel.fetch_message(record.message_id)
-            await message.edit(**edit_kwargs)
-        else:
-            webhook = await self._tracked_webhook(record, channel)
-            parent_channel = getattr(channel, "parent", None) or channel
-            if parent_channel is not channel:
-                edit_kwargs["thread"] = channel
-            await webhook.edit_message(record.message_id, **edit_kwargs)
-        try:
-            return await self._store.edit_message(
-                guild_id=record.guild_id,
-                channel_id=record.channel_id,
-                message_id=record.message_id,
-                expected_revision=record.revision,
-                content=content,
-                moderator_id=moderator_id,
-                transition_token=transition_token,
-            )
-        except Exception:  # noqa: BLE001
-            rollback = {
-                "content": record.content,
-                "allowed_mentions": _user_only_mentions(),
-            }
-            try:
-                if message is not None:
-                    await message.edit(**rollback)
-                elif webhook is not None:
-                    if getattr(channel, "parent", None) is not None:
-                        rollback["thread"] = channel
-                    await webhook.edit_message(record.message_id, **rollback)
-            except Exception:  # noqa: BLE001
-                log.exception(
-                    "Failed to roll back untracked Bot Proxy edit %s",
-                    record.message_id,
-                )
-            raise
-
-    async def delete_tracked(
-        self,
-        *,
-        record: Any,
-        channel: Any,
-        moderator_id: int,
-    ) -> Any:
-        lock = self._message_lock(record)
-        async with lock:
-            transition_token = await self._store.claim_message_transition(
-                guild_id=record.guild_id,
-                channel_id=record.channel_id,
-                message_id=record.message_id,
-                expected_revision=record.revision,
-            )
-            try:
-                return await self._delete_tracked_locked(
-                    record=record,
-                    channel=channel,
-                    moderator_id=moderator_id,
-                    transition_token=transition_token,
-                )
-            finally:
-                await self._store.release_message_transition(
-                    guild_id=record.guild_id,
-                    channel_id=record.channel_id,
-                    message_id=record.message_id,
-                    transition_token=transition_token,
-                )
-
-    async def _delete_tracked_locked(
-        self,
-        *,
-        record: Any,
-        channel: Any,
-        moderator_id: int,
-        transition_token: str,
-    ) -> Any:
-        if record.sender.value == IdentityType.BOT.value:
-            message = await channel.fetch_message(record.message_id)
-            await message.delete()
-        else:
-            webhook = await self._tracked_webhook(record, channel)
-            kwargs = {}
-            if getattr(channel, "parent", None) is not None:
-                kwargs["thread"] = channel
-            await webhook.delete_message(record.message_id, **kwargs)
-        return await self._store.mark_message_deleted(
-            guild_id=record.guild_id,
-            channel_id=record.channel_id,
-            message_id=record.message_id,
-            expected_revision=record.revision,
-            moderator_id=moderator_id,
-            transition_token=transition_token,
-        )
-
-    def _message_lock(self, record: Any) -> asyncio.Lock:
-        key = (record.guild_id, record.channel_id, record.message_id)
-        return self._message_locks.setdefault(key, asyncio.Lock())
-
-    @staticmethod
-    async def _tracked_webhook(record: Any, channel: Any) -> Any:
-        parent_channel = getattr(channel, "parent", None) or channel
-        for webhook in await parent_channel.webhooks():
-            if webhook.id == record.webhook_id:
-                return webhook
-        raise ValueError("Bot Proxy webhook is unavailable")
 
     @staticmethod
     async def _publish_bot(draft: BotProxyDraft, channel: Any) -> Any:

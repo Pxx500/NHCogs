@@ -136,6 +136,8 @@ class CharacterModal(discord.ui.Modal):
             control="session",
         ):
             return
+        if not await self.session.enabled_for(interaction):
+            return
         await interaction.response.defer(ephemeral=True)
         try:
             self.session.ensure_character_allowed()
@@ -215,11 +217,12 @@ class IdentityPickerView(discord.ui.View):
         self._build()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return await _interaction_is_authorized(
+        allowed = await _interaction_is_authorized(
             self.session.opener_id,
             interaction,
             control="session",
         )
+        return allowed and await self.session.enabled_for(interaction)
 
     async def on_error(
         self,
@@ -424,6 +427,8 @@ class ConfirmDeleteCharacterView(discord.ui.View):
         )
 
     async def _confirm(self, interaction: discord.Interaction) -> None:
+        if not await self.session.enabled_for(interaction):
+            return
         await interaction.response.defer(ephemeral=True)
         deleted = await self.session.manager.store.delete_character(
             guild_id=self.session.guild.id,
@@ -553,6 +558,8 @@ class DashboardView(discord.ui.View):
         )
 
     async def _identity(self, interaction: discord.Interaction) -> None:
+        if not await self.session.enabled_for(interaction):
+            return
         presets = await self.session.manager.store.list_characters(
             self.session.guild.id
         )
@@ -570,6 +577,8 @@ class DashboardView(discord.ui.View):
         )
 
     async def _persistent(self, interaction: discord.Interaction) -> None:
+        if not await self.session.enabled_for(interaction):
+            return
         await interaction.response.defer(ephemeral=True, thinking=True)
         destination = self.session.draft.destination
         if destination is None or destination.message_id is not None:
@@ -583,6 +592,8 @@ class DashboardView(discord.ui.View):
         await interaction.delete_original_response()
 
     async def _confirmation(self, interaction: discord.Interaction) -> None:
+        if not await self.session.enabled_for(interaction):
+            return
         await interaction.response.defer(ephemeral=True, thinking=True)
         self.session.send_confirmation = not self.session.send_confirmation
         await self.session.refresh()
@@ -727,6 +738,17 @@ class BotProxyWorkflowSession:
             self._timeout_task.cancel()
         self._timeout_task = asyncio.create_task(self._expire())
 
+    def require_enabled(self) -> None:
+        self.manager.require_enabled_now(self.guild.id)
+
+    async def enabled_for(self, interaction: discord.Interaction) -> bool:
+        try:
+            self.require_enabled()
+        except WorkflowInputError as error:
+            await self.manager.private_feedback(interaction, str(error))
+            return False
+        return True
+
     async def _expire(self) -> None:
         try:
             await asyncio.sleep(SESSION_TIMEOUT_SECONDS)
@@ -745,11 +767,13 @@ class BotProxyWorkflowSession:
         mode: InputMode,
         interaction: discord.Interaction,
     ) -> None:
+        self.require_enabled()
         await self._delete_input_prompt()
         self.input_mode = mode
         self._input_interaction = interaction
 
     def set_identity(self, identity: ProxyIdentity) -> None:
+        self.require_enabled()
         if identity.kind is IdentityType.CHARACTER:
             self.ensure_character_allowed()
         self.draft.identity = identity
@@ -945,6 +969,7 @@ class BotProxyWorkflowSession:
         )
 
     async def set_destination(self, destination: ProxyDestination) -> None:
+        self.require_enabled()
         if (
             destination.message_id is not None
             and self.draft.identity.kind is IdentityType.CHARACTER
@@ -967,13 +992,14 @@ class BotProxyWorkflowSession:
             )
             return
         async with self._publish_lock:
-            errors = self.draft.validation_errors()
-            if errors:
-                await interaction.edit_original_response(content=errors[0])
-                return
-            draft = copy.deepcopy(self.draft)
             preview_message = None
             try:
+                self.require_enabled()
+                errors = self.draft.validation_errors()
+                if errors:
+                    await interaction.edit_original_response(content=errors[0])
+                    return
+                draft = copy.deepcopy(self.draft)
                 await self.manager.resolve_publish_channel(
                     self.guild,
                     draft.destination,
@@ -1075,6 +1101,7 @@ class BotProxyWorkflowSession:
         action: str,
     ) -> bool:
         try:
+            self.require_enabled()
             channel = await self.manager.resolve_publish_channel(
                 self.guild,
                 draft.destination,
@@ -1160,283 +1187,3 @@ class BotProxyWorkflowSession:
                 await self._terminal.finish(status, launcher=self.launcher, delete=True)
             else:
                 await self._terminal.finish(status)
-
-
-class EditTrackedMessageModal(discord.ui.Modal):
-    def __init__(
-        self,
-        manager: BotProxyWorkflowManager,
-        record: Any,
-        owner_id: int,
-    ) -> None:
-        super().__init__(title="Edit Bot Proxy message")
-        self.manager = manager
-        self.record = record
-        self.owner_id = owner_id
-        self.content = discord.ui.TextInput(
-            label="Message",
-            style=discord.TextStyle.paragraph,
-            default=record.content,
-            required=True,
-            max_length=MAX_PROXY_CONTENT_LENGTH,
-        )
-        self.add_item(self.content)
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        if not await _interaction_is_authorized(
-            self.owner_id,
-            interaction,
-            control="action",
-        ):
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            channel = await self.manager.resolve_publish_channel(
-                interaction.guild,
-                ProxyDestination(self.record.guild_id, self.record.channel_id),
-                interaction.user,
-                identity_type=(
-                    IdentityType.CHARACTER
-                    if self.record.sender.value == IdentityType.CHARACTER.value
-                    else IdentityType.BOT
-                ),
-            )
-            updated = await self.manager.publisher.edit_tracked(
-                record=self.record,
-                channel=channel,
-                content=str(self.content.value),
-                moderator_id=interaction.user.id,
-            )
-            await self.manager.log_tracked_change(
-                interaction.guild,
-                interaction.user,
-                "edited",
-                updated,
-            )
-            await interaction.edit_original_response(
-                content="Bot Proxy message edited",
-                view=None,
-            )
-        except Exception as error:  # noqa: BLE001
-            await self.manager.handle_tracked_error(
-                interaction,
-                error,
-                action="edit Bot Proxy message",
-                record=self.record,
-            )
-
-
-class ConfirmDeleteTrackedView(discord.ui.View):
-    def __init__(
-        self,
-        manager: BotProxyWorkflowManager,
-        record: Any,
-        owner_id: int,
-    ) -> None:
-        super().__init__(timeout=30)
-        self.manager = manager
-        self.record = record
-        self.owner_id = owner_id
-        confirm = discord.ui.Button(
-            label="Delete",
-            style=discord.ButtonStyle.danger,
-        )
-        confirm.callback = self._confirm
-        self.add_item(confirm)
-        cancel = discord.ui.Button(
-            label="Cancel",
-            style=discord.ButtonStyle.secondary,
-        )
-        cancel.callback = self._cancel
-        self.add_item(cancel)
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return await _interaction_is_authorized(
-            self.owner_id,
-            interaction,
-            control="action",
-        )
-
-    async def _confirm(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
-        try:
-            channel = await self.manager.resolve_publish_channel(
-                interaction.guild,
-                ProxyDestination(self.record.guild_id, self.record.channel_id),
-                interaction.user,
-                identity_type=(
-                    IdentityType.CHARACTER
-                    if self.record.sender.value == IdentityType.CHARACTER.value
-                    else IdentityType.BOT
-                ),
-            )
-            deleted = await self.manager.publisher.delete_tracked(
-                record=self.record,
-                channel=channel,
-                moderator_id=interaction.user.id,
-            )
-            await self.manager.log_tracked_change(
-                interaction.guild,
-                interaction.user,
-                "deleted",
-                deleted,
-            )
-            await interaction.edit_original_response(
-                content="Bot Proxy message deleted",
-                view=None,
-            )
-        except Exception as error:  # noqa: BLE001
-            await self.manager.handle_tracked_error(
-                interaction,
-                error,
-                action="delete Bot Proxy message",
-                record=self.record,
-            )
-
-    async def _cancel(self, interaction: discord.Interaction) -> None:
-        await interaction.response.edit_message(content="Cancelled", view=None)
-
-
-class TrackedMessageActionsView(discord.ui.View):
-    def __init__(
-        self,
-        manager: BotProxyWorkflowManager,
-        record: Any,
-        owner_id: int,
-    ) -> None:
-        super().__init__(timeout=30)
-        self.manager = manager
-        self.record = record
-        self.owner_id = owner_id
-        for label, callback, style in (
-            ("Use as destination", self._use, discord.ButtonStyle.primary),
-            ("Edit", self._edit, discord.ButtonStyle.secondary),
-            ("Delete", self._delete, discord.ButtonStyle.danger),
-        ):
-            button = discord.ui.Button(label=label, style=style)
-            button.callback = callback
-            self.add_item(button)
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return await _interaction_is_authorized(
-            self.owner_id,
-            interaction,
-            control="action",
-        )
-
-    async def _use(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
-        await self.manager.route_destination_after_defer(
-            interaction,
-            ProxyDestination(
-                self.record.guild_id,
-                self.record.channel_id,
-                self.record.message_id,
-            ),
-        )
-
-    async def _edit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_modal(
-            EditTrackedMessageModal(self.manager, self.record, self.owner_id)
-        )
-
-    async def _delete(self, interaction: discord.Interaction) -> None:
-        await interaction.response.edit_message(
-            content="Delete this Bot Proxy message? This cannot be undone",
-            view=ConfirmDeleteTrackedView(self.manager, self.record, self.owner_id),
-        )
-
-
-class SessionPickerView(discord.ui.View):
-    def __init__(
-        self,
-        manager: BotProxyWorkflowManager,
-        sessions: tuple[ActiveSession, ...],
-        destination: ProxyDestination,
-        *,
-        page: int = 0,
-    ) -> None:
-        super().__init__(timeout=30)
-        self.manager = manager
-        self.sessions = sessions
-        self.destination = destination
-        self.page = page
-        start = page * PRESETS_PER_PAGE
-        page_sessions = sessions[start : start + PRESETS_PER_PAGE]
-        options = [
-            discord.SelectOption(
-                label=f"Bot Proxy {start + index + 1}",
-                value=session.session_id,
-                description=f"Thread {session.thread_id}",
-            )
-            for index, session in enumerate(page_sessions)
-        ]
-        select = discord.ui.Select(
-            placeholder="Choose session",
-            options=options,
-            min_values=1,
-            max_values=1,
-        )
-        select.callback = self._select
-        self.add_item(select)
-        previous = discord.ui.Button(
-            label="Previous",
-            style=discord.ButtonStyle.secondary,
-            disabled=page == 0,
-            row=1,
-        )
-        previous.callback = self._previous
-        self.add_item(previous)
-        next_button = discord.ui.Button(
-            label="Next",
-            style=discord.ButtonStyle.secondary,
-            disabled=start + PRESETS_PER_PAGE >= len(sessions),
-            row=1,
-        )
-        next_button.callback = self._next
-        self.add_item(next_button)
-
-    async def _select(self, interaction: discord.Interaction) -> None:
-        session_id = interaction.data["values"][0]
-        session = self.manager.sessions.get(session_id)
-        if session is None:
-            await interaction.response.edit_message(
-                content="This Bot Proxy session is no longer active",
-                view=None,
-            )
-            return
-        if interaction.user.id != session.opener_id:
-            await interaction.response.send_message(
-                "Only the session owner can select it",
-                ephemeral=True,
-            )
-            return
-        try:
-            await session.set_destination(self.destination)
-        except WorkflowInputError as error:
-            await interaction.response.edit_message(content=str(error), view=None)
-            return
-        await interaction.response.edit_message(
-            content=f"Open {session.thread.mention}",
-            view=None,
-        )
-
-    async def _previous(self, interaction: discord.Interaction) -> None:
-        await interaction.response.edit_message(
-            view=SessionPickerView(
-                self.manager,
-                self.sessions,
-                self.destination,
-                page=max(0, self.page - 1),
-            )
-        )
-
-    async def _next(self, interaction: discord.Interaction) -> None:
-        await interaction.response.edit_message(
-            view=SessionPickerView(
-                self.manager,
-                self.sessions,
-                self.destination,
-                page=self.page + 1,
-            )
-        )

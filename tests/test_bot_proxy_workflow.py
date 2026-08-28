@@ -22,7 +22,6 @@ IdentityType = bot_proxy.IdentityType
 ProxyDestination = bot_proxy.ProxyDestination
 ProxyIdentity = bot_proxy.ProxyIdentity
 SessionRegistry = bot_proxy.SessionRegistry
-SessionRouteKind = bot_proxy.SessionRouteKind
 SessionStatus = bot_proxy.SessionStatus
 
 
@@ -46,26 +45,6 @@ class BotProxyDraftTests(unittest.TestCase):
         )
 
         self.assertEqual(draft.validation_errors(), ())
-
-
-class BotProxySessionRegistryTests(unittest.TestCase):
-    def test_apps_routes_zero_one_and_many_active_sessions(self) -> None:
-        registry = SessionRegistry()
-        self.assertEqual(registry.route_for_message(10, 20).kind, SessionRouteKind.CREATE)
-
-        first = ActiveSession("first", 10, 20, 30)
-        registry.add(first)
-        single = registry.route_for_message(10, 20)
-        self.assertEqual(single.kind, SessionRouteKind.USE)
-        self.assertEqual(single.sessions, (first,))
-
-        second = ActiveSession("second", 10, 20, 31)
-        registry.add(second)
-        multiple = registry.route_for_message(10, 20)
-        self.assertEqual(multiple.kind, SessionRouteKind.CHOOSE)
-        self.assertEqual(multiple.sessions, (first, second))
-
-        self.assertEqual(registry.route_for_message(11, 20).kind, SessionRouteKind.CREATE)
 
 
 class BotProxySessionLifecycleTests(unittest.IsolatedAsyncioTestCase):
