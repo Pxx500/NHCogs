@@ -59,6 +59,20 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    def test_maintenance_commands_inherit_manage_messages_permission(self):
+        with loaded_nhmoderation() as module:
+            self.assertEqual(
+                module.NHModeration.nhmod.callback.mod_or_permissions,
+                {"manage_messages": True},
+            )
+            for command_name in (
+                "nhmod_migrate_run",
+                "nhmod_sync",
+                "nhmod_repair",
+            ):
+                callback = getattr(module.NHModeration, command_name).callback
+                self.assertFalse(hasattr(callback, "admin_or_permissions"))
+
     async def test_bare_nhmod_groups_use_runtime_overviews(self):
         with loaded_nhmoderation() as module:
             subject = object.__new__(module.NHModeration)
@@ -89,7 +103,6 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
     async def test_banchart_reads_history_and_sends_shared_chart(self):
         with loaded_nhmoderation() as module:
             subject = object.__new__(module.NHModeration)
-            subject._require_private_channel = mock.Mock()
             subject._mark_operational_recovered = mock.AsyncMock()
             subject.history = SimpleNamespace(
                 status=mock.AsyncMock(
@@ -133,7 +146,6 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
     async def test_banchart_rejects_incomplete_migration_without_reading_chart(self):
         with loaded_nhmoderation() as module:
             subject = object.__new__(module.NHModeration)
-            subject._require_private_channel = mock.Mock()
             subject._mark_operational_recovered = mock.AsyncMock()
             subject.history = SimpleNamespace(
                 status=mock.AsyncMock(
@@ -160,10 +172,35 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
             ctx.send.assert_awaited_once()
             self.assertEqual(
                 ctx.send.await_args.args[0],
-                "Run `!nhmod migrate run` before using banchart.",
+                "Initial migration is currently running. Try banchart again after it completes.",
             )
             self.assertIn("allowed_mentions", ctx.send.await_args.kwargs)
             subject._mark_operational_recovered.assert_not_awaited()
+
+    async def test_banchart_tells_moderator_to_start_pending_migration(self):
+        with loaded_nhmoderation() as module:
+            subject = object.__new__(module.NHModeration)
+            subject._mark_operational_recovered = mock.AsyncMock()
+            subject.history = SimpleNamespace(
+                status=mock.AsyncMock(
+                    return_value=SimpleNamespace(migration_state="pending")
+                ),
+                get_ban_chart=mock.AsyncMock(),
+            )
+            ctx = SimpleNamespace(
+                guild=SimpleNamespace(id=10, name="Test guild"),
+                channel=object(),
+                clean_prefix="!",
+                send=mock.AsyncMock(),
+            )
+
+            await module.NHModeration.banchart.callback(subject, ctx)
+
+            subject.history.get_ban_chart.assert_not_awaited()
+            self.assertEqual(
+                ctx.send.await_args.args[0],
+                "Run `!nhmod migrate run` before using banchart.",
+            )
 
     async def test_migrate_plan_reports_cached_source_and_command_readiness(self):
         with loaded_nhmoderation() as module:
@@ -238,6 +275,50 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
             subject._mark_operational_recovered.assert_awaited_once_with(
                 ctx.guild,
                 "nhmod migrate run",
+            )
+
+    async def test_migrate_run_acknowledges_start_before_waiting_for_import(self):
+        with loaded_nhmoderation() as module:
+            subject = object.__new__(module.NHModeration)
+            subject._require_private_channel = mock.Mock()
+            subject._mark_operational_recovered = mock.AsyncMock()
+            subject.history = SimpleNamespace(
+                status=mock.AsyncMock(
+                    return_value=SimpleNamespace(migration_state="pending")
+                )
+            )
+            import_started = asyncio.Event()
+            finish_import = asyncio.Event()
+
+            async def run_sync(*_args):
+                import_started.set()
+                await finish_import.wait()
+                return SimpleNamespace(inserted_observations=4)
+
+            subject._run_sync = mock.AsyncMock(side_effect=run_sync)
+            ctx = SimpleNamespace(
+                guild=SimpleNamespace(id=10),
+                send=mock.AsyncMock(),
+            )
+
+            task = asyncio.create_task(
+                module.NHModeration.nhmod_migrate_run.callback(subject, ctx)
+            )
+            try:
+                await asyncio.wait_for(import_started.wait(), timeout=1)
+                self.assertEqual(ctx.send.await_count, 1)
+                self.assertEqual(
+                    ctx.send.await_args.args[0],
+                    "Migration started. I will post the result here when it completes.",
+                )
+            finally:
+                finish_import.set()
+                await task
+
+            self.assertEqual(ctx.send.await_count, 2)
+            self.assertEqual(
+                ctx.send.await_args_list[1].args[0],
+                "Migration complete. Imported 4 new observations.",
             )
 
     async def test_status_reports_possible_historical_gap(self):
@@ -338,6 +419,82 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                 ctx.send.await_args.args[0],
                 "Something went wrong while running this command. The error was logged.",
             )
+
+    async def test_permission_check_failure_returns_user_feedback(self):
+        class CheckFailure(Exception):
+            pass
+
+        with loaded_nhmoderation() as module:
+            subject = object.__new__(module.NHModeration)
+            subject.report_operational_error = mock.AsyncMock()
+            ctx = SimpleNamespace(
+                guild=SimpleNamespace(id=10),
+                channel=SimpleNamespace(id=20),
+                message=SimpleNamespace(id=30),
+                command=SimpleNamespace(qualified_name="nhmod migrate run"),
+                send=mock.AsyncMock(),
+            )
+
+            with mock.patch.object(
+                module.commands,
+                "CheckFailure",
+                CheckFailure,
+                create=True,
+            ):
+                await module.NHModeration.cog_command_error(
+                    subject,
+                    ctx,
+                    CheckFailure(),
+                )
+
+            subject.report_operational_error.assert_not_awaited()
+            self.assertEqual(
+                ctx.send.await_args.args[0],
+                "You do not have permission to use this command.",
+            )
+
+    async def test_expected_command_error_is_delegated_to_red(self):
+        class CheckFailure(Exception):
+            pass
+
+        class UserFeedbackCheckFailure(CheckFailure):
+            pass
+
+        with loaded_nhmoderation() as module:
+            subject = object.__new__(module.NHModeration)
+            subject.report_operational_error = mock.AsyncMock()
+            bot = SimpleNamespace(on_command_error=mock.AsyncMock())
+            ctx = SimpleNamespace(
+                bot=bot,
+                guild=SimpleNamespace(id=10),
+                channel=SimpleNamespace(id=20),
+                message=SimpleNamespace(id=30),
+                command=SimpleNamespace(qualified_name="nhmod repair"),
+                send=mock.AsyncMock(),
+            )
+            error = UserFeedbackCheckFailure("Run this command in a private channel")
+
+            with (
+                mock.patch.object(
+                    module.commands,
+                    "CheckFailure",
+                    CheckFailure,
+                    create=True,
+                ),
+                mock.patch.object(
+                    module.commands,
+                    "UserFeedbackCheckFailure",
+                    UserFeedbackCheckFailure,
+                ),
+            ):
+                await module.NHModeration.cog_command_error(subject, ctx, error)
+
+            bot.on_command_error.assert_awaited_once_with(
+                ctx,
+                error,
+                unhandled_by_cog=True,
+            )
+            subject.report_operational_error.assert_not_awaited()
 
     async def test_operational_error_is_written_to_python_logger(self):
         with loaded_nhmoderation() as module:

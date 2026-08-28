@@ -134,21 +134,40 @@ class NHModeration(commands.Cog):
     async def cog_command_error(
         self, ctx: commands.Context, error: commands.CommandError
     ) -> None:
-        expected_types = tuple(
+        red_handled_types = tuple(
             error_type
             for name in (
                 "UserFeedbackCheckFailure",
                 "UserInputError",
-                "CheckFailure",
                 "CommandOnCooldown",
                 "DisabledCommand",
                 "MaxConcurrencyReached",
+                "NoPrivateMessage",
+                "PrivateMessageOnly",
+                "NSFWChannelRequired",
+                "BotMissingPermissions",
             )
             if isinstance((error_type := getattr(commands, name, None)), type)
             and error_type not in {BaseException, Exception, object}
         )
         original = getattr(error, "original", error)
-        if isinstance(error, expected_types) or isinstance(original, expected_types):
+        if isinstance(error, red_handled_types) or isinstance(
+            original, red_handled_types
+        ):
+            await ctx.bot.on_command_error(
+                ctx,
+                original,
+                unhandled_by_cog=True,
+            )
+            return
+        check_failure = getattr(commands, "CheckFailure", None)
+        if isinstance(check_failure, type) and (
+            isinstance(error, check_failure) or isinstance(original, check_failure)
+        ):
+            await ctx.send(
+                "You do not have permission to use this command.",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             return
         guild = getattr(ctx, "guild", None)
         if guild is not None:
@@ -420,11 +439,15 @@ class NHModeration(commands.Cog):
     @commands.mod_or_permissions(ban_members=True)
     async def banchart(self, ctx: commands.Context, *, arguments: str = "") -> None:
         """Render bans by credited moderator from local history."""
-        self._require_private_channel(ctx)
         state = await self.history.status(ctx.guild.id)
         if state.migration_state != "complete":
+            message = (
+                "Initial migration is currently running. Try banchart again after it completes."
+                if state.migration_state == "running"
+                else f"Run `{ctx.clean_prefix}nhmod migrate run` before using banchart."
+            )
             await ctx.send(
-                f"Run `{ctx.clean_prefix}nhmod migrate run` before using banchart.",
+                message,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
@@ -568,7 +591,6 @@ class NHModeration(commands.Cog):
         await self._mark_operational_recovered(ctx.guild, "nhmod migrate plan")
 
     @nhmod_migrate.command(name="run")
-    @commands.admin_or_permissions(administrator=True)
     async def nhmod_migrate_run(self, ctx: commands.Context) -> None:
         """Start or resume the initial moderation history import."""
         self._require_private_channel(ctx)
@@ -580,7 +602,17 @@ class NHModeration(commands.Cog):
             )
             await self._mark_operational_recovered(ctx.guild, "nhmod migrate run")
             return
+        await ctx.send(
+            "Migration started. I will post the result here when it completes.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        log.info("NHModeration initial migration started for guild %s", ctx.guild.id)
         report = await self._run_sync(ctx.guild, SyncMode.INITIAL)
+        log.info(
+            "NHModeration initial migration completed for guild %s with %s new observations",
+            ctx.guild.id,
+            report.inserted_observations,
+        )
         await ctx.send(
             f"Migration complete. Imported {report.inserted_observations} new observations.",
             allowed_mentions=discord.AllowedMentions.none(),
@@ -588,7 +620,6 @@ class NHModeration(commands.Cog):
         await self._mark_operational_recovered(ctx.guild, "nhmod migrate run")
 
     @nhmod.command(name="sync")
-    @commands.admin_or_permissions(administrator=True)
     async def nhmod_sync(self, ctx: commands.Context) -> None:
         """Run a low-cost incremental synchronization."""
         self._require_private_channel(ctx)
@@ -600,7 +631,6 @@ class NHModeration(commands.Cog):
         await self._mark_operational_recovered(ctx.guild, "nhmod sync")
 
     @nhmod.command(name="repair", usage="[confirm]")
-    @commands.admin_or_permissions(administrator=True)
     async def nhmod_repair(
         self, ctx: commands.Context, confirmation: str | None = None
     ) -> None:
