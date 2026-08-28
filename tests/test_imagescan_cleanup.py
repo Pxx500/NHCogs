@@ -118,6 +118,7 @@ def _install_redbot_stubs() -> None:
         group=_decorator,
         command=_decorator,
         guild_only=lambda: (lambda fn: fn),
+        has_permissions=lambda **kwargs: (lambda fn: fn),
         admin_or_permissions=lambda **kwargs: (lambda fn: fn),
         mod_or_permissions=lambda **kwargs: (lambda fn: fn),
         bot_has_guild_permissions=lambda **kwargs: (lambda fn: fn),

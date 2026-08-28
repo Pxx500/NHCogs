@@ -161,6 +161,8 @@ class BotProxyWorkflowManager:
             ("create_public_threads", "Create Public Threads"),
             ("send_messages_in_threads", "Send Messages in Threads"),
             ("manage_threads", "Manage Threads"),
+            ("manage_messages", "Manage Messages"),
+            ("manage_webhooks", "Manage Webhooks"),
         )
         missing = [label for attr, label in required if not getattr(permissions, attr)]
         if missing:

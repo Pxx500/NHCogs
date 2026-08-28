@@ -131,8 +131,8 @@ class BotProxyCommandTests(unittest.IsolatedAsyncioTestCase):
             create_public_threads=True,
             send_messages_in_threads=True,
             manage_threads=True,
-            manage_messages=False,
-            manage_webhooks=False,
+            manage_messages=True,
+            manage_webhooks=True,
         )
         channel = types.SimpleNamespace(
             id=30,

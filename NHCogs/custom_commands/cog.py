@@ -778,7 +778,7 @@ class CustomCommands(commands.Cog):
         aliases=["add"],
         invoke_without_command=True,
     )
-    @commands.mod_or_permissions(manage_messages=True)
+    @commands.has_permissions(manage_messages=True)
     async def cc_create(
         self,
         ctx: commands.Context,
@@ -790,7 +790,7 @@ class CustomCommands(commands.Cog):
         await self._open_create_workflow(ctx, command, text)
 
     @cc_create.command(name="simple")
-    @commands.mod_or_permissions(manage_messages=True)
+    @commands.has_permissions(manage_messages=True)
     async def cc_create_simple(
         self,
         ctx: commands.Context,
@@ -802,7 +802,7 @@ class CustomCommands(commands.Cog):
         await self._open_create_workflow(ctx, command, text)
 
     @cc_create.command(name="random")
-    @commands.mod_or_permissions(manage_messages=True)
+    @commands.has_permissions(manage_messages=True)
     async def cc_create_random(
         self,
         ctx: commands.Context,
@@ -836,7 +836,7 @@ class CustomCommands(commands.Cog):
         await self.workflows.open(ctx, draft)
 
     @customcom.command(name="edit")
-    @commands.mod_or_permissions(manage_messages=True)
+    @commands.has_permissions(manage_messages=True)
     async def cc_edit(
         self,
         ctx: commands.Context,
@@ -856,7 +856,7 @@ class CustomCommands(commands.Cog):
         await self.workflows.open(ctx, draft)
 
     @customcom.command(name="cooldown")
-    @commands.mod_or_permissions(manage_messages=True)
+    @commands.has_permissions(manage_messages=True)
     async def cc_cooldown(
         self,
         ctx: commands.Context,
@@ -905,7 +905,7 @@ class CustomCommands(commands.Cog):
         )
 
     @customcom.command(name="delete", aliases=["del", "remove"])
-    @commands.mod_or_permissions(manage_messages=True)
+    @commands.has_permissions(manage_messages=True)
     async def cc_delete(self, ctx: commands.Context, command: str) -> None:
         """Review and delete a custom command."""
         stored = await self.catalog.get(ctx.guild.id, command)

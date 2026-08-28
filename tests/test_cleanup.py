@@ -426,7 +426,7 @@ class CleanupOrchestrationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CleanupCommandAdapterTests(unittest.IsolatedAsyncioTestCase):
-    def test_cleanup_commands_allow_red_moderators_or_manage_messages(self):
+    def test_cleanup_commands_require_manage_messages(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
                 with loaded_managed_cleanup() as managed:
@@ -435,7 +435,7 @@ class CleanupCommandAdapterTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(root.name, "cleanup")
                     self.assertTrue(root.callback.guild_only)
                     self.assertEqual(
-                        root.callback.mod_or_permissions,
+                        root.callback.has_permissions,
                         {"manage_messages": True},
                     )
                     self.assertEqual(

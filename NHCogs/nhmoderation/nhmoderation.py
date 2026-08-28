@@ -436,7 +436,7 @@ class NHModeration(commands.Cog):
         usage="[days|all] [amount] [--automation]",
     )
     @commands.guild_only()
-    @commands.mod_or_permissions(ban_members=True)
+    @commands.has_permissions(manage_messages=True)
     async def banchart(self, ctx: commands.Context, *, arguments: str = "") -> None:
         """Render bans by credited moderator from local history."""
         state = await self.history.status(ctx.guild.id)
@@ -507,7 +507,7 @@ class NHModeration(commands.Cog):
 
     @commands.group(name="nhmod", invoke_without_command=True)
     @commands.guild_only()
-    @commands.mod_or_permissions(manage_messages=True)
+    @commands.has_permissions(manage_messages=True)
     async def nhmod(self, ctx: commands.Context) -> None:
         """Manage NHModeration history and synchronization."""
         self._require_private_channel(ctx)

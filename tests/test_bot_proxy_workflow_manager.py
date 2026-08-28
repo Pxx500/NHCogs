@@ -166,43 +166,6 @@ class _Workspace(discord.TextChannel):
 
 
 class BotProxyWorkflowManagerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_workspace_allows_missing_optional_message_and_webhook_permissions(
-        self,
-    ) -> None:
-        workspace = _Workspace(SimpleNamespace())
-        workspace.permissions_for = lambda subject: (
-            SimpleNamespace(view_channel=False)
-            if subject == "everyone"
-            else SimpleNamespace(
-                view_channel=True,
-                send_messages=True,
-                create_public_threads=True,
-                send_messages_in_threads=True,
-                manage_threads=True,
-                manage_messages=False,
-                manage_webhooks=False,
-            )
-        )
-        guild = SimpleNamespace(
-            id=10,
-            default_role="everyone",
-            me="bot",
-            get_channel=lambda channel_id: workspace if channel_id == 30 else None,
-        )
-        config = SimpleNamespace(
-            guild=lambda _guild: SimpleNamespace(
-                bot_proxy_channel=mock.AsyncMock(return_value=30)
-            )
-        )
-        manager = manager_module.BotProxyWorkflowManager(
-            config=config,
-            store=SimpleNamespace(),
-            moderation_log=mock.AsyncMock(),
-            error_reporter=mock.AsyncMock(),
-        )
-
-        self.assertIs(await manager.workspace_channel(guild), workspace)
-
     async def test_create_session_always_uses_configured_private_workspace(self) -> None:
         dashboard = SimpleNamespace(id=60, edit=mock.AsyncMock())
         thread = SimpleNamespace(

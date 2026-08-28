@@ -1422,7 +1422,7 @@ class Honeypot(Cog):
     # ─── Commands ─────────────────────────────────────────────────────────
 
     @commands.guild_only()
-    @commands.permissions_check(lambda ctx: ctx.author.id == ctx.guild.owner_id or ctx.author.id in ctx.bot.owner_ids)
+    @commands.has_permissions(manage_messages=True)
     @commands.group(invoke_without_command=True)
     async def honeypot(self, ctx: commands.Context) -> None:
         """Configure server safety and honeypot protections."""
@@ -1547,7 +1547,7 @@ class Honeypot(Cog):
     # ─── GIF detector sub-group ────────────────────────────────────────
 
     @honeypot.group(name="gifdetector", invoke_without_command=True)
-    @commands.mod_or_permissions(manage_messages=True)
+    @commands.has_permissions(manage_messages=True)
     async def gif_detector(self, ctx: commands.Context) -> None:
         """Configure channel-scoped GIF interception."""
         return await self._send_group_overview(
@@ -2335,7 +2335,7 @@ class Honeypot(Cog):
         return await channel_routing.configure_single(self, ctx, "daily_stats", target)
 
     @debug.command(name="resetstats")
-    @commands.permissions_check(lambda ctx: ctx.author.id == ctx.guild.owner_id or ctx.author.id in ctx.bot.owner_ids)
+    @commands.has_permissions(manage_messages=True)
     async def honeypot_reset_stats(self, ctx: commands.Context) -> None:
         """Reset stored honeypot statistics."""
         return await diagnostics.honeypot_reset_stats(self, ctx)

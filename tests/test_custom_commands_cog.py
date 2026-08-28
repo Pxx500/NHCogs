@@ -401,7 +401,7 @@ class CustomCommandsSurfaceTests(unittest.TestCase):
         )
         for name in ("create", "edit", "cooldown", "delete"):
             self.assertEqual(
-                children[name].callback.required_permissions,
+                children[name].callback.direct_permissions,
                 {"manage_messages": True},
             )
         self.assertTrue(children["purgelegacy"].hidden)

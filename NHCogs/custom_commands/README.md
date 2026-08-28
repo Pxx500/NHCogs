@@ -16,8 +16,8 @@ These commands are available to regular guild members:
 [p]customcom raw <name>
 ```
 
-`[p]commands` is a standalone public command and shows the same output as
-`[p]customcom list` without inheriting permissions configured for the `customcom` group.
+`[p]commands` is a standalone public command with its own public permission surface. It
+shows the same output as `[p]customcom list`.
 Lists and previews disable mentions. `list` and `search` show 15 commands per page. Each
 entry uses one logical line in the form `[p]command - short preview`, with whitespace and
 markdown normalized for compact display. The invoker navigates with Previous and Next
@@ -30,7 +30,7 @@ code fence are provided in one exact `.txt` transcript instead.
 
 ## Create and edit
 
-These commands require Red moderator status or Manage Messages:
+These commands require Manage Messages:
 
 ```ini
 [p]customcom create <name>

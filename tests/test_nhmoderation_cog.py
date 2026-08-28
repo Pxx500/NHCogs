@@ -82,7 +82,7 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                 "nhmod_repair",
             ):
                 command = getattr(module.NHModeration, command_name)
-                self.assertTrue(await command.can_run(red_moderator))
+                self.assertFalse(await command.can_run(red_moderator))
                 self.assertTrue(await command.can_run(manage_messages))
                 self.assertFalse(await command.can_run(unauthorized))
 
