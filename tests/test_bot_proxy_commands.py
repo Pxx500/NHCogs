@@ -26,15 +26,42 @@ class _ConfigValue:
 
 class _Config:
     def __init__(self):
-        self.values = {"bot_proxy_channel": None}
+        self.values = {
+            "bot_proxy_channel": None,
+            "bot_proxy_delete_closed_sessions": False,
+        }
 
     def guild(self, _guild):
         return types.SimpleNamespace(
-            bot_proxy_channel=_ConfigValue(self.values, "bot_proxy_channel")
+            bot_proxy_channel=_ConfigValue(self.values, "bot_proxy_channel"),
+            bot_proxy_delete_closed_sessions=_ConfigValue(
+                self.values,
+                "bot_proxy_delete_closed_sessions",
+            ),
         )
+
+    def guild_from_id(self, _guild_id):
+        return self.guild(None)
 
 
 class BotProxyCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_deleteclosed_configuration_can_be_shown_and_changed(self) -> None:
+        config = _Config()
+        ctx = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=10),
+            channel=types.SimpleNamespace(id=20),
+            send=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog.config = config
+        cog._channel_allows_everyone = mock.Mock(return_value=False)
+
+        await nhmisc.NHMisc.botproxy_deleteclosed.callback(cog, ctx, True)
+        self.assertTrue(config.values["bot_proxy_delete_closed_sessions"])
+
+        await nhmisc.NHMisc.botproxy_deleteclosed.callback(cog, ctx, None)
+        self.assertIn("enabled", ctx.send.await_args.args[0])
+
     async def test_create_deletes_invocation_and_always_opens_new_session(self) -> None:
         channel = types.SimpleNamespace(id=30, mention="<#30>")
         guild = types.SimpleNamespace(id=10)
@@ -72,6 +99,8 @@ class BotProxyCommandTests(unittest.IsolatedAsyncioTestCase):
             create_public_threads=True,
             send_messages_in_threads=True,
             manage_threads=True,
+            manage_messages=True,
+            manage_webhooks=True,
         )
         channel = types.SimpleNamespace(
             id=30,
@@ -126,6 +155,44 @@ class BotProxyCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         cog._ensure_bot_proxy.assert_not_called()
 
+    async def test_recovery_deletes_thread_and_launcher_when_configured(self) -> None:
+        record = types.SimpleNamespace(
+            session_id="session",
+            guild_id=10,
+            launcher_channel_id=30,
+            launcher_message_id=35,
+            thread_id=40,
+            dashboard_message_id=50,
+        )
+        thread = types.SimpleNamespace(delete=mock.AsyncMock())
+        launcher = types.SimpleNamespace(delete=mock.AsyncMock())
+        launcher_channel = types.SimpleNamespace(
+            fetch_message=mock.AsyncMock(return_value=launcher)
+        )
+        store = types.SimpleNamespace(
+            list_active_sessions=mock.AsyncMock(return_value=(record,)),
+            remove_active_session=mock.AsyncMock(),
+        )
+        config = _Config()
+        config.values["bot_proxy_delete_closed_sessions"] = True
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._bot_proxy_store = store
+        cog.config = config
+        cog.bot = types.SimpleNamespace(
+            get_channel=lambda channel_id: (
+                thread if channel_id == 40 else launcher_channel
+            ),
+            fetch_channel=mock.AsyncMock(),
+        )
+        cog.report_operational_error = mock.AsyncMock()
+
+        await nhmisc.NHMisc._recover_bot_proxy_sessions(cog)
+
+        thread.delete.assert_awaited_once()
+        launcher.delete.assert_awaited_once()
+        store.remove_active_session.assert_awaited_once_with("session")
+        cog.report_operational_error.assert_not_awaited()
+
     async def test_failed_startup_cleanup_keeps_session_for_next_recovery(self) -> None:
         record = types.SimpleNamespace(
             session_id="session",
@@ -147,6 +214,7 @@ class BotProxyCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._bot_proxy_store = store
+        cog.config = _Config()
         cog.bot = types.SimpleNamespace(
             get_channel=lambda _channel_id: thread,
             fetch_channel=mock.AsyncMock(),

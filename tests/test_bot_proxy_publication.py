@@ -55,6 +55,10 @@ class FakeAllowedMentions:
         self.roles = roles
         self.replied_user = replied_user
 
+    @classmethod
+    def none(cls):
+        return cls(everyone=False, users=False, roles=False, replied_user=False)
+
 
 def discord_module() -> types.ModuleType:
     module = types.ModuleType("discord")
@@ -71,6 +75,63 @@ def assert_user_only_mentions(test: unittest.TestCase, mentions: object) -> None
 
 
 class BotProxyPublisherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bot_preview_is_exact_untracked_and_suppresses_mentions(self) -> None:
+        preview = SimpleNamespace(id=300)
+        channel = SimpleNamespace(send=mock.AsyncMock(return_value=preview))
+        store = SimpleNamespace(record_message=mock.AsyncMock())
+        publisher = bot_proxy.BotProxyPublisher(store)
+        draft = BotProxyDraft(
+            destination=ProxyDestination(guild_id=100, channel_id=200),
+            content="Hello <@123> @everyone",
+        )
+
+        with mock.patch.dict(sys.modules, {"discord": discord_module()}):
+            result = await publisher.preview(draft=draft, channel=channel)
+
+        self.assertIs(result, preview)
+        kwargs = channel.send.await_args.kwargs
+        self.assertEqual(kwargs["content"], draft.content)
+        self.assertFalse(kwargs["allowed_mentions"].everyone)
+        self.assertFalse(kwargs["allowed_mentions"].users)
+        store.record_message.assert_not_awaited()
+
+    async def test_character_preview_uses_name_avatar_and_is_not_tracked(self) -> None:
+        preview = SimpleNamespace(id=300)
+        webhook = SimpleNamespace(id=900)
+        webhook.edit = mock.AsyncMock(return_value=webhook)
+        webhook.send = mock.AsyncMock(return_value=preview)
+        parent = SimpleNamespace(id=200, webhooks=mock.AsyncMock(return_value=[webhook]))
+        channel = SimpleNamespace(
+            id=201,
+            parent=parent,
+            guild=SimpleNamespace(id=100),
+        )
+        store = SimpleNamespace(
+            get_webhook_id=mock.AsyncMock(return_value=900),
+            record_message=mock.AsyncMock(),
+        )
+        publisher = bot_proxy.BotProxyPublisher(store)
+        draft = BotProxyDraft(
+            destination=ProxyDestination(guild_id=100, channel_id=400),
+            content="Character preview",
+            identity=ProxyIdentity(
+                IdentityType.CHARACTER,
+                display_name="Guide",
+                avatar_bytes=b"avatar",
+            ),
+        )
+
+        with mock.patch.dict(sys.modules, {"discord": discord_module()}):
+            result = await publisher.preview(draft=draft, channel=channel)
+
+        self.assertIs(result, preview)
+        webhook.edit.assert_awaited_once_with(avatar=b"avatar")
+        kwargs = webhook.send.await_args.kwargs
+        self.assertEqual(kwargs["username"], "Guide")
+        self.assertIs(kwargs["thread"], channel)
+        self.assertFalse(kwargs["allowed_mentions"].users)
+        store.record_message.assert_not_awaited()
+
     async def test_bot_standalone_sends_with_user_only_mentions_and_tracks_message(
         self,
     ) -> None:
