@@ -12,7 +12,7 @@ Version 1 does not replace ban, unban, mute, warn, or softban commands.
 [p]load NHModeration
 ```
 
-The bot needs View Audit Log and Ban Members for migration and synchronization. Administrative output and BanChart must be used in a channel hidden from `@everyone`.
+The bot needs View Audit Log and Ban Members for migration and synchronization. Administrative `nhmod` output must be used in a channel hidden from `@everyone`. BanChart may be posted in public channels.
 
 ## Initial migration
 
@@ -55,7 +55,7 @@ Names are resolved only from the Discord cache. The command does not call `fetch
 | `[p]nhmod sync` | Fetch only entries after committed cursors |
 | `[p]nhmod repair [confirm]` | Re-import all available sources, read the active ban list, and rebuild the projection |
 
-The `nhmod` root requires Red moderator status or Manage Messages. Migration run, sync, and repair require administrator authorization. BanChart requires Red moderator status or Ban Members.
+The `nhmod` root and all maintenance commands require Red moderator status or Manage Messages. BanChart requires Red moderator status or Ban Members.
 
 ## Synchronization
 
