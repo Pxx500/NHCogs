@@ -29,7 +29,7 @@ Requires `AAA3A_utils`. Red will show the pip install command if missing.
 
 ## Commands
 
-By default, only the server owner can use `!honeypot` and all subcommands. Red Permissions rules can allow other users or roles.
+The `!honeypot` command and all subcommands require Manage Messages.
 
 ### Manual punishment
 

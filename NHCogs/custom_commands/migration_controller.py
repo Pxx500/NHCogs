@@ -104,7 +104,7 @@ class CustomCommandsMigration(commands.Cog):
 
     @commands.group(name="nhcustomcom", hidden=True, invoke_without_command=True)
     @commands.guild_only()
-    @commands.mod_or_permissions(manage_messages=True)
+    @commands.has_permissions(manage_messages=True)
     async def nhcustomcom(self, ctx: commands.Context) -> None:
         """Run the one-time official CustomCom migration."""
         state = await self.state_store.get()

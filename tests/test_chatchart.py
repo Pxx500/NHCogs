@@ -196,7 +196,7 @@ class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(command.attrs["name"], "chatchart")
         self.assertTrue(command.callback.guild_only)
         self.assertEqual(
-            command.callback.mod_or_permissions,
+            command.callback.required_permissions,
             {"manage_messages": True},
         )
         self.assertEqual(

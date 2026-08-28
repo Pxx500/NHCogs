@@ -33,14 +33,14 @@ class Cleanup(commands.Cog):
         invoke_without_command=True,
     )
     @commands.guild_only()
-    @commands.mod_or_permissions(manage_messages=True)
+    @commands.has_permissions(manage_messages=True)
     async def cleanup(self, ctx: commands.Context) -> None:
         """Delete recently observed messages without fetching channel history."""
         await send_group_overview(ctx, title="Cleanup")
 
     @cleanup.command(name="messages", usage="<count>")
     @commands.guild_only()
-    @commands.mod_or_permissions(manage_messages=True)
+    @commands.has_permissions(manage_messages=True)
     async def cleanup_messages(self, ctx: commands.Context, count: int) -> None:
         """Delete recently observed messages from the current channel."""
         await self._run_cleanup(
@@ -51,7 +51,7 @@ class Cleanup(commands.Cog):
 
     @cleanup.command(name="user")
     @commands.guild_only()
-    @commands.mod_or_permissions(manage_messages=True)
+    @commands.has_permissions(manage_messages=True)
     async def cleanup_user(
         self,
         ctx: commands.Context,
@@ -68,7 +68,7 @@ class Cleanup(commands.Cog):
 
     @cleanup.command(name="after")
     @commands.guild_only()
-    @commands.mod_or_permissions(manage_messages=True)
+    @commands.has_permissions(manage_messages=True)
     async def cleanup_after(
         self,
         ctx: commands.Context,
@@ -92,7 +92,7 @@ class Cleanup(commands.Cog):
         usage="[message_id] <count> [delete_pinned]",
     )
     @commands.guild_only()
-    @commands.mod_or_permissions(manage_messages=True)
+    @commands.has_permissions(manage_messages=True)
     async def cleanup_before(
         self,
         ctx: commands.Context,
@@ -167,7 +167,7 @@ class Cleanup(commands.Cog):
 
     @cleanup.command(name="between")
     @commands.guild_only()
-    @commands.mod_or_permissions(manage_messages=True)
+    @commands.has_permissions(manage_messages=True)
     async def cleanup_between(
         self,
         ctx: commands.Context,

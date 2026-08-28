@@ -55,7 +55,7 @@ Names are resolved only from the Discord cache. The command does not call `fetch
 | `[p]nhmod sync` | Fetch only entries after committed cursors |
 | `[p]nhmod repair [confirm]` | Re-import all available sources, read the active ban list, and rebuild the projection |
 
-The `nhmod` root and all maintenance commands require Red moderator status or Manage Messages. BanChart requires Red moderator status or Ban Members.
+The `nhmod` root, all maintenance commands, and BanChart require Manage Messages.
 
 ## Synchronization
 

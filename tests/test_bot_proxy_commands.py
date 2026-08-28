@@ -45,6 +45,33 @@ class _Config:
 
 
 class BotProxyCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_create_reports_preflight_failure_directly_without_deleting_command(
+        self,
+    ) -> None:
+        guild = types.SimpleNamespace(id=10)
+        ctx = types.SimpleNamespace(
+            guild=guild,
+            channel=types.SimpleNamespace(id=30),
+            author=types.SimpleNamespace(id=20),
+            message=types.SimpleNamespace(id=40, delete=mock.AsyncMock()),
+            send=mock.AsyncMock(),
+        )
+        manager = types.SimpleNamespace(
+            workspace_channel=mock.AsyncMock(
+                side_effect=ValueError("Bot Proxy channel is unavailable")
+            ),
+            create_session=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._ensure_bot_proxy = mock.Mock(return_value=manager)
+
+        await nhmisc.NHMisc.botproxy_create.callback(cog, ctx)
+
+        ctx.send.assert_awaited_once()
+        self.assertIn("unavailable", ctx.send.await_args.args[0])
+        ctx.message.delete.assert_not_awaited()
+        manager.create_session.assert_not_awaited()
+
     async def test_deleteclosed_configuration_can_be_shown_and_changed(self) -> None:
         config = _Config()
         ctx = types.SimpleNamespace(
@@ -66,15 +93,19 @@ class BotProxyCommandTests(unittest.IsolatedAsyncioTestCase):
         channel = types.SimpleNamespace(id=30, mention="<#30>")
         guild = types.SimpleNamespace(id=10)
         author = types.SimpleNamespace(id=20)
+        events = []
+        delete = mock.AsyncMock(side_effect=lambda: events.append("delete"))
         ctx = types.SimpleNamespace(
             guild=guild,
             channel=channel,
             author=author,
-            message=types.SimpleNamespace(id=40, delete=mock.AsyncMock()),
+            message=types.SimpleNamespace(id=40, delete=delete),
         )
         manager = types.SimpleNamespace(
             workspace_channel=mock.AsyncMock(return_value=channel),
-            create_session=mock.AsyncMock(),
+            create_session=mock.AsyncMock(
+                side_effect=lambda *_args: events.append("create")
+            ),
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._ensure_bot_proxy = mock.Mock(return_value=manager)
@@ -83,6 +114,7 @@ class BotProxyCommandTests(unittest.IsolatedAsyncioTestCase):
 
         ctx.message.delete.assert_awaited_once()
         manager.create_session.assert_awaited_once_with(guild, author)
+        self.assertEqual(events, ["create", "delete"])
 
     async def test_channel_set_requires_private_channel_and_clear_disables_it(self) -> None:
         config = _Config()
