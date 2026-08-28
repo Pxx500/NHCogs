@@ -13,7 +13,10 @@
     "utility",
     "redbot"
   ],
-  "requirements": [],
+  "requirements": [
+    "PyJWT>=2.8.0",
+    "cryptography>=41.0.0"
+  ],
   "min_bot_version": "3.5.23",
   "min_python_version": [
     3,

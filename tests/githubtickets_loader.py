@@ -47,6 +47,7 @@ def isolated_githubtickets_modules(data_path: Path):
             for short_name in (
                 "models",
                 "store",
+                "github_app",
                 "settings",
                 "presentation",
                 "routing",
