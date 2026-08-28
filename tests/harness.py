@@ -323,6 +323,38 @@ class _CommandStub:
             return self
         return MethodType(self, instance)
 
+    async def can_run(self, ctx):
+        command = self
+        while command is not None:
+            callback = command.callback
+            mod_permissions = getattr(callback, "mod_or_permissions", None)
+            if mod_permissions is not None and not self._passes_permissions(
+                ctx,
+                mod_permissions,
+                "is_red_mod",
+                "is_red_admin",
+            ):
+                return False
+            admin_permissions = getattr(callback, "admin_or_permissions", None)
+            if admin_permissions is not None and not self._passes_permissions(
+                ctx,
+                admin_permissions,
+                "is_red_admin",
+            ):
+                return False
+            command = command.parent
+        return True
+
+    @staticmethod
+    def _passes_permissions(ctx, permissions, *privilege_flags):
+        if any(getattr(ctx, flag, False) for flag in privilege_flags):
+            return True
+        guild_permissions = ctx.author.guild_permissions
+        return all(
+            getattr(guild_permissions, name, False) is required
+            for name, required in permissions.items()
+        )
+
     def command(self, *args, **kwargs):
         return _command_decorator("command", parent=self, **kwargs)
 

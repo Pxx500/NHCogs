@@ -59,23 +59,37 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    def test_maintenance_commands_inherit_manage_messages_permission(self):
+    async def test_maintenance_commands_inherit_manage_messages_permission(self):
         with loaded_nhmoderation() as module:
-            self.assertEqual(
-                module.NHModeration.nhmod.callback.mod_or_permissions,
-                {"manage_messages": True},
-            )
+            def context(*, red_mod=False, manage_messages=False):
+                return SimpleNamespace(
+                    is_red_mod=red_mod,
+                    is_red_admin=False,
+                    author=SimpleNamespace(
+                        guild_permissions=SimpleNamespace(
+                            manage_messages=manage_messages,
+                            administrator=False,
+                        )
+                    ),
+                )
+
+            red_moderator = context(red_mod=True)
+            manage_messages = context(manage_messages=True)
+            unauthorized = context()
             for command_name in (
                 "nhmod_migrate_run",
                 "nhmod_sync",
                 "nhmod_repair",
             ):
-                callback = getattr(module.NHModeration, command_name).callback
-                self.assertFalse(hasattr(callback, "admin_or_permissions"))
+                command = getattr(module.NHModeration, command_name)
+                self.assertTrue(await command.can_run(red_moderator))
+                self.assertTrue(await command.can_run(manage_messages))
+                self.assertFalse(await command.can_run(unauthorized))
 
     async def test_bare_nhmod_groups_use_runtime_overviews(self):
         with loaded_nhmoderation() as module:
             subject = object.__new__(module.NHModeration)
+            subject._require_private_channel = mock.Mock()
             subject._mark_operational_recovered = mock.AsyncMock()
             ctx = SimpleNamespace(guild=SimpleNamespace(id=10))
 
@@ -98,6 +112,10 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                     mock.call(ctx.guild, "nhmod"),
                     mock.call(ctx.guild, "nhmod migrate"),
                 ],
+            )
+            self.assertEqual(
+                subject._require_private_channel.call_args_list,
+                [mock.call(ctx), mock.call(ctx)],
             )
 
     async def test_banchart_reads_history_and_sends_shared_chart(self):

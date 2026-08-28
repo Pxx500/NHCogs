@@ -510,6 +510,7 @@ class NHModeration(commands.Cog):
     @commands.mod_or_permissions(manage_messages=True)
     async def nhmod(self, ctx: commands.Context) -> None:
         """Manage NHModeration history and synchronization."""
+        self._require_private_channel(ctx)
         await send_group_overview(ctx, include_descendants=False)
         await self._mark_operational_recovered(ctx.guild, "nhmod")
 
@@ -549,6 +550,7 @@ class NHModeration(commands.Cog):
     @nhmod.group(name="migrate", invoke_without_command=True)
     async def nhmod_migrate(self, ctx: commands.Context) -> None:
         """Plan or run the initial moderation history import."""
+        self._require_private_channel(ctx)
         await send_group_overview(ctx)
         await self._mark_operational_recovered(ctx.guild, "nhmod migrate")
 
