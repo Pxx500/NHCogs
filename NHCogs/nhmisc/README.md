@@ -103,6 +103,62 @@ Defaults:
 The maintenance and moderator action channels do not inherit the alert channel. Configure
 each one explicitly after installing or updating NHMisc.
 
+## Bot Proxy
+
+Bot Proxy lets moderators prepare text in a private workflow and publish it through the
+normal bot identity or a one-message webhook character.
+
+```ini
+[p]botproxy
+[p]botproxy create
+[p]botproxy channel
+[p]botproxy channel #moderator-channel
+[p]botproxy channel clear
+```
+
+`[p]botproxy` shows the available operations. `create` deliberately opens an additional
+empty session and must be run in the configured Bot Proxy channel. The `channel`
+command shows, sets, or clears that private workflow channel. The bot needs View
+Channel, Send Messages, Create Public Threads, Send Messages in Threads, and Manage
+Threads there. Run channel configuration only from a private moderator channel. Bot
+Proxy rechecks the moderator's Manage Messages permission when controls and mutations
+are used, not only when the workflow is opened.
+
+The message Apps action is the fast path:
+
+```text
+Apps → Bot Proxy
+```
+
+With no active session, Apps creates one under the configured private channel. With one
+session, it updates that session's reply destination. With several sessions, it shows
+an ephemeral paginated selector. Apps never opens the workflow on the public source
+channel and never creates an additional session implicitly.
+
+Each workflow has `Set destination`, `Set content`, `Identity`, `Preview`, `Send`, and
+`Cancel`. A channel mention selects a standalone destination. A same-server message
+link selects a native reply. Draft text is limited to 2000 characters. Only explicit
+user mentions can notify. Role mentions, `@everyone`, `@here`, and reply-author pings
+are suppressed.
+
+Bot identity supports standalone messages and native replies. Character identity uses
+an owned webhook with a one-time public name and optional avatar. Webhooks do not
+support native replies, so a character cannot use a reply destination. Existing
+threads and forum posts are supported, but Bot Proxy does not create a forum post.
+
+Character presets are shared by the guild. The Identity panel can select, create, edit,
+delete, and page through presets. Avatars can come from a validated HTTPS image or one
+image attachment in the workflow thread. NHMisc copies validated PNG, JPEG, GIF, or
+WebP data up to 2 MiB.
+
+Using Apps on a message previously sent by Bot Proxy offers `Use as destination`,
+`Edit`, and `Delete`. Edit changes content only. Delete requires confirmation. Both
+actions recheck Manage Messages in the destination and write a private moderation log.
+
+Only the moderator who opened a session can control it. Sessions time out after 10
+minutes of inactivity. Sent, cancelled, timed-out, reloaded, and interrupted sessions
+lose their controls and have their thread archived and locked.
+
 ## Gatecount
 
 ```ini
@@ -583,6 +639,11 @@ Sticky-role commands require Manage Server or bot admin permissions.
 Server-wide activity commands and moderator tools require Manage Messages, Manage
 Server, or bot admin permissions.
 
+Bot Proxy commands, Apps, character management, publication, edit, and delete require
+Manage Messages. The permission is checked again in the destination. Character
+publication additionally requires the bot to have Manage Webhooks in the destination's
+parent channel.
+
 `rolesync`, `rolestats`, and `roleusers` require Manage Messages in the invocation
 channel. Only `roleusers` additionally requires a non-public channel and the bot channel
 permissions described above.
@@ -616,8 +677,15 @@ aggregate counts and channel IDs, but not user IDs.
 
 The detailed activity row is keyed by UTC date, user ID, parent channel ID, thread ID,
 and message count. A user can have multiple rows for the same day when they post in
-multiple channels or threads. NHMisc does not store message content, message IDs, jump
-URLs, attachment URLs, embeds, or deleted/edited message state.
+multiple channels or threads. Activity analytics does not store message content,
+message IDs, jump URLs, attachment URLs, embeds, or deleted/edited message state.
+
+Bot Proxy stores guild, moderator, channel, thread, webhook, and published message IDs;
+the original and current published text; the revision history for send, edit, and delete
+transitions; reply source IDs; sender and character snapshots; and saved character
+avatars in `bot_proxy.sqlite`. Active workflow
+records contain only the IDs needed to disable and archive an interrupted session.
+Unpublished draft content remains in memory and is not restored after a restart.
 
 Sticky roles are stored in a local SQLite database as guild IDs, user IDs, and role IDs.
 
