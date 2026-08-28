@@ -29,6 +29,7 @@ class _Config:
         self.values = {
             "bot_proxy_channel": None,
             "bot_proxy_delete_closed_sessions": False,
+            "bot_proxy_enabled": True,
         }
 
     def guild(self, _guild):
@@ -38,6 +39,7 @@ class _Config:
                 self.values,
                 "bot_proxy_delete_closed_sessions",
             ),
+            bot_proxy_enabled=_ConfigValue(self.values, "bot_proxy_enabled"),
         )
 
     def guild_from_id(self, _guild_id):
@@ -45,6 +47,28 @@ class _Config:
 
 
 class BotProxyCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_enabled_setting_shows_state_and_disables_through_manager(
+        self,
+    ) -> None:
+        guild = types.SimpleNamespace(id=10)
+        ctx = types.SimpleNamespace(guild=guild, send=mock.AsyncMock())
+        manager = types.SimpleNamespace(
+            enabled=mock.AsyncMock(return_value=False),
+            set_enabled=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._ensure_bot_proxy = mock.Mock(return_value=manager)
+
+        await nhmisc.NHMisc.botproxy_enabled.callback(cog, ctx, False)
+
+        manager.set_enabled.assert_awaited_once_with(guild, False)
+        ctx.send.assert_not_awaited()
+
+        await nhmisc.NHMisc.botproxy_enabled.callback(cog, ctx, None)
+
+        manager.enabled.assert_awaited_once_with(guild)
+        self.assertIn("disabled", ctx.send.await_args.args[0])
+
     async def test_create_reports_preflight_failure_directly_without_deleting_command(
         self,
     ) -> None:
@@ -57,6 +81,7 @@ class BotProxyCommandTests(unittest.IsolatedAsyncioTestCase):
             send=mock.AsyncMock(),
         )
         manager = types.SimpleNamespace(
+            require_enabled=mock.AsyncMock(),
             workspace_channel=mock.AsyncMock(
                 side_effect=ValueError("Bot Proxy channel is unavailable")
             ),
@@ -102,6 +127,7 @@ class BotProxyCommandTests(unittest.IsolatedAsyncioTestCase):
             message=types.SimpleNamespace(id=40, delete=delete),
         )
         manager = types.SimpleNamespace(
+            require_enabled=mock.AsyncMock(),
             workspace_channel=mock.AsyncMock(return_value=channel),
             create_session=mock.AsyncMock(
                 side_effect=lambda *_args: events.append("create")
@@ -168,24 +194,6 @@ class BotProxyCommandTests(unittest.IsolatedAsyncioTestCase):
             await nhmisc.NHMisc.botproxy_channel.callback(cog, ctx, None)
 
         ctx.send.assert_not_awaited()
-
-    async def test_context_action_rechecks_manage_messages(self) -> None:
-        interaction = types.SimpleNamespace(
-            guild=types.SimpleNamespace(id=10),
-            permissions=types.SimpleNamespace(manage_messages=False),
-            response=types.SimpleNamespace(send_message=mock.AsyncMock()),
-        )
-        cog = object.__new__(nhmisc.NHMisc)
-        cog._ensure_bot_proxy = mock.Mock()
-        source = types.SimpleNamespace()
-
-        await nhmisc.NHMisc._bot_proxy_context_action(cog, interaction, source)
-
-        interaction.response.send_message.assert_awaited_once_with(
-            "You need Manage Messages permission",
-            ephemeral=True,
-        )
-        cog._ensure_bot_proxy.assert_not_called()
 
     async def test_recovery_deletes_thread_and_launcher_when_configured(self) -> None:
         record = types.SimpleNamespace(

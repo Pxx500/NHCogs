@@ -19,7 +19,6 @@ ActiveSessionRecord = bot_proxy_store.ActiveSessionRecord
 CharacterExists = bot_proxy_store.CharacterExists
 ProxySender = bot_proxy_store.ProxySender
 StaleCharacterRevision = bot_proxy_store.StaleCharacterRevision
-StaleMessageRevision = bot_proxy_store.StaleMessageRevision
 
 
 class BotProxyCharacterStoreTests(unittest.IsolatedAsyncioTestCase):
@@ -165,8 +164,10 @@ class BotProxyLifecycleStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.store.list_active_sessions(), ())
         self.assertIsNone(await self.store.get_webhook_id(10, 70))
 
-    async def test_tracked_message_transitions_preserve_identity_snapshot(self) -> None:
-        created = await self.store.record_message(
+    async def test_recorded_message_preserves_identity_snapshot_and_sent_event(
+        self,
+    ) -> None:
+        recorded = await self.store.record_message(
             guild_id=10,
             channel_id=30,
             message_id=40,
@@ -180,61 +181,14 @@ class BotProxyLifecycleStoreTests(unittest.IsolatedAsyncioTestCase):
             avatar_sha256="abc123",
         )
 
-        edit_token = await self.store.claim_message_transition(
-            guild_id=10,
-            channel_id=30,
-            message_id=40,
-            expected_revision=created.revision,
-        )
-        edited = await self.store.edit_message(
-            guild_id=10,
-            channel_id=30,
-            message_id=40,
-            expected_revision=created.revision,
-            content="Edited content",
-            moderator_id=21,
-            transition_token=edit_token,
-        )
-        self.assertEqual(edited.content, "Edited content")
-        self.assertEqual(edited.original_content, "Original content")
-        self.assertEqual(edited.character_display_name, "The Narrator")
-        self.assertEqual(edited.revision, 2)
-
-        with self.assertRaises(StaleMessageRevision):
-            await self.store.claim_message_transition(
-                guild_id=10,
-                channel_id=30,
-                message_id=40,
-                expected_revision=created.revision,
-            )
-
-        delete_token = await self.store.claim_message_transition(
-            guild_id=10,
-            channel_id=30,
-            message_id=40,
-            expected_revision=edited.revision,
-        )
-        deleted = await self.store.mark_message_deleted(
-            guild_id=10,
-            channel_id=30,
-            message_id=40,
-            expected_revision=edited.revision,
-            moderator_id=22,
-            transition_token=delete_token,
-        )
-        self.assertEqual(deleted.deleted_by, 22)
-        self.assertEqual(deleted.revision, 3)
-        self.assertEqual(await self.store.get_message(10, 30, 40), deleted)
+        self.assertEqual(recorded.content, "Original content")
+        self.assertEqual(recorded.character_display_name, "The Narrator")
+        self.assertEqual(recorded.revision, 1)
         events = await self.store.list_message_events(10, 30, 40)
         self.assertEqual(
             [(event.action, event.revision, event.content) for event in events],
-            [
-                ("sent", 1, "Original content"),
-                ("edited", 2, "Edited content"),
-                ("deleted", 3, "Edited content"),
-            ],
+            [("sent", 1, "Original content")],
         )
-
 
 if __name__ == "__main__":
     unittest.main()

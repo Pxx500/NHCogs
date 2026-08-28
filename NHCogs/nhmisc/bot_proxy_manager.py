@@ -16,14 +16,11 @@ from .bot_proxy import (
     IdentityType,
     ProxyDestination,
     SessionRegistry,
-    SessionRouteKind,
     SessionStatus,
 )
 from .bot_proxy_store import ActiveSessionRecord, BotProxyStore, CharacterPreset
 from .bot_proxy_workflow import (
     BotProxyWorkflowSession,
-    SessionPickerView,
-    TrackedMessageActionsView,
     WorkflowInputError,
     _get_channel_or_thread,
     _moderator_mention,
@@ -65,7 +62,8 @@ class BotProxyWorkflowManager:
         self.publisher = BotProxyPublisher(store)
         self.registry = SessionRegistry()
         self.sessions: dict[str, BotProxyWorkflowSession] = {}
-        self._route_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self._state_locks: dict[int, asyncio.Lock] = {}
+        self._disabled_guild_ids: set[int] = set()
         self._session_sequences: dict[tuple[int, int], int] = {}
         self._moderation_log = moderation_log
         self._error_reporter = error_reporter
@@ -77,7 +75,68 @@ class BotProxyWorkflowManager:
             return_exceptions=True,
         )
 
+    def _state_lock(self, guild_id: int) -> asyncio.Lock:
+        return self._state_locks.setdefault(guild_id, asyncio.Lock())
+
+    async def enabled(self, guild: discord.Guild) -> bool:
+        async with self._state_lock(guild.id):
+            return await self._enabled_locked(guild)
+
+    async def _enabled_locked(self, guild: discord.Guild) -> bool:
+        value = bool(await self.config.guild(guild).bot_proxy_enabled())
+        if value:
+            self._disabled_guild_ids.discard(guild.id)
+        else:
+            self._disabled_guild_ids.add(guild.id)
+        return value
+
+    async def require_enabled(self, guild: discord.Guild) -> None:
+        if not await self.enabled(guild):
+            raise WorkflowInputError("Bot Proxy is disabled")
+
+    def require_enabled_now(self, guild_id: int) -> None:
+        if guild_id in self._disabled_guild_ids:
+            raise WorkflowInputError("Bot Proxy is disabled")
+
+    async def set_enabled(self, guild: discord.Guild, enabled: bool) -> None:
+        async with self._state_lock(guild.id):
+            await self.config.guild(guild).bot_proxy_enabled.set(enabled)
+            if enabled:
+                self._disabled_guild_ids.discard(guild.id)
+                return
+            self._disabled_guild_ids.add(guild.id)
+            sessions = tuple(
+                session
+                for session in self.sessions.values()
+                if session.guild.id == guild.id
+            )
+            for session in sessions:
+                try:
+                    await session.finish(SessionStatus.DISABLED)
+                except Exception as error:  # noqa: BLE001
+                    await self.report_session_error(
+                        session,
+                        error,
+                        action="close disabled Bot Proxy session",
+                    )
+
     async def create_session(
+        self,
+        guild: discord.Guild,
+        moderator: discord.Member,
+        *,
+        destination: ProxyDestination | None = None,
+    ) -> BotProxyWorkflowSession:
+        async with self._state_lock(guild.id):
+            if not await self._enabled_locked(guild):
+                raise WorkflowInputError("Bot Proxy is disabled")
+            return await self._create_session(
+                guild,
+                moderator,
+                destination=destination,
+            )
+
+    async def _create_session(
         self,
         guild: discord.Guild,
         moderator: discord.Member,
@@ -184,79 +243,6 @@ class BotProxyWorkflowManager:
             return False
         value = await setting()
         return bool(value)
-
-    async def route_message(
-        self,
-        interaction: discord.Interaction,
-        source: discord.Message,
-    ) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message(
-                "Bot Proxy is only available in a server",
-                ephemeral=True,
-            )
-            return
-        await interaction.response.defer(ephemeral=True)
-        tracked = await self.store.get_message(
-            interaction.guild.id,
-            source.channel.id,
-            source.id,
-        )
-        if tracked is not None and tracked.deleted_at is None:
-            await interaction.edit_original_response(
-                content="Choose a Bot Proxy action",
-                view=TrackedMessageActionsView(
-                    self,
-                    tracked,
-                    interaction.user.id,
-                ),
-            )
-            return
-        await self.route_destination_after_defer(
-            interaction,
-            ProxyDestination(
-                interaction.guild.id,
-                source.channel.id,
-                source.id,
-            ),
-        )
-
-    async def route_destination_after_defer(
-        self,
-        interaction: discord.Interaction,
-        destination: ProxyDestination,
-    ) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            await interaction.edit_original_response(
-                content="Bot Proxy is only available in a server",
-                view=None,
-            )
-            return
-        key = (interaction.guild.id, interaction.user.id)
-        lock = self._route_locks.setdefault(key, asyncio.Lock())
-        async with lock:
-            route = self.registry.route_for_message(*key)
-            if route.kind is SessionRouteKind.CREATE:
-                session = await self.create_session(
-                    interaction.guild,
-                    interaction.user,
-                    destination=destination,
-                )
-                await interaction.edit_original_response(
-                    content=f"Open {session.thread.mention}"
-                )
-                return
-            if route.kind is SessionRouteKind.USE:
-                session = self.sessions[route.sessions[0].session_id]
-                await session.set_destination(destination)
-                await interaction.edit_original_response(
-                    content=f"Open {session.thread.mention}"
-                )
-                return
-            await interaction.edit_original_response(
-                content="Choose an active Bot Proxy session",
-                view=SessionPickerView(self, route.sessions, destination),
-            )
 
     async def resolve_destination(
         self, guild: discord.Guild, value: str
@@ -365,7 +351,15 @@ class BotProxyWorkflowManager:
             ),
             None,
         )
-        return await session.handle_message(message) if session is not None else False
+        if session is None:
+            return False
+        if not await self.enabled(session.guild):
+            await session.thread.send(
+                "Bot Proxy is disabled",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return True
+        return await session.handle_message(message)
 
     async def log_publication(
         self,
@@ -416,38 +410,6 @@ class BotProxyWorkflowManager:
                 error=error,
             )
 
-    async def log_tracked_change(
-        self,
-        guild: discord.Guild,
-        moderator: discord.Member,
-        action: str,
-        record: Any,
-    ) -> None:
-        identity_suffix = ""
-        if record.sender.value == IdentityType.CHARACTER.value:
-            identity_suffix = f" as {record.character_display_name or 'character'}"
-        message_link = (
-            f"https://discord.com/channels/{record.guild_id}/"
-            f"{record.channel_id}/{record.message_id}"
-        )
-        notification = (
-            f"{moderator.mention} {action} Bot Proxy{identity_suffix}: {message_link}"
-        )
-        content_preview = _compact_content_preview(record.content)
-        if content_preview:
-            notification = f"{notification}\n{content_preview}"
-        try:
-            await self._write_moderation_log(guild, notification)
-        except Exception as error:  # noqa: BLE001
-            await self._error_reporter(
-                guild_id=guild.id,
-                source="NHMisc",
-                action=f"audit Bot Proxy message {action}",
-                error=error,
-                channel_id=record.channel_id,
-                message_id=record.message_id,
-            )
-
     async def _write_moderation_log(
         self, guild: discord.Guild, content: str
     ) -> None:
@@ -471,27 +433,6 @@ class BotProxyWorkflowManager:
             thread_id=session.thread.id,
             message_id=session.dashboard.id,
         )
-
-    async def handle_tracked_error(
-        self,
-        interaction: discord.Interaction,
-        error: Exception,
-        *,
-        action: str,
-        record: Any,
-    ) -> None:
-        if isinstance(error, (WorkflowInputError, ValueError)):
-            await self.private_feedback(interaction, str(error))
-            return
-        await self._error_reporter(
-            guild_id=record.guild_id,
-            source="NHMisc",
-            action=action,
-            error=error,
-            channel_id=record.channel_id,
-            message_id=record.message_id,
-        )
-        await self.private_feedback(interaction, "Bot Proxy failed")
 
     async def handle_expected_or_reported_error(
         self,

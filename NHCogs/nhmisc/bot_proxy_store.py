@@ -9,11 +9,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from uuid import uuid4
 
 MAX_AVATAR_BYTES = 2 * 1024 * 1024
 MAX_CHARACTER_NAME_LENGTH = 80
-MESSAGE_TRANSITION_TIMEOUT_SECONDS = 5 * 60
 ALLOWED_AVATAR_MEDIA_TYPES = frozenset(
     {"image/gif", "image/jpeg", "image/png", "image/webp"}
 )
@@ -36,14 +34,6 @@ class InvalidCharacter(CharacterStoreError):
 
 
 class StaleCharacterRevision(CharacterStoreError):
-    pass
-
-
-class StaleMessageRevision(ValueError):
-    pass
-
-
-class MessageNotFound(ValueError):
     pass
 
 
@@ -291,95 +281,6 @@ class BotProxyStore:
                 character_preset_name=character_preset_name,
                 character_display_name=character_display_name,
                 avatar_sha256=avatar_sha256,
-            )
-
-    async def edit_message(
-        self,
-        *,
-        guild_id: int,
-        channel_id: int,
-        message_id: int,
-        expected_revision: int,
-        content: str,
-        moderator_id: int,
-        transition_token: str,
-    ) -> ProxyMessageRecord:
-        async with self._lock:
-            return await asyncio.to_thread(
-                self._edit_message_sync,
-                guild_id=guild_id,
-                channel_id=channel_id,
-                message_id=message_id,
-                expected_revision=expected_revision,
-                content=content,
-                moderator_id=moderator_id,
-                transition_token=transition_token,
-            )
-
-    async def mark_message_deleted(
-        self,
-        *,
-        guild_id: int,
-        channel_id: int,
-        message_id: int,
-        expected_revision: int,
-        moderator_id: int,
-        transition_token: str,
-    ) -> ProxyMessageRecord:
-        async with self._lock:
-            return await asyncio.to_thread(
-                self._mark_message_deleted_sync,
-                guild_id=guild_id,
-                channel_id=channel_id,
-                message_id=message_id,
-                expected_revision=expected_revision,
-                moderator_id=moderator_id,
-                transition_token=transition_token,
-            )
-
-    async def claim_message_transition(
-        self,
-        *,
-        guild_id: int,
-        channel_id: int,
-        message_id: int,
-        expected_revision: int,
-    ) -> str:
-        token = uuid4().hex
-        async with self._lock:
-            await asyncio.to_thread(
-                self._claim_message_transition_sync,
-                guild_id,
-                channel_id,
-                message_id,
-                expected_revision,
-                token,
-            )
-        return token
-
-    async def release_message_transition(
-        self,
-        *,
-        guild_id: int,
-        channel_id: int,
-        message_id: int,
-        transition_token: str,
-    ) -> None:
-        async with self._lock:
-            await asyncio.to_thread(
-                self._release_message_transition_sync,
-                guild_id,
-                channel_id,
-                message_id,
-                transition_token,
-            )
-
-    async def get_message(
-        self, guild_id: int, channel_id: int, message_id: int
-    ) -> ProxyMessageRecord | None:
-        async with self._lock:
-            return await asyncio.to_thread(
-                self._get_message_sync, guild_id, channel_id, message_id
             )
 
     async def list_message_events(
@@ -805,184 +706,6 @@ class BotProxyStore:
             raise RuntimeError("recorded Bot Proxy message could not be read")
         return self._message_from_row(row)
 
-    def _edit_message_sync(
-        self,
-        *,
-        guild_id: int,
-        channel_id: int,
-        message_id: int,
-        expected_revision: int,
-        content: str,
-        moderator_id: int,
-        transition_token: str,
-    ) -> ProxyMessageRecord:
-        edited_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
-            row = self._select_message(connection, guild_id, channel_id, message_id)
-            row = self._require_current_message(row, expected_revision)
-            if row["transition_token"] != transition_token:
-                raise StaleMessageRevision(message_id)
-            if row["deleted_at"] is not None:
-                raise MessageNotFound(message_id)
-            cursor = connection.execute(
-                """
-                UPDATE bot_proxy_messages
-                SET content = ?, revision = revision + 1,
-                    edited_by = ?, edited_at = ?,
-                    transition_token = NULL, transition_started_at = NULL
-                WHERE guild_id = ? AND channel_id = ? AND message_id = ?
-                    AND revision = ? AND deleted_at IS NULL
-                    AND transition_token = ?
-                """,
-                (
-                    content,
-                    moderator_id,
-                    edited_at.isoformat(),
-                    guild_id,
-                    channel_id,
-                    message_id,
-                    expected_revision,
-                    transition_token,
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise StaleMessageRevision(message_id)
-            self._insert_message_event(
-                connection,
-                guild_id=guild_id,
-                channel_id=channel_id,
-                message_id=message_id,
-                revision=expected_revision + 1,
-                action="edited",
-                content=content,
-                moderator_id=moderator_id,
-                created_at=edited_at,
-            )
-            connection.commit()
-            updated = self._select_message(connection, guild_id, channel_id, message_id)
-        if updated is None:
-            raise RuntimeError("edited Bot Proxy message could not be read")
-        return self._message_from_row(updated)
-
-    def _mark_message_deleted_sync(
-        self,
-        *,
-        guild_id: int,
-        channel_id: int,
-        message_id: int,
-        expected_revision: int,
-        moderator_id: int,
-        transition_token: str,
-    ) -> ProxyMessageRecord:
-        deleted_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
-            row = self._select_message(connection, guild_id, channel_id, message_id)
-            row = self._require_current_message(row, expected_revision)
-            if row["transition_token"] != transition_token:
-                raise StaleMessageRevision(message_id)
-            if row["deleted_at"] is not None:
-                raise MessageNotFound(message_id)
-            cursor = connection.execute(
-                """
-                UPDATE bot_proxy_messages
-                SET revision = revision + 1, deleted_by = ?, deleted_at = ?,
-                    transition_token = NULL, transition_started_at = NULL
-                WHERE guild_id = ? AND channel_id = ? AND message_id = ?
-                    AND revision = ? AND deleted_at IS NULL
-                    AND transition_token = ?
-                """,
-                (
-                    moderator_id,
-                    deleted_at.isoformat(),
-                    guild_id,
-                    channel_id,
-                    message_id,
-                    expected_revision,
-                    transition_token,
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise StaleMessageRevision(message_id)
-            self._insert_message_event(
-                connection,
-                guild_id=guild_id,
-                channel_id=channel_id,
-                message_id=message_id,
-                revision=expected_revision + 1,
-                action="deleted",
-                content=row["content"],
-                moderator_id=moderator_id,
-                created_at=deleted_at,
-            )
-            connection.commit()
-            updated = self._select_message(connection, guild_id, channel_id, message_id)
-        if updated is None:
-            raise RuntimeError("deleted Bot Proxy message could not be read")
-        return self._message_from_row(updated)
-
-    def _get_message_sync(
-        self, guild_id: int, channel_id: int, message_id: int
-    ) -> ProxyMessageRecord | None:
-        with self._connection() as connection:
-            row = self._select_message(connection, guild_id, channel_id, message_id)
-        return self._message_from_row(row) if row is not None else None
-
-    def _claim_message_transition_sync(
-        self,
-        guild_id: int,
-        channel_id: int,
-        message_id: int,
-        expected_revision: int,
-        token: str,
-    ) -> None:
-        now = datetime.now(timezone.utc)
-        stale_before = now.timestamp() - MESSAGE_TRANSITION_TIMEOUT_SECONDS
-        stale_iso = datetime.fromtimestamp(stale_before, timezone.utc).isoformat()
-        with self._connection() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE bot_proxy_messages
-                SET transition_token = ?, transition_started_at = ?
-                WHERE guild_id = ? AND channel_id = ? AND message_id = ?
-                    AND revision = ? AND deleted_at IS NULL
-                    AND (
-                        transition_token IS NULL
-                        OR transition_started_at < ?
-                    )
-                """,
-                (
-                    token,
-                    now.isoformat(),
-                    guild_id,
-                    channel_id,
-                    message_id,
-                    expected_revision,
-                    stale_iso,
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise StaleMessageRevision(message_id)
-            connection.commit()
-
-    def _release_message_transition_sync(
-        self,
-        guild_id: int,
-        channel_id: int,
-        message_id: int,
-        transition_token: str,
-    ) -> None:
-        with self._connection() as connection:
-            connection.execute(
-                """
-                UPDATE bot_proxy_messages
-                SET transition_token = NULL, transition_started_at = NULL
-                WHERE guild_id = ? AND channel_id = ? AND message_id = ?
-                    AND transition_token = ?
-                """,
-                (guild_id, channel_id, message_id, transition_token),
-            )
-            connection.commit()
-
     def _list_message_events_sync(
         self, guild_id: int, channel_id: int, message_id: int
     ) -> tuple[ProxyMessageEvent, ...]:
@@ -1055,16 +778,6 @@ class BotProxyStore:
             """,
             (guild_id, channel_id, message_id),
         ).fetchone()
-
-    @staticmethod
-    def _require_current_message(
-        row: sqlite3.Row | None, expected_revision: int
-    ) -> sqlite3.Row:
-        if row is None:
-            raise MessageNotFound
-        if row["revision"] != expected_revision:
-            raise StaleMessageRevision(row["message_id"])
-        return row
 
     @staticmethod
     def _message_from_row(row: sqlite3.Row) -> ProxyMessageRecord:

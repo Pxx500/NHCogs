@@ -166,6 +166,161 @@ class _Workspace(discord.TextChannel):
 
 
 class BotProxyWorkflowManagerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_disabled_manager_rejects_session_before_workspace_lookup(self) -> None:
+        guild = SimpleNamespace(id=10)
+        moderator = SimpleNamespace(id=20)
+        guild_config = SimpleNamespace(
+            bot_proxy_enabled=mock.AsyncMock(return_value=False)
+        )
+        manager = manager_module.BotProxyWorkflowManager(
+            config=SimpleNamespace(guild=lambda _guild: guild_config),
+            store=SimpleNamespace(),
+            moderation_log=mock.AsyncMock(),
+            error_reporter=mock.AsyncMock(),
+        )
+        manager.workspace_channel = mock.AsyncMock()
+
+        with self.assertRaisesRegex(workflow.WorkflowInputError, "disabled"):
+            await manager.create_session(guild, moderator)
+
+        manager.workspace_channel.assert_not_awaited()
+
+    async def test_disabling_persists_before_closing_guild_sessions(self) -> None:
+        events: list[str] = []
+        setting = mock.AsyncMock(return_value=True)
+        setting.set = mock.AsyncMock(
+            side_effect=lambda value: events.append(f"set:{value}")
+        )
+        config = SimpleNamespace(
+            guild=lambda _guild: SimpleNamespace(bot_proxy_enabled=setting)
+        )
+        manager = manager_module.BotProxyWorkflowManager(
+            config=config,
+            store=SimpleNamespace(),
+            moderation_log=mock.AsyncMock(),
+            error_reporter=mock.AsyncMock(),
+        )
+        guild = SimpleNamespace(id=10)
+        matching = SimpleNamespace(
+            guild=SimpleNamespace(id=10),
+            finish=mock.AsyncMock(side_effect=lambda _status: events.append("close")),
+        )
+        other = SimpleNamespace(
+            guild=SimpleNamespace(id=11),
+            finish=mock.AsyncMock(),
+        )
+        manager.sessions = {"matching": matching, "other": other}
+
+        await manager.set_enabled(guild, False)
+
+        self.assertEqual(events, ["set:False", "close"])
+        matching.finish.assert_awaited_once_with(workflow.SessionStatus.DISABLED)
+        other.finish.assert_not_awaited()
+        with self.assertRaisesRegex(workflow.WorkflowInputError, "disabled"):
+            manager.require_enabled_now(guild.id)
+
+    async def test_stale_enabled_read_cannot_override_completed_disable(self) -> None:
+        read_started = asyncio.Event()
+        release_read = asyncio.Event()
+
+        class Setting:
+            value = True
+
+            async def __call__(self):
+                captured = self.value
+                read_started.set()
+                await release_read.wait()
+                return captured
+
+            async def set(self, value):
+                self.value = value
+
+        setting = Setting()
+        guild = SimpleNamespace(id=10)
+        manager = manager_module.BotProxyWorkflowManager(
+            config=SimpleNamespace(
+                guild=lambda _guild: SimpleNamespace(bot_proxy_enabled=setting)
+            ),
+            store=SimpleNamespace(),
+            moderation_log=mock.AsyncMock(),
+            error_reporter=mock.AsyncMock(),
+        )
+
+        read_task = asyncio.create_task(manager.enabled(guild))
+        await read_started.wait()
+        disable_task = asyncio.create_task(manager.set_enabled(guild, False))
+        await asyncio.sleep(0)
+        release_read.set()
+        await asyncio.gather(read_task, disable_task)
+
+        self.assertFalse(setting.value)
+        with self.assertRaisesRegex(workflow.WorkflowInputError, "disabled"):
+            manager.require_enabled_now(guild.id)
+
+    async def test_disabled_session_rejects_stale_input_and_publication(self) -> None:
+        active = manager_module.ActiveSession("session", 10, 20, 50)
+        manager = manager_module.BotProxyWorkflowManager(
+            config=SimpleNamespace(),
+            store=SimpleNamespace(remove_active_session=mock.AsyncMock()),
+            moderation_log=mock.AsyncMock(return_value=True),
+            error_reporter=mock.AsyncMock(),
+        )
+        manager._disabled_guild_ids.add(10)
+        manager.publisher.publish = mock.AsyncMock()
+        manager.handle_expected_or_reported_error = mock.AsyncMock()
+        session = workflow.BotProxyWorkflowSession(
+            manager,
+            active=active,
+            guild=SimpleNamespace(id=10),
+            moderator=SimpleNamespace(id=20),
+            launcher=SimpleNamespace(),
+            thread=SimpleNamespace(id=50),
+            dashboard=SimpleNamespace(id=60),
+            draft=manager_module.BotProxyDraft(
+                destination=manager_module.ProxyDestination(10, 30),
+                content="Hello",
+            ),
+        )
+        interaction = SimpleNamespace(user=SimpleNamespace(id=20))
+
+        with self.assertRaisesRegex(workflow.WorkflowInputError, "disabled"):
+            await session.begin_input(workflow.InputMode.CONTENT, interaction)
+
+        published = await session._publish_frozen(
+            interaction,
+            copy.deepcopy(session.draft),
+            action="publish Bot Proxy message",
+        )
+
+        self.assertFalse(published)
+        manager.publisher.publish.assert_not_awaited()
+        manager.handle_expected_or_reported_error.assert_awaited_once()
+
+    async def test_disabled_manager_does_not_consume_thread_input(self) -> None:
+        setting = mock.AsyncMock(return_value=False)
+        manager = manager_module.BotProxyWorkflowManager(
+            config=SimpleNamespace(
+                guild=lambda _guild: SimpleNamespace(bot_proxy_enabled=setting)
+            ),
+            store=SimpleNamespace(),
+            moderation_log=mock.AsyncMock(),
+            error_reporter=mock.AsyncMock(),
+        )
+        thread = SimpleNamespace(id=50, send=mock.AsyncMock())
+        session = SimpleNamespace(
+            guild=SimpleNamespace(id=10),
+            thread=thread,
+            handle_message=mock.AsyncMock(),
+        )
+        manager.sessions = {"session": session}
+        message = SimpleNamespace(channel=SimpleNamespace(id=50))
+
+        consumed = await manager.handle_message(message)
+
+        self.assertTrue(consumed)
+        session.handle_message.assert_not_awaited()
+        thread.send.assert_awaited_once()
+
     async def test_create_session_always_uses_configured_private_workspace(self) -> None:
         dashboard = SimpleNamespace(id=60, edit=mock.AsyncMock())
         thread = SimpleNamespace(
@@ -187,7 +342,8 @@ class BotProxyWorkflowManagerTests(unittest.IsolatedAsyncioTestCase):
         )
         moderator = SimpleNamespace(id=20, mention="<@20>", display_name="Mod")
         guild_config = SimpleNamespace(
-            bot_proxy_channel=mock.AsyncMock(return_value=30)
+            bot_proxy_channel=mock.AsyncMock(return_value=30),
+            bot_proxy_enabled=mock.AsyncMock(return_value=True),
         )
         config = SimpleNamespace(guild=lambda _guild: guild_config)
         store = SimpleNamespace(
@@ -246,33 +402,6 @@ class BotProxyWorkflowManagerTests(unittest.IsolatedAsyncioTestCase):
             await manager.workspace_channel(guild)
 
         workspace.send.assert_not_awaited()
-
-    async def test_tracked_message_opens_lifecycle_actions_instead_of_session(self) -> None:
-        record = SimpleNamespace(deleted_at=None)
-        store = SimpleNamespace(
-            get_message=mock.AsyncMock(return_value=record),
-        )
-        manager = manager_module.BotProxyWorkflowManager(
-            config=SimpleNamespace(),
-            store=store,
-            moderation_log=mock.AsyncMock(),
-            error_reporter=mock.AsyncMock(),
-        )
-        interaction = SimpleNamespace(
-            guild=SimpleNamespace(id=10),
-            user=SimpleNamespace(id=20),
-            response=SimpleNamespace(defer=mock.AsyncMock()),
-            edit_original_response=mock.AsyncMock(),
-        )
-        source = SimpleNamespace(id=40, channel=SimpleNamespace(id=30))
-        manager.create_session = mock.AsyncMock()
-
-        await manager.route_message(interaction, source)
-
-        manager.create_session.assert_not_awaited()
-        kwargs = interaction.edit_original_response.await_args.kwargs
-        self.assertEqual(kwargs["content"], "Choose a Bot Proxy action")
-        self.assertIsInstance(kwargs["view"], workflow.TrackedMessageActionsView)
 
     async def test_timeout_does_not_cancel_its_own_terminal_cleanup(self) -> None:
         active = manager_module.ActiveSession("session", 10, 20, 50)
@@ -909,36 +1038,6 @@ class BotProxyWorkflowManagerTests(unittest.IsolatedAsyncioTestCase):
 
         manager.publisher.publish.assert_not_awaited()
         self.assertIn("closed", interaction.edit_original_response.await_args.kwargs["content"])
-
-    async def test_session_picker_shows_character_reply_validation(self) -> None:
-        active = manager_module.ActiveSession("session", 10, 20, 50)
-        session = SimpleNamespace(
-            opener_id=20,
-            set_destination=mock.AsyncMock(
-                side_effect=workflow.WorkflowInputError(
-                    "Characters cannot reply to an existing message"
-                )
-            ),
-            thread=SimpleNamespace(mention="<#50>"),
-        )
-        manager = SimpleNamespace(sessions={"session": session})
-        view = workflow.SessionPickerView(
-            manager,
-            (active,),
-            manager_module.ProxyDestination(10, 30, 40),
-        )
-        interaction = SimpleNamespace(
-            data={"values": ["session"]},
-            user=SimpleNamespace(id=20),
-            response=SimpleNamespace(edit_message=mock.AsyncMock()),
-        )
-
-        await view._select(interaction)
-
-        self.assertIn(
-            "cannot reply",
-            interaction.response.edit_message.await_args.kwargs["content"],
-        )
 
     async def test_prompt_cleanup_failure_does_not_block_session_close(self) -> None:
         reporter = mock.AsyncMock()

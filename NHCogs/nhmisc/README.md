@@ -110,6 +110,7 @@ normal bot identity or a one-message webhook character.
 
 ```ini
 [p]botproxy
+[p]botproxy enabled [true|false]
 [p]botproxy create
 [p]botproxy channel
 [p]botproxy channel #moderator-channel
@@ -119,26 +120,17 @@ normal bot identity or a one-message webhook character.
 
 `[p]botproxy` shows the available operations. `create` deliberately opens an additional
 empty session and must be run in the configured Bot Proxy channel. Moderators need
-Manage Messages to use Bot Proxy. The `channel` command shows, sets, or clears the
-private workflow channel. In that channel, the bot account needs View Channel, Send
-Messages, Create Public Threads, Send Messages in Threads, Manage Threads, Manage
-Messages, and Manage Webhooks. `deleteclosed` shows or changes
-whether closing a session deletes its
+Manage Messages to use Bot Proxy. `enabled` shows or changes the per-server state and
+defaults to enabled. Disabling Bot Proxy closes every active session according to the
+`deleteclosed` setting and blocks new sessions until it is enabled again. The `channel`
+command shows, sets, or clears the private workflow channel. In that channel, the bot
+account needs View Channel, Send Messages, Create Public Threads, Send Messages in
+Threads, Manage Threads, Manage Messages, and Manage Webhooks. `deleteclosed` shows or
+changes whether closing a session deletes its
 launcher message and thread instead of archiving them. It defaults to disabled. Run
 channel configuration only from a private moderator channel. Bot
 Proxy rechecks the moderator's Manage Messages permission when controls and mutations
 are used, not only when the workflow is opened.
-
-The message Apps action is the fast path:
-
-```text
-Apps → Bot Proxy
-```
-
-With no active session, Apps creates one under the configured private channel. With one
-session, it updates that session's reply destination. With several sessions, it shows
-an ephemeral paginated selector. Apps never opens the workflow on the public source
-channel and never creates an additional session implicitly.
 
 `[p]botproxy` also explains the workflow buttons before a session is created. Each
 workflow repeats the instructions through `Help` and shows a Help hint in its dashboard.
@@ -175,14 +167,11 @@ delete, and page through presets. Avatars can come from a validated HTTPS image 
 image attachment in the workflow thread. NHMisc copies validated PNG, JPEG, GIF, or
 WebP data up to 2 MiB.
 
-Using Apps on a message previously sent by Bot Proxy offers `Use as destination`,
-`Edit`, and `Delete`. Edit changes content only. Delete requires confirmation. Both
-actions recheck Manage Messages in the destination and write a private moderation log.
-
 Only the moderator who opened a session can control it. Sessions time out after 10
-minutes of inactivity. Cancelled, timed-out, reloaded, and interrupted sessions lose
-their controls. They are archived and locked by default. When `deleteclosed` is enabled,
-Bot Proxy explicitly deletes both the thread and its launcher message.
+minutes of inactivity. Cancelled, disabled, timed-out, reloaded, and interrupted
+sessions lose their controls. They are archived and locked by default. When
+`deleteclosed` is enabled, Bot Proxy explicitly deletes both the thread and its launcher
+message.
 
 ## Gatecount
 
@@ -664,8 +653,8 @@ Sticky-role commands require Manage Server or bot admin permissions.
 Server-wide activity commands and moderator tools require Manage Messages, Manage
 Server, or bot admin permissions.
 
-Bot Proxy commands, Apps, character management, publication, edit, and delete require
-Manage Messages. The permission is checked again in the destination. Character
+Bot Proxy commands, character management, and publication require Manage Messages. The
+permission is checked again in the destination. Character
 publication additionally requires the bot to have Manage Webhooks in the destination's
 parent channel.
 
@@ -706,9 +695,8 @@ multiple channels or threads. Activity analytics does not store message content,
 message IDs, jump URLs, attachment URLs, embeds, or deleted/edited message state.
 
 Bot Proxy stores guild, moderator, channel, thread, webhook, and published message IDs;
-the original and current published text; the revision history for send, edit, and delete
-transitions; reply source IDs; sender and character snapshots; and saved character
-avatars in `bot_proxy.sqlite`. Active workflow
+the published text and send event; reply source IDs; sender and character snapshots; and
+saved character avatars in `bot_proxy.sqlite`. Active workflow
 records contain only the IDs needed to disable and archive an interrupted session.
 Unpublished draft content remains in memory and is not restored after a restart.
 
