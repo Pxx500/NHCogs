@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -98,6 +100,15 @@ class BotProxyWorkflowManager:
         if guild_id in self._disabled_guild_ids:
             raise WorkflowInputError("Bot Proxy is disabled")
 
+    @asynccontextmanager
+    async def enabled_operation(
+        self,
+        guild: discord.Guild,
+    ) -> AsyncIterator[None]:
+        async with self._state_lock(guild.id):
+            self.require_enabled_now(guild.id)
+            yield
+
     async def set_enabled(self, guild: discord.Guild, enabled: bool) -> None:
         async with self._state_lock(guild.id):
             await self.config.guild(guild).bot_proxy_enabled.set(enabled)
@@ -110,15 +121,15 @@ class BotProxyWorkflowManager:
                 for session in self.sessions.values()
                 if session.guild.id == guild.id
             )
-            for session in sessions:
-                try:
-                    await session.finish(SessionStatus.DISABLED)
-                except Exception as error:  # noqa: BLE001
-                    await self.report_session_error(
-                        session,
-                        error,
-                        action="close disabled Bot Proxy session",
-                    )
+        for session in sessions:
+            try:
+                await session.finish(SessionStatus.DISABLED)
+            except Exception as error:  # noqa: BLE001
+                await self.report_session_error(
+                    session,
+                    error,
+                    action="close disabled Bot Proxy session",
+                )
 
     async def create_session(
         self,

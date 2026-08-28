@@ -144,55 +144,59 @@ class CharacterModal(discord.ui.Modal):
             avatar = await self.session.manager.load_avatar_url(
                 str(self.avatar_url.value).strip()
             )
-            if self.save_preset:
-                preset_name = str(self.preset_name.value)
-                if self.preset is None:
-                    preset = await self.session.manager.store.create_character(
-                        guild_id=self.session.guild.id,
-                        preset_name=preset_name,
-                        display_name=str(self.display_name.value),
+            async with self.session.manager.enabled_operation(self.session.guild):
+                self.session.ensure_character_allowed()
+                if self.save_preset:
+                    preset_name = str(self.preset_name.value)
+                    if self.preset is None:
+                        preset = await self.session.manager.store.create_character(
+                            guild_id=self.session.guild.id,
+                            preset_name=preset_name,
+                            display_name=str(self.display_name.value),
+                            avatar_bytes=avatar.data if avatar is not None else None,
+                            avatar_media_type=(
+                                avatar.media_type if avatar is not None else None
+                            ),
+                            moderator_id=interaction.user.id,
+                        )
+                    else:
+                        preset = await self.session.manager.store.update_character(
+                            guild_id=self.session.guild.id,
+                            preset_name=self.preset.preset_name,
+                            expected_revision=self.preset.revision,
+                            new_preset_name=preset_name,
+                            display_name=str(self.display_name.value),
+                            avatar_bytes=(
+                                avatar.data
+                                if avatar is not None
+                                else self.preset.avatar_bytes
+                            ),
+                            avatar_media_type=(
+                                avatar.media_type
+                                if avatar is not None
+                                else self.preset.avatar_media_type
+                            ),
+                            moderator_id=interaction.user.id,
+                        )
+                    self.session.set_character(preset)
+                    await self.session.manager.log_preset_change(
+                        self.session.guild,
+                        interaction.user,
+                        "updated" if self.preset is not None else "created",
+                        preset,
+                    )
+                else:
+                    self.session.set_identity(ProxyIdentity(
+                        IdentityType.CHARACTER,
+                        display_name=str(self.display_name.value).strip(),
                         avatar_bytes=avatar.data if avatar is not None else None,
                         avatar_media_type=(
                             avatar.media_type if avatar is not None else None
                         ),
-                        moderator_id=interaction.user.id,
-                    )
-                else:
-                    preset = await self.session.manager.store.update_character(
-                        guild_id=self.session.guild.id,
-                        preset_name=self.preset.preset_name,
-                        expected_revision=self.preset.revision,
-                        new_preset_name=preset_name,
-                        display_name=str(self.display_name.value),
-                        avatar_bytes=(
-                            avatar.data
-                            if avatar is not None
-                            else self.preset.avatar_bytes
-                        ),
-                        avatar_media_type=(
-                            avatar.media_type
-                            if avatar is not None
-                            else self.preset.avatar_media_type
-                        ),
-                        moderator_id=interaction.user.id,
-                    )
-                self.session.set_character(preset)
-                await self.session.manager.log_preset_change(
-                    self.session.guild,
-                    interaction.user,
-                    "updated" if self.preset is not None else "created",
-                    preset,
-                )
-            else:
-                self.session.set_identity(ProxyIdentity(
-                    IdentityType.CHARACTER,
-                    display_name=str(self.display_name.value).strip(),
-                    avatar_bytes=avatar.data if avatar is not None else None,
-                    avatar_media_type=avatar.media_type if avatar is not None else None,
-                    avatar_sha256=avatar.sha256 if avatar is not None else None,
-                ))
-            await self.session.refresh()
-            await interaction.edit_original_response(content="Character selected")
+                        avatar_sha256=avatar.sha256 if avatar is not None else None,
+                    ))
+                await self.session.refresh()
+                await interaction.edit_original_response(content="Character selected")
         except Exception as error:  # noqa: BLE001
             await self.session.manager.handle_expected_or_reported_error(
                 interaction,
@@ -430,23 +434,24 @@ class ConfirmDeleteCharacterView(discord.ui.View):
         if not await self.session.enabled_for(interaction):
             return
         await interaction.response.defer(ephemeral=True)
-        deleted = await self.session.manager.store.delete_character(
-            guild_id=self.session.guild.id,
-            preset_name=self.preset.preset_name,
-            expected_revision=self.preset.revision,
-        )
-        self.session.draft.identity = ProxyIdentity(IdentityType.BOT)
-        await self.session.refresh()
-        await self.session.manager.log_preset_change(
-            self.session.guild,
-            interaction.user,
-            "deleted",
-            deleted,
-        )
-        await interaction.edit_original_response(
-            content="Character preset deleted",
-            view=None,
-        )
+        async with self.session.manager.enabled_operation(self.session.guild):
+            deleted = await self.session.manager.store.delete_character(
+                guild_id=self.session.guild.id,
+                preset_name=self.preset.preset_name,
+                expected_revision=self.preset.revision,
+            )
+            self.session.draft.identity = ProxyIdentity(IdentityType.BOT)
+            await self.session.refresh()
+            await self.session.manager.log_preset_change(
+                self.session.guild,
+                interaction.user,
+                "deleted",
+                deleted,
+            )
+            await interaction.edit_original_response(
+                content="Character preset deleted",
+                view=None,
+            )
 
     async def _cancel(self, interaction: discord.Interaction) -> None:
         await interaction.response.edit_message(content="Cancelled", view=None)
@@ -932,41 +937,42 @@ class BotProxyWorkflowSession:
         if len(message.attachments) != 1:
             raise WorkflowInputError("Send exactly one image attachment")
         loaded = await self.manager.load_avatar_attachment(message.attachments[0])
-        identity = self.draft.identity
-        if identity.kind is not IdentityType.CHARACTER:
-            raise WorkflowInputError("Choose a character before uploading an avatar")
-        if identity.preset_name is None:
-            self.draft.identity = ProxyIdentity(
-                IdentityType.CHARACTER,
-                display_name=identity.display_name,
+        async with self.manager.enabled_operation(self.guild):
+            identity = self.draft.identity
+            if identity.kind is not IdentityType.CHARACTER:
+                raise WorkflowInputError("Choose a character before uploading an avatar")
+            if identity.preset_name is None:
+                self.draft.identity = ProxyIdentity(
+                    IdentityType.CHARACTER,
+                    display_name=identity.display_name,
+                    avatar_bytes=loaded.data,
+                    avatar_media_type=loaded.media_type,
+                    avatar_sha256=loaded.sha256,
+                )
+                return
+            preset = await self.manager.store.get_character(
+                self.guild.id,
+                identity.preset_name,
+            )
+            if preset is None:
+                raise WorkflowInputError("Character preset no longer exists")
+            updated = await self.manager.store.update_character(
+                guild_id=self.guild.id,
+                preset_name=preset.preset_name,
+                expected_revision=preset.revision,
+                new_preset_name=preset.preset_name,
+                display_name=preset.display_name,
                 avatar_bytes=loaded.data,
                 avatar_media_type=loaded.media_type,
-                avatar_sha256=loaded.sha256,
+                moderator_id=message.author.id,
             )
-            return
-        preset = await self.manager.store.get_character(
-            self.guild.id,
-            identity.preset_name,
-        )
-        if preset is None:
-            raise WorkflowInputError("Character preset no longer exists")
-        updated = await self.manager.store.update_character(
-            guild_id=self.guild.id,
-            preset_name=preset.preset_name,
-            expected_revision=preset.revision,
-            new_preset_name=preset.preset_name,
-            display_name=preset.display_name,
-            avatar_bytes=loaded.data,
-            avatar_media_type=loaded.media_type,
-            moderator_id=message.author.id,
-        )
-        self.set_character(updated)
-        await self.manager.log_preset_change(
-            self.guild,
-            message.author,
-            "updated",
-            updated,
-        )
+            self.set_character(updated)
+            await self.manager.log_preset_change(
+                self.guild,
+                message.author,
+                "updated",
+                updated,
+            )
 
     async def set_destination(self, destination: ProxyDestination) -> None:
         self.require_enabled()
@@ -1101,18 +1107,24 @@ class BotProxyWorkflowSession:
         action: str,
     ) -> bool:
         try:
-            self.require_enabled()
-            channel = await self.manager.resolve_publish_channel(
-                self.guild,
-                draft.destination,
-                interaction.user,
-                identity_type=draft.identity.kind,
-            )
-            message = await self.manager.publisher.publish(
-                draft=draft,
-                moderator_id=interaction.user.id,
-                channel=channel,
-            )
+            async with self.manager.enabled_operation(self.guild):
+                channel = await self.manager.resolve_publish_channel(
+                    self.guild,
+                    draft.destination,
+                    interaction.user,
+                    identity_type=draft.identity.kind,
+                )
+                message = await self.manager.publisher.publish(
+                    draft=draft,
+                    moderator_id=interaction.user.id,
+                    channel=channel,
+                )
+                await self.manager.log_publication(
+                    self,
+                    interaction.user,
+                    message,
+                    draft=draft,
+                )
         except Exception as error:  # noqa: BLE001
             await self.manager.handle_expected_or_reported_error(
                 interaction,
@@ -1121,12 +1133,6 @@ class BotProxyWorkflowSession:
                 session=self,
             )
             return False
-        await self.manager.log_publication(
-            self,
-            interaction.user,
-            message,
-            draft=draft,
-        )
         return True
 
     async def _complete_publication(self, interaction: discord.Interaction) -> None:
