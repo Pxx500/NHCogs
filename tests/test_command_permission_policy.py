@@ -11,19 +11,16 @@ FORBIDDEN_CALLER_DECORATORS = {
     "commands.admin_or_permissions",
     "commands.guildowner",
     "commands.guildowner_or_permissions",
+    "commands.has_guild_permissions",
     "commands.is_owner",
     "commands.mod_or_permissions",
 }
 
-FORBIDDEN_CALLER_PERMISSIONS = {
-    "administrator",
-    "manage_webhooks",
-}
-
-CALLER_PERMISSION_DECORATORS = {
+DIRECT_CALLER_PERMISSION_DECORATORS = {
+    "app_commands.default_permissions",
     "app_commands.checks.has_permissions",
-    "commands.has_guild_permissions",
     "commands.has_permissions",
+    "discord.app_commands.default_permissions",
     "discord.app_commands.checks.has_permissions",
 }
 
@@ -52,14 +49,74 @@ def _dotted_name(node: ast.AST) -> str:
     return ".".join(reversed(parts))
 
 
-def _enabled_keywords(call: ast.Call) -> set[str]:
-    enabled: set[str] = set()
+def _permission_arguments(call: ast.Call) -> dict[str, bool] | None:
+    if call.args:
+        return None
+    permissions: dict[str, bool] = {}
     for keyword in call.keywords:
-        if keyword.arg is None:
+        if keyword.arg is None or not isinstance(keyword.value, ast.Constant):
+            return None
+        if not isinstance(keyword.value.value, bool):
+            return None
+        permissions[keyword.arg] = keyword.value.value
+    return permissions
+
+
+def _authorization_violations(tree: ast.AST, source: str) -> list[str]:
+    violations: list[str] = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        if isinstance(keyword.value, ast.Constant) and keyword.value.value is True:
-            enabled.add(keyword.arg)
-    return enabled
+
+        for decorator in node.decorator_list:
+            for call in (
+                child for child in ast.walk(decorator) if isinstance(child, ast.Call)
+            ):
+                decorator_name = _dotted_name(call.func)
+
+                if decorator_name in FORBIDDEN_CALLER_DECORATORS:
+                    violations.append(
+                        f"{source}:{call.lineno}: {decorator_name}"
+                    )
+
+                if decorator_name in DIRECT_CALLER_PERMISSION_DECORATORS:
+                    permissions = _permission_arguments(call)
+                    if permissions != {"manage_messages": True}:
+                        violations.append(
+                            f"{source}:{call.lineno}: {decorator_name} must require "
+                            f"only manage_messages=True, got {permissions!r}"
+                        )
+
+                if decorator_name not in CUSTOM_CALLER_CHECK_DECORATORS:
+                    continue
+
+                referenced_names = {
+                    child.attr
+                    for child in ast.walk(call)
+                    if isinstance(child, ast.Attribute)
+                }
+                for check_name in sorted(
+                    referenced_names & FORBIDDEN_CUSTOM_CHECK_REFERENCES
+                ):
+                    violations.append(
+                        f"{source}:{call.lineno}: forbidden caller check {check_name}"
+                    )
+
+                for attribute in (
+                    child for child in ast.walk(call) if isinstance(child, ast.Attribute)
+                ):
+                    parts = _dotted_name(attribute).split(".")
+                    if len(parts) < 2 or parts[-2] != "guild_permissions":
+                        continue
+                    permission = parts[-1]
+                    if permission != "manage_messages":
+                        violations.append(
+                            f"{source}:{call.lineno}: custom caller check uses "
+                            f"{permission}"
+                        )
+
+    return violations
 
 
 class CommandPermissionPolicyTests(unittest.TestCase):
@@ -70,51 +127,60 @@ class CommandPermissionPolicyTests(unittest.TestCase):
             tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
             relative_path = path.relative_to(PACKAGE_ROOT.parent)
 
-            for node in ast.walk(tree):
-                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    continue
-
-                for decorator in node.decorator_list:
-                    call = decorator if isinstance(decorator, ast.Call) else None
-                    target = call.func if call is not None else decorator
-                    decorator_name = _dotted_name(target)
-
-                    if decorator_name in FORBIDDEN_CALLER_DECORATORS:
-                        violations.append(
-                            f"{relative_path}:{decorator.lineno}: {decorator_name}"
-                        )
-
-                    if (
-                        decorator_name in CALLER_PERMISSION_DECORATORS
-                        and call is not None
-                    ):
-                        forbidden_permissions = (
-                            _enabled_keywords(call) & FORBIDDEN_CALLER_PERMISSIONS
-                        )
-                        for permission in sorted(forbidden_permissions):
-                            violations.append(
-                                f"{relative_path}:{decorator.lineno}: "
-                                f"caller permission {permission}"
-                            )
-
-                    if decorator_name in CUSTOM_CALLER_CHECK_DECORATORS:
-                        referenced_names = {
-                            child.attr
-                            for child in ast.walk(decorator)
-                            if isinstance(child, ast.Attribute)
-                        }
-                        for check_name in sorted(
-                            referenced_names & FORBIDDEN_CUSTOM_CHECK_REFERENCES
-                        ):
-                            violations.append(
-                                f"{relative_path}:{decorator.lineno}: "
-                                f"Red bot check {check_name}"
-                            )
+            violations.extend(_authorization_violations(tree, str(relative_path)))
 
         self.assertEqual(
             violations,
             [],
             "Forbidden command authorization found:\n" + "\n".join(violations),
+        )
+
+    def test_policy_rejects_wrong_and_composed_caller_permissions(self) -> None:
+        source = """
+@commands.has_permissions(manage_guild=True)
+async def manage_guild_command(ctx):
+    pass
+
+@commands.has_guild_permissions(manage_messages=True)
+async def guild_permission_command(ctx):
+    pass
+
+@commands.check_any(
+    commands.has_permissions(manage_messages=True),
+    commands.has_permissions(administrator=True),
+)
+async def composed_command(ctx):
+    pass
+
+@commands.permissions_check(lambda ctx: ctx.author.guild_permissions.ban_members)
+async def custom_permission_command(ctx):
+    pass
+"""
+
+        violations = _authorization_violations(ast.parse(source), "example.py")
+
+        self.assertTrue(any("manage_guild" in violation for violation in violations))
+        self.assertTrue(
+            any("has_guild_permissions" in violation for violation in violations)
+        )
+        self.assertTrue(any("administrator" in violation for violation in violations))
+        self.assertTrue(any("ban_members" in violation for violation in violations))
+
+    def test_policy_allows_manage_messages_custom_roles_and_bot_permissions(self) -> None:
+        source = """
+@commands.has_permissions(manage_messages=True)
+@commands.bot_has_permissions(manage_webhooks=True)
+async def moderator_command(ctx):
+    pass
+
+@commands.check(lambda ctx: any(role.id == 10 for role in ctx.author.roles))
+async def custom_role_command(ctx):
+    pass
+"""
+
+        self.assertEqual(
+            _authorization_violations(ast.parse(source), "example.py"),
+            [],
         )
 
 
