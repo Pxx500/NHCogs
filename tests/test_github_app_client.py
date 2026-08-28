@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import unittest
 from collections import deque
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 
 import jwt
 from cryptography.hazmat.primitives import serialization
@@ -39,7 +40,7 @@ class FakeResponse:
 class FakeSession:
     def __init__(self, *responses: FakeResponse | BaseException) -> None:
         self.responses = deque(responses)
-        self.requests: list[tuple[str, str, dict[str, object]]] = []
+        self.requests: list[tuple[str, str, dict[str, Any]]] = []
 
     def request(self, method: str, url: str, **kwargs):
         self.requests.append((method, url, kwargs))
@@ -62,6 +63,10 @@ class DeferredResponse(FakeResponse):
 
 
 class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
+    private_key: rsa.RSAPrivateKey
+    private_pem: bytes
+    public_key: rsa.RSAPublicKey
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -117,7 +122,7 @@ class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
             ),
             FakeResponse(200, self.pull_request_payload()),
         )
-        now = datetime(2026, 8, 29, tzinfo=UTC)
+        now = datetime(2026, 8, 29, tzinfo=timezone.utc)
         credentials = self.credentials()
         client = github_app.GitHubAppClient(credentials, session, clock=lambda: now)
 
@@ -166,7 +171,7 @@ class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
             ),
             FakeResponse(200, self.pull_request_payload()),
         )
-        now = datetime(2026, 8, 29, tzinfo=UTC)
+        now = datetime(2026, 8, 29, tzinfo=timezone.utc)
         client = github_app.GitHubAppClient(self.credentials(), session, clock=lambda: now)
 
         pull_request = await client.get_pull_request("GTNewHorizons", "Example", 42)
@@ -185,7 +190,7 @@ class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
             ),
             FakeResponse(200, {"assignees": [{"login": "someone-else"}]}),
         )
-        now = datetime(2026, 8, 29, tzinfo=UTC)
+        now = datetime(2026, 8, 29, tzinfo=timezone.utc)
         client = github_app.GitHubAppClient(self.credentials(), session, clock=lambda: now)
 
         with self.assertRaises(github_app.GitHubAssigneeUnavailable) as raised:
@@ -205,7 +210,7 @@ class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
             ),
             FakeResponse(200, {"assignees": []}),
         )
-        now = datetime(2026, 8, 29, tzinfo=UTC)
+        now = datetime(2026, 8, 29, tzinfo=timezone.utc)
         client = github_app.GitHubAppClient(self.credentials(), session, clock=lambda: now)
 
         await client.remove_assignee("GTNewHorizons", "Example", 42, "reviewer")
@@ -233,7 +238,7 @@ class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
             ),
             FakeResponse(202, {}),
         )
-        now = datetime(2026, 8, 29, tzinfo=UTC)
+        now = datetime(2026, 8, 29, tzinfo=timezone.utc)
         client = github_app.GitHubAppClient(self.credentials(), session, clock=lambda: now)
 
         deliveries = await client.list_deliveries(page=2)
@@ -245,7 +250,7 @@ class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
                 github_app.GitHubDeliverySummary(
                     delivery_id=765,
                     guid="delivery-guid",
-                    delivered_at=datetime(2026, 8, 29, 0, 10, tzinfo=UTC),
+                    delivered_at=datetime(2026, 8, 29, 0, 10, tzinfo=timezone.utc),
                     redelivery=False,
                     status_code=503,
                     event="pull_request",
@@ -283,7 +288,7 @@ class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
                 headers={"Retry-After": "120"},
             ),
         )
-        now = datetime(2026, 8, 29, tzinfo=UTC)
+        now = datetime(2026, 8, 29, tzinfo=timezone.utc)
         client = github_app.GitHubAppClient(self.credentials(), session, clock=lambda: now)
 
         with self.assertRaises(github_app.GitHubRequestError) as raised:
@@ -293,14 +298,14 @@ class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error.status, 403)
         self.assertTrue(error.retryable)
         self.assertTrue(error.rate_limited)
-        self.assertEqual(error.retry_at, datetime(2026, 8, 29, 0, 2, tzinfo=UTC))
+        self.assertEqual(error.retry_at, datetime(2026, 8, 29, 0, 2, tzinfo=timezone.utc))
         self.assertNotIn("sensitive upstream", str(error))
         self.assertLessEqual(len(str(error)), 120)
 
     async def test_network_failure_is_safe_and_retryable(self) -> None:
         github_app = self.loaded.github_app
         session = FakeSession(OSError("socket failed with sensitive local detail"))
-        now = datetime(2026, 8, 29, tzinfo=UTC)
+        now = datetime(2026, 8, 29, tzinfo=timezone.utc)
         client = github_app.GitHubAppClient(self.credentials(), session, clock=lambda: now)
 
         with self.assertRaises(github_app.GitHubRequestError) as raised:
@@ -323,7 +328,7 @@ class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
             FakeResponse(200, self.pull_request_payload()),
             FakeResponse(200, self.pull_request_payload()),
         )
-        now = datetime(2026, 8, 29, tzinfo=UTC)
+        now = datetime(2026, 8, 29, tzinfo=timezone.utc)
         client = github_app.GitHubAppClient(self.credentials(), session, clock=lambda: now)
 
         first = asyncio.create_task(client.get_pull_request("GTNewHorizons", "Example", 42))

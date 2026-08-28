@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import aiohttp
@@ -93,7 +93,7 @@ class GitHubAppClient:
     ) -> None:
         self._credentials = credentials
         self._session = session
-        self._clock = clock or (lambda: datetime.now(tz=UTC))
+        self._clock = clock or (lambda: datetime.now(tz=timezone.utc))
         self._token: str | None = None
         self._token_expires_at: datetime | None = None
         self._token_lock = asyncio.Lock()
@@ -110,8 +110,8 @@ class GitHubAppClient:
             operation="read pull request",
         )
         return PullRequestSnapshot(
-            node_id=int(payload["id"]),
-            number=int(payload["number"]),
+            node_id=_integer(payload["id"]),
+            number=_integer(payload["number"]),
             title=str(payload["title"]),
             url=str(payload["html_url"]),
             state=str(payload["state"]),
@@ -169,11 +169,11 @@ class GitHubAppClient:
             action = delivery.get("action")
             deliveries.append(
                 GitHubDeliverySummary(
-                    delivery_id=int(delivery["id"]),
+                    delivery_id=_integer(delivery["id"]),
                     guid=str(delivery["guid"]),
                     delivered_at=_parse_datetime(delivery["delivered_at"]),
                     redelivery=bool(delivery["redelivery"]),
-                    status_code=int(delivery["status_code"]),
+                    status_code=_integer(delivery["status_code"]),
                     event=str(delivery["event"]),
                     action=action if isinstance(action, str) else None,
                 )
@@ -331,6 +331,12 @@ def _sequence(value: object) -> tuple[object, ...]:
     return tuple(value)
 
 
+def _integer(value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise GitHubRequestError("decode response")
+    return value
+
+
 def _assignee_logins(payload: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(
         str(_mapping(assignee)["login"]) for assignee in _sequence(payload["assignees"])
@@ -370,7 +376,7 @@ def _retry_at(retry_after: object, rate_limit_reset: object, now: datetime) -> d
             pass
     if rate_limit_reset is not None:
         try:
-            return datetime.fromtimestamp(float(str(rate_limit_reset)), tz=UTC)
+            return datetime.fromtimestamp(float(str(rate_limit_reset)), tz=timezone.utc)
         except ValueError:
             pass
     return None
