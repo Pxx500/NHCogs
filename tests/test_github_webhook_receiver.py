@@ -5,6 +5,7 @@ import hmac
 import json
 import socket
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock
@@ -297,6 +298,67 @@ class GitHubWebhookReceiverTests(unittest.IsolatedAsyncioTestCase):
         assert delivery is not None
         self.assertEqual(delivery.action, "labeled")
         self.assertEqual(delivery.raw_body, first_body)
+
+    async def test_prepared_failed_delivery_accepts_verified_same_guid_redelivery(
+        self,
+    ) -> None:
+        first_body = json.dumps(self.payload(), separators=(",", ":")).encode()
+        first_response = await self.client.post(
+            self.loaded.webhook.WEBHOOK_PATH,
+            data=first_body,
+            headers=self.signed_headers(first_body),
+        )
+        self.assertEqual(first_response.status, 202)
+        claimed = await self.store.claim_next_delivery(
+            now=datetime.now(timezone.utc),
+            stale_before=datetime(2000, 1, 1, tzinfo=timezone.utc),
+        )
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+        self.assertTrue(
+            await self.store.fail_delivery(
+                claimed.delivery_guid,
+                completed_at=datetime.now(timezone.utc),
+                error_summary="terminal delivery failure",
+            )
+        )
+
+        duplicate_body = json.dumps(self.payload(), indent=2).encode()
+        duplicate_response = await self.client.post(
+            self.loaded.webhook.WEBHOOK_PATH,
+            data=duplicate_body,
+            headers=self.signed_headers(duplicate_body),
+        )
+        self.assertEqual(duplicate_response.status, 202)
+        unchanged = await self.store.get_delivery("delivery-guid")
+        self.assertEqual(unchanged.state, self.loaded.models.GitHubDeliveryState.FAILED)
+        self.assertEqual(unchanged.raw_body, first_body)
+
+        now = datetime.now(timezone.utc)
+        self.assertTrue(
+            await self.store.prepare_delivery_redelivery(
+                "delivery-guid",
+                github_delivery_id=765,
+                now=now,
+                next_attempt_at=now + timedelta(minutes=1),
+            )
+        )
+        awaiting = await self.store.get_delivery("delivery-guid")
+        self.assertEqual(awaiting.state.value, "awaiting_redelivery")
+        self.assertEqual(awaiting.raw_body, first_body)
+        redelivery_response = await self.client.post(
+            self.loaded.webhook.WEBHOOK_PATH,
+            data=duplicate_body,
+            headers=self.signed_headers(duplicate_body),
+        )
+
+        self.assertEqual(redelivery_response.status, 202)
+        reopened = await self.store.get_delivery("delivery-guid")
+        self.assertEqual(reopened.state, self.loaded.models.GitHubDeliveryState.PENDING)
+        self.assertEqual(reopened.github_delivery_id, 765)
+        self.assertEqual(reopened.attempts, 0)
+        self.assertEqual(reopened.raw_body, duplicate_body)
+        self.assertIsNone(reopened.error_summary)
 
     async def test_store_failure_is_not_acknowledged(self) -> None:
         body = json.dumps(self.payload(), separators=(",", ":")).encode()

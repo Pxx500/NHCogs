@@ -247,6 +247,7 @@ class GitHubTickets(commands.Cog):
                 client=client,
                 receiver=receiver,
                 delivery_handler=handler,
+                lifecycle_stopped=self._github_lifecycle_stopped,
                 bot=self.bot,
                 guild_id=guild_id,
                 clock=lambda: datetime.now(timezone.utc),
@@ -286,6 +287,23 @@ class GitHubTickets(commands.Cog):
         try:
             if runtime is not None:
                 await runtime.close()
+        finally:
+            if session is not None:
+                await session.close()
+
+    async def _github_lifecycle_stopped(
+        self,
+        runtime: GitHubIntegrationRuntime,
+    ) -> None:
+        if runtime is not self._github_runtime:
+            return
+        session = self._github_session
+        self._github_runtime = None
+        self._github_session = None
+        self._github_client = None
+        self._github_organization = None
+        try:
+            await self.config.set_raw("enabled", value=False)
         finally:
             if session is not None:
                 await session.close()

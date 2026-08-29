@@ -563,6 +563,19 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.delivery_guid, "delivery-b")
         self.assertEqual(first.attempts, 1)
         self.assertEqual(first.raw_body, b'{"private":"payload"}')
+        self.assertFalse(
+            await reopened.accept_delivery(
+                delivery_guid="delivery-a",
+                github_delivery_id=None,
+                event="pull_request",
+                action="labeled",
+                installation_id=123,
+                repository_id=100,
+                pr_number=7,
+                received_at=self.now + timedelta(minutes=1),
+                raw_body=b"processing duplicate",
+            )
+        )
         self.assertIsNone(
             await reopened.claim_next_delivery(
                 now=self.now,
@@ -585,6 +598,19 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
         completed = await reopened.get_delivery(recovered.delivery_guid)
         self.assertEqual(completed.state, models.GitHubDeliveryState.PROCESSED)
         self.assertIsNone(completed.raw_body)
+        self.assertFalse(
+            await reopened.accept_delivery(
+                delivery_guid="delivery-a",
+                github_delivery_id=None,
+                event="pull_request",
+                action="labeled",
+                installation_id=123,
+                repository_id=100,
+                pr_number=7,
+                received_at=self.now + timedelta(minutes=11),
+                raw_body=b"processed duplicate",
+            )
+        )
 
         with self.assertRaisesRegex(ValueError, "raw body"):
             await reopened.accept_delivery(
@@ -657,19 +683,54 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
             completed_at=self.now,
             error_summary="terminal failure",
         )
+        await self.store.accept_delivery(
+            delivery_guid="awaiting-redelivery",
+            github_delivery_id=1235,
+            event="pull_request",
+            action="edited",
+            installation_id=123,
+            repository_id=100,
+            pr_number=8,
+            received_at=self.now,
+            raw_body=b'{"private":"redelivery"}',
+        )
+        awaiting = await self.store.claim_next_delivery(
+            now=self.now,
+            stale_before=self.now - timedelta(minutes=5),
+        )
+        self.assertIsNotNone(awaiting)
+        assert awaiting is not None
+        await self.store.fail_delivery(
+            awaiting.delivery_guid,
+            completed_at=self.now,
+            error_summary="retry through GitHub",
+        )
+        await self.store.prepare_delivery_redelivery(
+            awaiting.delivery_guid,
+            github_delivery_id=1235,
+            now=self.now,
+            next_attempt_at=self.now + timedelta(minutes=1),
+        )
 
         self.assertEqual(
             await self.store.prune_deliveries(self.now + timedelta(days=4)),
-            (1, 0),
+            (2, 0),
         )
         retained = await self.store.get_delivery("failed-delivery")
         self.assertIsNone(retained.raw_body)
         self.assertEqual(retained.github_delivery_id, 1234)
+        awaiting_retained = await self.store.get_delivery("awaiting-redelivery")
+        self.assertEqual(
+            awaiting_retained.state,
+            models.GitHubDeliveryState.AWAITING_REDELIVERY,
+        )
+        self.assertIsNone(awaiting_retained.raw_body)
         self.assertEqual(
             await self.store.prune_deliveries(self.now + timedelta(days=8)),
-            (0, 1),
+            (0, 2),
         )
         self.assertIsNone(await self.store.get_delivery("failed-delivery"))
+        self.assertIsNone(await self.store.get_delivery("awaiting-redelivery"))
 
     async def test_delivery_retry_ignored_and_terminal_states_are_durable(self):
         await self.store.accept_delivery(
@@ -693,6 +754,19 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
                 retry.delivery_guid,
                 next_attempt_at=retry_at,
                 error_summary="x" * 1_000,
+            )
+        )
+        self.assertFalse(
+            await self.store.accept_delivery(
+                delivery_guid="retry-delivery",
+                github_delivery_id=None,
+                event="pull_request",
+                action="edited",
+                installation_id=123,
+                repository_id=100,
+                pr_number=7,
+                received_at=self.now + timedelta(minutes=1),
+                raw_body=b"retry duplicate",
             )
         )
         await self.store.accept_delivery(
@@ -720,6 +794,19 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
         stored_ignored = await self.store.get_delivery(ignored.delivery_guid)
         self.assertEqual(stored_ignored.state, models.GitHubDeliveryState.IGNORED)
         self.assertIsNone(stored_ignored.raw_body)
+        self.assertFalse(
+            await self.store.accept_delivery(
+                delivery_guid="ignored-delivery",
+                github_delivery_id=None,
+                event="unknown_event",
+                action=None,
+                installation_id=123,
+                repository_id=None,
+                pr_number=None,
+                received_at=self.now + timedelta(minutes=1),
+                raw_body=b"ignored duplicate",
+            )
+        )
         self.assertIsNone(
             await self.store.claim_next_delivery(
                 now=self.now + timedelta(minutes=4),

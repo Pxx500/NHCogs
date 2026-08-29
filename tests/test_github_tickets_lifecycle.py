@@ -312,6 +312,59 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertIs(report.await_args.kwargs["error"], failure)
 
+    async def test_lifecycle_stop_disables_owner_until_moderator_enable(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            bot = FakeBot(ready=True)
+            bot.api_tokens = {
+                "organization": "NewHorizons",
+                "client_id": "Iv1.client",
+                "app_id": "123",
+                "installation_id": "456",
+                "private_key": "private-key",
+                "webhook_secret": "webhook-secret",
+            }
+            cog = modules.githubtickets.GitHubTickets(bot)
+            await cog.config.set_raw("guild_id", value=10)
+            await cog.config.set_raw("enabled", value=True)
+            await cog.config.set_raw("bind_host", value="127.0.0.1")
+            await cog.config.set_raw("bind_port", value=8765)
+            session = FakeGitHubSession()
+            FakeGitHubRuntime.instances.clear()
+
+            with (
+                mock.patch.object(
+                    modules.githubtickets.aiohttp,
+                    "ClientSession",
+                    return_value=session,
+                ),
+                mock.patch.object(
+                    modules.githubtickets,
+                    "GitHubIntegrationRuntime",
+                    FakeGitHubRuntime,
+                ),
+            ):
+                self.assertTrue(await cog._restart_github_integration())
+                runtime = FakeGitHubRuntime.instances[0]
+                lifecycle_stopped = runtime.kwargs.get("lifecycle_stopped")
+                self.assertIsNotNone(lifecycle_stopped)
+                if lifecycle_stopped is None:
+                    return
+
+                await lifecycle_stopped(runtime)
+
+                integration = modules.settings.GitHubIntegrationSettings.from_mapping(
+                    await cog.config.all()
+                )
+                self.assertFalse(integration.enabled)
+                self.assertIsNone(cog._github_runtime)
+                self.assertIsNone(cog._github_client)
+                self.assertIsNone(cog._github_session)
+                self.assertIsNone(cog._github_organization)
+                self.assertTrue(session.closed)
+
+                self.assertFalse(await cog._restart_github_integration())
+                self.assertEqual(len(FakeGitHubRuntime.instances), 1)
+
     async def test_application_commands_are_guild_only_and_runtime_authorized(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             bot = FakeBot(ready=False)

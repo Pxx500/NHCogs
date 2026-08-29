@@ -600,8 +600,8 @@ def _migrate_to_github_durable_work(connection: sqlite3.Connection) -> None:
             received_at TEXT NOT NULL,
             state TEXT NOT NULL CHECK (
                 state IN (
-                    'pending', 'processing', 'retry', 'processed', 'ignored',
-                    'failed'
+                    'pending', 'processing', 'retry', 'awaiting_redelivery',
+                    'processed', 'ignored', 'failed'
                 )
             ),
             attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
@@ -915,6 +915,44 @@ class GitHubTicketsStore:
     async def get_delivery(self, delivery_guid: str) -> GitHubDelivery | None:
         async with self._lock:
             return await asyncio.to_thread(self._get_delivery_sync, delivery_guid)
+
+    async def prepare_delivery_redelivery(
+        self,
+        delivery_guid: str,
+        *,
+        github_delivery_id: int,
+        now: datetime,
+        next_attempt_at: datetime,
+    ) -> bool:
+        if github_delivery_id < 1:
+            raise ValueError("GitHub delivery ID must be positive")
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._prepare_delivery_redelivery_sync,
+                delivery_guid,
+                github_delivery_id,
+                now,
+                next_attempt_at,
+            )
+
+    async def restore_delivery_redelivery(
+        self,
+        delivery_guid: str,
+        *,
+        raw_body: bytes | None,
+        next_attempt_at: datetime | None,
+        error_summary: str,
+    ) -> bool:
+        if raw_body is not None and len(raw_body) > MAX_DELIVERY_BODY_BYTES:
+            raise ValueError("delivery raw body exceeds the retention limit")
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._restore_delivery_redelivery_sync,
+                delivery_guid,
+                raw_body,
+                next_attempt_at,
+                error_summary,
+            )
 
     async def get_delivery_recovery_checkpoint(self) -> tuple[int, int | None]:
         async with self._lock:
@@ -2233,15 +2271,56 @@ class GitHubTicketsStore:
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                if (
-                    connection.execute(
-                        "SELECT 1 FROM github_deliveries WHERE delivery_guid = ?",
-                        (normalized_guid,),
-                    ).fetchone()
-                    is not None
+                existing = connection.execute(
+                    "SELECT * FROM github_deliveries WHERE delivery_guid = ?",
+                    (normalized_guid,),
+                ).fetchone()
+                if existing is not None and not (
+                    str(existing["state"])
+                    == GitHubDeliveryState.AWAITING_REDELIVERY.value
+                    and str(existing["event"]) == normalized_event
+                    and (
+                        str(existing["action"])
+                        if existing["action"] is not None
+                        else None
+                    )
+                    == normalized_action
+                    and int(existing["installation_id"]) == installation_id
+                    and (
+                        int(existing["repository_id"])
+                        if existing["repository_id"] is not None
+                        else None
+                    )
+                    == repository_id
+                    and (
+                        int(existing["pr_number"])
+                        if existing["pr_number"] is not None
+                        else None
+                    )
+                    == pr_number
                 ):
                     connection.rollback()
                     return False
+                if existing is not None:
+                    connection.execute(
+                        """
+                        UPDATE github_deliveries
+                        SET github_delivery_id = COALESCE(?, github_delivery_id),
+                            received_at = ?, state = 'pending', attempts = 0,
+                            next_attempt_at = ?, processing_started_at = NULL,
+                            completed_at = NULL, error_summary = NULL, raw_body = ?
+                        WHERE delivery_guid = ? AND state = 'awaiting_redelivery'
+                        """,
+                        (
+                            github_delivery_id,
+                            timestamp,
+                            timestamp,
+                            raw_body,
+                            normalized_guid,
+                        ),
+                    )
+                    connection.commit()
+                    return True
                 connection.execute(
                     """
                     INSERT INTO github_deliveries (
@@ -2326,6 +2405,55 @@ class GitHubTicketsStore:
                 (delivery_guid,),
             ).fetchone()
         return _decode_delivery(row) if row is not None else None
+
+    def _prepare_delivery_redelivery_sync(
+        self,
+        delivery_guid: str,
+        github_delivery_id: int,
+        now: datetime,
+        next_attempt_at: datetime,
+    ) -> bool:
+        changed = self._execute_update(
+            """
+            UPDATE github_deliveries
+            SET github_delivery_id = COALESCE(github_delivery_id, ?),
+                state = 'awaiting_redelivery', next_attempt_at = ?,
+                processing_started_at = NULL, completed_at = NULL
+            WHERE delivery_guid = ?
+                AND state IN ('failed', 'awaiting_redelivery')
+                AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+            """,
+            (
+                github_delivery_id,
+                _serialize_datetime(next_attempt_at),
+                delivery_guid,
+                _serialize_datetime(now),
+            ),
+        )
+        return changed > 0
+
+    def _restore_delivery_redelivery_sync(
+        self,
+        delivery_guid: str,
+        raw_body: bytes | None,
+        next_attempt_at: datetime | None,
+        error_summary: str,
+    ) -> bool:
+        changed = self._execute_update(
+            """
+            UPDATE github_deliveries
+            SET state = 'failed', raw_body = ?, next_attempt_at = ?,
+                error_summary = ?
+            WHERE delivery_guid = ? AND state = 'awaiting_redelivery'
+            """,
+            (
+                raw_body,
+                _serialize_optional_datetime(next_attempt_at),
+                error_summary.strip()[:MAX_ERROR_SUMMARY_LENGTH],
+                delivery_guid,
+            ),
+        )
+        return changed > 0
 
     def _get_delivery_recovery_checkpoint_sync(self) -> tuple[int, int | None]:
         with closing(self._connect()) as connection:
@@ -2444,17 +2572,23 @@ class GitHubTicketsStore:
                     """
                     UPDATE github_deliveries SET raw_body = NULL
                     WHERE received_at < ? AND raw_body IS NOT NULL
-                        AND state IN ('processed', 'ignored', 'failed')
+                        AND state IN (
+                            'awaiting_redelivery', 'processed', 'ignored', 'failed'
+                        )
                     """,
                     (raw_body_cutoff,),
                 ).rowcount
                 deleted = connection.execute(
                     """
                     DELETE FROM github_deliveries
-                    WHERE completed_at < ?
+                    WHERE (
+                        completed_at < ?
                         AND state IN ('processed', 'ignored', 'failed')
+                    ) OR (
+                        received_at < ? AND state = 'awaiting_redelivery'
+                    )
                     """,
-                    (identity_cutoff,),
+                    (identity_cutoff, identity_cutoff),
                 ).rowcount
                 connection.commit()
                 return cleared, deleted
