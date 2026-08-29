@@ -21,6 +21,12 @@ PullRequestAction: TypeAlias = Literal[
     "assigned",
     "unassigned",
 ]
+GitHubAppLifecycleReason: TypeAlias = Literal[
+    "installation_suspended",
+    "installation_deleted",
+    "permissions_changed",
+    "repositories_removed",
+]
 
 
 class InvalidGitHubDelivery(ValueError):
@@ -45,7 +51,15 @@ class PullRequestReviewEvent:
     assignee_logins: tuple[str, ...] = ()
 
 
-ParsedGitHubEvent: TypeAlias = PullRequestEvent | PullRequestReviewEvent
+@dataclass(frozen=True, slots=True)
+class GitHubAppLifecycleEvent:
+    reason: GitHubAppLifecycleReason
+    repository_ids: tuple[int, ...] = ()
+
+
+ParsedGitHubEvent: TypeAlias = (
+    PullRequestEvent | PullRequestReviewEvent | GitHubAppLifecycleEvent
+)
 
 _PULL_REQUEST_ACTIONS = frozenset(
     {
@@ -66,6 +80,19 @@ _INVALID_MESSAGE = "GitHub delivery payload is invalid"
 
 
 def parse_delivery(delivery: GitHubDelivery) -> ParsedGitHubEvent | None:
+    lifecycle_reason = _LIFECYCLE_ACTIONS.get((delivery.event, delivery.action))
+    if lifecycle_reason is not None:
+        try:
+            payload = _payload(delivery)
+            _delivery_action(payload, delivery)
+            repository_ids = (
+                _removed_repository_ids(payload)
+                if lifecycle_reason == "repositories_removed"
+                else ()
+            )
+            return GitHubAppLifecycleEvent(lifecycle_reason, repository_ids)
+        except (json.JSONDecodeError, KeyError, TypeError, UnicodeDecodeError, ValueError):
+            raise InvalidGitHubDelivery(_INVALID_MESSAGE) from None
     if delivery.event == "pull_request":
         if delivery.action not in _PULL_REQUEST_ACTIONS:
             return None
@@ -81,6 +108,17 @@ def parse_delivery(delivery: GitHubDelivery) -> ParsedGitHubEvent | None:
         except (json.JSONDecodeError, KeyError, TypeError, UnicodeDecodeError, ValueError):
             raise InvalidGitHubDelivery(_INVALID_MESSAGE) from None
     return None
+
+
+_LIFECYCLE_ACTIONS: dict[
+    tuple[str, str | None],
+    GitHubAppLifecycleReason,
+] = {
+    ("installation", "suspend"): "installation_suspended",
+    ("installation", "deleted"): "installation_deleted",
+    ("installation", "new_permissions_accepted"): "permissions_changed",
+    ("installation_repositories", "removed"): "repositories_removed",
+}
 
 
 def _parse_pull_request_event(delivery: GitHubDelivery) -> PullRequestEvent:
@@ -176,6 +214,7 @@ def _pull_request(
         open=state == "open",
         labels=labels,
         github_updated_at=_datetime(pull_request, "updated_at"),
+        assignees=_assignee_logins(payload),
         last_processed_action=action,
     )
 
@@ -198,6 +237,16 @@ def _assignee_logins(payload: Mapping[str, object]) -> tuple[str, ...]:
         if isinstance(login, str) and login:
             logins.append(login)
     return tuple(logins)
+
+
+def _removed_repository_ids(payload: Mapping[str, object]) -> tuple[int, ...]:
+    repository_ids = tuple(
+        _positive_integer(_mapping_value(repository), "id")
+        for repository in _sequence(payload, "repositories_removed")
+    )
+    if not repository_ids:
+        raise ValueError
+    return repository_ids
 
 
 def _mapping(parent: Mapping[str, object], key: str) -> Mapping[str, object]:

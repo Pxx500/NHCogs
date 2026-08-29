@@ -190,6 +190,7 @@ def _decode_pull_request(row: sqlite3.Row) -> GitHubPullRequest:
         open=bool(row["open"]),
         labels=tuple(json.loads(str(row["observed_labels"]))),
         github_updated_at=_deserialize_datetime(str(row["github_updated_at"])),
+        assignees=tuple(json.loads(str(row["observed_assignees"]))),
         current_ticket_id=(
             int(row["current_ticket_id"]) if row["current_ticket_id"] is not None else None
         ),
@@ -208,6 +209,11 @@ def _pull_request_state(pull_request: GitHubPullRequest) -> tuple[object, ...]:
         pull_request.draft,
         pull_request.open,
         frozenset(label.strip().casefold() for label in pull_request.labels if label.strip()),
+        tuple(
+            assignee.strip().casefold()
+            for assignee in pull_request.assignees
+            if assignee.strip()
+        ),
     )
 
 
@@ -569,6 +575,7 @@ def _migrate_to_github_durable_work(connection: sqlite3.Connection) -> None:
             draft INTEGER NOT NULL CHECK (draft IN (0, 1)),
             open INTEGER NOT NULL CHECK (open IN (0, 1)),
             observed_labels TEXT NOT NULL,
+            observed_assignees TEXT NOT NULL,
             github_updated_at TEXT NOT NULL,
             current_ticket_id INTEGER,
             last_processed_action TEXT,
@@ -614,6 +621,15 @@ def _migrate_to_github_durable_work(connection: sqlite3.Connection) -> None:
         CREATE INDEX idx_github_deliveries_processing
             ON github_deliveries (processing_started_at, delivery_guid)
             WHERE state = 'processing';
+
+        CREATE TABLE github_delivery_recovery (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            next_page INTEGER NOT NULL CHECK (next_page > 0),
+            last_delivery_id INTEGER CHECK (
+                last_delivery_id IS NULL OR last_delivery_id > 0
+            ),
+            checked_at TEXT NOT NULL
+        );
 
         CREATE TABLE github_outbox (
             outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -899,6 +915,31 @@ class GitHubTicketsStore:
     async def get_delivery(self, delivery_guid: str) -> GitHubDelivery | None:
         async with self._lock:
             return await asyncio.to_thread(self._get_delivery_sync, delivery_guid)
+
+    async def get_delivery_recovery_checkpoint(self) -> tuple[int, int | None]:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._get_delivery_recovery_checkpoint_sync
+            )
+
+    async def save_delivery_recovery_checkpoint(
+        self,
+        *,
+        next_page: int,
+        last_delivery_id: int | None,
+        checked_at: datetime,
+    ) -> None:
+        if next_page < 1 or (
+            last_delivery_id is not None and last_delivery_id < 1
+        ):
+            raise ValueError("delivery recovery checkpoint is invalid")
+        async with self._lock:
+            await asyncio.to_thread(
+                self._save_delivery_recovery_checkpoint_sync,
+                next_page,
+                last_delivery_id,
+                checked_at,
+            )
 
     async def complete_delivery(
         self,
@@ -1969,6 +2010,11 @@ class GitHubTicketsStore:
         labels = tuple(
             dict.fromkeys(label.strip() for label in pull_request.labels if label.strip())
         )
+        assignees = tuple(
+            dict.fromkeys(
+                assignee.strip() for assignee in pull_request.assignees if assignee.strip()
+            )
+        )
         existing = connection.execute(
             """
             SELECT * FROM github_pull_requests
@@ -1988,9 +2034,9 @@ class GitHubTicketsStore:
                 INSERT INTO github_pull_requests (
                     repository_id, pr_number, github_pr_id, github_author_id,
                     repository_full_name, pr_url, pr_title, github_author_login,
-                    draft, open, observed_labels, github_updated_at,
+                    draft, open, observed_labels, observed_assignees, github_updated_at,
                     last_processed_action
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     pull_request.repository_id,
@@ -2004,6 +2050,7 @@ class GitHubTicketsStore:
                     int(pull_request.draft),
                     int(pull_request.open),
                     json.dumps(labels, separators=(",", ":")),
+                    json.dumps(assignees, separators=(",", ":")),
                     timestamp,
                     pull_request.last_processed_action,
                 ),
@@ -2016,7 +2063,7 @@ class GitHubTicketsStore:
                 UPDATE github_pull_requests
                 SET repository_full_name = ?, pr_url = ?, pr_title = ?,
                     github_author_login = ?, draft = ?, open = ?,
-                    observed_labels = ?, github_updated_at = ?,
+                    observed_labels = ?, observed_assignees = ?, github_updated_at = ?,
                     last_processed_action = COALESCE(?, last_processed_action)
                 WHERE repository_id = ? AND pr_number = ?
                 """,
@@ -2028,6 +2075,7 @@ class GitHubTicketsStore:
                     int(pull_request.draft),
                     int(pull_request.open),
                     json.dumps(labels, separators=(",", ":")),
+                    json.dumps(assignees, separators=(",", ":")),
                     timestamp,
                     pull_request.last_processed_action,
                     pull_request.repository_id,
@@ -2278,6 +2326,50 @@ class GitHubTicketsStore:
                 (delivery_guid,),
             ).fetchone()
         return _decode_delivery(row) if row is not None else None
+
+    def _get_delivery_recovery_checkpoint_sync(self) -> tuple[int, int | None]:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT next_page, last_delivery_id
+                FROM github_delivery_recovery WHERE singleton = 1
+                """
+            ).fetchone()
+        if row is None:
+            return 1, None
+        return (
+            int(row["next_page"]),
+            (
+                int(row["last_delivery_id"])
+                if row["last_delivery_id"] is not None
+                else None
+            ),
+        )
+
+    def _save_delivery_recovery_checkpoint_sync(
+        self,
+        next_page: int,
+        last_delivery_id: int | None,
+        checked_at: datetime,
+    ) -> None:
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """
+                INSERT INTO github_delivery_recovery (
+                    singleton, next_page, last_delivery_id, checked_at
+                ) VALUES (1, ?, ?, ?)
+                ON CONFLICT(singleton) DO UPDATE SET
+                    next_page = excluded.next_page,
+                    last_delivery_id = excluded.last_delivery_id,
+                    checked_at = excluded.checked_at
+                """,
+                (
+                    next_page,
+                    last_delivery_id,
+                    _serialize_datetime(checked_at),
+                ),
+            )
+            connection.commit()
 
     def _complete_delivery_sync(
         self,

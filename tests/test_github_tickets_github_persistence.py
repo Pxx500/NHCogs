@@ -169,6 +169,7 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
         github_author_id: int = 900,
         title: str = "Add GitHub App integration",
         login: str = "octocat",
+        assignees: tuple[str, ...] = (),
         updated_at: datetime | None = None,
         last_processed_action: str | None = "labeled",
     ):
@@ -185,6 +186,7 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
             open=True,
             labels=("discord-ticket", "python"),
             github_updated_at=updated_at or self.now,
+            assignees=assignees,
             last_processed_action=last_processed_action,
         )
 
@@ -448,6 +450,31 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed.pull_request.title, "Title-only observation")
         self.assertEqual(observed.pull_request.last_processed_action, "labeled")
 
+    async def test_assignees_round_trip_and_conflict_at_equal_timestamp(self):
+        applied = await self.store.observe_pull_request(
+            self.pull_request(assignees=("ReviewerOne",))
+        )
+
+        self.assertIs(applied.state, models.PullRequestObservationState.APPLIED)
+        self.assertEqual(applied.pull_request.assignees, ("ReviewerOne",))
+        self.assertEqual(
+            (await self.store.get_pull_request(100, 7)).assignees,
+            ("ReviewerOne",),
+        )
+
+        conflict = await self.store.observe_pull_request(
+            self.pull_request(assignees=("ReviewerTwo",))
+        )
+        self.assertIs(conflict.state, models.PullRequestObservationState.CONFLICT)
+        self.assertEqual(conflict.pull_request.assignees, ("ReviewerOne",))
+
+        authoritative = await self.store.observe_pull_request(
+            self.pull_request(assignees=("ReviewerTwo",)),
+            authoritative=True,
+        )
+        self.assertIs(authoritative.state, models.PullRequestObservationState.APPLIED)
+        self.assertEqual(authoritative.pull_request.assignees, ("ReviewerTwo",))
+
     async def test_ticket_deletion_preserves_executable_github_intent(self):
         ticket = await self.store.create_ticket_for_pull_request(
             self.new_ticket(),
@@ -571,6 +598,37 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
                 received_at=self.now,
                 raw_body=b"x" * (store_module.MAX_DELIVERY_BODY_BYTES + 1),
             )
+
+    async def test_recovery_checkpoint_is_durable_and_globally_owned(self):
+        self.assertEqual(
+            await self.store.get_delivery_recovery_checkpoint(),
+            (1, None),
+        )
+        await self.store.save_delivery_recovery_checkpoint(
+            next_page=4,
+            last_delivery_id=321,
+            checked_at=self.now,
+        )
+        await self.store.save_profile(
+            guild_id=10,
+            user_id=20,
+            github_username="someone",
+            category_ids=(),
+            automatic_pings=False,
+            updated_at=self.now,
+        )
+
+        reloaded = store_module.GitHubTicketsStore(self.path)
+        await reloaded.initialize()
+        self.assertEqual(
+            await reloaded.get_delivery_recovery_checkpoint(),
+            (4, 321),
+        )
+        self.assertTrue(await reloaded.delete_guild_state(10))
+        self.assertEqual(
+            await reloaded.get_delivery_recovery_checkpoint(),
+            (4, 321),
+        )
 
     async def test_delivery_retention_bounds_failed_bodies_and_keeps_identity_for_seven_days(
         self,

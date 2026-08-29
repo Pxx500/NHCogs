@@ -178,6 +178,7 @@ class GitHubPullRequest:
     open: bool
     labels: tuple[str, ...]
     github_updated_at: datetime
+    assignees: tuple[str, ...] = ()
     current_ticket_id: int | None = None
     last_processed_action: str | None = None
 

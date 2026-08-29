@@ -150,6 +150,37 @@ class GitHubWebhookReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(delivery.repository_id)
         self.assertIsNone(delivery.pr_number)
 
+    async def test_app_lifecycle_delivery_is_durable_before_acknowledgement(self) -> None:
+        body = json.dumps(
+            {
+                "action": "removed",
+                "installation": {"id": 456},
+                "organization": {"login": "GTNewHorizons"},
+                "repositories_removed": [
+                    {"id": 9001, "full_name": "GTNewHorizons/Example"}
+                ],
+            },
+            separators=(",", ":"),
+        ).encode()
+
+        response = await self.client.post(
+            self.loaded.webhook.WEBHOOK_PATH,
+            data=body,
+            headers=self.signed_headers(
+                body,
+                delivery="installation-repositories-removed",
+                event="installation_repositories",
+            ),
+        )
+
+        self.assertEqual(response.status, 202)
+        delivery = await self.store.get_delivery("installation-repositories-removed")
+        self.assertIsNotNone(delivery)
+        assert delivery is not None
+        self.assertEqual(delivery.event, "installation_repositories")
+        self.assertEqual(delivery.action, "removed")
+        self.assertEqual(delivery.raw_body, body)
+
     async def test_invalid_requests_are_rejected_without_persistence(self) -> None:
         cases: list[tuple[str, bytes, dict[str, str], int]] = []
 

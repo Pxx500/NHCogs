@@ -53,6 +53,8 @@ class GitHubEventHandler:
         parsed = events.parse_delivery(delivery)
         if parsed is None:
             return DeliveryDisposition.IGNORED
+        if isinstance(parsed, events.GitHubAppLifecycleEvent):
+            return DeliveryDisposition.STOPPED
         observation = await self._store.observe_pull_request(parsed.pull_request)
         if observation.state is PullRequestObservationState.STALE:
             return DeliveryDisposition.PROCESSED
@@ -70,10 +72,27 @@ class GitHubEventHandler:
                 raise GitHubEventTransitionDeferred(
                     "GitHub pull request conflict did not settle"
                 )
-        parsed = replace(parsed, pull_request=observation.pull_request)
         if isinstance(parsed, events.PullRequestEvent):
+            action = parsed.action
+            if action in {"assigned", "unassigned"} and parsed.assignee_login is not None:
+                assigned = any(
+                    login.casefold() == parsed.assignee_login.casefold()
+                    for login in observation.pull_request.assignees
+                )
+                action = "assigned" if assigned else "unassigned"
+            parsed = replace(
+                parsed,
+                action=action,
+                pull_request=observation.pull_request,
+                assignee_logins=observation.pull_request.assignees,
+            )
             await self._handle_pull_request(parsed)
         else:
+            parsed = replace(
+                parsed,
+                pull_request=observation.pull_request,
+                assignee_logins=observation.pull_request.assignees,
+            )
             await self._handle_review(parsed)
         return DeliveryDisposition.PROCESSED
 
@@ -263,12 +282,7 @@ class GitHubEventHandler:
 
     @staticmethod
     def _assignee_logins(event: events.PullRequestEvent) -> tuple[str, ...]:
-        logins = list(event.assignee_logins)
-        if event.assignee_login is not None and all(
-            login.casefold() != event.assignee_login.casefold() for login in logins
-        ):
-            logins.append(event.assignee_login)
-        return tuple(dict.fromkeys(login.casefold() for login in logins))
+        return tuple(dict.fromkeys(login.casefold() for login in event.assignee_logins))
 
     def _eligible(self, member: Any) -> bool:
         return self._member_is_eligible(member)

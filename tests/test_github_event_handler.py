@@ -281,6 +281,19 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.observed, [])
         self.assertEqual(self.coordinator.calls, [])
 
+    async def test_app_lifecycle_event_requests_runtime_owned_stop(self) -> None:
+        disposition = await self.handler(
+            self.delivery(
+                event="installation",
+                action="suspend",
+                payload={"action": "suspend"},
+            )
+        )
+
+        self.assertIs(disposition, self.modules.runtime.DeliveryDisposition.STOPPED)
+        self.assertEqual(self.store.observed, [])
+        self.assertEqual(self.coordinator.calls, [])
+
     async def test_stale_pull_request_event_is_observed_without_domain_transition(self) -> None:
         self.store.observation_state = self.modules.models.PullRequestObservationState.STALE
         self.map_profile("participant", 2)
@@ -338,6 +351,100 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
             self.coordinator.calls,
             [("title", 100, 7, "Authoritative title")],
         )
+
+    async def test_same_second_reordered_assignment_uses_authoritative_assignees(
+        self,
+    ) -> None:
+        self.map_profile("participant", 2)
+        self.guild.members[2] = _Member(2, role_ids=(99,))
+        cases = (
+            (
+                "assigned",
+                ("participant",),
+                "unassigned",
+                (),
+                [("unassign", 100, 7, 2)],
+            ),
+            (
+                "unassigned",
+                (),
+                "assigned",
+                ("participant",),
+                [("claim", 100, 7, 2, None)],
+            ),
+        )
+        for index, (
+            stale_action,
+            stale_assignees,
+            authoritative_action,
+            authoritative_assignees,
+            expected_calls,
+        ) in enumerate(cases):
+            with self.subTest(stale_action=stale_action):
+                store = self.modules.store.GitHubTicketsStore(
+                    Path(self.directory.name) / f"same-second-{index}.sqlite"
+                )
+                await store.initialize()
+                await store.save_profile(
+                    guild_id=10,
+                    user_id=2,
+                    github_username="participant",
+                    category_ids=(),
+                    automatic_pings=False,
+                    updated_at=datetime(2026, 8, 29, 10, 0, tzinfo=timezone.utc),
+                )
+                authoritative_payload = self.payload(
+                    action=authoritative_action,
+                    assignees=authoritative_assignees,
+                )
+                authoritative_payload["assignee"] = {"login": "participant"}
+                authoritative_delivery = self.delivery(
+                    event="pull_request",
+                    action=authoritative_action,
+                    payload=authoritative_payload,
+                )
+                authoritative_event = self.modules.events.parse_delivery(
+                    authoritative_delivery
+                )
+                await store.observe_pull_request(
+                    authoritative_event.pull_request,
+                    authoritative=True,
+                )
+
+                stale_payload = self.payload(
+                    action=stale_action,
+                    assignees=stale_assignees,
+                )
+                stale_payload["assignee"] = {"login": "participant"}
+                stale_delivery = self.delivery(
+                    event="pull_request",
+                    action=stale_action,
+                    payload=stale_payload,
+                )
+                coordinator = _Coordinator()
+                refresh_calls = []
+
+                async def refresh_pull_request(
+                    pull_request,
+                    calls=refresh_calls,
+                    authoritative=authoritative_event.pull_request,
+                ):
+                    calls.append(pull_request)
+                    return authoritative
+
+                handler = self.event_handler.GitHubEventHandler(
+                    store,
+                    coordinator,
+                    bot=self.bot,
+                    guild_id=10,
+                    member_is_eligible=_member_is_eligible,
+                    refresh_pull_request=refresh_pull_request,
+                )
+
+                await handler(stale_delivery)
+
+                self.assertEqual(len(refresh_calls), 1)
+                self.assertEqual(coordinator.calls, expected_calls)
 
     async def test_discord_ticket_label_creates_only_for_ready_pull_request(self) -> None:
         self.map_profile("author", 300)
