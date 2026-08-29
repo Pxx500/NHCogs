@@ -19,6 +19,10 @@ class _AmbiguousGitHubMapping(RuntimeError):
         super().__init__(f"GitHub login {login} maps to {count} cached members")
 
 
+class GitHubEventTransitionDeferred(RuntimeError):
+    pass
+
+
 class GitHubEventHandler:
     def __init__(
         self,
@@ -67,24 +71,27 @@ class GitHubEventHandler:
             )
             if ambiguous:
                 return
-            await self._coordinator.create_ticket_from_github(
+            result = await self._coordinator.create_ticket_from_github(
                 self._guild_id,
                 pull_request,
                 author_id=int(author.id) if author is not None else None,
             )
+            self._require_settled(result)
             return
         if event.action == "closed":
-            await self._coordinator.finish_ticket_from_github(
+            result = await self._coordinator.finish_ticket_from_github(
                 pull_request.repository_id,
                 pull_request.pr_number,
             )
+            self._require_settled(result)
             return
         if event.action == "edited" and event.title_changed:
-            await self._coordinator.update_title_from_github(
+            result = await self._coordinator.update_title_from_github(
                 pull_request.repository_id,
                 pull_request.pr_number,
                 title=pull_request.title,
             )
+            self._require_settled(result)
             return
         if event.action == "assigned":
             candidate, ambiguous = await self._first_eligible_assignee(
@@ -93,12 +100,13 @@ class GitHubEventHandler:
             )
             if ambiguous or candidate is None:
                 return
-            await self._coordinator.claim_ticket_from_github(
+            result = await self._coordinator.claim_ticket_from_github(
                 pull_request.repository_id,
                 pull_request.pr_number,
                 user_id=int(candidate.id),
                 ensure_assigned_login=None,
             )
+            self._require_settled(result)
             return
         if event.action == "unassigned":
             await self._handle_unassigned(event)
@@ -120,12 +128,13 @@ class GitHubEventHandler:
         already_assigned = any(
             login.casefold() == reviewer_login.casefold() for login in event.assignee_logins
         )
-        await self._coordinator.claim_ticket_from_github(
+        result = await self._coordinator.claim_ticket_from_github(
             event.pull_request.repository_id,
             event.pull_request.pr_number,
             user_id=int(reviewer.id),
             ensure_assigned_login=None if already_assigned else reviewer_login,
         )
+        self._require_settled(result)
 
     async def _handle_unassigned(self, event: events.PullRequestEvent) -> None:
         pull_request = event.pull_request
@@ -154,15 +163,15 @@ class GitHubEventHandler:
                 pull_request.pr_number,
                 user_id=int(removed.id),
             )
-            if not result.success:
-                return
+            self._require_settled(result)
         if candidate is not None:
-            await self._coordinator.claim_ticket_from_github(
+            result = await self._coordinator.claim_ticket_from_github(
                 pull_request.repository_id,
                 pull_request.pr_number,
                 user_id=int(candidate.id),
                 ensure_assigned_login=None,
             )
+            self._require_settled(result)
 
     async def _resolve_member(
         self,
@@ -231,3 +240,8 @@ class GitHubEventHandler:
             return True
         role_ids = {int(role.id) for role in getattr(member, "roles", ())}
         return bool(self._participant_role_ids.intersection(role_ids))
+
+    @staticmethod
+    def _require_settled(result: Any) -> None:
+        if not result.success:
+            raise GitHubEventTransitionDeferred("GitHub event transition did not settle")

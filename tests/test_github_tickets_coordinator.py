@@ -313,6 +313,8 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ticket.category_ids, (self.category.category_id,))
         self.assertEqual(ticket.routing_mode, models.RoutingMode.DIRECT_AUTOMATIC)
         self.assertEqual(ticket.direct_target_id, 500)
+        self.assertEqual(ticket.pr_title, pull_request.title)
+        self.assertEqual(ticket.pr_url, pull_request.url)
         binding = await self.store.get_pull_request(100, 7)
         self.assertEqual(binding.current_ticket_id, ticket.ticket_id)
         self.assertEqual(
@@ -406,6 +408,48 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             self.projection.calls,
             [("edit_ticket", ticket_id, models.TicketState.OPEN, None)],
         )
+
+    async def test_github_replays_succeed_when_desired_state_is_already_settled(self):
+        pull_request = self.pull_request()
+        await self.create_github_active(pull_request=pull_request)
+
+        duplicate_create = await self.coordinator.create_ticket_from_github(
+            10,
+            pull_request,
+            author_id=None,
+        )
+        first_claim = await self.coordinator.claim_ticket_from_github(
+            100,
+            7,
+            user_id=222,
+            ensure_assigned_login=None,
+        )
+        duplicate_claim = await self.coordinator.claim_ticket_from_github(
+            100,
+            7,
+            user_id=222,
+            ensure_assigned_login=None,
+        )
+        first_finish = await self.coordinator.finish_ticket_from_github(100, 7)
+        duplicate_finish = await self.coordinator.finish_ticket_from_github(100, 7)
+        absent_unassign = await self.coordinator.unassign_ticket_from_github(
+            100,
+            7,
+            user_id=222,
+        )
+        absent_title = await self.coordinator.update_title_from_github(
+            100,
+            7,
+            title="Already closed",
+        )
+
+        self.assertTrue(duplicate_create.success)
+        self.assertTrue(first_claim.success)
+        self.assertTrue(duplicate_claim.success)
+        self.assertTrue(first_finish.success)
+        self.assertTrue(duplicate_finish.success)
+        self.assertTrue(absent_unassign.success)
+        self.assertTrue(absent_title.success)
 
     async def test_create_rejects_direct_self_review_without_writing_ticket(self):
         result = await self.coordinator.create_ticket(

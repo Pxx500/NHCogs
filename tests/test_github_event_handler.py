@@ -74,6 +74,7 @@ class _Store:
 class _Coordinator:
     def __init__(self) -> None:
         self.calls: list[tuple[object, ...]] = []
+        self.claim_success = True
         self.unassign_success = True
 
     async def create_ticket_from_github(
@@ -103,7 +104,7 @@ class _Coordinator:
                 ensure_assigned_login,
             )
         )
-        return SimpleNamespace(success=True)
+        return SimpleNamespace(success=self.claim_success)
 
     async def unassign_ticket_from_github(
         self,
@@ -393,6 +394,23 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(len(self.coordinator.calls), 3)
+
+    async def test_unsettled_assignment_is_deferred_instead_of_acknowledged(self) -> None:
+        self.map_profile("participant", 2)
+        self.guild.members[2] = _Member(2, role_ids=(99,))
+        self.coordinator.claim_success = False
+
+        with self.assertRaises(self.event_handler.GitHubEventTransitionDeferred):
+            await self.handler(
+                self.delivery(
+                    event="pull_request",
+                    action="assigned",
+                    payload=self.payload(
+                        action="assigned",
+                        assignees=("participant",),
+                    ),
+                )
+            )
 
     async def test_unassigned_releases_matching_claimant_then_considers_remaining_assignees(
         self,
