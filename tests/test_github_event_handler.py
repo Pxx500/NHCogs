@@ -92,6 +92,7 @@ class _Coordinator:
         self.calls: list[tuple[object, ...]] = []
         self.claim_success = True
         self.unassign_success = True
+        self.finished_ticket = None
 
     async def create_ticket_from_github(
         self,
@@ -138,6 +139,17 @@ class _Coordinator:
         pr_number: int,
     ) -> object:
         self.calls.append(("finish", repository_id, pr_number))
+        return SimpleNamespace(
+            success=True,
+            finished_ticket=self.finished_ticket,
+        )
+
+    async def prompt_draft_decision_from_github(
+        self,
+        repository_id: int,
+        pr_number: int,
+    ) -> object:
+        self.calls.append(("draft", repository_id, pr_number))
         return SimpleNamespace(success=True)
 
     async def update_title_from_github(
@@ -414,6 +426,53 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
             self.coordinator.calls[1:],
             [("finish", 100, 7), ("finish", 100, 7)],
         )
+
+    async def test_converted_draft_prompts_and_closed_finish_logging_is_best_effort(
+        self,
+    ) -> None:
+        finished_ticket = object()
+        self.coordinator.finished_ticket = finished_ticket
+
+        async def failed_log(ticket) -> None:
+            self.assertIs(ticket, finished_ticket)
+            raise RuntimeError("log unavailable")
+
+        handler = self.event_handler.GitHubEventHandler(
+            self.store,
+            self.coordinator,
+            bot=self.bot,
+            guild_id=10,
+            member_is_eligible=_member_is_eligible,
+            ticket_finished=failed_log,
+        )
+
+        draft_result = await handler(
+            self.delivery(
+                event="pull_request",
+                action="converted_to_draft",
+                payload=self.payload(
+                    action="converted_to_draft",
+                    draft=True,
+                ),
+            )
+        )
+        closed_result = await handler(
+            self.delivery(
+                event="pull_request",
+                action="closed",
+                payload=self.payload(
+                    action="closed",
+                    state="closed",
+                ),
+            )
+        )
+
+        self.assertEqual(
+            [call[0] for call in self.coordinator.calls],
+            ["draft", "finish"],
+        )
+        self.assertIs(draft_result, self.modules.runtime.DeliveryDisposition.PROCESSED)
+        self.assertIs(closed_result, self.modules.runtime.DeliveryDisposition.PROCESSED)
 
     async def test_explicit_title_edit_updates_the_bound_ticket_once(self) -> None:
         payload = self.payload(action="edited")

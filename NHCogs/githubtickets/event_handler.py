@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
@@ -8,12 +10,14 @@ from NHCogs.operational_errors import report_operational_error
 
 from . import events
 from .coordinator import TicketCoordinator
-from .models import GitHubDelivery, GitHubPullRequest, PullRequestObservationState
+from .models import GitHubDelivery, GitHubPullRequest, PullRequestObservationState, Ticket
 from .runtime import DeliveryDisposition
 from .store import GitHubTicketsStore
 
 _TICKET_LABEL = "discord-ticket"
 RefreshPullRequest = Callable[[GitHubPullRequest], Awaitable[GitHubPullRequest]]
+TicketFinished = Callable[[Ticket], Awaitable[None]]
+log = logging.getLogger(__name__)
 
 
 class _AmbiguousGitHubMapping(RuntimeError):
@@ -35,6 +39,7 @@ class GitHubEventHandler:
         guild_id: int,
         member_is_eligible: Callable[[Any], bool],
         refresh_pull_request: RefreshPullRequest | None = None,
+        ticket_finished: TicketFinished | None = None,
     ) -> None:
         self._store = store
         self._coordinator = coordinator
@@ -42,6 +47,7 @@ class GitHubEventHandler:
         self._guild_id = guild_id
         self._member_is_eligible = member_is_eligible
         self._refresh_pull_request = refresh_pull_request
+        self._ticket_finished = ticket_finished
 
     async def __call__(self, delivery: GitHubDelivery) -> DeliveryDisposition:
         parsed = events.parse_delivery(delivery)
@@ -98,23 +104,33 @@ class GitHubEventHandler:
                 author_id=int(author.id) if author is not None else None,
             )
             self._require_settled(result)
-            return
-        if event.action == "closed":
+        elif event.action == "closed":
             result = await self._coordinator.finish_ticket_from_github(
                 pull_request.repository_id,
                 pull_request.pr_number,
             )
             self._require_settled(result)
-            return
-        if event.action == "edited" and event.title_changed:
+            if result.finished_ticket is not None and self._ticket_finished is not None:
+                try:
+                    await self._ticket_finished(result.finished_ticket)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("GitHub Tickets finished ticket log failed")
+        elif event.action == "converted_to_draft":
+            result = await self._coordinator.prompt_draft_decision_from_github(
+                pull_request.repository_id,
+                pull_request.pr_number,
+            )
+            self._require_settled(result)
+        elif event.action == "edited" and event.title_changed:
             result = await self._coordinator.update_title_from_github(
                 pull_request.repository_id,
                 pull_request.pr_number,
                 title=pull_request.title,
             )
             self._require_settled(result)
-            return
-        if event.action == "assigned":
+        elif event.action == "assigned":
             candidate, ambiguous = await self._first_eligible_assignee(
                 self._assignee_logins(event),
                 author_login=pull_request.github_author_login,
@@ -128,8 +144,7 @@ class GitHubEventHandler:
                 ensure_assigned_login=None,
             )
             self._require_settled(result)
-            return
-        if event.action == "unassigned":
+        elif event.action == "unassigned":
             await self._handle_unassigned(event)
 
     async def _handle_review(self, event: events.PullRequestReviewEvent) -> None:

@@ -15,7 +15,7 @@ from .. import command_overview
 from ..operational_errors import report_operational_error
 from . import presentation, settings
 from .coordinator import TicketActor, TicketCoordinator, TicketResult
-from .credentials import load_github_app_credentials
+from .credentials import InvalidGitHubAppCredentials, load_github_app_credentials
 from .dashboard import (
     GitHubTicketsDashboard,
     send_developer_profile,
@@ -36,7 +36,7 @@ from .routing import CandidateFacts
 from .runtime import GitHubIntegrationRuntime
 from .scheduler import DeadlineScheduler
 from .store import MAX_CATEGORY_NAME_LENGTH, GitHubTicketsStore
-from .ticket_views import TicketControls
+from .ticket_views import DraftTicketControls, GitHubCategoryPrompt, TicketControls
 from .webhook import GitHubWebhookReceiver
 
 log = logging.getLogger(__name__)
@@ -59,7 +59,12 @@ class GitHubTickets(commands.Cog):
         self.config.register_global(**settings.GITHUB_INTEGRATION_DEFAULTS)
         self.store = GitHubTicketsStore(cog_data_path(self) / "githubtickets.sqlite")
         self._participant_roles: dict[int, frozenset[int]] = {}
-        self.projection = DiscordTicketProjection(bot, self._ticket_view)
+        self.projection = DiscordTicketProjection(
+            bot,
+            self._ticket_view,
+            category_prompt_view_factory=self._github_category_prompt_view,
+            draft_prompt_view_factory=self._draft_ticket_view,
+        )
         self.coordinator = TicketCoordinator(
             self.store,
             self.projection,
@@ -156,6 +161,8 @@ class GitHubTickets(commands.Cog):
             if ticket.message_id is None or ticket.message_id in self._restored_view_message_ids:
                 continue
             self.bot.add_view(self._ticket_view(ticket), message_id=ticket.message_id)
+            self.bot.add_view(self._github_category_prompt_view(ticket))
+            self.bot.add_view(self._draft_ticket_view(ticket))
             self._restored_view_message_ids.add(ticket.message_id)
         now = datetime.now(timezone.utc)
         for ticket_id in await self.store.due_ticket_ids(now):
@@ -175,7 +182,7 @@ class GitHubTickets(commands.Cog):
                 return False
             credentials = await load_github_app_credentials(self.bot)
             if credentials is None:
-                return False
+                raise RuntimeError("GitHub App credentials are not configured")
             if (
                 integration_settings.guild_id is None
                 or not integration_settings.receiver_configured
@@ -211,6 +218,7 @@ class GitHubTickets(commands.Cog):
                     member,
                 ).can_participate,
                 refresh_pull_request=refresh_pull_request,
+                ticket_finished=self._log_github_finished_ticket,
             )
             runtime = GitHubIntegrationRuntime(
                 self.store,
@@ -502,6 +510,23 @@ class GitHubTickets(commands.Cog):
             mark_finished=self._finish_ticket,
         )
 
+    def _github_category_prompt_view(self, ticket: Ticket) -> GitHubCategoryPrompt:
+        return GitHubCategoryPrompt(
+            ticket.guild_id,
+            ticket.public_token,
+            actor_factory=self._actor_from_interaction,
+            get_categories=self.store.list_categories,
+            add_categories=self._add_ticket_categories,
+        )
+
+    def _draft_ticket_view(self, ticket: Ticket) -> DraftTicketControls:
+        return DraftTicketControls(
+            ticket.public_token,
+            actor_factory=self._actor_from_interaction,
+            keep_ticket=self._keep_draft_ticket,
+            remove_ticket=self._remove_draft_ticket,
+        )
+
     async def _ticket_action(self, action, public_token: str, actor: TicketActor):
         ticket = await self.store.get_ticket_by_public_token(public_token)
         if ticket is None:
@@ -517,6 +542,35 @@ class GitHubTickets(commands.Cog):
     async def _unassign_ticket(self, public_token: str, actor: TicketActor):
         return await self._ticket_action(self.coordinator.unassign, public_token, actor)
 
+    async def _add_ticket_categories(
+        self,
+        public_token: str,
+        category_ids: tuple[int, ...],
+        actor: TicketActor,
+    ):
+        ticket = await self.store.get_ticket_by_public_token(public_token)
+        if ticket is None:
+            return TicketResult(False, presentation.TICKET_NOT_ACTIVE)
+        return await self.coordinator.add_ticket_categories(
+            ticket.ticket_id,
+            category_ids,
+            actor,
+        )
+
+    async def _keep_draft_ticket(self, public_token: str, actor: TicketActor):
+        return await self._ticket_action(
+            self.coordinator.keep_draft_ticket,
+            public_token,
+            actor,
+        )
+
+    async def _remove_draft_ticket(self, public_token: str, actor: TicketActor):
+        return await self._ticket_action(
+            self.coordinator.remove_draft_ticket,
+            public_token,
+            actor,
+        )
+
     async def _finish_ticket(self, public_token: str, actor: TicketActor):
         ticket = await self.store.get_ticket_by_public_token(public_token)
         if ticket is None:
@@ -526,7 +580,10 @@ class GitHubTickets(commands.Cog):
             await self._log_finished_ticket(result.finished_ticket, actor.user_id)
         return result
 
-    async def _log_finished_ticket(self, ticket: Ticket, actor_id: int) -> None:
+    async def _log_github_finished_ticket(self, ticket: Ticket) -> None:
+        await self._log_finished_ticket(ticket, None)
+
+    async def _log_finished_ticket(self, ticket: Ticket, actor_id: int | None) -> None:
         try:
             guild_settings = await self._get_guild_settings(ticket.guild_id)
             if guild_settings.log_channel_id is None:
@@ -859,10 +916,14 @@ class GitHubTickets(commands.Cog):
         integration_settings = settings.GitHubIntegrationSettings.from_mapping(
             await self.config.all()
         )
+        credentials_valid: bool | None
         try:
             credentials = await load_github_app_credentials(self.bot)
         except Exception:
             credentials = None
+            credentials_valid = False
+        else:
+            credentials_valid = True if credentials is not None else None
         receiver = None
         if integration_settings.receiver_configured:
             receiver = f"{integration_settings.bind_host}:{integration_settings.bind_port}"
@@ -870,7 +931,7 @@ class GitHubTickets(commands.Cog):
             enabled=integration_settings.enabled,
             organization=(credentials.organization if credentials is not None else None),
             receiver=receiver,
-            credentials_available=credentials is not None,
+            credentials_valid=credentials_valid,
             running=self._github_runtime is not None,
             recovery_seconds=integration_settings.recovery_seconds,
         )
@@ -895,8 +956,26 @@ class GitHubTickets(commands.Cog):
             return
         try:
             credentials = await load_github_app_credentials(self.bot)
-        except Exception:
-            credentials = None
+        except InvalidGitHubAppCredentials as error:
+            await report_operational_error(
+                self.bot,
+                guild_id=ctx.guild.id,
+                source="GitHubTickets",
+                action="load GitHub credentials",
+                error=error,
+            )
+            await ctx.send("GitHub credentials are invalid")
+            return
+        except Exception as error:
+            await report_operational_error(
+                self.bot,
+                guild_id=ctx.guild.id,
+                source="GitHubTickets",
+                action="load GitHub credentials",
+                error=error,
+            )
+            await ctx.send("Could not read GitHub credentials")
+            return
         if credentials is None:
             await ctx.send("GitHub credentials are not configured")
             return

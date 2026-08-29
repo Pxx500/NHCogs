@@ -116,6 +116,18 @@ accepting a delivery. It returns before Discord or GitHub processing, then worke
 delivery asynchronously. Recovery runs after startup and every 15 minutes by default. GitHub
 App delivery history is used to request redelivery for locally missing deliveries.
 
+Adding the `discord-ticket` label to a ready pull request creates one Discord ticket. A draft
+waits until it becomes ready for review. The ticket starts without categories or automatic
+routing. When the pull request author has one eligible Discord profile, the bot pings that
+author once in the ticket thread with an Add Categories control. Any participant or moderator
+can use the control. Confirming categories starts the normal all-category routing flow.
+
+Discord claims add the mapped GitHub login as a pull request assignee. Discord unassign removes
+that assignee. GitHub assignment and qualifying submitted reviews can claim the Discord ticket.
+Converting the pull request to a draft shows Keep Ticket and Remove Ticket controls. Closing or
+merging the pull request finishes the Discord ticket and writes the configured best-effort
+finish log. Removing the label does not remove an existing ticket.
+
 Create one private GitHub App for the organization and install it on the organization's
 repositories. The App needs these repository permissions:
 

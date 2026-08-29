@@ -54,6 +54,10 @@ MARK_FINISHED = "Mark Finished"
 CLAIM = "Claim"
 DECLINE = "Decline"
 UNASSIGN = "Unassign"
+ADD_CATEGORIES = "Add Categories"
+KEEP_TICKET = "Keep Ticket"
+REMOVE_TICKET = "Remove Ticket"
+CATEGORIES_ADDED = "Categories added"
 TICKET_CHANNEL_NOT_CONFIGURED = "Ticket channel is not configured"
 CANNOT_USE_ACTION = "You cannot use this action"
 TICKET_NOT_ACTIVE = "This ticket is no longer active"
@@ -146,6 +150,10 @@ FIXED_COPY = (
     CLAIM,
     DECLINE,
     UNASSIGN,
+    ADD_CATEGORIES,
+    KEEP_TICKET,
+    REMOVE_TICKET,
+    CATEGORIES_ADDED,
     TICKET_CHANNEL_NOT_CONFIGURED,
     CANNOT_USE_ACTION,
     TICKET_NOT_ACTIVE,
@@ -184,6 +192,15 @@ def confirm_categories(candidate_count: int) -> str:
     return f"{CONFIRM_CATEGORIES}\n{detail}"
 
 
+def add_categories_notification(author_mention: str) -> str:
+    return f"{author_mention} add categories to start automatic routing"
+
+
+def draft_ticket_notification(author_mention: str | None) -> str:
+    prompt = "This pull request was converted to a draft. Keep or remove its ticket?"
+    return prompt if author_mention is None else f"{author_mention} {prompt}"
+
+
 def _linked_title(title: str, url: str) -> str:
     return f"[{title}](<{url}>)"
 
@@ -212,11 +229,15 @@ def finished_ticket_log(
     *,
     title: str,
     url: str,
-    actor_id: int,
-    author_id: int,
+    actor_id: int | None,
+    author_id: int | None,
     reviewer_id: int | None,
 ) -> str:
-    metadata = [f"Finished by <@{actor_id}>", f"Author <@{author_id}>"]
+    metadata = [
+        f"Finished by <@{actor_id}>" if actor_id is not None else "Finished from GitHub"
+    ]
+    if author_id is not None:
+        metadata.append(f"Author <@{author_id}>")
     if reviewer_id is not None:
         metadata.append(f"Reviewer <@{reviewer_id}>")
     return f"{_linked_title(title, url)}\n{' | '.join(metadata)}"
@@ -368,16 +389,23 @@ def github_integration_overview(
     enabled: bool,
     organization: str | None,
     receiver: str | None,
-    credentials_available: bool,
+    credentials_valid: bool | None,
     running: bool,
     recovery_seconds: int,
 ) -> str:
+    credentials = (
+        "Available"
+        if credentials_valid is True
+        else "Invalid"
+        if credentials_valid is False
+        else "Not configured"
+    )
     return "\n".join(
         (
             f"Enabled: {'Yes' if enabled else 'No'}",
             f"Organization: {organization or 'Not configured'}",
             f"Receiver: {receiver or 'Not configured'}",
-            f"Credentials: {'Available' if credentials_available else 'Not configured'}",
+            f"Credentials: {credentials}",
             f"Runtime: {'Running' if running else 'Stopped'}",
             f"Recovery interval: {duration_text(recovery_seconds)}",
         )
