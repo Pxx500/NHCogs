@@ -389,6 +389,24 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_github_title_edit_updates_bound_ticket_and_projection_once(self):
+        ticket_id = await self.create_github_active()
+        self.projection.calls.clear()
+
+        result = await self.coordinator.update_title_from_github(
+            100,
+            7,
+            title="Renamed pull request",
+        )
+
+        self.assertTrue(result.success)
+        ticket = await self.store.get_ticket(ticket_id)
+        self.assertEqual(ticket.pr_title, "Renamed pull request")
+        self.assertEqual(
+            self.projection.calls,
+            [("edit_ticket", ticket_id, models.TicketState.OPEN, None)],
+        )
+
     async def test_create_rejects_direct_self_review_without_writing_ticket(self):
         result = await self.coordinator.create_ticket(
             self.request(models.RoutingMode.DIRECT_WAIT, direct_target_id=100),

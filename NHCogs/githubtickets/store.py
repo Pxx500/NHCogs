@@ -103,9 +103,7 @@ def _decode_profile(connection: sqlite3.Connection, row: sqlite3.Row) -> Profile
         guild_id=int(row["guild_id"]),
         user_id=int(row["user_id"]),
         github_username=(
-            str(row["github_username"])
-            if row["github_username"] is not None
-            else None
+            str(row["github_username"]) if row["github_username"] is not None else None
         ),
         automatic_pings=bool(row["automatic_pings"]),
         category_ids=category_ids,
@@ -143,9 +141,7 @@ def _decode_ticket(connection: sqlite3.Connection, row: sqlite3.Row) -> Ticket:
             int(row["direct_target_id"]) if row["direct_target_id"] is not None else None
         ),
         current_target_id=(
-            int(row["current_target_id"])
-            if row["current_target_id"] is not None
-            else None
+            int(row["current_target_id"]) if row["current_target_id"] is not None else None
         ),
         assignee_id=int(row["assignee_id"]) if row["assignee_id"] is not None else None,
         ping_count=int(row["ping_count"]),
@@ -155,9 +151,7 @@ def _decode_ticket(connection: sqlite3.Connection, row: sqlite3.Row) -> Ticket:
         ),
         next_action_at=_deserialize_optional_datetime(row["next_action_at"]),
         pending_target_id=(
-            int(row["pending_target_id"])
-            if row["pending_target_id"] is not None
-            else None
+            int(row["pending_target_id"]) if row["pending_target_id"] is not None else None
         ),
         pending_presence_tier=(
             PresenceTier(str(row["pending_presence_tier"]))
@@ -169,12 +163,8 @@ def _decode_ticket(connection: sqlite3.Connection, row: sqlite3.Row) -> Ticket:
             if row["pending_ping_automatic"] is not None
             else None
         ),
-        pending_ping_reserved_at=_deserialize_optional_datetime(
-            row["pending_ping_reserved_at"]
-        ),
-        pending_response_deadline=_deserialize_optional_datetime(
-            row["pending_response_deadline"]
-        ),
+        pending_ping_reserved_at=_deserialize_optional_datetime(row["pending_ping_reserved_at"]),
+        pending_response_deadline=_deserialize_optional_datetime(row["pending_response_deadline"]),
         created_at=_deserialize_datetime(str(row["created_at"])),
         updated_at=_deserialize_datetime(str(row["updated_at"])),
         transition_version=int(row["transition_version"]),
@@ -199,14 +189,10 @@ def _decode_pull_request(row: sqlite3.Row) -> GitHubPullRequest:
         labels=tuple(json.loads(str(row["observed_labels"]))),
         github_updated_at=_deserialize_datetime(str(row["github_updated_at"])),
         current_ticket_id=(
-            int(row["current_ticket_id"])
-            if row["current_ticket_id"] is not None
-            else None
+            int(row["current_ticket_id"]) if row["current_ticket_id"] is not None else None
         ),
         last_processed_action=(
-            str(row["last_processed_action"])
-            if row["last_processed_action"] is not None
-            else None
+            str(row["last_processed_action"]) if row["last_processed_action"] is not None else None
         ),
     )
 
@@ -216,28 +202,20 @@ def _decode_delivery(row: sqlite3.Row) -> GitHubDelivery:
     return GitHubDelivery(
         delivery_guid=str(row["delivery_guid"]),
         github_delivery_id=(
-            int(row["github_delivery_id"])
-            if row["github_delivery_id"] is not None
-            else None
+            int(row["github_delivery_id"]) if row["github_delivery_id"] is not None else None
         ),
         event=str(row["event"]),
         action=str(row["action"]) if row["action"] is not None else None,
         installation_id=int(row["installation_id"]),
-        repository_id=(
-            int(row["repository_id"]) if row["repository_id"] is not None else None
-        ),
+        repository_id=(int(row["repository_id"]) if row["repository_id"] is not None else None),
         pr_number=int(row["pr_number"]) if row["pr_number"] is not None else None,
         received_at=_deserialize_datetime(str(row["received_at"])),
         state=GitHubDeliveryState(str(row["state"])),
         attempts=int(row["attempts"]),
         next_attempt_at=_deserialize_optional_datetime(row["next_attempt_at"]),
-        processing_started_at=_deserialize_optional_datetime(
-            row["processing_started_at"]
-        ),
+        processing_started_at=_deserialize_optional_datetime(row["processing_started_at"]),
         completed_at=_deserialize_optional_datetime(row["completed_at"]),
-        error_summary=(
-            str(row["error_summary"]) if row["error_summary"] is not None else None
-        ),
+        error_summary=(str(row["error_summary"]) if row["error_summary"] is not None else None),
         raw_body=bytes(raw_body) if raw_body is not None else None,
     )
 
@@ -252,18 +230,12 @@ def _decode_outbox(row: sqlite3.Row) -> GitHubOutboxItem:
         repository_full_name=str(row["repository_full_name"]),
         pr_number=int(row["pr_number"]),
         github_login=str(row["github_login"]),
-        actor_user_id=(
-            int(row["actor_user_id"]) if row["actor_user_id"] is not None else None
-        ),
+        actor_user_id=(int(row["actor_user_id"]) if row["actor_user_id"] is not None else None),
         state=GitHubOutboxState(str(row["state"])),
         attempts=int(row["attempts"]),
         next_attempt_at=_deserialize_optional_datetime(row["next_attempt_at"]),
-        processing_started_at=_deserialize_optional_datetime(
-            row["processing_started_at"]
-        ),
-        error_summary=(
-            str(row["error_summary"]) if row["error_summary"] is not None else None
-        ),
+        processing_started_at=_deserialize_optional_datetime(row["processing_started_at"]),
+        error_summary=(str(row["error_summary"]) if row["error_summary"] is not None else None),
         created_at=_deserialize_datetime(str(row["created_at"])),
         updated_at=_deserialize_datetime(str(row["updated_at"])),
     )
@@ -1015,6 +987,20 @@ class GitHubTicketsStore:
         async with self._lock:
             return await asyncio.to_thread(self._get_ticket_sync, ticket_id)
 
+    async def update_ticket_title(
+        self,
+        ticket_id: int,
+        title: str,
+        updated_at: datetime,
+    ) -> Ticket | None:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._update_ticket_title_sync,
+                ticket_id,
+                title,
+                updated_at,
+            )
+
     async def get_ticket_by_public_token(self, public_token: str) -> Ticket | None:
         async with self._lock:
             return await asyncio.to_thread(
@@ -1693,15 +1679,11 @@ class GitHubTicketsStore:
                 guild_id=int(row["guild_id"]),
                 user_id=int(row["user_id"]),
                 github_username=(
-                    str(row["github_username"])
-                    if row["github_username"] is not None
-                    else None
+                    str(row["github_username"]) if row["github_username"] is not None else None
                 ),
                 automatic_pings=bool(row["automatic_pings"]),
                 category_ids=tuple(
-                    int(value)
-                    for value in str(row["category_ids"] or "").split(",")
-                    if value
+                    int(value) for value in str(row["category_ids"] or "").split(",") if value
                 ),
                 updated_at=_deserialize_datetime(str(row["updated_at"])),
             )
@@ -2120,10 +2102,13 @@ class GitHubTicketsStore:
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                if connection.execute(
-                    "SELECT 1 FROM github_deliveries WHERE delivery_guid = ?",
-                    (normalized_guid,),
-                ).fetchone() is not None:
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM github_deliveries WHERE delivery_guid = ?",
+                        (normalized_guid,),
+                    ).fetchone()
+                    is not None
+                ):
                     connection.rollback()
                     return False
                 connection.execute(
@@ -2218,9 +2203,7 @@ class GitHubTicketsStore:
         ignored: bool,
     ) -> bool:
         state = (
-            GitHubDeliveryState.IGNORED.value
-            if ignored
-            else GitHubDeliveryState.PROCESSED.value
+            GitHubDeliveryState.IGNORED.value if ignored else GitHubDeliveryState.PROCESSED.value
         )
         changed = self._execute_update(
             """
@@ -2384,6 +2367,47 @@ class GitHubTicketsStore:
                 (ticket_id,),
             ).fetchone()
             return _decode_ticket(connection, row) if row is not None else None
+
+    def _update_ticket_title_sync(
+        self,
+        ticket_id: int,
+        title: str,
+        updated_at: datetime,
+    ) -> Ticket | None:
+        normalized_title = title.strip()
+        if not normalized_title:
+            raise ValueError("ticket title is required")
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                changed = connection.execute(
+                    """
+                    UPDATE tickets
+                    SET pr_title = ?, updated_at = ?, projection_sync_at = ?,
+                        transition_version = transition_version + 1
+                    WHERE ticket_id = ? AND state IN ('open', 'claimed')
+                        AND pr_title != ?
+                    """,
+                    (
+                        normalized_title,
+                        _serialize_datetime(updated_at),
+                        _serialize_datetime(updated_at),
+                        ticket_id,
+                        normalized_title,
+                    ),
+                ).rowcount
+                if changed == 0:
+                    connection.rollback()
+                    return None
+                row = connection.execute(
+                    "SELECT * FROM tickets WHERE ticket_id = ?",
+                    (ticket_id,),
+                ).fetchone()
+                connection.commit()
+                return _decode_ticket(connection, row) if row is not None else None
+            except Exception:
+                connection.rollback()
+                raise
 
     def _get_ticket_by_public_token_sync(self, public_token: str) -> Ticket | None:
         with closing(self._connect()) as connection:
@@ -2672,10 +2696,7 @@ class GitHubTicketsStore:
                 if inserted == 0:
                     connection.rollback()
                     return False
-                if (
-                    row["current_target_id"] == user_id
-                    or row["pending_target_id"] == user_id
-                ):
+                if row["current_target_id"] == user_id or row["pending_target_id"] == user_id:
                     connection.execute(
                         """
                         UPDATE tickets
@@ -3006,9 +3027,7 @@ class GitHubTicketsStore:
                             else None
                         ),
                         automatic=bool(row["pending_ping_automatic"]),
-                        reserved_at=_deserialize_datetime(
-                            str(row["pending_ping_reserved_at"])
-                        ),
+                        reserved_at=_deserialize_datetime(str(row["pending_ping_reserved_at"])),
                         response_deadline=_deserialize_datetime(
                             str(row["pending_response_deadline"])
                         ),
@@ -3076,9 +3095,7 @@ class GitHubTicketsStore:
                     else None
                 )
                 automatic = bool(row["pending_ping_automatic"])
-                response_deadline = _deserialize_datetime(
-                    str(row["pending_response_deadline"])
-                )
+                response_deadline = _deserialize_datetime(str(row["pending_response_deadline"]))
                 connection.execute(
                     """
                     INSERT INTO ticket_pings (
@@ -3425,9 +3442,7 @@ class GitHubTicketsStore:
                         WHERE state IN ('succeeded', 'failed')
                         """
                     ).rowcount
-                    changed += connection.execute(
-                        "DELETE FROM github_pull_requests"
-                    ).rowcount
+                    changed += connection.execute("DELETE FROM github_pull_requests").rowcount
                     changed += connection.execute("DELETE FROM github_deliveries").rowcount
                 connection.commit()
                 return changed > 0
@@ -3539,21 +3554,13 @@ class GitHubTicketsStore:
                     ),
                 ).fetchall()
                 affected_guild_ids = {
-                    int(row["guild_id"])
-                    for row in affected_rows
-                    if bool(row["reopen"])
+                    int(row["guild_id"]) for row in affected_rows if bool(row["reopen"])
                 }
-                missing_deadlines = affected_guild_ids.difference(
-                    protection_until_by_guild
-                )
+                missing_deadlines = affected_guild_ids.difference(protection_until_by_guild)
                 if missing_deadlines:
-                    raise ValueError(
-                        "a protection deadline is required for every affected guild"
-                    )
+                    raise ValueError("a protection deadline is required for every affected guild")
                 serialized_deadlines = {
-                    guild_id: _serialize_datetime(
-                        protection_until_by_guild[guild_id]
-                    )
+                    guild_id: _serialize_datetime(protection_until_by_guild[guild_id])
                     for guild_id in affected_guild_ids
                 }
                 updated_timestamp = _serialize_datetime(updated_at)
@@ -3570,10 +3577,7 @@ class GitHubTicketsStore:
                     INSERT INTO redacted_user_affected_tickets (ticket_id, reopen)
                     VALUES (?, ?)
                     """,
-                    (
-                        (int(row["ticket_id"]), int(row["reopen"]))
-                        for row in affected_rows
-                    ),
+                    ((int(row["ticket_id"]), int(row["reopen"])) for row in affected_rows),
                 )
 
                 connection.execute(
