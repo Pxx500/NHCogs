@@ -19,6 +19,7 @@ from .dashboard import (
     send_new_ticket_modal,
 )
 from .discord_projection import DiscordTicketProjection
+from .github_app import GitHubAppClient
 from .models import (
     CategoryAlreadyExists,
     CategoryLimitReached,
@@ -59,6 +60,8 @@ class GitHubTickets(commands.Cog):
             wake_deadlines=self._wake_deadlines,
         )
         self.scheduler = DeadlineScheduler(self.store, self._process_due_deadline)
+        self._github_client: GitHubAppClient | None = None
+        self._github_organization: str | None = None
         self._startup_task: asyncio.Task[None] | None = None
         self._new_ticket_command = discord.app_commands.Command(
             name=presentation.NEW_TICKET_COMMAND,
@@ -235,7 +238,13 @@ class GitHubTickets(commands.Cog):
             interaction,
             self.store,
             guild_id=guild_id,
-            create_ticket=self.coordinator.create_ticket,
+            create_ticket=self.coordinator.create_ticket_for_pull_request,
+            fetch_pull_request=(
+                self._github_client.get_pull_request
+                if self._github_client is not None
+                else None
+            ),
+            expected_organization=self._github_organization,
             actor_factory=self._actor_from_interaction,
             count_automatic_candidates=self._count_automatic_candidates,
         )
