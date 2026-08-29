@@ -27,6 +27,7 @@ class GitHubWebhookReceiverTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.store.initialize()
         self.credentials = self.loaded.github_app.GitHubAppCredentials(
+            organization="GTNewHorizons",
             client_id="Iv1.client",
             app_id=123,
             installation_id=456,
@@ -36,7 +37,6 @@ class GitHubWebhookReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.receiver = self.loaded.webhook.GitHubWebhookReceiver(
             self.store,
             self.credentials,
-            organization="GTNewHorizons",
         )
         self.client = TestClient(TestServer(self.receiver.application))
         await self.client.start_server()
@@ -298,7 +298,6 @@ class GitHubWebhookReceiverTests(unittest.IsolatedAsyncioTestCase):
         receiver = self.loaded.webhook.GitHubWebhookReceiver(
             self.store,
             self.credentials,
-            organization="GTNewHorizons",
         )
         started_port = await receiver.start("127.0.0.1", port)
         self.assertEqual(started_port, port)
@@ -319,7 +318,6 @@ class GitHubWebhookReceiverTests(unittest.IsolatedAsyncioTestCase):
         receiver = self.loaded.webhook.GitHubWebhookReceiver(
             self.store,
             self.credentials,
-            organization="GTNewHorizons",
         )
         with socket.socket() as reserved:
             reserved.bind(("127.0.0.1", 0))

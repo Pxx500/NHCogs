@@ -27,6 +27,7 @@ _REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
 
 @dataclass(frozen=True, slots=True)
 class GitHubAppCredentials:
+    organization: str
     client_id: str
     app_id: int
     installation_id: int
