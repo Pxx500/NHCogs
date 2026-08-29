@@ -523,6 +523,35 @@ class TicketCoordinator:
                 return TicketResult(False, INACTIVE_TICKET)
             return await self._finish_ticket_locked(ticket)
 
+    async def update_title_from_github(
+        self,
+        repository_id: int,
+        pr_number: int,
+        *,
+        title: str,
+    ) -> TicketResult:
+        ticket_id = await self._bound_ticket_id(repository_id, pr_number)
+        if ticket_id is None:
+            return TicketResult(False, INACTIVE_TICKET)
+        async with self._ticket_lock(ticket_id):
+            ticket = await self._store.get_ticket(ticket_id)
+            if ticket is None or ticket.state not in (
+                TicketState.OPEN,
+                TicketState.CLAIMED,
+            ):
+                return TicketResult(False, INACTIVE_TICKET)
+            normalized_title = title.strip()
+            if ticket.pr_title == normalized_title:
+                return TicketResult(True)
+            updated = await self._store.update_ticket_title(
+                ticket_id,
+                normalized_title,
+                self._clock(),
+            )
+            if updated is None:
+                return TicketResult(False, INACTIVE_TICKET)
+            return await self._edit_after_transition(updated)
+
     async def _finish_ticket_locked(self, ticket: Ticket) -> TicketResult:
         if not await self._store.begin_finishing(ticket.ticket_id, self._clock()):
             return TicketResult(False, INACTIVE_TICKET)

@@ -79,6 +79,13 @@ class GitHubEventHandler:
                 pull_request.pr_number,
             )
             return
+        if event.action == "edited" and event.title_changed:
+            await self._coordinator.update_title_from_github(
+                pull_request.repository_id,
+                pull_request.pr_number,
+                title=pull_request.title,
+            )
+            return
         if event.action == "assigned":
             candidate, ambiguous = await self._first_eligible_assignee(
                 self._assignee_logins(event),

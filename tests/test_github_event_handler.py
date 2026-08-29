@@ -123,6 +123,16 @@ class _Coordinator:
         self.calls.append(("finish", repository_id, pr_number))
         return SimpleNamespace(success=True)
 
+    async def update_title_from_github(
+        self,
+        repository_id: int,
+        pr_number: int,
+        *,
+        title: str,
+    ) -> object:
+        self.calls.append(("title", repository_id, pr_number, title))
+        return SimpleNamespace(success=True)
+
 
 class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -324,6 +334,23 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.coordinator.calls[1:],
             [("finish", 100, 7), ("finish", 100, 7)],
+        )
+
+    async def test_explicit_title_edit_updates_the_bound_ticket_once(self) -> None:
+        payload = self.payload(action="edited")
+        payload["changes"] = {"title": {"from": "Old title"}}
+
+        await self.handler(
+            self.delivery(
+                event="pull_request",
+                action="edited",
+                payload=payload,
+            )
+        )
+
+        self.assertEqual(
+            self.coordinator.calls,
+            [("title", 100, 7, "GitHub ticket")],
         )
 
     async def test_assigned_claims_first_eligible_non_author_without_outbound_echo(
