@@ -13,6 +13,7 @@ DEFAULT_DND_RESPONSE_SECONDS = 6 * 60 * 60
 DEFAULT_OFFLINE_RESPONSE_SECONDS = 24 * 60 * 60
 DEFAULT_DIRECT_RESPONSE_SECONDS = 24 * 60 * 60
 DEFAULT_MAX_PINGS = 3
+DEFAULT_GITHUB_RECOVERY_SECONDS = 15 * 60
 
 
 class InvalidDuration(ValueError):
@@ -21,6 +22,7 @@ class InvalidDuration(ValueError):
 
 class NegativeDuration(ValueError):
     pass
+
 
 DEFAULTS: dict[str, object] = {
     "ticket_channel_id": None,
@@ -36,8 +38,17 @@ DEFAULTS: dict[str, object] = {
     "max_pings": DEFAULT_MAX_PINGS,
 }
 
+GITHUB_INTEGRATION_DEFAULTS: dict[str, object] = {
+    "guild_id": None,
+    "enabled": False,
+    "bind_host": None,
+    "bind_port": None,
+    "recovery_seconds": DEFAULT_GITHUB_RECOVERY_SECONDS,
+}
+
 _DURATION_PATTERN = re.compile(r"^(?P<sign>-?)(?P<value>\d+)(?P<unit>[smh]?)$")
 _DURATION_MULTIPLIERS = {"": 1, "s": 1, "m": 60, "h": 60 * 60}
+_MAX_PORT = 65535
 
 
 def parse_duration(raw: str) -> int:
@@ -87,6 +98,25 @@ def _nonnegative_int(raw: object, default: int) -> int:
     return raw
 
 
+def _positive_int(raw: object, default: int) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        return default
+    return raw
+
+
+def _bind_host(raw: object) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    return value or None
+
+
+def _bind_port(raw: object) -> int | None:
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None
+    return raw if 1 <= raw <= _MAX_PORT else None
+
+
 @dataclass(frozen=True, slots=True)
 class GuildSettings:
     ticket_channel_id: int | None
@@ -132,4 +162,35 @@ class GuildSettings:
                 values.get("direct_response_seconds"), DEFAULT_DIRECT_RESPONSE_SECONDS
             ),
             max_pings=_nonnegative_int(values.get("max_pings"), DEFAULT_MAX_PINGS),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubIntegrationSettings:
+    guild_id: int | None
+    enabled: bool
+    bind_host: str | None
+    bind_port: int | None
+    recovery_seconds: int
+
+    @property
+    def receiver_configured(self) -> bool:
+        return self.bind_host is not None and self.bind_port is not None
+
+    @classmethod
+    def from_mapping(
+        cls,
+        raw: Mapping[str, object] | object,
+    ) -> GitHubIntegrationSettings:
+        values = raw if isinstance(raw, Mapping) else {}
+        enabled = values.get("enabled")
+        return cls(
+            guild_id=_positive_id(values.get("guild_id")),
+            enabled=enabled if isinstance(enabled, bool) else False,
+            bind_host=_bind_host(values.get("bind_host")),
+            bind_port=_bind_port(values.get("bind_port")),
+            recovery_seconds=_positive_int(
+                values.get("recovery_seconds"),
+                DEFAULT_GITHUB_RECOVERY_SECONDS,
+            ),
         )
