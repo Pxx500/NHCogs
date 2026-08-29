@@ -10,7 +10,7 @@ import discord
 
 from . import presentation
 from .coordinator import SELF_REVIEW_DENIED, TicketActor, TicketRequest, TicketResult
-from .github_app import PullRequestSnapshot
+from .github_app import PullRequestSnapshot, pull_request_from_snapshot
 from .models import Category, GitHubPullRequest, Profile, RoutingMode
 from .store import GitHubTicketsStore
 
@@ -67,20 +67,7 @@ def _validated_pull_request(
         or snapshot.merged
     ):
         return None
-    return GitHubPullRequest(
-        repository_id=snapshot.repository_id,
-        pr_number=snapshot.number,
-        github_pr_id=snapshot.pull_request_id,
-        github_author_id=snapshot.author_id,
-        repository_full_name=repository_full_name,
-        url=snapshot.url,
-        title=snapshot.title,
-        github_author_login=snapshot.author_login,
-        draft=snapshot.draft,
-        open=True,
-        labels=snapshot.labels,
-        github_updated_at=snapshot.updated_at,
-    )
+    return pull_request_from_snapshot(snapshot)
 
 
 async def _check_participant(

@@ -2,24 +2,28 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
+import aiohttp
 import discord
 from redbot.core import Config, commands
 from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
 
 from .. import command_overview
+from ..operational_errors import report_operational_error
 from . import presentation, settings
 from .coordinator import TicketActor, TicketCoordinator, TicketResult
+from .credentials import load_github_app_credentials
 from .dashboard import (
     GitHubTicketsDashboard,
     send_developer_profile,
     send_new_ticket_modal,
 )
 from .discord_projection import DiscordTicketProjection
-from .github_app import GitHubAppClient
+from .event_handler import GitHubEventHandler
+from .github_app import GitHubAppClient, pull_request_from_snapshot
 from .models import (
     CategoryAlreadyExists,
     CategoryLimitReached,
@@ -29,9 +33,11 @@ from .models import (
     TicketState,
 )
 from .routing import CandidateFacts
+from .runtime import GitHubIntegrationRuntime
 from .scheduler import DeadlineScheduler
 from .store import MAX_CATEGORY_NAME_LENGTH, GitHubTicketsStore
 from .ticket_views import TicketControls
+from .webhook import GitHubWebhookReceiver
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +55,7 @@ class GitHubTickets(commands.Cog):
             force_registration=True,
         )
         self.config.register_guild(**settings.DEFAULTS)
+        self.config.register_global(**settings.GITHUB_INTEGRATION_DEFAULTS)
         self.store = GitHubTicketsStore(cog_data_path(self) / "githubtickets.sqlite")
         self._participant_roles: dict[int, frozenset[int]] = {}
         self.projection = DiscordTicketProjection(bot, self._ticket_view)
@@ -60,8 +67,10 @@ class GitHubTickets(commands.Cog):
             wake_deadlines=self._wake_deadlines,
         )
         self.scheduler = DeadlineScheduler(self.store, self._process_due_deadline)
+        self._github_session: aiohttp.ClientSession | None = None
         self._github_client: GitHubAppClient | None = None
         self._github_organization: str | None = None
+        self._github_runtime: GitHubIntegrationRuntime | None = None
         self._startup_task: asyncio.Task[None] | None = None
         self._new_ticket_command = discord.app_commands.Command(
             name=presentation.NEW_TICKET_COMMAND,
@@ -118,6 +127,10 @@ class GitHubTickets(commands.Cog):
                 pass
             except Exception:
                 pass
+        try:
+            await self._stop_github_integration()
+        except Exception:
+            log.exception("GitHub Tickets integration shutdown failed")
         await self.scheduler.close()
 
     async def _restore_runtime(self) -> None:
@@ -146,6 +159,103 @@ class GitHubTickets(commands.Cog):
         now = datetime.now(timezone.utc)
         for ticket_id in await self.store.due_ticket_ids(now):
             await self.coordinator.process_due(ticket_id)
+        await self._restart_github_integration()
+
+    async def _restart_github_integration(self) -> None:
+        report_guild_id = 0
+        try:
+            await self._stop_github_integration()
+            integration_settings = settings.GitHubIntegrationSettings.from_mapping(
+                await self.config.all()
+            )
+            if integration_settings.guild_id is not None:
+                report_guild_id = integration_settings.guild_id
+            if not integration_settings.enabled:
+                return
+            credentials = await load_github_app_credentials(self.bot)
+            if credentials is None:
+                return
+            if (
+                integration_settings.guild_id is None
+                or not integration_settings.receiver_configured
+            ):
+                raise RuntimeError("GitHub integration receiver is not configured")
+            guild_id = integration_settings.guild_id
+            bind_host = integration_settings.bind_host
+            bind_port = integration_settings.bind_port
+            if bind_host is None or bind_port is None:
+                raise RuntimeError("GitHub integration receiver is not configured")
+            session = aiohttp.ClientSession()
+            client = GitHubAppClient(credentials, session)
+            receiver = GitHubWebhookReceiver(self.store, credentials)
+
+            async def refresh_pull_request(pull_request):
+                owner, separator, repository = pull_request.repository_full_name.partition("/")
+                if not separator or not owner or not repository or "/" in repository:
+                    raise ValueError("stored pull request repository is invalid")
+                snapshot = await client.get_pull_request(
+                    owner,
+                    repository,
+                    pull_request.pr_number,
+                )
+                return pull_request_from_snapshot(snapshot)
+
+            handler = GitHubEventHandler(
+                self.store,
+                self.coordinator,
+                bot=self.bot,
+                guild_id=guild_id,
+                member_is_eligible=lambda member: self._actor_for_member(
+                    guild_id,
+                    member,
+                ).can_participate,
+                refresh_pull_request=refresh_pull_request,
+            )
+            runtime = GitHubIntegrationRuntime(
+                self.store,
+                client=client,
+                receiver=receiver,
+                delivery_handler=handler,
+                bot=self.bot,
+                guild_id=guild_id,
+                clock=lambda: datetime.now(timezone.utc),
+                recovery_interval=timedelta(
+                    seconds=integration_settings.recovery_seconds
+                ),
+            )
+            try:
+                await runtime.start(bind_host, bind_port)
+            except BaseException:
+                await session.close()
+                raise
+            self._github_session = session
+            self._github_client = client
+            self._github_organization = credentials.organization
+            self._github_runtime = runtime
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await report_operational_error(
+                self.bot,
+                guild_id=report_guild_id,
+                source="GitHubTickets",
+                action="start GitHub integration",
+                error=error,
+            )
+
+    async def _stop_github_integration(self) -> None:
+        runtime = self._github_runtime
+        session = self._github_session
+        self._github_runtime = None
+        self._github_session = None
+        self._github_client = None
+        self._github_organization = None
+        try:
+            if runtime is not None:
+                await runtime.close()
+        finally:
+            if session is not None:
+                await session.close()
 
     @staticmethod
     def _observe_startup_task(task: asyncio.Task[None]) -> None:

@@ -115,11 +115,29 @@ class _GuildConfig:
 class _Config:
     def __init__(self):
         self.defaults = {}
+        self.global_defaults = {}
+        self.global_values = {}
         self._guilds = {}
         self._stats = {}
 
     def register_guild(self, **defaults):
         self.defaults = defaults
+
+    def register_global(self, **defaults):
+        self.global_defaults = defaults
+
+    async def all(self):
+        return {**self.global_defaults, **self.global_values}
+
+    async def get_raw(self, key, *, default=None):
+        key = str(key)
+        return self.global_values.get(key, self.global_defaults.get(key, default))
+
+    async def set_raw(self, key, *, value):
+        self.global_values[str(key)] = value
+
+    async def clear_raw(self, key):
+        self.global_values.pop(str(key), None)
 
     def guild(self, guild):
         return self.guild_from_id(guild.id)
