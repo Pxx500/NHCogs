@@ -21,12 +21,10 @@ class GitHubWebhookReceiver:
         self,
         store: GitHubTicketsStore,
         credentials: GitHubAppCredentials,
-        *,
-        organization: str,
     ) -> None:
         self._store = store
         self._credentials = credentials
-        self._organization = organization.casefold()
+        self._organization = credentials.organization.casefold()
         self.application = web.Application(client_max_size=_MAX_BODY_BYTES)
         self.application.router.add_post(WEBHOOK_PATH, self._receive)
         self._runner: web.AppRunner | None = None

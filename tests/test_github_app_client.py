@@ -88,6 +88,7 @@ class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
 
     def credentials(self):
         return self.loaded.github_app.GitHubAppCredentials(
+            organization="NewHorizons",
             client_id="Iv1.client",
             app_id=123,
             installation_id=456,
