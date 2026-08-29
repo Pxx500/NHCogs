@@ -141,6 +141,21 @@ class _SerializingClient(_Client):
             self.active_mutations -= 1
 
 
+class _BlockingRecoveryClient(_Client):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_list_started = asyncio.Event()
+        self.release_first_list = asyncio.Event()
+
+    async def list_deliveries(self, *, page: int = 1) -> tuple[object, ...]:
+        self.listed_pages.append(page)
+        if len(self.listed_pages) == 1:
+            self.first_list_started.set()
+            await self.release_first_list.wait()
+            return ()
+        return self.pages.get(page, ())
+
+
 class _Reporter:
     def __init__(self) -> None:
         self.reports: list[dict[str, object]] = []
@@ -1155,6 +1170,39 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await _wait_until(redelivered_once)
         self.assertEqual(client.redelivered, [99])
         self.assertEqual(client.max_active_mutations, 1)
+
+    async def test_overlapping_recovery_requests_coalesce_into_a_follow_up_pass(
+        self,
+    ) -> None:
+        client = _BlockingRecoveryClient()
+        summary = self.modules.github_app.GitHubDeliverySummary(
+            99,
+            "arrived-during-recovery",
+            self.now,
+            False,
+            200,
+            "ping",
+            None,
+        )
+        self.runtime = self.modules.runtime.GitHubIntegrationRuntime(
+            self.store,
+            client=client,
+            receiver=_Receiver(),
+            delivery_handler=lambda delivery: None,
+            bot=_Bot(),
+            guild_id=10,
+            clock=lambda: self.now,
+        )
+        first = asyncio.create_task(self.runtime.run_recovery())
+        await asyncio.wait_for(client.first_list_started.wait(), timeout=1)
+        client.pages[1] = (summary,)
+
+        await self.runtime.run_recovery()
+        client.release_first_list.set()
+        await asyncio.wait_for(first, timeout=1)
+
+        self.assertEqual(client.listed_pages, [1, 1])
+        self.assertEqual(client.redelivered, [99])
 
     async def test_outbox_intent_survives_guild_cleanup_and_executes_without_lookup(
         self,

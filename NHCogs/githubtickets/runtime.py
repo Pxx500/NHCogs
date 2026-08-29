@@ -154,10 +154,15 @@ class GitHubIntegrationRuntime:
     async def run_recovery(self) -> None:
         if self._client is None:
             return
+        self._recovery_requested.set()
         if self._recovery_lock.locked():
             return
-        async with self._recovery_lock:
-            await self._run_recovery_once()
+        while self._recovery_requested.is_set():
+            async with self._recovery_lock:
+                if not self._recovery_requested.is_set():
+                    return
+                self._recovery_requested.clear()
+                await self._run_recovery_once()
 
     async def _run_recovery_once(self) -> None:
         if (
