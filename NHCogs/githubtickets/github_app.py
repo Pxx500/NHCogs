@@ -9,6 +9,8 @@ from typing import Any
 import aiohttp
 import jwt
 
+from .models import GitHubPullRequest
+
 _API_ROOT = "https://api.github.com"
 _API_VERSION = "2022-11-28"
 _ACCEPT = "application/vnd.github+json"
@@ -51,6 +53,26 @@ class PullRequestSnapshot:
     updated_at: datetime
     labels: tuple[str, ...]
     assignees: tuple[str, ...]
+
+
+def pull_request_from_snapshot(snapshot: PullRequestSnapshot) -> GitHubPullRequest:
+    state = snapshot.state.casefold()
+    if state not in {"open", "closed"}:
+        raise ValueError("pull request state is invalid")
+    return GitHubPullRequest(
+        repository_id=snapshot.repository_id,
+        pr_number=snapshot.number,
+        github_pr_id=snapshot.pull_request_id,
+        github_author_id=snapshot.author_id,
+        repository_full_name=snapshot.repository_full_name.strip(),
+        url=snapshot.url,
+        title=snapshot.title,
+        github_author_login=snapshot.author_login,
+        draft=snapshot.draft,
+        open=state == "open",
+        labels=snapshot.labels,
+        github_updated_at=snapshot.updated_at,
+    )
 
 
 @dataclass(frozen=True, slots=True)
