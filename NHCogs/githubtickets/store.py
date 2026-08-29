@@ -30,6 +30,8 @@ from .models import (
     PingReservation,
     PresenceTier,
     Profile,
+    PullRequestObservation,
+    PullRequestObservationState,
     RoutingMode,
     Ticket,
     TicketExclusion,
@@ -194,6 +196,18 @@ def _decode_pull_request(row: sqlite3.Row) -> GitHubPullRequest:
         last_processed_action=(
             str(row["last_processed_action"]) if row["last_processed_action"] is not None else None
         ),
+    )
+
+
+def _pull_request_state(pull_request: GitHubPullRequest) -> tuple[object, ...]:
+    return (
+        pull_request.repository_full_name.strip().casefold(),
+        pull_request.url.strip().casefold(),
+        pull_request.title.strip(),
+        pull_request.github_author_login.strip().casefold(),
+        pull_request.draft,
+        pull_request.open,
+        frozenset(label.strip().casefold() for label in pull_request.labels if label.strip()),
     )
 
 
@@ -810,11 +824,14 @@ class GitHubTicketsStore:
     async def observe_pull_request(
         self,
         pull_request: GitHubPullRequest,
-    ) -> GitHubPullRequest:
+        *,
+        authoritative: bool = False,
+    ) -> PullRequestObservation:
         async with self._lock:
             return await asyncio.to_thread(
                 self._observe_pull_request_sync,
                 pull_request,
+                authoritative,
             )
 
     async def get_pull_request(
@@ -2037,13 +2054,47 @@ class GitHubTicketsStore:
     def _observe_pull_request_sync(
         self,
         pull_request: GitHubPullRequest,
-    ) -> GitHubPullRequest:
+        authoritative: bool,
+    ) -> PullRequestObservation:
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                existing_row = connection.execute(
+                    """
+                    SELECT * FROM github_pull_requests
+                    WHERE repository_id = ? AND pr_number = ?
+                    """,
+                    (pull_request.repository_id, pull_request.pr_number),
+                ).fetchone()
+                if existing_row is not None:
+                    existing = _decode_pull_request(existing_row)
+                    if (
+                        existing.github_pr_id != pull_request.github_pr_id
+                        or existing.github_author_id != pull_request.github_author_id
+                    ):
+                        raise ValueError("immutable GitHub identity does not match stored identity")
+                    if existing.github_updated_at > pull_request.github_updated_at:
+                        connection.commit()
+                        return PullRequestObservation(
+                            PullRequestObservationState.STALE,
+                            existing,
+                        )
+                    if (
+                        existing.github_updated_at == pull_request.github_updated_at
+                        and not authoritative
+                        and _pull_request_state(existing) != _pull_request_state(pull_request)
+                    ):
+                        connection.commit()
+                        return PullRequestObservation(
+                            PullRequestObservationState.CONFLICT,
+                            existing,
+                        )
                 observed = self._upsert_pull_request(connection, pull_request)
                 connection.commit()
-                return observed
+                return PullRequestObservation(
+                    PullRequestObservationState.APPLIED,
+                    observed,
+                )
             except Exception:
                 connection.rollback()
                 raise

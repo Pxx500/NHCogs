@@ -4,6 +4,7 @@ import importlib
 import json
 import sys
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -56,10 +57,19 @@ class _Bot:
 class _Store:
     def __init__(self) -> None:
         self.observed: list[object] = []
+        self.observation_state = None
         self.profiles: dict[str, tuple[object, ...]] = {}
 
-    async def observe_pull_request(self, pull_request) -> None:
+    async def observe_pull_request(self, pull_request, *, authoritative: bool = False):
         self.observed.append(pull_request)
+        return SimpleNamespace(
+            state=(
+                self.observation_state
+                if not authoritative
+                else self._applied_observation_state
+            ),
+            pull_request=pull_request,
+        )
 
     async def list_profiles_by_github_username(
         self,
@@ -147,6 +157,10 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.guild = _Guild(())
         self.bot = _Bot(self.guild, self.reporter)
         self.store = _Store()
+        self.store.observation_state = self.modules.models.PullRequestObservationState.APPLIED
+        self.store._applied_observation_state = (
+            self.modules.models.PullRequestObservationState.APPLIED
+        )
         self.coordinator = _Coordinator()
         self.handler = self.event_handler.GitHubEventHandler(
             self.store,
@@ -248,6 +262,64 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(disposition, self.modules.runtime.DeliveryDisposition.IGNORED)
         self.assertEqual(self.store.observed, [])
         self.assertEqual(self.coordinator.calls, [])
+
+    async def test_stale_pull_request_event_is_observed_without_domain_transition(self) -> None:
+        self.store.observation_state = self.modules.models.PullRequestObservationState.STALE
+        self.map_profile("participant", 2)
+        self.guild.members[2] = _Member(2, role_ids=(99,))
+
+        disposition = await self.handler(
+            self.delivery(
+                event="pull_request",
+                action="assigned",
+                payload=self.payload(
+                    action="assigned",
+                    assignees=("participant",),
+                ),
+            )
+        )
+
+        self.assertIs(disposition, self.modules.runtime.DeliveryDisposition.PROCESSED)
+        self.assertEqual(self.coordinator.calls, [])
+
+    async def test_equal_timestamp_conflict_refreshes_once_before_transition(self) -> None:
+        delivery = self.delivery(
+            event="pull_request",
+            action="edited",
+            payload={
+                **self.payload(action="edited"),
+                "changes": {"title": {"from": "Old title"}},
+            },
+        )
+        parsed = self.modules.events.parse_delivery(delivery)
+        authoritative = replace(
+            parsed.pull_request,
+            title="Authoritative title",
+        )
+        refresh_calls: list[object] = []
+
+        async def refresh_pull_request(pull_request):
+            refresh_calls.append(pull_request)
+            return authoritative
+
+        self.store.observation_state = self.modules.models.PullRequestObservationState.CONFLICT
+        handler = self.event_handler.GitHubEventHandler(
+            self.store,
+            self.coordinator,
+            bot=self.bot,
+            guild_id=10,
+            participant_role_ids=(99,),
+            refresh_pull_request=refresh_pull_request,
+        )
+
+        await handler(delivery)
+
+        self.assertEqual(refresh_calls, [parsed.pull_request])
+        self.assertEqual(len(self.store.observed), 2)
+        self.assertEqual(
+            self.coordinator.calls,
+            [("title", 100, 7, "Authoritative title")],
+        )
 
     async def test_discord_ticket_label_creates_only_for_ready_pull_request(self) -> None:
         self.map_profile("author", 300)

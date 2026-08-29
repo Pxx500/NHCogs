@@ -65,6 +65,12 @@ class GitHubOutboxState(str, Enum):
     FAILED = "failed"
 
 
+class PullRequestObservationState(str, Enum):
+    APPLIED = "applied"
+    STALE = "stale"
+    CONFLICT = "conflict"
+
+
 class InvalidCategoryName(ValueError):
     pass
 
@@ -174,6 +180,12 @@ class GitHubPullRequest:
     github_updated_at: datetime
     current_ticket_id: int | None = None
     last_processed_action: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestObservation:
+    state: PullRequestObservationState
+    pull_request: GitHubPullRequest
 
 
 @dataclass(frozen=True, slots=True)

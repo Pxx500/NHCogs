@@ -366,17 +366,40 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
                 updated_at=self.now + timedelta(minutes=2),
             )
         )
-        self.assertEqual(mutable.github_pr_id, 700)
-        self.assertEqual(mutable.github_author_id, 900)
-        self.assertEqual(mutable.title, "Updated title")
-        self.assertEqual(mutable.github_author_login, "OctoCat-Renamed")
+        self.assertIs(mutable.state, models.PullRequestObservationState.APPLIED)
+        self.assertEqual(mutable.pull_request.github_pr_id, 700)
+        self.assertEqual(mutable.pull_request.github_author_id, 900)
+        self.assertEqual(mutable.pull_request.title, "Updated title")
+        self.assertEqual(mutable.pull_request.github_author_login, "OctoCat-Renamed")
         ignored_older = await self.store.observe_pull_request(
             self.pull_request(
                 title="Stale title",
                 updated_at=self.now + timedelta(minutes=1),
             )
         )
-        self.assertEqual(ignored_older.title, "Updated title")
+        self.assertIs(ignored_older.state, models.PullRequestObservationState.STALE)
+        self.assertEqual(ignored_older.pull_request.title, "Updated title")
+
+        conflict = await self.store.observe_pull_request(
+            self.pull_request(
+                title="Conflicting title",
+                login="OctoCat-Renamed",
+                updated_at=self.now + timedelta(minutes=2),
+            )
+        )
+        self.assertIs(conflict.state, models.PullRequestObservationState.CONFLICT)
+        self.assertEqual(conflict.pull_request.title, "Updated title")
+
+        authoritative = await self.store.observe_pull_request(
+            self.pull_request(
+                title="Authoritative title",
+                login="OctoCat-Renamed",
+                updated_at=self.now + timedelta(minutes=2),
+            ),
+            authoritative=True,
+        )
+        self.assertIs(authoritative.state, models.PullRequestObservationState.APPLIED)
+        self.assertEqual(authoritative.pull_request.title, "Authoritative title")
 
         self.assertTrue(await self.store.delete_ticket(ticket.ticket_id))
         self.assertIsNone((await self.store.get_pull_request(100, 7)).current_ticket_id)
@@ -421,8 +444,9 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(observed.title, "Title-only observation")
-        self.assertEqual(observed.last_processed_action, "labeled")
+        self.assertIs(observed.state, models.PullRequestObservationState.APPLIED)
+        self.assertEqual(observed.pull_request.title, "Title-only observation")
+        self.assertEqual(observed.pull_request.last_processed_action, "labeled")
 
     async def test_ticket_deletion_preserves_executable_github_intent(self):
         ticket = await self.store.create_ticket_for_pull_request(
