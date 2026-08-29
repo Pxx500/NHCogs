@@ -69,6 +69,33 @@ class GitHubWebhookReceiver:
         if not isinstance(payload, Mapping):
             raise web.HTTPBadRequest()
 
+        installation_id, repository_id, pr_number, action = self._delivery_identity(
+            payload,
+            event,
+        )
+        try:
+            await self._store.accept_delivery(
+                delivery_guid=delivery_guid,
+                github_delivery_id=None,
+                event=event,
+                action=action,
+                installation_id=installation_id,
+                repository_id=repository_id,
+                pr_number=pr_number,
+                received_at=datetime.now(timezone.utc),
+                raw_body=body,
+            )
+        except ValueError:
+            raise web.HTTPBadRequest() from None
+        except Exception:
+            raise web.HTTPServiceUnavailable() from None
+        return web.Response(status=202)
+
+    def _delivery_identity(
+        self,
+        payload: Mapping[str, object],
+        event: str,
+    ) -> tuple[int, int | None, int | None, str | None]:
         installation_id = _nested_integer(payload, "installation", "id")
         if event == "ping" and installation_id is None:
             installation_id = self._credentials.installation_id
@@ -90,32 +117,20 @@ class GitHubWebhookReceiver:
         ):
             raise web.HTTPForbidden()
 
-        action = payload.get("action")
-        if not isinstance(action, str):
-            action = None
         pr_number = _nested_integer(payload, "pull_request", "number")
-        if event in _PULL_REQUEST_EVENTS and (
-            repository_id is None or pr_number is None
-        ):
-            raise web.HTTPBadRequest()
-        if event == "ping":
+        if event in _PULL_REQUEST_EVENTS:
+            if repository_id is None or pr_number is None:
+                raise web.HTTPBadRequest()
+        else:
             repository_id = None
             pr_number = None
-        try:
-            await self._store.accept_delivery(
-                delivery_guid=delivery_guid,
-                github_delivery_id=None,
-                event=event,
-                action=action,
-                installation_id=installation_id,
-                repository_id=repository_id,
-                pr_number=pr_number,
-                received_at=datetime.now(timezone.utc),
-                raw_body=body,
-            )
-        except Exception:
-            raise web.HTTPServiceUnavailable() from None
-        return web.Response(status=202)
+        action = payload.get("action")
+        return (
+            installation_id,
+            repository_id,
+            pr_number,
+            action if isinstance(action, str) else None,
+        )
 
     def _valid_signature(self, provided: str | None, body: bytes) -> bool:
         if provided is None:
