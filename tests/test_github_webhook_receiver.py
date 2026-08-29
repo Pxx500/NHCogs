@@ -130,6 +130,26 @@ class GitHubWebhookReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(delivery.repository_id)
         self.assertIsNone(delivery.pr_number)
 
+    async def test_non_pull_request_event_is_accepted_without_pr_target(self) -> None:
+        payload = self.payload()
+        del payload["pull_request"]
+        payload["action"] = "created"
+        body = json.dumps(payload, separators=(",", ":")).encode()
+
+        response = await self.client.post(
+            self.loaded.webhook.WEBHOOK_PATH,
+            data=body,
+            headers=self.signed_headers(body, event="check_run"),
+        )
+
+        self.assertEqual(response.status, 202)
+        delivery = await self.store.get_delivery("delivery-guid")
+        self.assertIsNotNone(delivery)
+        assert delivery is not None
+        self.assertEqual(delivery.event, "check_run")
+        self.assertIsNone(delivery.repository_id)
+        self.assertIsNone(delivery.pr_number)
+
     async def test_invalid_requests_are_rejected_without_persistence(self) -> None:
         cases: list[tuple[str, bytes, dict[str, str], int]] = []
 
