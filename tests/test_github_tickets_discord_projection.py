@@ -421,6 +421,26 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(draft_kwargs["allowed_mentions"].users[0].id, 30)
         self.assertEqual(bot.fetch_calls, 0)
 
+    async def test_unmapped_github_category_prompt_is_neutral_and_non_pinging(self):
+        thread = FakeThread(66)
+        bot = FakeBot({thread.id: thread})
+        category_view = object()
+        adapter = adapter_module.DiscordTicketProjection(
+            bot,
+            lambda _ticket: object(),
+            category_prompt_view_factory=lambda _ticket: category_view,
+            draft_prompt_view_factory=lambda _ticket: object(),
+        )
+
+        await adapter.prompt_categories(ticket(author_id=None), 66)
+
+        self.assertEqual(len(thread.send_calls), 1)
+        content, kwargs = thread.send_calls[0]
+        self.assertEqual(content, "Add categories to start automatic routing")
+        self.assertIs(kwargs["view"], category_view)
+        self.assertFalse(kwargs["allowed_mentions"].users)
+        self.assertEqual(bot.fetch_calls, 0)
+
     async def test_ping_uses_exact_copy_and_allows_only_the_new_target_mention(self):
         thread = FakeThread(66)
         bot = FakeBot({thread.id: thread})

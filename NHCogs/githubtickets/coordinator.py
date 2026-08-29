@@ -257,6 +257,8 @@ class TicketCoordinator:
                 now,
             ):
                 raise RuntimeError("ticket thread reservation lost its creating state")
+            if ticket.origin is TicketOrigin.GITHUB:
+                await self._projection.prompt_categories(ticket, thread_id)
             protection_until, next_action, next_action_at = self._creation_schedule(
                 routing_mode,
                 settings,
@@ -273,8 +275,6 @@ class TicketCoordinator:
             )
             if not activated:
                 raise RuntimeError("ticket activation lost its creating state")
-            if ticket.origin is TicketOrigin.GITHUB and ticket.author_id is not None:
-                await self._projection.prompt_categories(ticket, thread_id)
         except Exception:
             await self._cleanup_failed_creation(ticket, message_id, thread_id)
             if await self._store.get_ticket(ticket.ticket_id) is not None:
@@ -357,12 +357,24 @@ class TicketCoordinator:
         settings = await self._get_settings(ticket.guild_id)
         now = self._clock()
         protection_until = now + timedelta(seconds=settings.protection_seconds)
-        if not await self._store.claim(
-            ticket.ticket_id,
-            actor.user_id,
-            protection_until,
-            now,
-        ):
+        github_login = await self._bound_unique_github_login(ticket, actor.user_id)
+        transitioned = (
+            await self._store.claim_with_github_outbox(
+                ticket.ticket_id,
+                assignee_id=actor.user_id,
+                github_login=github_login,
+                protection_until=protection_until,
+                updated_at=now,
+            )
+            if github_login is not None
+            else await self._store.claim(
+                ticket.ticket_id,
+                actor.user_id,
+                protection_until,
+                now,
+            )
+        )
+        if not transitioned:
             current = await self._store.get_ticket(ticket.ticket_id)
             if current is not None and current.state is TicketState.CLAIMED:
                 return TicketResult(False, CLAIM_RACE_LOST)
@@ -443,12 +455,27 @@ class TicketCoordinator:
                 ticket.routing_mode,
                 protection_until,
             )
-            former_assignee = await self._store.unassign(
-                ticket_id,
-                protection_until=protection_until,
-                next_action=next_action,
-                next_action_at=next_action_at,
-                updated_at=now,
+            github_login = await self._bound_unique_github_login(
+                ticket,
+                ticket.assignee_id,
+            )
+            former_assignee = (
+                await self._store.unassign_with_github_outbox(
+                    ticket_id,
+                    github_login=github_login,
+                    protection_until=protection_until,
+                    next_action=next_action,
+                    next_action_at=next_action_at,
+                    updated_at=now,
+                )
+                if github_login is not None
+                else await self._store.unassign(
+                    ticket_id,
+                    protection_until=protection_until,
+                    next_action=next_action,
+                    next_action_at=next_action_at,
+                    updated_at=now,
+                )
             )
             if former_assignee is None:
                 return TicketResult(False, INACTIVE_TICKET)
@@ -459,6 +486,27 @@ class TicketCoordinator:
             if result.success and next_action_at is not None:
                 self._wake_deadlines()
             return result
+
+    async def _bound_unique_github_login(
+        self,
+        ticket: Ticket,
+        user_id: int | None,
+    ) -> str | None:
+        if user_id is None:
+            return None
+        pull_request = await self._store.get_pull_request_for_ticket(ticket.ticket_id)
+        if pull_request is None:
+            return None
+        profile = await self._store.get_profile(ticket.guild_id, user_id)
+        if profile is None or not profile.github_username:
+            return None
+        matching_profiles = await self._store.list_profiles_by_github_username(
+            ticket.guild_id,
+            profile.github_username,
+        )
+        if len(matching_profiles) != 1 or matching_profiles[0].user_id != user_id:
+            return None
+        return profile.github_username
 
     async def unassign_ticket_from_github(
         self,

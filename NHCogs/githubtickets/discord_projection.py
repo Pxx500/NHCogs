@@ -103,12 +103,17 @@ class DiscordTicketProjection:
         return thread.id
 
     async def prompt_categories(self, ticket: Ticket, thread_id: int) -> None:
-        if ticket.author_id is None:
-            return
-        author_mention = f"<@{ticket.author_id}>"
+        author_mention = (
+            f"<@{ticket.author_id}>" if ticket.author_id is not None else None
+        )
+        content = (
+            add_categories_notification(author_mention)
+            if author_mention is not None
+            else "Add categories to start automatic routing"
+        )
         await self._send_thread_prompt(
             thread_id,
-            add_categories_notification(author_mention),
+            content,
             view=self._category_prompt_view_factory(ticket),
             user_id=ticket.author_id,
         )

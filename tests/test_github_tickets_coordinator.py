@@ -60,6 +60,7 @@ class FakeProjection:
         self.recovered_ping_at: datetime | None = None
         self.send_started: asyncio.Event | None = None
         self.allow_send: asyncio.Event | None = None
+        self.prompt_hook = None
 
     async def send_ticket(self, ticket, *, reviewer_github=None):
         self.calls.append(("send_ticket", ticket.ticket_id, reviewer_github))
@@ -97,6 +98,10 @@ class FakeProjection:
 
     async def prompt_categories(self, ticket, thread_id):
         self.calls.append(("prompt_categories", ticket.ticket_id, thread_id, ticket.author_id))
+        if self.prompt_hook is not None:
+            await self.prompt_hook(ticket)
+        if error := self.errors.get("prompt_categories"):
+            raise error
 
     async def prompt_draft_decision(self, ticket):
         self.calls.append(("prompt_draft_decision", ticket.ticket_id, ticket.thread_id))
@@ -280,7 +285,14 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.wake_count, 1)
 
-    async def test_github_creation_binds_and_projects_ticket_without_author(self):
+    async def test_github_creation_prompts_for_categories_without_author_mention(self):
+        prompt_states = []
+
+        async def capture_prompt_state(ticket):
+            current = await self.store.get_ticket(ticket.ticket_id)
+            prompt_states.append(current.state)
+
+        self.projection.prompt_hook = capture_prompt_state
         result = await self.coordinator.create_ticket_from_github(
             10,
             self.pull_request(),
@@ -297,9 +309,14 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(ticket.next_action)
         binding = await self.store.get_pull_request(100, 7)
         self.assertEqual(binding.current_ticket_id, ticket.ticket_id)
+        self.assertEqual(prompt_states, [models.TicketState.CREATING])
         self.assertEqual(
             self.projection.calls,
-            [("send_ticket", ticket.ticket_id, None), ("create_thread", ticket.ticket_id, 300)],
+            [
+                ("send_ticket", ticket.ticket_id, None),
+                ("create_thread", ticket.ticket_id, 300),
+                ("prompt_categories", ticket.ticket_id, 400, None),
+            ],
         )
 
     async def test_github_creation_prompts_mapped_author_for_categories_once(self):
@@ -320,6 +337,78 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 ("send_ticket", ticket.ticket_id, None),
                 ("create_thread", ticket.ticket_id, 300),
                 ("prompt_categories", ticket.ticket_id, 400, 100),
+            ],
+        )
+
+    async def test_github_category_prompt_failure_rolls_back_and_can_retry(self):
+        pull_request = self.pull_request()
+        self.projection.errors["prompt_categories"] = RuntimeError(
+            "controlled prompt failure"
+        )
+
+        failed = await self.coordinator.create_ticket_from_github(
+            10,
+            pull_request,
+            author_id=None,
+        )
+
+        self.assertFalse(failed.success)
+        self.assertEqual(failed.response, "Could not create the ticket")
+        self.assertIsNone(await self.store.get_ticket(1))
+        self.assertIsNone((await self.store.get_pull_request(100, 7)).current_ticket_id)
+        self.assertEqual(
+            self.projection.calls,
+            [
+                ("send_ticket", 1, None),
+                ("create_thread", 1, 300),
+                ("prompt_categories", 1, 400, None),
+                ("delete_thread", 400),
+                ("delete_message", 20, 300),
+            ],
+        )
+
+        self.projection.errors.pop("prompt_categories")
+        self.projection.calls.clear()
+        retried = await self.coordinator.create_ticket_from_github(
+            10,
+            pull_request,
+            author_id=None,
+        )
+
+        self.assertTrue(retried.success)
+        ticket = (await self.store.list_active_tickets())[0]
+        self.assertEqual(ticket.ticket_id, 2)
+        self.assertEqual(
+            self.projection.calls,
+            [
+                ("send_ticket", 2, None),
+                ("create_thread", 2, 301),
+                ("prompt_categories", 2, 401, None),
+            ],
+        )
+
+    async def test_github_activation_failure_deletes_prompt_thread_and_ticket(self):
+        async def lose_activation(*_args, **_kwargs):
+            return False
+
+        self.store.activate_ticket = lose_activation
+
+        result = await self.coordinator.create_ticket_from_github(
+            10,
+            self.pull_request(),
+            author_id=None,
+        )
+
+        self.assertFalse(result.success)
+        self.assertIsNone(await self.store.get_ticket(1))
+        self.assertEqual(
+            self.projection.calls,
+            [
+                ("send_ticket", 1, None),
+                ("create_thread", 1, 300),
+                ("prompt_categories", 1, 400, None),
+                ("delete_thread", 400),
+                ("delete_message", 20, 300),
             ],
         )
 
@@ -528,6 +617,133 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(removed.success)
         self.assertEqual(removed.finished_ticket.ticket_id, ticket_id)
         self.assertIsNone(await self.store.get_ticket(ticket_id))
+
+    async def test_discord_claim_and_unassign_enqueue_bound_mapped_github_writes(self):
+        await self.store.save_profile(
+            guild_id=10,
+            user_id=222,
+            github_username="Reviewer",
+            category_ids=(),
+            automatic_pings=False,
+            updated_at=self.now,
+        )
+        ticket_id = await self.create_github_active()
+
+        claimed = await self.coordinator.claim(ticket_id, self.actor(222))
+        add_intent = await self.store.claim_next_outbox(
+            now=self.now,
+            stale_before=self.now - timedelta(minutes=5),
+        )
+        await self.store.complete_outbox(add_intent.outbox_id, completed_at=self.now)
+        unassigned = await self.coordinator.unassign(
+            ticket_id,
+            self.actor(999, participant=False, staff=True),
+        )
+        remove_intent = await self.store.claim_next_outbox(
+            now=self.now,
+            stale_before=self.now - timedelta(minutes=5),
+        )
+
+        self.assertTrue(claimed.success)
+        self.assertEqual(add_intent.operation, models.GitHubOutboxOperation.ADD_ASSIGNEE)
+        self.assertEqual(add_intent.github_login, "reviewer")
+        self.assertTrue(unassigned.success)
+        self.assertEqual(
+            remove_intent.operation,
+            models.GitHubOutboxOperation.REMOVE_ASSIGNEE,
+        )
+        self.assertEqual(remove_intent.github_login, "reviewer")
+        await self.store.fail_outbox(
+            remove_intent.outbox_id,
+            failed_at=self.now,
+            error_summary="controlled GitHub failure",
+        )
+        current = await self.store.get_ticket(ticket_id)
+        self.assertEqual(current.state, models.TicketState.OPEN)
+        self.assertIsNone(current.assignee_id)
+
+    async def test_bound_claim_and_unassign_without_unique_mapping_stay_local(self):
+        ticket_id = await self.create_github_active()
+
+        claimed = await self.coordinator.claim(ticket_id, self.actor(222))
+        unassigned = await self.coordinator.unassign(ticket_id, self.actor(222))
+
+        self.assertTrue(claimed.success)
+        self.assertTrue(unassigned.success)
+        self.assertIsNone(
+            await self.store.claim_next_outbox(
+                now=self.now,
+                stale_before=self.now - timedelta(minutes=5),
+            )
+        )
+
+    async def test_unbound_mapped_claim_and_unassign_stay_local(self):
+        await self.store.save_profile(
+            guild_id=10,
+            user_id=222,
+            github_username="Reviewer",
+            category_ids=(),
+            automatic_pings=False,
+            updated_at=self.now,
+        )
+        ticket = await self.create_active(routing_mode=models.RoutingMode.NONE)
+
+        claimed = await self.coordinator.claim(ticket.ticket_id, self.actor(222))
+        unassigned = await self.coordinator.unassign(ticket.ticket_id, self.actor(222))
+
+        self.assertTrue(claimed.success)
+        self.assertTrue(unassigned.success)
+        self.assertIsNone(
+            await self.store.claim_next_outbox(
+                now=self.now,
+                stale_before=self.now - timedelta(minutes=5),
+            )
+        )
+
+    async def test_ambiguous_github_mapping_keeps_bound_transitions_local(self):
+        for user_id in (222, 333):
+            await self.store.save_profile(
+                guild_id=10,
+                user_id=user_id,
+                github_username="Reviewer",
+                category_ids=(),
+                automatic_pings=False,
+                updated_at=self.now,
+            )
+        ticket_id = await self.create_github_active()
+
+        claimed = await self.coordinator.claim(ticket_id, self.actor(222))
+        unassigned = await self.coordinator.unassign(ticket_id, self.actor(222))
+
+        self.assertTrue(claimed.success)
+        self.assertTrue(unassigned.success)
+        self.assertIsNone(
+            await self.store.claim_next_outbox(
+                now=self.now,
+                stale_before=self.now - timedelta(minutes=5),
+            )
+        )
+
+    async def test_bound_decline_never_enqueues_github_write(self):
+        await self.store.save_profile(
+            guild_id=10,
+            user_id=222,
+            github_username="Reviewer",
+            category_ids=(),
+            automatic_pings=False,
+            updated_at=self.now,
+        )
+        ticket_id = await self.create_github_active()
+
+        declined = await self.coordinator.decline(ticket_id, self.actor(222))
+
+        self.assertTrue(declined.success)
+        self.assertIsNone(
+            await self.store.claim_next_outbox(
+                now=self.now,
+                stale_before=self.now - timedelta(minutes=5),
+            )
+        )
 
     async def test_draft_controls_reject_ready_pull_request(self):
         ticket_id = await self.create_github_active(author_id=100)
