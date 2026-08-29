@@ -280,6 +280,38 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(cog._github_runtime)
             self.assertIsNone(cog._github_client)
 
+    async def test_shared_githubtickets_token_update_restarts_only_its_runtime(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            cog = modules.githubtickets.GitHubTickets(FakeBot(ready=True))
+            listener = getattr(cog, "on_red_api_tokens_update", None)
+            self.assertIsNotNone(listener)
+            if listener is None:
+                return
+            cog._restart_github_integration = mock.AsyncMock(return_value=True)
+
+            await listener("youtube", {"api_key": "ignored"})
+            cog._restart_github_integration.assert_not_awaited()
+
+            await listener("githubtickets", {"client_id": "replacement"})
+            cog._restart_github_integration.assert_awaited_once_with()
+
+            failure = RuntimeError("restart failed")
+            cog._restart_github_integration = mock.AsyncMock(side_effect=failure)
+            with mock.patch.object(
+                modules.githubtickets,
+                "report_operational_error",
+                new=mock.AsyncMock(),
+            ) as report:
+                await listener("githubtickets", {})
+
+            report.assert_awaited_once()
+            self.assertEqual(report.await_args.kwargs["source"], "GitHubTickets")
+            self.assertEqual(
+                report.await_args.kwargs["action"],
+                "restart GitHub integration after API token update",
+            )
+            self.assertIs(report.await_args.kwargs["error"], failure)
+
     async def test_application_commands_are_guild_only_and_runtime_authorized(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             bot = FakeBot(ready=False)

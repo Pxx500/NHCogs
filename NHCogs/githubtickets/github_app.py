@@ -72,6 +72,7 @@ def pull_request_from_snapshot(snapshot: PullRequestSnapshot) -> GitHubPullReque
         open=state == "open",
         labels=snapshot.labels,
         github_updated_at=snapshot.updated_at,
+        assignees=snapshot.assignees,
     )
 
 
@@ -221,6 +222,10 @@ class GitHubAppClient:
             operation="redeliver delivery",
             read_json=False,
         )
+
+    def invalidate_installation_token(self) -> None:
+        self._token = None
+        self._token_expires_at = None
 
     async def _app_request(
         self,

@@ -143,6 +143,10 @@ class GitHubEventParserTests(unittest.TestCase):
                 self.assertEqual(snapshot.draft, action == "converted_to_draft")
                 self.assertEqual(snapshot.open, action != "closed")
                 self.assertEqual(snapshot.labels, ("discord-ticket", "type: bug"))
+                self.assertEqual(
+                    getattr(snapshot, "assignees", None),
+                    ("reviewer",),
+                )
                 self.assertEqual(parsed.assignee_logins, ("reviewer",))
                 self.assertEqual(
                     snapshot.github_updated_at,
@@ -259,6 +263,37 @@ class GitHubEventParserTests(unittest.TestCase):
 
         self.assertIsInstance(parsed, self.modules.events.PullRequestReviewEvent)
         self.assertIsNone(parsed.reviewer_login)
+
+    def test_app_lifecycle_inputs_return_typed_stop_events(self) -> None:
+        cases = (
+            ("installation", "suspend", {}, "installation_suspended", ()),
+            ("installation", "deleted", {}, "installation_deleted", ()),
+            (
+                "installation",
+                "new_permissions_accepted",
+                {},
+                "permissions_changed",
+                (),
+            ),
+            (
+                "installation_repositories",
+                "removed",
+                {"repositories_removed": [{"id": 100}, {"id": 200}]},
+                "repositories_removed",
+                (100, 200),
+            ),
+        )
+        for event, action, extra, expected_reason, expected_repository_ids in cases:
+            with self.subTest(event=event, action=action):
+                payload = {"action": action, **extra}
+
+                parsed = self.modules.events.parse_delivery(
+                    self.delivery(event=event, action=action, payload=payload)
+                )
+
+                self.assertEqual(type(parsed).__name__, "GitHubAppLifecycleEvent")
+                self.assertEqual(parsed.reason, expected_reason)
+                self.assertEqual(parsed.repository_ids, expected_repository_ids)
 
     def test_known_malformed_deliveries_raise_one_safe_error(self) -> None:
         missing_repository = self.pull_request_payload()

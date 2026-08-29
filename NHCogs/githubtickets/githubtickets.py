@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
@@ -138,6 +139,27 @@ class GitHubTickets(commands.Cog):
         except Exception:
             log.exception("GitHub Tickets integration shutdown failed")
         await self.scheduler.close()
+
+    @commands.Cog.listener()
+    async def on_red_api_tokens_update(
+        self,
+        service_name: str,
+        _api_tokens: Mapping[str, str],
+    ) -> None:
+        if service_name != "githubtickets":
+            return
+        try:
+            await self._restart_github_integration()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await report_operational_error(
+                self.bot,
+                guild_id=0,
+                source="GitHubTickets",
+                action="restart GitHub integration after API token update",
+                error=error,
+            )
 
     async def _restore_runtime(self) -> None:
         await self.bot.wait_until_red_ready()

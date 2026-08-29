@@ -1030,6 +1030,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
                         open=True,
                         labels=("bug",),
                         github_updated_at=now,
+                        assignees=("reviewer",),
                     ),
                 )
                 self.assertEqual(submit_interaction.response.defer_calls, 1)

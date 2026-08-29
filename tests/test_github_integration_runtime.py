@@ -29,6 +29,10 @@ class _Client:
         self.listed_pages: list[int] = []
         self.redelivered: list[int] = []
         self.mutations: list[tuple[str, str, str, int, str]] = []
+        self.token_invalidations = 0
+
+    def invalidate_installation_token(self) -> None:
+        self.token_invalidations += 1
 
     async def list_deliveries(self, *, page: int = 1) -> tuple[object, ...]:
         self.listed_pages.append(page)
@@ -69,6 +73,20 @@ class _FailingAddClient(_Client):
         login: str,
     ) -> None:
         raise self.error
+
+
+class _FailingRedeliveryClient(_Client):
+    def __init__(self, pages, errors):
+        super().__init__(pages)
+        self.errors = errors
+        self.redelivery_attempts = []
+
+    async def redeliver(self, delivery_id: int) -> None:
+        self.redelivery_attempts.append(delivery_id)
+        error = self.errors.get(delivery_id)
+        if error is not None:
+            raise error
+        await super().redeliver(delivery_id)
 
 
 class _SerializingClient(_Client):
@@ -281,6 +299,64 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(processed.raw_body)
         self.assertIsNone(ignored.raw_body)
 
+    async def test_lifecycle_delivery_stops_runtime_without_self_await(self) -> None:
+        await self.store.accept_delivery(
+            delivery_guid="installation-suspended",
+            github_delivery_id=None,
+            event="installation",
+            action="suspend",
+            installation_id=123,
+            repository_id=None,
+            pr_number=None,
+            received_at=self.now,
+            raw_body=b'{"action":"suspend"}',
+        )
+        reporter = _Reporter()
+        client = _Client()
+        receiver = _Receiver()
+
+        async def handle(delivery):
+            return self.modules.runtime.DeliveryDisposition.STOPPED
+
+        self.runtime = self.modules.runtime.GitHubIntegrationRuntime(
+            self.store,
+            client=client,
+            receiver=receiver,
+            delivery_handler=handle,
+            bot=_Bot(reporter),
+            guild_id=10,
+            clock=lambda: self.now,
+            poll_interval=0.001,
+            recovery_interval=timedelta(milliseconds=1),
+        )
+        await self.runtime.start("127.0.0.1", 8080)
+
+        async def delivery_completed() -> bool:
+            stored = await self.store.get_delivery("installation-suspended")
+            return (
+                stored.state is self.modules.models.GitHubDeliveryState.PROCESSED
+                and receiver.closed.is_set()
+                and client.token_invalidations == 1
+                and len(reporter.reports) == 1
+            )
+
+        await _wait_until(delivery_completed)
+        self.assertTrue(receiver.closed.is_set())
+        self.assertEqual(client.token_invalidations, 1)
+        self.assertEqual(len(reporter.reports), 1)
+        self.assertEqual(
+            reporter.reports[0]["action"],
+            "stop GitHub integration after installation suspend",
+        )
+        github_calls = (tuple(client.listed_pages), tuple(client.redelivered))
+        await asyncio.sleep(0.01)
+        self.assertEqual(
+            (tuple(client.listed_pages), tuple(client.redelivered)),
+            github_calls,
+        )
+        await asyncio.wait_for(self.runtime.close(), timeout=1)
+        self.runtime = None
+
     async def test_delivery_failure_is_reported_and_deferred_without_blocking_later_work(
         self,
     ) -> None:
@@ -400,6 +476,216 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored.attempts, 2)
         self.assertEqual(len(reporter.reports), 1)
 
+    async def test_delivery_github_failure_uses_structured_retry_policy(self) -> None:
+        cases = (
+            (
+                "validation",
+                self.modules.github_app.GitHubRequestError(
+                    "read pull request",
+                    422,
+                ),
+                self.modules.models.GitHubDeliveryState.FAILED,
+                None,
+            ),
+            (
+                "rate-limit",
+                self.modules.github_app.GitHubRequestError(
+                    "read pull request",
+                    429,
+                    retryable=True,
+                    rate_limited=True,
+                    retry_at=self.now + timedelta(hours=1),
+                ),
+                self.modules.models.GitHubDeliveryState.RETRY,
+                self.now + timedelta(hours=1),
+            ),
+        )
+        for index, (name, error, expected_state, expected_retry_at) in enumerate(cases):
+            with self.subTest(name=name):
+                guid = f"github-failure-{index}"
+                await self._accept_delivery(guid)
+
+                async def handle(delivery, *, raised=error):
+                    raise raised
+
+                runtime = self.modules.runtime.GitHubIntegrationRuntime(
+                    self.store,
+                    client=_Client(),
+                    receiver=_Receiver(),
+                    delivery_handler=handle,
+                    bot=_Bot(_Reporter()),
+                    guild_id=10,
+                    clock=lambda: self.now,
+                    poll_interval=0.001,
+                    max_delivery_attempts=5,
+                )
+                await runtime.start("127.0.0.1", 8080)
+
+                async def settled(delivery_guid=guid) -> bool:
+                    stored = await self.store.get_delivery(delivery_guid)
+                    return stored.state in {
+                        self.modules.models.GitHubDeliveryState.FAILED,
+                        self.modules.models.GitHubDeliveryState.RETRY,
+                    }
+
+                try:
+                    await _wait_until(settled)
+                    stored = await self.store.get_delivery(guid)
+                    self.assertIs(stored.state, expected_state)
+                    self.assertEqual(stored.next_attempt_at, expected_retry_at)
+                finally:
+                    await runtime.close()
+
+    async def test_recovery_redelivers_failed_summaries_and_local_failures(self) -> None:
+        local_states = {
+            "local-failed": "failed",
+            "local-retry": "retry",
+            "summary-failed": "processed",
+            "known-pending": "pending",
+        }
+        for guid, state in local_states.items():
+            await self._accept_delivery(guid)
+            if state == "pending":
+                continue
+            claimed = await self.store.claim_next_delivery(
+                now=self.now,
+                stale_before=self.now - timedelta(minutes=5),
+            )
+            self.assertEqual(claimed.delivery_guid, guid)
+            if state == "failed":
+                await self.store.fail_delivery(
+                    guid,
+                    completed_at=self.now,
+                    error_summary="failed",
+                )
+            elif state == "retry":
+                await self.store.defer_delivery(
+                    guid,
+                    next_attempt_at=self.now + timedelta(minutes=5),
+                    error_summary="retry",
+                )
+            else:
+                await self.store.complete_delivery(
+                    guid,
+                    completed_at=self.now,
+                    ignored=False,
+                )
+        summary = self.modules.github_app.GitHubDeliverySummary
+        delivered_at = self.now - timedelta(minutes=1)
+        client = _Client(
+            {
+                1: (
+                    summary(1, "local-failed", delivered_at, False, 200, "ping", None),
+                    summary(2, "local-retry", delivered_at, False, 200, "ping", None),
+                    summary(3, "summary-failed", delivered_at, False, 500, "ping", None),
+                    summary(4, "known-pending", delivered_at, False, 200, "ping", None),
+                    summary(5, "missing", delivered_at, False, 200, "ping", None),
+                )
+            }
+        )
+        self.runtime = self.modules.runtime.GitHubIntegrationRuntime(
+            self.store,
+            client=client,
+            receiver=_Receiver(),
+            delivery_handler=lambda delivery: None,
+            bot=_Bot(),
+            guild_id=10,
+            clock=lambda: self.now,
+        )
+
+        await self.runtime.run_recovery()
+
+        self.assertEqual(client.redelivered, [1, 2, 3, 5])
+
+    async def test_recovery_rate_limit_stops_further_github_mutations(self) -> None:
+        summary = self.modules.github_app.GitHubDeliverySummary
+        delivered_at = self.now - timedelta(minutes=1)
+        retry_at = self.now + timedelta(hours=1)
+        client = _FailingRedeliveryClient(
+            {
+                1: (
+                    summary(1, "missing-one", delivered_at, False, 500, "ping", None),
+                    summary(2, "missing-two", delivered_at, False, 500, "ping", None),
+                )
+            },
+            {
+                1: self.modules.github_app.GitHubRequestError(
+                    "redeliver delivery",
+                    429,
+                    retryable=True,
+                    rate_limited=True,
+                    retry_at=retry_at,
+                )
+            },
+        )
+        reporter = _Reporter()
+        self.runtime = self.modules.runtime.GitHubIntegrationRuntime(
+            self.store,
+            client=client,
+            receiver=_Receiver(),
+            delivery_handler=lambda delivery: None,
+            bot=_Bot(reporter),
+            guild_id=10,
+            clock=lambda: self.now,
+        )
+
+        await self.runtime.run_recovery()
+        await self.runtime.run_recovery()
+
+        self.assertEqual(client.redelivery_attempts, [1])
+        self.assertEqual(client.listed_pages, [1])
+        self.assertEqual(len(reporter.reports), 1)
+
+    async def test_recovery_checkpoint_continues_older_pages_after_restart(self) -> None:
+        summary = self.modules.github_app.GitHubDeliverySummary
+        delivered_at = self.now - timedelta(minutes=1)
+        page_one = tuple(
+            summary(
+                index,
+                f"already-redelivered-{index}",
+                delivered_at,
+                True,
+                200,
+                "ping",
+                None,
+            )
+            for index in range(1, 101)
+        )
+        page_two = (
+            summary(101, "older-missing", delivered_at, False, 200, "ping", None),
+        )
+        first_client = _Client({1: page_one, 2: page_two})
+        first_runtime = self.modules.runtime.GitHubIntegrationRuntime(
+            self.store,
+            client=first_client,
+            receiver=_Receiver(),
+            delivery_handler=lambda delivery: None,
+            bot=_Bot(),
+            guild_id=10,
+            clock=lambda: self.now,
+            max_recovery_pages=1,
+        )
+        await first_runtime.run_recovery()
+        await first_runtime.close()
+
+        second_client = _Client({1: page_one, 2: page_two})
+        self.runtime = self.modules.runtime.GitHubIntegrationRuntime(
+            self.store,
+            client=second_client,
+            receiver=_Receiver(),
+            delivery_handler=lambda delivery: None,
+            bot=_Bot(),
+            guild_id=10,
+            clock=lambda: self.now,
+            max_recovery_pages=1,
+        )
+
+        await self.runtime.run_recovery()
+
+        self.assertEqual(first_client.listed_pages, [1])
+        self.assertEqual(second_client.listed_pages, [2])
+        self.assertEqual(second_client.redelivered, [101])
+
     async def test_recovery_paginates_and_redelivers_only_recent_missing_deliveries(
         self,
     ) -> None:
@@ -428,7 +714,7 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 f"redelivery-{index}",
                 delivered_at,
                 True,
-                500,
+                200,
                 "ping",
                 None,
             )
@@ -456,7 +742,7 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.run_recovery()
 
         self.assertEqual(client.listed_pages, [1, 2])
-        self.assertEqual(client.redelivered, [1, 200])
+        self.assertEqual(client.redelivered, [1, 2, 4, 200])
         self.assertEqual(handled, [])
 
     async def test_recovery_applies_delivery_retention(self) -> None:
@@ -668,6 +954,11 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         client.release_add.set()
         await asyncio.wait_for(recovery, timeout=1)
+
+        async def redelivered_once() -> bool:
+            return client.redelivered == [99]
+
+        await _wait_until(redelivered_once)
         self.assertEqual(client.redelivered, [99])
         self.assertEqual(client.max_active_mutations, 1)
 
