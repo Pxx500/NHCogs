@@ -108,6 +108,21 @@ class ReadOnlyLogBufferTests(unittest.TestCase):
         self.assertNotIn(discord_token, redacted)
         self.assertGreaterEqual(redacted.count("[REDACTED]"), 3)
 
+    def test_redaction_removes_github_app_secrets_and_private_key_blocks(self):
+        original = (
+            "webhook_secret=hook-value private_key=inline-value\n"
+            "-----BEGIN PRIVATE KEY-----\n"
+            "private-key-material\n"
+            "-----END PRIVATE KEY-----"
+        )
+
+        redacted = console_dump.redact_log_text(original)
+
+        self.assertNotIn("hook-value", redacted)
+        self.assertNotIn("inline-value", redacted)
+        self.assertNotIn("private-key-material", redacted)
+        self.assertNotIn("BEGIN PRIVATE KEY", redacted)
+
     def test_redaction_removes_complete_plain_and_structured_authorization_values(self):
         original = (
             "Authorization: Basic dXNlcjpwYXNz\n"
