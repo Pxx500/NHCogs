@@ -105,7 +105,14 @@ class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
             "state": "open",
             "draft": False,
             "merged": False,
-            "user": {"login": "author"},
+            "user": {"id": 7001, "login": "author"},
+            "base": {
+                "repo": {
+                    "id": 5001,
+                    "full_name": "GTNewHorizons/Example",
+                }
+            },
+            "updated_at": "2026-08-28T23:45:00Z",
             "labels": [{"name": "discord-ticket"}],
             "assignees": [{"login": "reviewer"}],
         }
@@ -131,11 +138,25 @@ class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pull_request.pull_request_id, 9001)
         self.assertEqual(pull_request.number, 42)
         self.assertEqual(pull_request.title, "Make the machine faster")
+        self.assertEqual(pull_request.repository_id, 5001)
+        self.assertEqual(
+            pull_request.repository_full_name,
+            "GTNewHorizons/Example",
+        )
+        self.assertEqual(pull_request.author_id, 7001)
         self.assertEqual(pull_request.author_login, "author")
+        self.assertEqual(
+            pull_request.updated_at,
+            datetime(2026, 8, 28, 23, 45, tzinfo=timezone.utc),
+        )
         self.assertEqual(pull_request.labels, ("discord-ticket",))
         self.assertEqual(pull_request.assignees, ("reviewer",))
 
         token_request, pull_request_request = session.requests
+        self.assertEqual(
+            pull_request_request[0:2],
+            ("GET", "https://api.github.com/repos/GTNewHorizons/Example/pulls/42"),
+        )
         self.assertEqual(token_request[0:2], ("POST", "https://api.github.com/app/installations/456/access_tokens"))
         encoded_jwt = token_request[2]["headers"]["Authorization"].removeprefix("Bearer ")
         claims = jwt.decode(

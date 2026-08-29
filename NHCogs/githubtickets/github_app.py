@@ -38,12 +38,16 @@ class GitHubAppCredentials:
 class PullRequestSnapshot:
     pull_request_id: int
     number: int
+    repository_id: int
+    repository_full_name: str
     title: str
     url: str
     state: str
     draft: bool
     merged: bool
+    author_id: int
     author_login: str
+    updated_at: datetime
     labels: tuple[str, ...]
     assignees: tuple[str, ...]
 
@@ -110,15 +114,21 @@ class GitHubAppClient:
             f"/repos/{owner}/{repository}/pulls/{number}",
             operation="read pull request",
         )
+        user = _mapping(payload["user"])
+        repository_payload = _mapping(_mapping(payload["base"])["repo"])
         return PullRequestSnapshot(
             pull_request_id=_integer(payload["id"]),
             number=_integer(payload["number"]),
+            repository_id=_integer(repository_payload["id"]),
+            repository_full_name=str(repository_payload["full_name"]),
             title=str(payload["title"]),
             url=str(payload["html_url"]),
             state=str(payload["state"]),
             draft=bool(payload["draft"]),
             merged=bool(payload["merged"]),
-            author_login=str(_mapping(payload["user"])["login"]),
+            author_id=_integer(user["id"]),
+            author_login=str(user["login"]),
+            updated_at=_parse_datetime(payload["updated_at"]),
             labels=tuple(str(_mapping(label)["name"]) for label in _sequence(payload["labels"])),
             assignees=tuple(
                 str(_mapping(assignee)["login"]) for assignee in _sequence(payload["assignees"])

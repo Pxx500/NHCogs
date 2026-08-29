@@ -242,8 +242,21 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
                 accepted = FakeInteraction(role_ids=(99,))
                 await new_ticket_command.callback(accepted)
+                self.assertEqual(
+                    accepted.response.messages[0][0],
+                    "GitHub integration is unavailable",
+                )
+                self.assertTrue(accepted.response.messages[0][1]["ephemeral"])
+                self.assertEqual(accepted.response.modals, [])
+
+                cog._github_client = SimpleNamespace(
+                    get_pull_request=mock.AsyncMock(),
+                )
+                cog._github_organization = "NewHorizons"
+                configured = FakeInteraction(role_ids=(99,))
+                await new_ticket_command.callback(configured)
                 self.assertIsInstance(
-                    accepted.response.modals[0],
+                    configured.response.modals[0],
                     modules.dashboard.NewTicketModal,
                 )
 
