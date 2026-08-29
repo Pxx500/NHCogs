@@ -202,10 +202,10 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         break
                     await asyncio.sleep(0.01)
 
-                self.assertEqual(len(bot.restored_views), 2)
+                self.assertEqual(len(bot.restored_views), 6)
                 self.assertEqual(
                     [message_id for _view, message_id in bot.restored_views],
-                    [40, 41],
+                    [40, None, None, 41, None, None],
                 )
                 self.assertTrue(
                     all(view.timeout is None for view, _message_id in bot.restored_views)

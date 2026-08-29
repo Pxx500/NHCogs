@@ -972,6 +972,25 @@ class GitHubTicketsStore:
                 updated_at,
             )
 
+    async def start_automatic_routing(
+        self,
+        ticket_id: int,
+        *,
+        category_ids: tuple[int, ...],
+        category_display: str,
+        next_action_at: datetime,
+        updated_at: datetime,
+    ) -> Ticket | None:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._start_automatic_routing_sync,
+                ticket_id,
+                category_ids,
+                category_display,
+                next_action_at,
+                updated_at,
+            )
+
     async def record_ticket_message(
         self,
         ticket_id: int,
@@ -1842,16 +1861,11 @@ class GitHubTicketsStore:
         url = new_ticket.pr_url.strip()
         if not title or not url:
             raise ValueError("ticket title and URL cannot be empty")
-        category_ids = tuple(dict.fromkeys(new_ticket.category_ids))
-        valid_category_ids = {
-            int(row["category_id"])
-            for row in connection.execute(
-                "SELECT category_id FROM categories WHERE guild_id = ?",
-                (new_ticket.guild_id,),
-            )
-        }
-        if not set(category_ids).issubset(valid_category_ids):
-            raise ValueError("ticket categories must belong to the guild")
+        category_ids = self._validate_ticket_category_ids(
+            connection,
+            new_ticket.guild_id,
+            new_ticket.category_ids,
+        )
         timestamp = _serialize_datetime(new_ticket.created_at)
         cursor = connection.execute(
             """
@@ -1890,6 +1904,24 @@ class GitHubTicketsStore:
         if row is None:
             raise RuntimeError("created ticket could not be loaded")
         return _decode_ticket(connection, row)
+
+    def _validate_ticket_category_ids(
+        self,
+        connection: sqlite3.Connection,
+        guild_id: int,
+        category_ids: tuple[int, ...],
+    ) -> tuple[int, ...]:
+        selected_category_ids = tuple(dict.fromkeys(category_ids))
+        valid_category_ids = {
+            int(row["category_id"])
+            for row in connection.execute(
+                "SELECT category_id FROM categories WHERE guild_id = ?",
+                (guild_id,),
+            )
+        }
+        if not set(selected_category_ids).issubset(valid_category_ids):
+            raise ValueError("ticket categories must belong to the guild")
+        return selected_category_ids
 
     def _create_ticket_sync(self, new_ticket: NewTicket) -> Ticket:
         self._validate_ticket_origin(new_ticket, pull_request_bound=False)
@@ -2367,6 +2399,78 @@ class GitHubTicketsStore:
             ),
         )
         return cursor > 0
+
+    def _start_automatic_routing_sync(
+        self,
+        ticket_id: int,
+        category_ids: tuple[int, ...],
+        category_display: str,
+        next_action_at: datetime,
+        updated_at: datetime,
+    ) -> Ticket | None:
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    """
+                    SELECT guild_id FROM tickets
+                    WHERE ticket_id = ? AND state IN ('open', 'claimed')
+                        AND routing_mode = 'none'
+                    """,
+                    (ticket_id,),
+                ).fetchone()
+                if row is None:
+                    connection.rollback()
+                    return None
+                selected_category_ids = self._validate_ticket_category_ids(
+                    connection,
+                    int(row["guild_id"]),
+                    category_ids,
+                )
+
+                connection.execute(
+                    "DELETE FROM ticket_categories WHERE ticket_id = ?",
+                    (ticket_id,),
+                )
+                connection.executemany(
+                    """
+                    INSERT INTO ticket_categories (ticket_id, category_id)
+                    VALUES (?, ?)
+                    """,
+                    (
+                        (ticket_id, category_id)
+                        for category_id in selected_category_ids
+                    ),
+                )
+                timestamp = _serialize_datetime(updated_at)
+                connection.execute(
+                    """
+                    UPDATE tickets
+                    SET category_display = ?, routing_mode = 'automatic',
+                        next_action = 'automatic_ping', next_action_at = ?,
+                        projection_sync_at = ?, updated_at = ?,
+                        transition_version = transition_version + 1
+                    WHERE ticket_id = ? AND state IN ('open', 'claimed')
+                        AND routing_mode = 'none'
+                    """,
+                    (
+                        category_display,
+                        _serialize_datetime(next_action_at),
+                        timestamp,
+                        timestamp,
+                        ticket_id,
+                    ),
+                )
+                updated = connection.execute(
+                    "SELECT * FROM tickets WHERE ticket_id = ?",
+                    (ticket_id,),
+                ).fetchone()
+                routed = _decode_ticket(connection, updated)
+                connection.commit()
+                return routed
+            except Exception:
+                connection.rollback()
+                raise
 
     def _record_ticket_message_sync(
         self,

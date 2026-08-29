@@ -519,6 +519,61 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(config["bind_host"])
         self.assertIsNone(config["bind_port"])
 
+    async def test_invalid_github_credentials_are_not_reported_as_missing(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            ctx = FakeContext()
+            await cog.config.set_raw("bind_host", value="127.0.0.1")
+            await cog.config.set_raw("bind_port", value=8080)
+            error = modules.credentials.InvalidGitHubAppCredentials("invalid")
+
+            with (
+                mock.patch.object(
+                    modules.githubtickets,
+                    "load_github_app_credentials",
+                    new=mock.AsyncMock(side_effect=error),
+                ),
+                mock.patch.object(
+                    modules.githubtickets,
+                    "report_operational_error",
+                    new=mock.AsyncMock(),
+                ) as reporter,
+            ):
+                await cog.githubtickets_github_enable(ctx)
+                await cog._send_github_configuration_overview(ctx)
+
+        self.assertEqual(
+            [call.args[0] for call in ctx.send.await_args_list],
+            ["GitHub credentials are invalid", mock.ANY],
+        )
+        self.assertIn("Credentials: Invalid", ctx.send.await_args_list[-1].args[0])
+        reporter.assert_awaited_once()
+
+    async def test_enabled_integration_reports_missing_runtime_credentials(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            await cog.config.set_raw("guild_id", value=42)
+            await cog.config.set_raw("enabled", value=True)
+            await cog.config.set_raw("bind_host", value="127.0.0.1")
+            await cog.config.set_raw("bind_port", value=8080)
+
+            with (
+                mock.patch.object(
+                    modules.githubtickets,
+                    "load_github_app_credentials",
+                    new=mock.AsyncMock(return_value=None),
+                ),
+                mock.patch.object(
+                    modules.githubtickets,
+                    "report_operational_error",
+                    new=mock.AsyncMock(),
+                ) as reporter,
+            ):
+                started = await cog._restart_github_integration()
+
+        self.assertFalse(started)
+        reporter.assert_awaited_once()
+
 
 if __name__ == "__main__":
     unittest.main()

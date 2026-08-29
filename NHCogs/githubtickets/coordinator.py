@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from . import presentation
 from .models import (
     ActivePullRequestTicketExists,
+    Category,
     GitHubPullRequest,
     NewTicket,
     NextAction,
@@ -272,6 +273,8 @@ class TicketCoordinator:
             )
             if not activated:
                 raise RuntimeError("ticket activation lost its creating state")
+            if ticket.origin is TicketOrigin.GITHUB and ticket.author_id is not None:
+                await self._projection.prompt_categories(ticket, thread_id)
         except Exception:
             await self._cleanup_failed_creation(ticket, message_id, thread_id)
             if await self._store.get_ticket(ticket.ticket_id) is not None:
@@ -534,6 +537,151 @@ class TicketCoordinator:
             ):
                 return TicketResult(True)
             return await self._finish_ticket_locked(ticket)
+
+    async def prompt_draft_decision_from_github(
+        self,
+        repository_id: int,
+        pr_number: int,
+    ) -> TicketResult:
+        ticket_id = await self._bound_ticket_id(repository_id, pr_number)
+        if ticket_id is None:
+            return TicketResult(True)
+        async with self._ticket_lock(ticket_id):
+            ticket = await self._store.get_ticket(ticket_id)
+            if ticket is None or ticket.state not in (
+                TicketState.OPEN,
+                TicketState.CLAIMED,
+            ):
+                return TicketResult(True)
+            pull_request = await self._store.get_pull_request_for_ticket(ticket_id)
+            if pull_request is None or not pull_request.draft:
+                return TicketResult(True)
+            try:
+                await self._projection.prompt_draft_decision(ticket)
+            except Exception:
+                return TicketResult(False, ACTION_FAILED)
+            return TicketResult(True)
+
+    async def add_ticket_categories(
+        self,
+        ticket_id: int,
+        category_ids: tuple[int, ...],
+        actor: TicketActor,
+    ) -> TicketResult:
+        selected_ids = tuple(dict.fromkeys(category_ids))
+        if not selected_ids:
+            return TicketResult(False, MISSING_AUTOMATIC_CATEGORIES)
+        async with self._ticket_lock(ticket_id):
+            ticket = await self._store.get_ticket(ticket_id)
+            if ticket is None or ticket.state not in (
+                TicketState.OPEN,
+                TicketState.CLAIMED,
+            ):
+                return TicketResult(False, INACTIVE_TICKET)
+            if not actor.can_participate:
+                return TicketResult(False, PERMISSION_DENIED)
+            categories = await self._store.list_categories(ticket.guild_id)
+            selected = set(selected_ids)
+            ordered_categories = tuple(
+                category for category in categories if category.category_id in selected
+            )
+            if len(ordered_categories) != len(selected_ids):
+                return TicketResult(False, presentation.CATEGORY_NO_LONGER_EXISTS)
+            ordered_ids = tuple(category.category_id for category in ordered_categories)
+            settled = self._settled_category_result(ticket, ordered_ids)
+            if settled is not None:
+                return settled
+            return await self._start_ticket_routing(ticket, ordered_categories)
+
+    @staticmethod
+    def _settled_category_result(
+        ticket: Ticket,
+        category_ids: tuple[int, ...],
+    ) -> TicketResult | None:
+        if ticket.routing_mode is RoutingMode.AUTOMATIC:
+            if ticket.category_ids == category_ids:
+                return TicketResult(True)
+            return TicketResult(False, INACTIVE_TICKET)
+        if (
+            ticket.origin is not TicketOrigin.GITHUB
+            or ticket.routing_mode is not RoutingMode.NONE
+        ):
+            return TicketResult(False, INACTIVE_TICKET)
+        return None
+
+    async def _start_ticket_routing(
+        self,
+        ticket: Ticket,
+        categories: tuple[Category, ...],
+    ) -> TicketResult:
+        settings = await self._get_settings(ticket.guild_id)
+        now = self._clock()
+        _, _, next_action_at = self._creation_schedule(
+            RoutingMode.AUTOMATIC,
+            settings,
+            now,
+        )
+        if next_action_at is None:
+            raise RuntimeError("automatic routing must have a deadline")
+        try:
+            current = await self._store.start_automatic_routing(
+                ticket.ticket_id,
+                category_ids=tuple(category.category_id for category in categories),
+                category_display=", ".join(category.name for category in categories),
+                next_action_at=next_action_at,
+                updated_at=now,
+            )
+        except ValueError:
+            return TicketResult(False, presentation.CATEGORY_NO_LONGER_EXISTS)
+        if current is None:
+            return TicketResult(False, INACTIVE_TICKET)
+        result = await self._edit_after_transition(current)
+        if result.success:
+            self._wake_deadlines()
+        return result
+
+    async def keep_draft_ticket(
+        self,
+        ticket_id: int,
+        actor: TicketActor,
+    ) -> TicketResult:
+        async with self._ticket_lock(ticket_id):
+            ticket, error = await self._authorized_draft_ticket(ticket_id, actor)
+            if ticket is None:
+                return TicketResult(False, error)
+            return TicketResult(True)
+
+    async def remove_draft_ticket(
+        self,
+        ticket_id: int,
+        actor: TicketActor,
+    ) -> TicketResult:
+        async with self._ticket_lock(ticket_id):
+            ticket, error = await self._authorized_draft_ticket(ticket_id, actor)
+            if ticket is None:
+                return TicketResult(False, error)
+            return await self._finish_ticket_locked(ticket)
+
+    async def _authorized_draft_ticket(
+        self,
+        ticket_id: int,
+        actor: TicketActor,
+    ) -> tuple[Ticket | None, str]:
+        ticket = await self._store.get_ticket(ticket_id)
+        if ticket is None or ticket.state not in (TicketState.OPEN, TicketState.CLAIMED):
+            return None, INACTIVE_TICKET
+        pull_request = await self._store.get_pull_request_for_ticket(ticket_id)
+        if pull_request is None or not pull_request.draft:
+            return None, INACTIVE_TICKET
+        if actor.can_manage_messages or actor.user_id == ticket.author_id:
+            return ticket, ""
+        profiles = await self._store.list_profiles_by_github_username(
+            ticket.guild_id,
+            pull_request.github_author_login,
+        )
+        if len(profiles) == 1 and profiles[0].user_id == actor.user_id:
+            return ticket, ""
+        return None, PERMISSION_DENIED
 
     async def update_title_from_github(
         self,

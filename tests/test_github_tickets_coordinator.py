@@ -95,6 +95,12 @@ class FakeProjection:
         self.next_thread_id += 1
         return thread_id
 
+    async def prompt_categories(self, ticket, thread_id):
+        self.calls.append(("prompt_categories", ticket.ticket_id, thread_id, ticket.author_id))
+
+    async def prompt_draft_decision(self, ticket):
+        self.calls.append(("prompt_draft_decision", ticket.ticket_id, ticket.thread_id))
+
     async def edit_ticket(self, ticket, *, reviewer_github=None):
         self.calls.append(("edit_ticket", ticket.ticket_id, ticket.state, reviewer_github))
         if "edit_ticket" in self.not_found_operations:
@@ -296,6 +302,86 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             [("send_ticket", ticket.ticket_id, None), ("create_thread", ticket.ticket_id, 300)],
         )
 
+    async def test_github_creation_prompts_mapped_author_for_categories_once(self):
+        result = await self.coordinator.create_ticket_from_github(
+            10,
+            self.pull_request(),
+            author_id=100,
+        )
+
+        self.assertTrue(result.success)
+        ticket = (await self.store.list_active_tickets())[0]
+        self.assertEqual(ticket.routing_mode, models.RoutingMode.NONE)
+        self.assertEqual(ticket.category_ids, ())
+        self.assertIsNone(ticket.next_action)
+        self.assertEqual(
+            self.projection.calls,
+            [
+                ("send_ticket", ticket.ticket_id, None),
+                ("create_thread", ticket.ticket_id, 300),
+                ("prompt_categories", ticket.ticket_id, 400, 100),
+            ],
+        )
+
+    async def test_github_categories_start_strict_automatic_routing_once(self):
+        ticket_id = await self.create_github_active(author_id=100)
+        self.projection.calls.clear()
+        self.wake_count = 0
+
+        rejected = await self.coordinator.add_ticket_categories(
+            ticket_id,
+            (self.category.category_id,),
+            self.actor(200, participant=False),
+        )
+        accepted = await self.coordinator.add_ticket_categories(
+            ticket_id,
+            (self.category.category_id,),
+            self.actor(200),
+        )
+        repeated = await self.coordinator.add_ticket_categories(
+            ticket_id,
+            (self.category.category_id,),
+            self.actor(300, participant=False, staff=True),
+        )
+
+        self.assertFalse(rejected.success)
+        self.assertEqual(rejected.response, "You cannot use this action")
+        self.assertTrue(accepted.success)
+        self.assertTrue(repeated.success)
+        ticket = await self.store.get_ticket(ticket_id)
+        self.assertEqual(ticket.routing_mode, models.RoutingMode.AUTOMATIC)
+        self.assertEqual(ticket.category_ids, (self.category.category_id,))
+        self.assertEqual(ticket.category_display, "rendering")
+        self.assertEqual(ticket.next_action, models.NextAction.AUTOMATIC_PING)
+        self.assertEqual(ticket.next_action_at, self.now + timedelta(seconds=120))
+        self.assertEqual(
+            self.projection.calls,
+            [("edit_ticket", ticket_id, models.TicketState.OPEN, None)],
+        )
+        self.assertEqual(self.wake_count, 1)
+
+    async def test_github_categories_preserve_existing_claim(self):
+        ticket_id = await self.create_github_active(author_id=100)
+        claimed = await self.coordinator.claim(ticket_id, self.actor(500))
+        self.projection.calls.clear()
+
+        categorized = await self.coordinator.add_ticket_categories(
+            ticket_id,
+            (self.category.category_id,),
+            self.actor(200),
+        )
+
+        self.assertTrue(claimed.success)
+        self.assertTrue(categorized.success)
+        ticket = await self.store.get_ticket(ticket_id)
+        self.assertEqual(ticket.state, models.TicketState.CLAIMED)
+        self.assertEqual(ticket.assignee_id, 500)
+        self.assertEqual(ticket.routing_mode, models.RoutingMode.AUTOMATIC)
+        self.assertEqual(
+            self.projection.calls,
+            [("edit_ticket", ticket_id, models.TicketState.CLAIMED, None)],
+        )
+
     async def test_manual_github_creation_preserves_author_categories_and_routing(self):
         request = self.request(models.RoutingMode.DIRECT_AUTOMATIC, direct_target_id=500)
         pull_request = self.pull_request()
@@ -390,6 +476,70 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 ("delete_message", ticket.channel_id, ticket.message_id),
             ],
         )
+
+    async def test_draft_prompt_and_decisions_use_author_or_staff_authorization(self):
+        pull_request = self.pull_request()
+        ticket_id = await self.create_github_active(author_id=100, pull_request=pull_request)
+        await self.store.observe_pull_request(
+            replace(
+                pull_request,
+                draft=True,
+                github_updated_at=self.now + timedelta(seconds=1),
+                last_processed_action="converted_to_draft",
+            )
+        )
+        await self.store.save_profile(
+            guild_id=10,
+            user_id=200,
+            github_username="octocat",
+            category_ids=(),
+            automatic_pings=False,
+            updated_at=self.now,
+        )
+        self.projection.calls.clear()
+
+        prompted = await self.coordinator.prompt_draft_decision_from_github(100, 7)
+        rejected = await self.coordinator.keep_draft_ticket(
+            ticket_id,
+            self.actor(201),
+        )
+        mapped_author_kept = await self.coordinator.keep_draft_ticket(
+            ticket_id,
+            self.actor(200, participant=False),
+        )
+        kept = await self.coordinator.keep_draft_ticket(
+            ticket_id,
+            self.actor(100, participant=False),
+        )
+        removed = await self.coordinator.remove_draft_ticket(
+            ticket_id,
+            self.actor(300, participant=False, staff=True),
+        )
+
+        self.assertTrue(prompted.success)
+        self.assertEqual(
+            self.projection.calls[0],
+            ("prompt_draft_decision", ticket_id, 400),
+        )
+        self.assertFalse(rejected.success)
+        self.assertEqual(rejected.response, "You cannot use this action")
+        self.assertTrue(mapped_author_kept.success)
+        self.assertTrue(kept.success)
+        self.assertTrue(removed.success)
+        self.assertEqual(removed.finished_ticket.ticket_id, ticket_id)
+        self.assertIsNone(await self.store.get_ticket(ticket_id))
+
+    async def test_draft_controls_reject_ready_pull_request(self):
+        ticket_id = await self.create_github_active(author_id=100)
+
+        kept = await self.coordinator.keep_draft_ticket(ticket_id, self.actor(100))
+        removed = await self.coordinator.remove_draft_ticket(ticket_id, self.actor(100))
+
+        self.assertFalse(kept.success)
+        self.assertEqual(kept.response, "This ticket is no longer active")
+        self.assertFalse(removed.success)
+        self.assertEqual(removed.response, "This ticket is no longer active")
+        self.assertIsNotNone(await self.store.get_ticket(ticket_id))
 
     async def test_github_title_edit_updates_bound_ticket_and_projection_once(self):
         ticket_id = await self.create_github_active()

@@ -415,8 +415,11 @@ class NewTicketModal(_DashboardModal):
         if identity is None:
             await self._send_error(interaction, presentation.COULD_NOT_CREATE_TICKET)
             return None
-        await interaction.response.defer(ephemeral=True)
         owner, repository, number = identity
+        if owner.casefold() != self._expected_organization.casefold():
+            await self._send_error(interaction, presentation.COULD_NOT_CREATE_TICKET)
+            return None
+        await interaction.response.defer(ephemeral=True)
         try:
             snapshot = await self._fetch_pull_request(owner, repository, number)
         except Exception:

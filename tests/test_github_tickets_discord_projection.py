@@ -79,6 +79,15 @@ def _load_modules():
 models, presentation, projection_module, adapter_module = _load_modules()
 
 
+def make_projection(bot, view_factory=lambda _ticket: object()):
+    return adapter_module.DiscordTicketProjection(
+        bot,
+        view_factory,
+        category_prompt_view_factory=lambda _ticket: object(),
+        draft_prompt_view_factory=lambda _ticket: object(),
+    )
+
+
 def ticket(**changes):
     now = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
     values = {
@@ -221,7 +230,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
         channel = FakeChannel()
         thread = FakeChannel(66)
         bot = FakeBot({channel.id: channel, thread.id: thread})
-        adapter = adapter_module.DiscordTicketProjection(bot, lambda _ticket: object())
+        adapter = make_projection(bot)
         current = ticket(created_at=now, public_token="opaque-token")
         main = types.SimpleNamespace(
             id=77,
@@ -261,10 +270,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
         channel.fetched_message = types.SimpleNamespace(
             thread=types.SimpleNamespace(id=88)
         )
-        adapter = adapter_module.DiscordTicketProjection(
-            FakeBot({channel.id: channel}),
-            lambda _ticket: object(),
-        )
+        adapter = make_projection(FakeBot({channel.id: channel}))
 
         thread_id = await adapter.find_ticket_thread(ticket(message_id=55))
 
@@ -281,7 +287,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
             view_tickets.append((current.ticket_id, current.state is models.TicketState.CLAIMED))
             return view
 
-        adapter = adapter_module.DiscordTicketProjection(bot, view_factory)
+        adapter = make_projection(bot, view_factory)
         current = ticket(pr_title="x" * 101)
 
         message_id = await adapter.send_ticket(current)
@@ -321,7 +327,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
             view_tickets.append((current.ticket_id, current.state is models.TicketState.CLAIMED))
             return view
 
-        adapter = adapter_module.DiscordTicketProjection(bot, view_factory)
+        adapter = make_projection(bot, view_factory)
         current = ticket(
             message_id=55,
             state=models.TicketState.CLAIMED,
@@ -355,10 +361,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_open_ticket_edit_does_not_display_the_pinged_target_as_reviewer(self):
         channel = FakeChannel()
         bot = FakeBot({channel.id: channel})
-        adapter = adapter_module.DiscordTicketProjection(
-            bot,
-            lambda _ticket: object(),
-        )
+        adapter = make_projection(bot)
         current = ticket(
             message_id=55,
             state=models.TicketState.OPEN,
@@ -377,10 +380,51 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+    async def test_github_prompts_use_cached_thread_once_with_exact_views(self):
+        thread = FakeThread(66)
+        bot = FakeBot({thread.id: thread})
+        category_view = object()
+        draft_view = object()
+        category_tickets = []
+        draft_tickets = []
+        adapter = adapter_module.DiscordTicketProjection(
+            bot,
+            lambda _ticket: object(),
+            category_prompt_view_factory=lambda current: (
+                category_tickets.append(current.ticket_id) or category_view
+            ),
+            draft_prompt_view_factory=lambda current: (
+                draft_tickets.append(current.ticket_id) or draft_view
+            ),
+        )
+        current = ticket(thread_id=66, author_id=30)
+
+        await adapter.prompt_categories(current, 66)
+        await adapter.prompt_draft_decision(current)
+
+        self.assertEqual(category_tickets, [current.ticket_id])
+        self.assertEqual(draft_tickets, [current.ticket_id])
+        self.assertEqual(len(thread.send_calls), 2)
+        category_content, category_kwargs = thread.send_calls[0]
+        draft_content, draft_kwargs = thread.send_calls[1]
+        self.assertEqual(
+            category_content,
+            presentation.add_categories_notification("<@30>"),
+        )
+        self.assertEqual(
+            draft_content,
+            presentation.draft_ticket_notification("<@30>"),
+        )
+        self.assertIs(category_kwargs["view"], category_view)
+        self.assertIs(draft_kwargs["view"], draft_view)
+        self.assertEqual(category_kwargs["allowed_mentions"].users[0].id, 30)
+        self.assertEqual(draft_kwargs["allowed_mentions"].users[0].id, 30)
+        self.assertEqual(bot.fetch_calls, 0)
+
     async def test_ping_uses_exact_copy_and_allows_only_the_new_target_mention(self):
         thread = FakeThread(66)
         bot = FakeBot({thread.id: thread})
-        adapter = adapter_module.DiscordTicketProjection(bot, lambda _ticket: object())
+        adapter = make_projection(bot)
 
         await adapter.ping_reviewer(66, 41, False)
         await adapter.ping_reviewer(66, 42, True)
@@ -404,7 +448,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
         channel = FakeChannel()
         thread = FakeThread(66)
         bot = FakeBot({channel.id: channel, thread.id: thread})
-        adapter = adapter_module.DiscordTicketProjection(bot, lambda _ticket: object())
+        adapter = make_projection(bot)
 
         await adapter.delete_message(channel.id, 55)
         await adapter.delete_thread(thread.id)
@@ -421,9 +465,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
         with self.subTest(operation="send"):
             channel = FakeChannel()
             channel.error = error
-            adapter = adapter_module.DiscordTicketProjection(
-                FakeBot({channel.id: channel}), lambda _ticket: object()
-            )
+            adapter = make_projection(FakeBot({channel.id: channel}))
             with self.assertRaises(projection_module.ProjectionNotFound):
                 await adapter.send_ticket(ticket())
 
@@ -431,9 +473,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(operation=operation):
                 channel = FakeChannel()
                 channel.message.error = error
-                adapter = adapter_module.DiscordTicketProjection(
-                    FakeBot({channel.id: channel}), lambda _ticket: object()
-                )
+                adapter = make_projection(FakeBot({channel.id: channel}))
                 if operation == "create_thread":
                     with self.assertRaises(projection_module.ProjectionNotFound):
                         await adapter.create_thread(ticket(), 55)
@@ -448,9 +488,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(operation=operation):
                 thread = FakeThread(66)
                 thread.error = error
-                adapter = adapter_module.DiscordTicketProjection(
-                    FakeBot({thread.id: thread}), lambda _ticket: object()
-                )
+                adapter = make_projection(FakeBot({thread.id: thread}))
                 if operation == "ping_reviewer":
                     with self.assertRaises(projection_module.ProjectionNotFound):
                         await adapter.ping_reviewer(thread.id, 41, True)
@@ -462,7 +500,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
         bot = FakeBot({})
         archived = FakeThread(66)
         bot.fetched_channels[66] = archived
-        adapter = adapter_module.DiscordTicketProjection(bot, lambda _ticket: object())
+        adapter = make_projection(bot)
 
         with self.assertRaises(projection_module.ProjectionUnavailable):
             await adapter.send_ticket(ticket())

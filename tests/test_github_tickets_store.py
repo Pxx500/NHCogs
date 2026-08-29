@@ -251,6 +251,146 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(activated)
         return await self.store.get_ticket(ticket.ticket_id)
 
+    async def test_start_automatic_routing_persists_categories_and_schedule(self):
+        await self.store.initialize()
+        rendering = await self.store.add_category(10, "rendering", self.now)
+        python = await self.store.add_category(10, "python", self.now)
+        ticket = await self._create_open_ticket(
+            routing_mode=models.RoutingMode.NONE,
+        )
+        next_action_at = self.now + timedelta(seconds=10)
+        updated_at = self.now + timedelta(seconds=1)
+
+        routed = await self.store.start_automatic_routing(
+            ticket.ticket_id,
+            category_ids=(
+                rendering.category_id,
+                python.category_id,
+                rendering.category_id,
+            ),
+            category_display="rendering, python",
+            next_action_at=next_action_at,
+            updated_at=updated_at,
+        )
+
+        self.assertIsNotNone(routed)
+        self.assertEqual(
+            routed.category_ids,
+            (python.category_id, rendering.category_id),
+        )
+        self.assertEqual(routed.category_display, "rendering, python")
+        self.assertEqual(routed.routing_mode, models.RoutingMode.AUTOMATIC)
+        self.assertEqual(routed.next_action, models.NextAction.AUTOMATIC_PING)
+        self.assertEqual(routed.next_action_at, next_action_at)
+        self.assertEqual(routed.updated_at, updated_at)
+        self.assertEqual(routed.transition_version, ticket.transition_version + 1)
+        self.assertEqual(await self.store.get_ticket(ticket.ticket_id), routed)
+
+    async def test_start_automatic_routing_preserves_claimed_active_ticket(self):
+        await self.store.initialize()
+        rendering = await self.store.add_category(10, "rendering", self.now)
+        ticket = await self._create_open_ticket(
+            routing_mode=models.RoutingMode.NONE,
+        )
+        self.assertTrue(
+            await self.store.claim(
+                ticket.ticket_id,
+                200,
+                self.now + timedelta(minutes=1),
+                self.now,
+            )
+        )
+        claimed = await self.store.get_ticket(ticket.ticket_id)
+        next_action_at = self.now + timedelta(seconds=10)
+
+        routed = await self.store.start_automatic_routing(
+            claimed.ticket_id,
+            category_ids=(rendering.category_id,),
+            category_display="rendering",
+            next_action_at=next_action_at,
+            updated_at=self.now + timedelta(seconds=1),
+        )
+
+        self.assertIsNotNone(routed)
+        self.assertEqual(routed.state, models.TicketState.CLAIMED)
+        self.assertEqual(routed.assignee_id, 200)
+        self.assertEqual(routed.routing_mode, models.RoutingMode.AUTOMATIC)
+        self.assertEqual(routed.next_action, models.NextAction.AUTOMATIC_PING)
+        self.assertEqual(routed.next_action_at, next_action_at)
+        self.assertEqual(routed.category_ids, (rendering.category_id,))
+
+    async def test_start_automatic_routing_rejects_invalid_transitions_atomically(self):
+        await self.store.initialize()
+        rendering = await self.store.add_category(10, "rendering", self.now)
+        other_guild = await self.store.add_category(20, "rendering", self.now)
+        next_action_at = self.now + timedelta(seconds=10)
+        parameters = {
+            "category_ids": (rendering.category_id,),
+            "category_display": "rendering",
+            "next_action_at": next_action_at,
+            "updated_at": self.now + timedelta(seconds=1),
+        }
+
+        self.assertIsNone(await self.store.start_automatic_routing(999, **parameters))
+
+        creating = await self.store.create_ticket(
+            models.NewTicket(
+                guild_id=10,
+                channel_id=20,
+                author_id=100,
+                pr_title="Creating",
+                pr_url="https://example.test/pull/creating",
+                category_display="",
+                routing_mode=models.RoutingMode.NONE,
+                direct_target_id=None,
+                category_ids=(),
+                created_at=self.now,
+            )
+        )
+        self.assertIsNone(
+            await self.store.start_automatic_routing(creating.ticket_id, **parameters)
+        )
+        self.assertEqual(await self.store.get_ticket(creating.ticket_id), creating)
+
+        already_routed = await self._create_open_ticket(
+            routing_mode=models.RoutingMode.AUTOMATIC,
+        )
+        self.assertIsNone(
+            await self.store.start_automatic_routing(
+                already_routed.ticket_id,
+                **parameters,
+            )
+        )
+        self.assertEqual(
+            await self.store.get_ticket(already_routed.ticket_id),
+            already_routed,
+        )
+
+        finishing = await self._create_open_ticket(
+            routing_mode=models.RoutingMode.NONE,
+        )
+        self.assertTrue(await self.store.begin_finishing(finishing.ticket_id, self.now))
+        finishing = await self.store.get_ticket(finishing.ticket_id)
+        self.assertIsNone(
+            await self.store.start_automatic_routing(finishing.ticket_id, **parameters)
+        )
+        self.assertEqual(await self.store.get_ticket(finishing.ticket_id), finishing)
+
+        unchanged = await self._create_open_ticket(
+            category_ids=(rendering.category_id,),
+            category_display="original",
+            routing_mode=models.RoutingMode.NONE,
+        )
+        with self.assertRaisesRegex(ValueError, "must belong to the guild"):
+            await self.store.start_automatic_routing(
+                unchanged.ticket_id,
+                category_ids=(other_guild.category_id,),
+                category_display="foreign",
+                next_action_at=next_action_at,
+                updated_at=self.now + timedelta(seconds=1),
+            )
+        self.assertEqual(await self.store.get_ticket(unchanged.ticket_id), unchanged)
+
     async def test_candidate_history_batches_all_persisted_facts_in_candidate_order(self):
         await self.store.initialize()
         rendering = await self.store.add_category(10, "rendering", self.now)

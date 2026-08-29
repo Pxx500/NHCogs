@@ -1138,6 +1138,27 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private failure", str(interaction.followup.send.await_args))
         create_ticket.assert_not_awaited()
 
+    async def test_new_ticket_rejects_foreign_organization_before_fetch(self):
+        fetch_pull_request = mock.AsyncMock()
+        create_ticket = mock.AsyncMock()
+        modal = await self.open_ticket_modal(
+            create_ticket=create_ticket,
+            fetch_pull_request=fetch_pull_request,
+            expected_organization="NewHorizons",
+        )
+        modal.pr_link.value = "https://github.com/OtherOrganization/NHCogs/pull/42"
+        modal.ping_behavior.value = models.RoutingMode.NONE.value
+        interaction = FakeInteraction()
+
+        await modal.on_submit(interaction)
+
+        self.assertEqual(
+            interaction.response.messages[0][0],
+            presentation.COULD_NOT_CREATE_TICKET,
+        )
+        fetch_pull_request.assert_not_awaited()
+        create_ticket.assert_not_awaited()
+
     async def test_multiple_automatic_categories_open_confirmation_before_create(self):
         now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
         store = FakeStore()
