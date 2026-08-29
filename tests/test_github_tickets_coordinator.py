@@ -296,6 +296,30 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             [("send_ticket", ticket.ticket_id, None), ("create_thread", ticket.ticket_id, 300)],
         )
 
+    async def test_manual_github_creation_preserves_author_categories_and_routing(self):
+        request = self.request(models.RoutingMode.DIRECT_AUTOMATIC, direct_target_id=500)
+        pull_request = self.pull_request()
+
+        result = await self.coordinator.create_ticket_for_pull_request(
+            request,
+            self.actor(),
+            pull_request,
+        )
+
+        self.assertTrue(result.success)
+        ticket = (await self.store.list_active_tickets())[0]
+        self.assertEqual(ticket.author_id, 100)
+        self.assertEqual(ticket.origin, models.TicketOrigin.DISCORD)
+        self.assertEqual(ticket.category_ids, (self.category.category_id,))
+        self.assertEqual(ticket.routing_mode, models.RoutingMode.DIRECT_AUTOMATIC)
+        self.assertEqual(ticket.direct_target_id, 500)
+        binding = await self.store.get_pull_request(100, 7)
+        self.assertEqual(binding.current_ticket_id, ticket.ticket_id)
+        self.assertEqual(
+            self.projection.calls,
+            [("send_ticket", ticket.ticket_id, None), ("create_thread", ticket.ticket_id, 300)],
+        )
+
     async def test_github_claim_and_unassign_do_not_echo_assignee_writes(self):
         ticket_id = await self.create_github_active()
 

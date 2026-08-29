@@ -108,6 +108,19 @@ class TicketCoordinator:
         async with self._lifecycle_lock:
             return await self._create_ticket_locked(request, actor)
 
+    async def create_ticket_for_pull_request(
+        self,
+        request: TicketRequest,
+        actor: TicketActor,
+        pull_request: GitHubPullRequest,
+    ) -> TicketResult:
+        async with self._lifecycle_lock:
+            return await self._create_ticket_locked(
+                request,
+                actor,
+                pull_request=pull_request,
+            )
+
     async def create_ticket_from_github(
         self,
         guild_id: int,
@@ -150,6 +163,8 @@ class TicketCoordinator:
         self,
         request: TicketRequest,
         actor: TicketActor,
+        *,
+        pull_request: GitHubPullRequest | None = None,
     ) -> TicketResult:
         direct_target_id = (
             request.direct_target_id
@@ -172,18 +187,24 @@ class TicketCoordinator:
 
         now = self._clock()
         try:
-            ticket = await self._store.create_ticket(
-                NewTicket(
-                    guild_id=request.guild_id,
-                    channel_id=settings.ticket_channel_id,
-                    author_id=actor.user_id,
-                    pr_title=request.pr_title,
-                    pr_url=request.pr_url,
-                    category_display=request.category_display,
-                    routing_mode=request.routing_mode,
-                    direct_target_id=direct_target_id,
-                    category_ids=request.category_ids,
-                    created_at=now,
+            new_ticket = NewTicket(
+                guild_id=request.guild_id,
+                channel_id=settings.ticket_channel_id,
+                author_id=actor.user_id,
+                pr_title=request.pr_title,
+                pr_url=request.pr_url,
+                category_display=request.category_display,
+                routing_mode=request.routing_mode,
+                direct_target_id=direct_target_id,
+                category_ids=request.category_ids,
+                created_at=now,
+            )
+            ticket = (
+                await self._store.create_ticket(new_ticket)
+                if pull_request is None
+                else await self._store.create_ticket_for_pull_request(
+                    new_ticket,
+                    pull_request,
                 )
             )
         except Exception:
