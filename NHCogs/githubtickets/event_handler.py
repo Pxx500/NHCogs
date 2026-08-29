@@ -124,6 +124,8 @@ class GitHubEventHandler:
             and pull_request.open
             and not pull_request.draft
         ):
+            if not pull_request.title.strip():
+                return
             author, ambiguous = await self._resolve_member(
                 pull_request.github_author_login,
                 require_eligible=True,
