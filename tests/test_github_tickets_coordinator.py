@@ -82,9 +82,7 @@ class FakeProjection:
         return self.recovered_thread_id
 
     async def find_ping(self, thread_id, target_user_id, automatic, reserved_at):
-        self.calls.append(
-            ("find_ping", thread_id, target_user_id, automatic, reserved_at)
-        )
+        self.calls.append(("find_ping", thread_id, target_user_id, automatic, reserved_at))
         if error := self.errors.get("find_ping"):
             raise error
         return self.recovered_ping_at
@@ -98,9 +96,7 @@ class FakeProjection:
         return thread_id
 
     async def edit_ticket(self, ticket, *, reviewer_github=None):
-        self.calls.append(
-            ("edit_ticket", ticket.ticket_id, ticket.state, reviewer_github)
-        )
+        self.calls.append(("edit_ticket", ticket.ticket_id, ticket.state, reviewer_github))
         if "edit_ticket" in self.not_found_operations:
             raise projection_module.ProjectionNotFound
         if error := self.errors.get("edit_ticket"):
@@ -196,6 +192,38 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             category_ids=(self.category.category_id,),
         )
 
+    def pull_request(self, *, repository_id=100, pr_number=7, author_id=900):
+        return models.GitHubPullRequest(
+            repository_id=repository_id,
+            pr_number=pr_number,
+            github_pr_id=700 + pr_number,
+            repository_full_name="GTNewHorizons/Example",
+            url=f"https://github.com/GTNewHorizons/Example/pull/{pr_number}",
+            title="Automate ticket creation",
+            github_author_id=author_id,
+            github_author_login="octocat",
+            draft=False,
+            open=True,
+            labels=("discord-ticket",),
+            github_updated_at=self.now,
+            last_processed_action="labeled",
+        )
+
+    async def create_github_active(self, *, author_id=None, pull_request=None):
+        pull_request = pull_request or self.pull_request()
+        result = await self.coordinator.create_ticket_from_github(
+            10,
+            pull_request,
+            author_id=author_id,
+        )
+        self.assertTrue(result.success)
+        return (
+            await self.store.get_pull_request(
+                pull_request.repository_id,
+                pull_request.pr_number,
+            )
+        ).current_ticket_id
+
     async def create_active(self, *, routing_mode=None, direct_target_id=None):
         result = await self.coordinator.create_ticket(
             self.request(routing_mode, direct_target_id),
@@ -205,9 +233,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         return (await self.store.list_active_tickets())[-1]
 
     def candidate(self, user_id=500, *, presence=None):
-        routing_module = importlib.import_module(
-            f"{GITHUBTICKETS_PACKAGE_NAME}.routing"
-        )
+        routing_module = importlib.import_module(f"{GITHUBTICKETS_PACKAGE_NAME}.routing")
         return routing_module.CandidateFacts(
             user_id=user_id,
             is_cached_member=True,
@@ -247,6 +273,97 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             [("send_ticket", 1, None), ("create_thread", 1, 300)],
         )
         self.assertEqual(self.wake_count, 1)
+
+    async def test_github_creation_binds_and_projects_ticket_without_author(self):
+        result = await self.coordinator.create_ticket_from_github(
+            10,
+            self.pull_request(),
+            author_id=None,
+        )
+
+        self.assertTrue(result.success)
+        ticket = (await self.store.list_active_tickets())[0]
+        self.assertIsNone(ticket.author_id)
+        self.assertEqual(ticket.origin, models.TicketOrigin.GITHUB)
+        self.assertEqual(ticket.pr_title, "Automate ticket creation")
+        self.assertEqual(ticket.routing_mode, models.RoutingMode.NONE)
+        self.assertEqual(ticket.category_ids, ())
+        self.assertIsNone(ticket.next_action)
+        binding = await self.store.get_pull_request(100, 7)
+        self.assertEqual(binding.current_ticket_id, ticket.ticket_id)
+        self.assertEqual(
+            self.projection.calls,
+            [("send_ticket", ticket.ticket_id, None), ("create_thread", ticket.ticket_id, 300)],
+        )
+
+    async def test_github_claim_and_unassign_do_not_echo_assignee_writes(self):
+        ticket_id = await self.create_github_active()
+
+        claimed = await self.coordinator.claim_ticket_from_github(
+            100,
+            7,
+            user_id=222,
+            ensure_assigned_login=None,
+        )
+        unassigned = await self.coordinator.unassign_ticket_from_github(
+            100,
+            7,
+            user_id=222,
+        )
+
+        self.assertTrue(claimed.success)
+        self.assertTrue(unassigned.success)
+        ticket = await self.store.get_ticket(ticket_id)
+        self.assertEqual(ticket.state, models.TicketState.OPEN)
+        self.assertIsNone(ticket.assignee_id)
+        self.assertIsNone(
+            await self.store.claim_next_outbox(
+                now=self.now,
+                stale_before=self.now - timedelta(minutes=5),
+            )
+        )
+
+    async def test_review_claim_can_enqueue_github_assignment(self):
+        ticket_id = await self.create_github_active()
+
+        result = await self.coordinator.claim_ticket_from_github(
+            100,
+            7,
+            user_id=222,
+            ensure_assigned_login="Reviewer",
+        )
+
+        self.assertTrue(result.success)
+        ticket = await self.store.get_ticket(ticket_id)
+        self.assertEqual(ticket.assignee_id, 222)
+        intent = await self.store.claim_next_outbox(
+            now=self.now,
+            stale_before=self.now - timedelta(minutes=5),
+        )
+        self.assertEqual(
+            intent.operation,
+            models.GitHubOutboxOperation.ADD_ASSIGNEE,
+        )
+        self.assertEqual(intent.github_login, "reviewer")
+
+    async def test_github_finish_uses_normal_projection_cleanup(self):
+        ticket_id = await self.create_github_active()
+        ticket = await self.store.get_ticket(ticket_id)
+        self.projection.calls.clear()
+
+        result = await self.coordinator.finish_ticket_from_github(100, 7)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.finished_ticket.ticket_id, ticket_id)
+        self.assertIsNone(await self.store.get_ticket(ticket_id))
+        self.assertIsNone((await self.store.get_pull_request(100, 7)).current_ticket_id)
+        self.assertEqual(
+            self.projection.calls,
+            [
+                ("delete_thread", ticket.thread_id),
+                ("delete_message", ticket.channel_id, ticket.message_id),
+            ],
+        )
 
     async def test_create_rejects_direct_self_review_without_writing_ticket(self):
         result = await self.coordinator.create_ticket(
@@ -530,7 +647,10 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(passive.current_target_id)
         self.assertIsNone(passive.next_action)
         self.assertEqual(
-            [(item.user_id, item.reason) for item in await self.store.list_exclusions(ticket.ticket_id)],
+            [
+                (item.user_id, item.reason)
+                for item in await self.store.list_exclusions(ticket.ticket_id)
+            ],
             [(200, models.ExclusionReason.TIMED_OUT)],
         )
         self.assertEqual(
@@ -546,9 +666,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_automatic_due_uses_presence_deadline_and_failed_send_costs_no_ping(self):
         ticket = await self.create_active()
-        self.candidates = (
-            self.candidate(500, presence=models.PresenceTier.IDLE),
-        )
+        self.candidates = (self.candidate(500, presence=models.PresenceTier.IDLE),)
         self.now = ticket.next_action_at
         expected_response_deadline = self.now + timedelta(
             seconds=self.settings.idle_response_seconds
@@ -739,9 +857,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 created_at=self.now,
             )
         )
-        self.assertTrue(
-            await self.store.record_ticket_message(ticket.ticket_id, 999, self.now)
-        )
+        self.assertTrue(await self.store.record_ticket_message(ticket.ticket_id, 999, self.now))
         self.projection.recovered_thread_id = 888
 
         result = await self.coordinator.recover_projection_cleanup(ticket.ticket_id)
@@ -772,9 +888,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         await self.store.record_ticket_message(ticket.ticket_id, 999, self.now)
-        self.projection.errors["find_ticket_thread"] = (
-            projection_module.ProjectionNotFound()
-        )
+        self.projection.errors["find_ticket_thread"] = projection_module.ProjectionNotFound()
 
         result = await self.coordinator.recover_projection_cleanup(ticket.ticket_id)
 
@@ -798,9 +912,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         await self.store.record_ticket_message(ticket.ticket_id, 999, self.now)
-        self.projection.errors["find_ticket_thread"] = (
-            projection_module.ProjectionNotFound()
-        )
+        self.projection.errors["find_ticket_thread"] = projection_module.ProjectionNotFound()
         original_delete_ticket = self.store.delete_ticket
         delete_attempts = 0
 
@@ -827,9 +939,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(recovered.success)
         self.assertIsNone(await self.store.get_ticket(ticket.ticket_id))
-        find_calls = [
-            call for call in self.projection.calls if call[0] == "find_ticket_thread"
-        ]
+        find_calls = [call for call in self.projection.calls if call[0] == "find_ticket_thread"]
         self.assertEqual(len(find_calls), 1)
 
     async def test_create_started_before_privacy_redaction_is_cleaned_by_redaction(self):
@@ -999,9 +1109,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
         self.store.claim = delayed_claim
         self.store.user_reference_ticket_ids = observed_reference_ids
-        claim_task = asyncio.create_task(
-            self.coordinator.claim(ticket.ticket_id, self.actor(500))
-        )
+        claim_task = asyncio.create_task(self.coordinator.claim(ticket.ticket_id, self.actor(500)))
         await claim_started.wait()
         redact_task = asyncio.create_task(
             self.coordinator.redact_user(
@@ -1078,9 +1186,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 passive = await self.store.get_ticket(ticket.ticket_id)
                 self.assertEqual(passive.state, models.TicketState.OPEN)
                 self.assertIsNone(passive.next_action)
-                self.assertFalse(
-                    any(call[0] == "ping_reviewer" for call in self.projection.calls)
-                )
+                self.assertFalse(any(call[0] == "ping_reviewer" for call in self.projection.calls))
 
     async def test_not_found_from_ping_and_finish_is_successful_absence(self):
         ping_ticket = await self.create_active(
