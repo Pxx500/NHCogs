@@ -488,7 +488,7 @@ class OperationalErrorCommandTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
 
-    async def test_public_set_commands_reject_before_protected_configuration_access(self):
+    async def test_public_mutation_commands_reject_before_configuration_access(self):
         with TemporaryDirectory() as directory:
             with _isolated_operational_errors(Path(directory)) as module:
                 cog, _bot, guild, private_channel = _reporting_fixture(module)
@@ -523,11 +523,34 @@ class OperationalErrorCommandTests(unittest.IsolatedAsyncioTestCase):
                         ctx,
                         guild.maintainer,
                     )
+                ctx.command = module.OperationalErrors.nhcogs_errors_channel_clear
+                with self.assertRaisesRegex(
+                    feedback_error,
+                    "hidden from @everyone",
+                ):
+                    await module.OperationalErrors.nhcogs_errors_channel_clear.callback(
+                        cog,
+                        ctx,
+                    )
+                ctx.command = module.OperationalErrors.nhcogs_errors_maintainer_clear
+                with self.assertRaisesRegex(
+                    feedback_error,
+                    "hidden from @everyone",
+                ):
+                    await module.OperationalErrors.nhcogs_errors_maintainer_clear.callback(
+                        cog,
+                        ctx,
+                    )
 
                 self.assertEqual(cog.config.error_channel.read_count, 0)
                 self.assertEqual(cog.config.error_channel.set_count, 0)
                 self.assertEqual(cog.config.error_maintainer_id.read_count, 0)
                 self.assertEqual(cog.config.error_maintainer_id.set_count, 0)
+                self.assertEqual(cog.config.error_channel.value, private_channel.id)
+                self.assertEqual(
+                    cog.config.error_maintainer_id.value,
+                    guild.maintainer.id,
+                )
 
     async def test_private_set_commands_write_protected_configuration(self):
         with TemporaryDirectory() as directory:
