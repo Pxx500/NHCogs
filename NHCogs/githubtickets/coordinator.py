@@ -257,8 +257,6 @@ class TicketCoordinator:
                 now,
             ):
                 raise RuntimeError("ticket thread reservation lost its creating state")
-            if ticket.origin is TicketOrigin.GITHUB:
-                await self._projection.prompt_categories(ticket, thread_id)
             protection_until, next_action, next_action_at = self._creation_schedule(
                 routing_mode,
                 settings,
@@ -281,9 +279,31 @@ class TicketCoordinator:
                 await self._defer_cleanup_retry(ticket.ticket_id)
             return TicketResult(False, CREATE_FAILED)
 
+        activated_ticket = await self._store.get_ticket(ticket.ticket_id)
+        if activated_ticket is not None:
+            await self._send_pending_category_prompt(activated_ticket)
         if next_action_at is not None:
             self._wake_deadlines()
         return TicketResult(True)
+
+    async def _send_pending_category_prompt(self, ticket: Ticket) -> bool:
+        if ticket.category_prompt_retry_at is None:
+            return True
+        if ticket.thread_id is None:
+            return False
+        try:
+            await self._projection.prompt_categories(ticket, ticket.thread_id)
+        except Exception:
+            log.exception(
+                "GitHub Tickets category prompt failed for ticket %s",
+                ticket.ticket_id,
+            )
+            retry_at = self._clock() + timedelta(seconds=PROJECTION_RETRY_SECONDS)
+            if await self._store.defer_category_prompt(ticket.ticket_id, retry_at):
+                self._wake_deadlines()
+            return False
+        await self._store.acknowledge_category_prompt(ticket.ticket_id)
+        return True
 
     async def claim(self, ticket_id: int, actor: TicketActor) -> TicketResult:
         async with self._ticket_lock(ticket_id):
@@ -1013,6 +1033,16 @@ class TicketCoordinator:
                 TicketState.FINISHING,
             ):
                 return await self._recover_projection_cleanup_locked(ticket_id)
+            if (
+                ticket is not None
+                and ticket.category_prompt_retry_at is not None
+                and ticket.category_prompt_retry_at <= self._clock()
+            ):
+                if not await self._send_pending_category_prompt(ticket):
+                    return TicketResult(True)
+                ticket = await self._store.get_ticket(ticket_id)
+                if ticket is None:
+                    return TicketResult(False, INACTIVE_TICKET)
             projection_sync = await self._store.get_projection_sync_ticket(ticket_id)
             if projection_sync is not None:
                 result = await self._edit_after_transition(projection_sync)

@@ -309,7 +309,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(ticket.next_action)
         binding = await self.store.get_pull_request(100, 7)
         self.assertEqual(binding.current_ticket_id, ticket.ticket_id)
-        self.assertEqual(prompt_states, [models.TicketState.CREATING])
+        self.assertEqual(prompt_states, [models.TicketState.OPEN])
         self.assertEqual(
             self.projection.calls,
             [
@@ -340,50 +340,60 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_github_category_prompt_failure_rolls_back_and_can_retry(self):
+    async def test_github_category_prompt_failure_keeps_ticket_and_retries_prompt(self):
         pull_request = self.pull_request()
         self.projection.errors["prompt_categories"] = RuntimeError(
             "controlled prompt failure"
         )
 
-        failed = await self.coordinator.create_ticket_from_github(
+        created = await self.coordinator.create_ticket_from_github(
             10,
             pull_request,
             author_id=None,
         )
 
-        self.assertFalse(failed.success)
-        self.assertEqual(failed.response, "Could not create the ticket")
-        self.assertIsNone(await self.store.get_ticket(1))
-        self.assertIsNone((await self.store.get_pull_request(100, 7)).current_ticket_id)
+        self.assertTrue(created.success)
+        ticket = await self.store.get_ticket(1)
+        self.assertEqual(ticket.state, models.TicketState.OPEN)
+        self.assertEqual(
+            ticket.category_prompt_retry_at,
+            self.now + timedelta(seconds=5),
+        )
+        self.assertEqual(
+            await self.store.nearest_deadline(),
+            self.now + timedelta(seconds=5),
+        )
+        self.assertEqual(
+            await self.store.due_ticket_ids(self.now + timedelta(seconds=4)),
+            (),
+        )
+        self.assertEqual(
+            await self.store.due_ticket_ids(self.now + timedelta(seconds=5)),
+            (1,),
+        )
+        self.assertEqual((await self.store.get_pull_request(100, 7)).current_ticket_id, 1)
         self.assertEqual(
             self.projection.calls,
             [
                 ("send_ticket", 1, None),
                 ("create_thread", 1, 300),
                 ("prompt_categories", 1, 400, None),
-                ("delete_thread", 400),
-                ("delete_message", 20, 300),
             ],
         )
+        self.assertEqual(self.wake_count, 1)
 
         self.projection.errors.pop("prompt_categories")
         self.projection.calls.clear()
-        retried = await self.coordinator.create_ticket_from_github(
-            10,
-            pull_request,
-            author_id=None,
-        )
+        self.now += timedelta(seconds=5)
+        retried = await self.coordinator.process_due(1)
 
         self.assertTrue(retried.success)
-        ticket = (await self.store.list_active_tickets())[0]
-        self.assertEqual(ticket.ticket_id, 2)
+        ticket = await self.store.get_ticket(1)
+        self.assertIsNone(ticket.category_prompt_retry_at)
         self.assertEqual(
             self.projection.calls,
             [
-                ("send_ticket", 2, None),
-                ("create_thread", 2, 301),
-                ("prompt_categories", 2, 401, None),
+                ("prompt_categories", 1, 400, None),
             ],
         )
 
@@ -406,7 +416,6 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             [
                 ("send_ticket", 1, None),
                 ("create_thread", 1, 300),
-                ("prompt_categories", 1, 400, None),
                 ("delete_thread", 400),
                 ("delete_message", 20, 300),
             ],
