@@ -42,6 +42,12 @@ class _Guild:
         return self.members.get(user_id)
 
 
+def _member_is_eligible(member: _Member) -> bool:
+    return member.guild_permissions.manage_messages or any(
+        role.id == 99 for role in member.roles
+    )
+
+
 class _Bot:
     def __init__(self, guild: _Guild, reporter: _Reporter) -> None:
         self.guild = guild
@@ -167,7 +173,7 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
             self.coordinator,
             bot=self.bot,
             guild_id=10,
-            participant_role_ids=(99,),
+            member_is_eligible=_member_is_eligible,
         )
 
     async def asyncTearDown(self) -> None:
@@ -308,7 +314,7 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
             self.coordinator,
             bot=self.bot,
             guild_id=10,
-            participant_role_ids=(99,),
+            member_is_eligible=_member_is_eligible,
             refresh_pull_request=refresh_pull_request,
         )
 
