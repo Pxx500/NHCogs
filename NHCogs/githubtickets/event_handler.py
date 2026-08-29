@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
 
@@ -33,14 +33,14 @@ class GitHubEventHandler:
         *,
         bot: Any,
         guild_id: int,
-        participant_role_ids: Iterable[int],
+        member_is_eligible: Callable[[Any], bool],
         refresh_pull_request: RefreshPullRequest | None = None,
     ) -> None:
         self._store = store
         self._coordinator = coordinator
         self._bot = bot
         self._guild_id = guild_id
-        self._participant_role_ids = frozenset(participant_role_ids)
+        self._member_is_eligible = member_is_eligible
         self._refresh_pull_request = refresh_pull_request
 
     async def __call__(self, delivery: GitHubDelivery) -> DeliveryDisposition:
@@ -256,11 +256,7 @@ class GitHubEventHandler:
         return tuple(dict.fromkeys(login.casefold() for login in logins))
 
     def _eligible(self, member: Any) -> bool:
-        permissions = getattr(member, "guild_permissions", None)
-        if permissions is not None and bool(permissions.manage_messages):
-            return True
-        role_ids = {int(role.id) for role in getattr(member, "roles", ())}
-        return bool(self._participant_role_ids.intersection(role_ids))
+        return self._member_is_eligible(member)
 
     @staticmethod
     def _require_settled(result: Any) -> None:
