@@ -249,6 +249,7 @@ def _decode_outbox(row: sqlite3.Row) -> GitHubOutboxItem:
         ticket_id=int(row["ticket_id"]),
         transition_version=int(row["transition_version"]),
         repository_id=int(row["repository_id"]),
+        repository_full_name=str(row["repository_full_name"]),
         pr_number=int(row["pr_number"]),
         github_login=str(row["github_login"]),
         actor_user_id=(
@@ -636,6 +637,7 @@ def _migrate_to_github_durable_work(connection: sqlite3.Connection) -> None:
             ticket_id INTEGER NOT NULL,
             transition_version INTEGER NOT NULL CHECK (transition_version >= 0),
             repository_id INTEGER NOT NULL,
+            repository_full_name TEXT NOT NULL,
             pr_number INTEGER NOT NULL CHECK (pr_number > 0),
             github_login TEXT NOT NULL,
             actor_user_id INTEGER,
@@ -651,7 +653,8 @@ def _migrate_to_github_durable_work(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             UNIQUE (ticket_id, transition_version, operation, github_login),
-            CHECK (length(github_login) > 0)
+            CHECK (length(github_login) > 0),
+            CHECK (length(repository_full_name) > 0)
         );
         CREATE INDEX idx_github_outbox_pending
             ON github_outbox (next_attempt_at, created_at, outbox_id)
@@ -2532,17 +2535,22 @@ class GitHubTicketsStore:
         self,
         connection: sqlite3.Connection,
         ticket_id: int,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, str]:
         row = connection.execute(
             """
-            SELECT repository_id, pr_number FROM github_pull_requests
+            SELECT repository_id, pr_number, repository_full_name
+            FROM github_pull_requests
             WHERE current_ticket_id = ?
             """,
             (ticket_id,),
         ).fetchone()
         if row is None:
             raise ValueError("ticket does not have an active GitHub pull request binding")
-        return int(row["repository_id"]), int(row["pr_number"])
+        return (
+            int(row["repository_id"]),
+            int(row["pr_number"]),
+            str(row["repository_full_name"]).strip(),
+        )
 
     def _insert_outbox_intent(
         self,
@@ -2551,6 +2559,7 @@ class GitHubTicketsStore:
         operation: GitHubOutboxOperation,
         ticket_id: int,
         repository_id: int,
+        repository_full_name: str,
         pr_number: int,
         github_login: str,
         actor_user_id: int,
@@ -2567,15 +2576,16 @@ class GitHubTicketsStore:
             """
             INSERT INTO github_outbox (
                 operation, ticket_id, transition_version, repository_id,
-                pr_number, github_login, actor_user_id, state, attempts,
-                next_attempt_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+                repository_full_name, pr_number, github_login, actor_user_id,
+                state, attempts, next_attempt_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
             """,
             (
                 operation.value,
                 ticket_id,
                 int(row["transition_version"]),
                 repository_id,
+                repository_full_name,
                 pr_number,
                 github_login,
                 actor_user_id,
@@ -2599,10 +2609,11 @@ class GitHubTicketsStore:
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                repository_id, pr_number = self._pull_request_identity_for_ticket(
-                    connection,
-                    ticket_id,
-                )
+                (
+                    repository_id,
+                    pr_number,
+                    repository_full_name,
+                ) = self._pull_request_identity_for_ticket(connection, ticket_id)
                 if not self._claim_ticket(
                     connection,
                     ticket_id,
@@ -2617,6 +2628,7 @@ class GitHubTicketsStore:
                     operation=GitHubOutboxOperation.ADD_ASSIGNEE,
                     ticket_id=ticket_id,
                     repository_id=repository_id,
+                    repository_full_name=repository_full_name,
                     pr_number=pr_number,
                     github_login=normalized_login,
                     actor_user_id=assignee_id,
@@ -2792,10 +2804,11 @@ class GitHubTicketsStore:
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                repository_id, pr_number = self._pull_request_identity_for_ticket(
-                    connection,
-                    ticket_id,
-                )
+                (
+                    repository_id,
+                    pr_number,
+                    repository_full_name,
+                ) = self._pull_request_identity_for_ticket(connection, ticket_id)
                 assignee_id = self._unassign_ticket(
                     connection,
                     ticket_id,
@@ -2809,6 +2822,7 @@ class GitHubTicketsStore:
                     operation=GitHubOutboxOperation.REMOVE_ASSIGNEE,
                     ticket_id=ticket_id,
                     repository_id=repository_id,
+                    repository_full_name=repository_full_name,
                     pr_number=pr_number,
                     github_login=normalized_login,
                     actor_user_id=assignee_id,
@@ -2841,9 +2855,20 @@ class GitHubTicketsStore:
                 )
                 row = connection.execute(
                     """
-                    SELECT * FROM github_outbox
-                    WHERE state IN ('pending', 'retry') AND next_attempt_at <= ?
-                    ORDER BY next_attempt_at, created_at, outbox_id
+                    SELECT candidate.* FROM github_outbox AS candidate
+                    WHERE candidate.state IN ('pending', 'retry')
+                        AND candidate.next_attempt_at <= ?
+                        AND NOT EXISTS (
+                            SELECT 1 FROM github_outbox AS predecessor
+                            WHERE predecessor.repository_id = candidate.repository_id
+                                AND predecessor.pr_number = candidate.pr_number
+                                AND predecessor.outbox_id < candidate.outbox_id
+                                AND predecessor.state IN (
+                                    'pending', 'processing', 'retry'
+                                )
+                        )
+                    ORDER BY candidate.next_attempt_at,
+                        candidate.created_at, candidate.outbox_id
                     LIMIT 1
                     """,
                     (now_value,),

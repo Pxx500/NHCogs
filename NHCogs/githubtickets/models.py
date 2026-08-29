@@ -202,6 +202,7 @@ class GitHubOutboxItem:
     ticket_id: int
     transition_version: int
     repository_id: int
+    repository_full_name: str
     pr_number: int
     github_login: str
     actor_user_id: int | None

@@ -575,6 +575,10 @@ class GitHubTicketsStoreCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.store.get_delivery("private-delivery"))
         processing_after_cleanup = await self.store.get_outbox_item(outbox.outbox_id)
         self.assertEqual(processing_after_cleanup.state, models.GitHubOutboxState.PROCESSING)
+        self.assertEqual(
+            processing_after_cleanup.repository_full_name,
+            "NewHorizons/NHCogs",
+        )
         self.assertIsNone(processing_after_cleanup.actor_user_id)
         self.assertTrue(
             await self.store.complete_outbox(
@@ -587,6 +591,7 @@ class GitHubTicketsStoreCleanupTests(unittest.IsolatedAsyncioTestCase):
             stale_before=self.now - timedelta(minutes=5),
         )
         self.assertEqual(pending.github_login, "pending-login")
+        self.assertEqual(pending.repository_full_name, "NewHorizons/NHCogs")
         self.assertIsNone(pending.actor_user_id)
         retry_at = self.now + timedelta(minutes=1)
         self.assertTrue(
