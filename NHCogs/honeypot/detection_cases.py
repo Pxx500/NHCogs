@@ -250,21 +250,6 @@ class OperationRecord:
 
 
 @dataclass(frozen=True)
-class OperationalFailureRecord:
-    failure_id: str
-    guild_id: int
-    source: OperationType | str
-    summary: str
-    first_seen_at: datetime
-    last_seen_at: datetime
-    occurrences: int
-    case_id: str | None
-    operation_id: str | None
-    resolved_at: datetime | None
-    acknowledged_at: datetime | None
-
-
-@dataclass(frozen=True)
 class EvidencePublicationRecord:
     case_id: str
     batch_index: int
@@ -398,10 +383,10 @@ class CaseSnapshot:
 
 
 ACTION_PRIORITY = MappingProxyType({
-    ActionIntent.NONE: 0,
-    ActionIntent.REVIEW: 1,
-    ActionIntent.KICK: 2,
-    ActionIntent.BAN: 3,
+        ActionIntent.NONE: 0,
+        ActionIntent.REVIEW: 1,
+        ActionIntent.KICK: 2,
+        ActionIntent.BAN: 3,
 })
 
 
@@ -588,26 +573,6 @@ class DetectionCaseStore:
                     FOREIGN KEY(case_id, message_sequence)
                         REFERENCES detection_messages(case_id, sequence) ON DELETE CASCADE
                 );
-
-                CREATE TABLE IF NOT EXISTS operational_failures (
-                    failure_id TEXT PRIMARY KEY,
-                    guild_id INTEGER NOT NULL,
-                    source TEXT NOT NULL,
-                    summary TEXT NOT NULL,
-                    first_seen_at INTEGER NOT NULL,
-                    last_seen_at INTEGER NOT NULL,
-                    occurrences INTEGER NOT NULL DEFAULT 1,
-                    case_id TEXT,
-                    operation_id TEXT,
-                    resolved_at INTEGER,
-                    acknowledged_at INTEGER
-                );
-                CREATE UNIQUE INDEX IF NOT EXISTS one_active_operational_failure
-                    ON operational_failures(guild_id, source, COALESCE(operation_id, ''),
-                                            COALESCE(case_id, ''))
-                    WHERE resolved_at IS NULL;
-                CREATE INDEX IF NOT EXISTS operational_failures_visible
-                    ON operational_failures(guild_id, acknowledged_at, resolved_at, last_seen_at);
 
                 CREATE TABLE IF NOT EXISTS detection_evidence_reservations (
                     case_id TEXT NOT NULL,
@@ -876,8 +841,8 @@ class DetectionCaseStore:
     def ensure_projection_endpoint(self, case_id: str) -> ProjectionEndpointRecord:
         with closing(self._connect()) as connection, connection:
             if connection.execute(
-                "SELECT 1 FROM detection_case_deletions WHERE case_id = ?",
-                (case_id,),
+                    "SELECT 1 FROM detection_case_deletions WHERE case_id = ?",
+                    (case_id,),
             ).fetchone() is not None:
                 raise KeyError(case_id)
             connection.execute(
@@ -946,8 +911,8 @@ class DetectionCaseStore:
         )
         with closing(self._connect()) as connection, connection:
             if connection.execute(
-                "SELECT 1 FROM detection_case_deletions WHERE case_id = ?",
-                (case_id,),
+                    "SELECT 1 FROM detection_case_deletions WHERE case_id = ?",
+                    (case_id,),
             ).fetchone() is not None:
                 raise KeyError(logical_key)
             connection.execute(
@@ -1166,8 +1131,8 @@ class DetectionCaseStore:
                     (new_message.guild_id, new_message.user_id),
                 ).fetchone()
                 if case_row is not None and connection.execute(
-                    "SELECT 1 FROM detection_case_deletions WHERE case_id = ?",
-                    (case_row["case_id"],),
+                        "SELECT 1 FROM detection_case_deletions WHERE case_id = ?",
+                        (case_row["case_id"],),
                 ).fetchone() is not None:
                     return None
                 if case_row is None or case_row["status"] != CaseStatus.RESOLVING.value:
@@ -1885,8 +1850,8 @@ class DetectionCaseStore:
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             if connection.execute(
-                "SELECT 1 FROM detection_case_deletions WHERE case_id = ?",
-                (case_id,),
+                    "SELECT 1 FROM detection_case_deletions WHERE case_id = ?",
+                    (case_id,),
             ).fetchone() is not None:
                 return None
             connection.execute(
@@ -2283,7 +2248,7 @@ class DetectionCaseStore:
                 (case_id, stale_before),
             )
             return connection.execute(
-                """SELECT 1
+                    """SELECT 1
                    WHERE EXISTS (
                        SELECT 1 FROM detection_publication_claims
                        WHERE case_id = ?
@@ -2291,7 +2256,7 @@ class DetectionCaseStore:
                        SELECT 1 FROM detection_timeline_publications
                        WHERE case_id = ? AND claim_token IS NOT NULL
                    )""",
-                (case_id, case_id),
+                    (case_id, case_id),
             ).fetchone() is not None
 
     def add_case_deletion_publication(
@@ -2341,9 +2306,9 @@ class DetectionCaseStore:
             if cursor.rowcount == 1:
                 return True
             return connection.execute(
-                """SELECT 1 FROM detection_orphan_publications
+                    """SELECT 1 FROM detection_orphan_publications
                    WHERE case_id = ? AND channel_id = ? AND message_id = ?""",
-                (case_id, channel_id, message_id),
+                    (case_id, channel_id, message_id),
             ).fetchone() is not None
 
     def list_orphan_publications(
@@ -2828,13 +2793,13 @@ class DetectionCaseStore:
         if operation is None:
             return False
         if connection.execute(
-            """SELECT 1 FROM detection_attachments
+                """SELECT 1 FROM detection_attachments
                WHERE case_id = ? AND capture_status = 'pending' LIMIT 1""",
-            (case_id,),
+                (case_id,),
         ).fetchone() is not None:
             return False
         if connection.execute(
-            """SELECT 1 FROM detection_attachments
+                """SELECT 1 FROM detection_attachments
                WHERE case_id = ? AND capture_status = 'captured'
                  AND evidence_path IS NOT NULL AND learning_decision IS NULL
                  AND (
@@ -2845,8 +2810,8 @@ class DetectionCaseStore:
                    OR lower(filename) LIKE '%.webp'
                    OR lower(filename) LIKE '%.gif'
                  )
-               LIMIT 1""",
-            (case_id,),
+                LIMIT 1""",
+                (case_id,),
         ).fetchone() is not None:
             return False
         pending_sources = connection.execute(
@@ -2870,10 +2835,10 @@ class DetectionCaseStore:
             ):
                 return False
         if connection.execute(
-            """SELECT 1 FROM detection_operations
+                """SELECT 1 FROM detection_operations
                WHERE case_id = ? AND operation_type = 'cached_purge'
                  AND status NOT IN ('succeeded', 'abandoned') LIMIT 1""",
-            (case_id,),
+                (case_id,),
         ).fetchone() is not None:
             return False
         final_operations = [
@@ -2904,20 +2869,20 @@ class DetectionCaseStore:
                 ),
             )
         terminal = connection.execute(
-                """UPDATE detection_cases
+            """UPDATE detection_cases
                    SET status = 'resolved', resolution = ?, moderator_id = ?, resolved_at = ?,
                        resolving_since = NULL, resolving_token = NULL
                    WHERE case_id = ? AND status = 'resolving' AND resolving_token = ?""",
-                (
-                    operation["result"]
-                    if operation["result"].startswith("planned_")
-                    else operation["operation_type"].removeprefix("moderator_"),
-                    operation["actor_id"],
-                    now_value,
-                    case_id,
-                    operation["operation_id"],
-                ),
-            )
+            (
+                operation["result"]
+                if operation["result"].startswith("planned_")
+                else operation["operation_type"].removeprefix("moderator_"),
+                operation["actor_id"],
+                now_value,
+                case_id,
+                operation["operation_id"],
+            ),
+        )
         return terminal.rowcount == 1
 
     def ensure_operation(
@@ -3336,98 +3301,6 @@ class DetectionCaseStore:
             )
             return result.rowcount == 1
 
-    def record_operational_failure(
-        self,
-        *,
-        guild_id: int,
-        source: OperationType | str,
-        summary: str,
-        occurred_at: datetime,
-        case_id: str | None = None,
-        operation_id: str | None = None,
-    ) -> OperationalFailureRecord:
-        source_value = source.value if isinstance(source, OperationType) else source
-        with closing(self._connect()) as connection, connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                """SELECT * FROM operational_failures
-                   WHERE guild_id = ? AND source = ?
-                     AND COALESCE(operation_id, '') = COALESCE(?, '')
-                     AND COALESCE(case_id, '') = COALESCE(?, '')
-                     AND resolved_at IS NULL""",
-                (guild_id, source_value, operation_id, case_id),
-            ).fetchone()
-            timestamp = _to_timestamp(occurred_at)
-            if row is None:
-                failure_id = str(uuid4())
-                connection.execute(
-                    """INSERT INTO operational_failures
-                       (failure_id, guild_id, source, summary, first_seen_at,
-                        last_seen_at, occurrences, case_id, operation_id)
-                       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)""",
-                    (
-                        failure_id,
-                        guild_id,
-                        source_value,
-                        summary[:1000],
-                        timestamp,
-                        timestamp,
-                        case_id,
-                        operation_id,
-                    ),
-                )
-            else:
-                failure_id = row["failure_id"]
-                connection.execute(
-                    """UPDATE operational_failures
-                       SET summary = ?, last_seen_at = ?, occurrences = occurrences + 1,
-                           acknowledged_at = NULL
-                       WHERE failure_id = ?""",
-                    (summary[:1000], timestamp, failure_id),
-                )
-            return self._operational_failure_from_row(
-                connection.execute(
-                    "SELECT * FROM operational_failures WHERE failure_id = ?",
-                    (failure_id,),
-                ).fetchone()
-            )
-
-    def resolve_operational_failure(
-        self, operation_id: str, resolved_at: datetime
-    ) -> bool:
-        with closing(self._connect()) as connection, connection:
-            result = connection.execute(
-                """UPDATE operational_failures SET resolved_at = ?
-                   WHERE operation_id = ? AND resolved_at IS NULL""",
-                (_to_timestamp(resolved_at), operation_id),
-            )
-            return result.rowcount > 0
-
-    def list_operational_failures(
-        self, guild_id: int, *, include_resolved: bool = False, limit: int = 100
-    ) -> tuple[OperationalFailureRecord, ...]:
-        where = "guild_id = ? AND acknowledged_at IS NULL"
-        if not include_resolved:
-            where += " AND resolved_at IS NULL"
-        with closing(self._connect()) as connection:
-            return tuple(
-                self._operational_failure_from_row(row)
-                for row in connection.execute(
-                    f"""SELECT * FROM operational_failures WHERE {where}
-                        ORDER BY last_seen_at DESC LIMIT ?""",
-                    (guild_id, limit),
-                )
-            )
-
-    def clear_operational_failures(self, guild_id: int, acknowledged_at: datetime) -> int:
-        with closing(self._connect()) as connection, connection:
-            result = connection.execute(
-                """UPDATE operational_failures SET acknowledged_at = ?
-                   WHERE guild_id = ? AND acknowledged_at IS NULL""",
-                (_to_timestamp(acknowledged_at), guild_id),
-            )
-            return result.rowcount
-
     def _snapshot(self, connection: sqlite3.Connection, case_row: sqlite3.Row) -> CaseSnapshot:
         messages = tuple(
             self._message_from_row(row)
@@ -3604,21 +3477,4 @@ class DetectionCaseStore:
             _from_timestamp(row["retry_at"]), row["last_error"], row["result"],
             row["actor_id"], row["idempotency_key"],
             row["claim_token"], _from_timestamp(row["claimed_at"]),
-        )
-
-    @staticmethod
-    def _operational_failure_from_row(row: sqlite3.Row) -> OperationalFailureRecord:
-        source = next(
-            (
-                operation_type
-                for operation_type in OperationType
-                if operation_type.value == row["source"]
-            ),
-            row["source"],
-        )
-        return OperationalFailureRecord(
-            row["failure_id"], row["guild_id"], source, row["summary"],
-            _from_timestamp(row["first_seen_at"]), _from_timestamp(row["last_seen_at"]),
-            row["occurrences"], row["case_id"], row["operation_id"],
-            _from_timestamp(row["resolved_at"]), _from_timestamp(row["acknowledged_at"]),
         )

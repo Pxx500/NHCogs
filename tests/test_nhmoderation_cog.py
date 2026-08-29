@@ -517,12 +517,17 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
     async def test_operational_error_is_written_to_python_logger(self):
         with loaded_nhmoderation() as module:
             subject = object.__new__(module.NHModeration)
-            subject._operational_errors = SimpleNamespace(
-                report=mock.AsyncMock(return_value=object())
-            )
+            subject.bot = object()
             error = RuntimeError("sync failed")
 
-            with mock.patch.object(module.log, "error") as logger:
+            with (
+                mock.patch.object(module.log, "error") as logger,
+                mock.patch.object(
+                    module,
+                    "report_operational_error",
+                    new=mock.AsyncMock(return_value=object()),
+                ) as report,
+            ):
                 result = await module.NHModeration.report_operational_error(
                     subject,
                     guild_id=10,
@@ -531,6 +536,15 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             self.assertIsNotNone(result)
+            report.assert_awaited_once_with(
+                subject.bot,
+                guild_id=10,
+                source="NHModeration",
+                action="weekly reconciliation",
+                error=error,
+                channel_id=None,
+                message_id=None,
+            )
             logger.assert_called_once()
             self.assertEqual(logger.call_args.kwargs["exc_info"][1], error)
 
@@ -548,13 +562,15 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             subject._run_sync = mock.AsyncMock()
-            subject._operational_errors = SimpleNamespace(
-                mark_action_recovered=mock.AsyncMock(return_value=1)
-            )
+            with mock.patch.object(
+                module,
+                "mark_operational_error_recovered",
+                new=mock.AsyncMock(return_value=1),
+            ) as recovered:
+                await module.NHModeration._startup_catchup(subject)
 
-            await module.NHModeration._startup_catchup(subject)
-
-            subject._operational_errors.mark_action_recovered.assert_awaited_once_with(
+            recovered.assert_awaited_once_with(
+                subject.bot,
                 guild_id=10,
                 source="NHModeration",
                 action="startup sync",
@@ -571,12 +587,16 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             subject._run_sync = mock.AsyncMock()
-            subject._operational_errors = SimpleNamespace(
-                mark_action_recovered=mock.AsyncMock(return_value=0)
-            )
             subject._gateway_catchup_task = None
 
-            with mock.patch.object(module.asyncio, "sleep", new=mock.AsyncMock()):
+            with (
+                mock.patch.object(module.asyncio, "sleep", new=mock.AsyncMock()),
+                mock.patch.object(
+                    module,
+                    "mark_operational_error_recovered",
+                    new=mock.AsyncMock(return_value=0),
+                ) as recovered,
+            ):
                 await module.NHModeration.on_ready(subject)
                 await subject._gateway_catchup_task
 
@@ -584,7 +604,8 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                 guild,
                 module.SyncMode.INCREMENTAL,
             )
-            subject._operational_errors.mark_action_recovered.assert_awaited_once_with(
+            recovered.assert_awaited_once_with(
+                subject.bot,
                 guild_id=10,
                 source="NHModeration",
                 action="gateway catch-up",

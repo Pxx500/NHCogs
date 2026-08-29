@@ -64,13 +64,6 @@ CHANNEL_CATEGORIES = (
         module_command="review channel",
     ),
     ChannelCategory(
-        "errors",
-        "errors_channel",
-        "Errors",
-        "destination",
-        central_command="errors",
-    ),
-    ChannelCategory(
         "daily_stats",
         "daily_stats_channel",
         "Daily stats",

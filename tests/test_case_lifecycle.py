@@ -6,7 +6,6 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from types import SimpleNamespace
 from unittest import mock
 
 from tests.detection_case_fixtures import capture_attachment, publish_primary
@@ -262,60 +261,6 @@ class CaseLifecycleTests(CaseExpiryTestCase):
                 self.assertIn(
                     "kind=future_operation",
                     "\n".join(operation_logs.output),
-                )
-
-    async def test_recovered_operation_alert_uses_persisted_value(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                now = datetime.now(timezone.utc)
-                channel = SimpleNamespace(send=mock.AsyncMock())
-                guild = SimpleNamespace(
-                    id=10,
-                    get_channel=lambda channel_id: channel,
-                )
-                bot = _Bot()
-                bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
-                cog.config = self._config({"errors_channel": 30})
-                honeypot.discord.AllowedMentions = SimpleNamespace(none=lambda: None)
-                appended = self._append_case(honeypot, cog, now)
-                operation = cog._case_store.ensure_operation(
-                    appended.case.case_id,
-                    honeypot.OperationType.EVIDENCE_CLEANUP,
-                    f"evidence-cleanup:{appended.case.case_id}",
-                )
-                first = cog._case_store.claim_operation(operation.operation_id, now)
-                self.assertTrue(
-                    cog._case_store.fail_operation(
-                        first.operation_id,
-                        first.claim_token,
-                        "temporary",
-                        now,
-                        now,
-                    )
-                )
-                cog._case_store.record_operational_failure(
-                    guild_id=10,
-                    source=honeypot.OperationType.EVIDENCE_CLEANUP,
-                    summary="temporary",
-                    occurred_at=now,
-                    case_id=appended.case.case_id,
-                    operation_id=operation.operation_id,
-                )
-                retried = cog._case_store.claim_operation(
-                    operation.operation_id,
-                    now + timedelta(seconds=1),
-                )
-
-                await cog._execute_detection_case_operation(
-                    retried,
-                    now + timedelta(seconds=1),
-                )
-
-                channel.send.assert_awaited_once()
-                self.assertEqual(
-                    channel.send.await_args.args[0],
-                    "✅ Recovered: evidence_cleanup succeeded after 2 attempts.",
                 )
 
     async def test_terminal_capture_failure_is_a_current_case_note(self):

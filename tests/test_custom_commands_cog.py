@@ -44,7 +44,11 @@ def _tag(name, value=True):
 
 
 def load_cog_module():  # noqa: PLR0915
-    package_name = "custom_commands_cog_subject"
+    root_name = "custom_commands_cog_subject"
+    root = types.ModuleType(root_name)
+    root.__path__ = [str(PACKAGE_PATH.parent)]
+    sys.modules[root_name] = root
+    package_name = f"{root_name}.custom_commands"
     package = types.ModuleType(package_name)
     package.__path__ = [str(PACKAGE_PATH)]
     sys.modules[package_name] = package
@@ -259,11 +263,20 @@ def load_cog_module():  # noqa: PLR0915
 cog, migration_controller = load_cog_module()
 
 
+def _reporting_bot(**values):
+    report = mock.AsyncMock()
+    reporter = types.SimpleNamespace(report=report)
+    return types.SimpleNamespace(
+        get_cog=mock.Mock(return_value=reporter),
+        **values,
+    ), report
+
+
 class CustomCommandsStartupTests(unittest.IsolatedAsyncioTestCase):
     async def test_startup_reports_catalog_initialization_failure(self):
         failure = OSError("database is unavailable")
-        bot = types.SimpleNamespace(guilds=[types.SimpleNamespace(id=100)])
-        nhmisc = types.SimpleNamespace(report_operational_error=mock.AsyncMock())
+        bot, report = _reporting_bot(guilds=[types.SimpleNamespace(id=100)])
+        nhmisc = types.SimpleNamespace()
         catalog = types.SimpleNamespace(
             initialize=mock.AsyncMock(side_effect=failure)
         )
@@ -276,16 +289,20 @@ class CustomCommandsStartupTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(OSError, "database is unavailable"):
                 await migration_controller.build_custom_commands_component(bot, nhmisc)
 
-        nhmisc.report_operational_error.assert_awaited_once_with(
+        report.assert_awaited_once_with(
             guild_id=100,
             source="CustomCommands",
             action="activate replacement startup",
             error=failure,
+            channel_id=None,
+            thread_id=None,
+            message_id=None,
+            correlation_key=None,
         )
 
     async def test_startup_activates_replacement_without_reading_migration_state(self):
-        bot = types.SimpleNamespace(guilds=[types.SimpleNamespace(id=100)])
-        nhmisc = types.SimpleNamespace(report_operational_error=mock.AsyncMock())
+        bot, report = _reporting_bot(guilds=[types.SimpleNamespace(id=100)])
+        nhmisc = types.SimpleNamespace()
         catalog = types.SimpleNamespace(initialize=mock.AsyncMock())
         runtime = object()
         activator = types.SimpleNamespace(activate=mock.AsyncMock(return_value=runtime))
@@ -316,12 +333,12 @@ class CustomCommandsStartupTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result, runtime)
         catalog.initialize.assert_awaited_once()
         activator.activate.assert_awaited_once()
-        nhmisc.report_operational_error.assert_not_awaited()
+        report.assert_not_awaited()
 
     async def test_startup_reports_activation_failure_and_never_returns_migrator(self):
         failure = RuntimeError("replacement registration failed")
-        bot = types.SimpleNamespace(guilds=[types.SimpleNamespace(id=100)])
-        nhmisc = types.SimpleNamespace(report_operational_error=mock.AsyncMock())
+        bot, report = _reporting_bot(guilds=[types.SimpleNamespace(id=100)])
+        nhmisc = types.SimpleNamespace()
         catalog = types.SimpleNamespace(initialize=mock.AsyncMock())
         activator = types.SimpleNamespace(
             activate=mock.AsyncMock(side_effect=failure)
@@ -346,11 +363,15 @@ class CustomCommandsStartupTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await migration_controller.build_custom_commands_component(bot, nhmisc)
 
-        nhmisc.report_operational_error.assert_awaited_once_with(
+        report.assert_awaited_once_with(
             guild_id=100,
             source="CustomCommands",
             action="activate replacement startup",
             error=failure,
+            channel_id=None,
+            thread_id=None,
+            message_id=None,
+            correlation_key=None,
         )
 
 
@@ -584,9 +605,7 @@ class CustomCommandsCommandErrorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(listener)
 
         subject = object.__new__(cog.CustomCommands)
-        subject.nhmisc = types.SimpleNamespace(
-            report_operational_error=mock.AsyncMock()
-        )
+        subject.bot, report = _reporting_bot()
         command = types.SimpleNamespace(qualified_name="customcom raw")
         ctx = types.SimpleNamespace(
             cog=subject,
@@ -601,26 +620,28 @@ class CustomCommandsCommandErrorTests(unittest.IsolatedAsyncioTestCase):
             ctx,
             cog.commands.UserFeedbackCheckFailure("expected"),
         )
-        subject.nhmisc.report_operational_error.assert_not_awaited()
+        report.assert_not_awaited()
 
         await listener(subject, ctx, cog.commands.UserInputError("invalid input"))
-        subject.nhmisc.report_operational_error.assert_not_awaited()
+        report.assert_not_awaited()
 
         failure = RuntimeError("paginator failed")
         await listener(subject, ctx, types.SimpleNamespace(original=failure))
-        subject.nhmisc.report_operational_error.assert_awaited_once_with(
+        report.assert_awaited_once_with(
             guild_id=100,
             source="CustomCommands",
             action="customcom raw",
             error=failure,
             channel_id=200,
+            thread_id=None,
             message_id=300,
+            correlation_key=None,
         )
 
-        subject.nhmisc.report_operational_error.reset_mock()
+        report.reset_mock()
         ctx.cog = object()
         await listener(subject, ctx, failure)
-        subject.nhmisc.report_operational_error.assert_not_awaited()
+        report.assert_not_awaited()
 
 
 class CustomCommandsCopyTests(unittest.IsolatedAsyncioTestCase):
@@ -889,11 +910,8 @@ class CustomCommandsListTests(unittest.IsolatedAsyncioTestCase):
 class CustomCommandsMessageListenerTests(unittest.IsolatedAsyncioTestCase):
     def _subject(self):
         subject = object.__new__(cog.CustomCommands)
-        subject.bot = types.SimpleNamespace(
+        subject.bot, subject.report = _reporting_bot(
             cog_disabled_in_guild=mock.AsyncMock(return_value=False)
-        )
-        subject.nhmisc = types.SimpleNamespace(
-            report_operational_error=mock.AsyncMock()
         )
         subject.workflows = types.SimpleNamespace(
             on_message=mock.AsyncMock(return_value=False)
@@ -918,7 +936,7 @@ class CustomCommandsMessageListenerTests(unittest.IsolatedAsyncioTestCase):
         await subject.on_message_without_command(message)
 
         subject.runtime.handle_message.assert_not_awaited()
-        subject.nhmisc.report_operational_error.assert_awaited_once_with(
+        subject.report.assert_awaited_once_with(
             guild_id=100,
             source="CustomCommands",
             action="process custom command message",
@@ -926,6 +944,7 @@ class CustomCommandsMessageListenerTests(unittest.IsolatedAsyncioTestCase):
             channel_id=200,
             thread_id=200,
             message_id=300,
+            correlation_key=None,
         )
 
     async def test_listener_reports_unexpected_runtime_dispatch_failure(self):
@@ -936,7 +955,7 @@ class CustomCommandsMessageListenerTests(unittest.IsolatedAsyncioTestCase):
 
         await subject.on_message_without_command(message)
 
-        subject.nhmisc.report_operational_error.assert_awaited_once_with(
+        subject.report.assert_awaited_once_with(
             guild_id=100,
             source="CustomCommands",
             action="process custom command message",
@@ -944,6 +963,7 @@ class CustomCommandsMessageListenerTests(unittest.IsolatedAsyncioTestCase):
             channel_id=200,
             thread_id=200,
             message_id=300,
+            correlation_key=None,
         )
 
 
@@ -1004,9 +1024,7 @@ class CustomCommandsRawTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_raw_timeout_reports_a_failed_message_edit(self):
         subject = object.__new__(cog.CustomCommands)
-        subject.nhmisc = types.SimpleNamespace(
-            report_operational_error=mock.AsyncMock()
-        )
+        subject.bot, report = _reporting_bot()
         view = cog.RawResponseView(
             subject,
             requester_id=200,
@@ -1022,20 +1040,20 @@ class CustomCommandsRawTests(unittest.IsolatedAsyncioTestCase):
 
         await view.on_timeout()
 
-        subject.nhmisc.report_operational_error.assert_awaited_once_with(
+        report.assert_awaited_once_with(
             guild_id=100,
             source="CustomCommands",
             action="expire raw custom command response browser",
             error=failure,
             channel_id=200,
+            thread_id=None,
             message_id=300,
+            correlation_key=None,
         )
 
     async def test_raw_pagination_error_is_reported_to_the_user(self):
         subject = object.__new__(cog.CustomCommands)
-        subject.nhmisc = types.SimpleNamespace(
-            report_operational_error=mock.AsyncMock()
-        )
+        subject.bot, _report = _reporting_bot()
         view = cog.RawResponseView(
             subject,
             requester_id=200,
@@ -1140,9 +1158,7 @@ class CustomCommandsDeleteViewTests(unittest.IsolatedAsyncioTestCase):
 class CustomCommandsDeleteTimeoutTests(unittest.IsolatedAsyncioTestCase):
     async def test_delete_timeout_reports_a_failed_message_edit(self):
         subject = object.__new__(cog.CustomCommands)
-        subject.nhmisc = types.SimpleNamespace(
-            report_operational_error=mock.AsyncMock()
-        )
+        subject.bot, report = _reporting_bot()
         command = types.SimpleNamespace(name="ben")
         view = cog.DeleteConfirmationView(subject, command=command, opener_id=200)
         failure = RuntimeError("message edit failed")
@@ -1155,13 +1171,15 @@ class CustomCommandsDeleteTimeoutTests(unittest.IsolatedAsyncioTestCase):
 
         await view.on_timeout()
 
-        subject.nhmisc.report_operational_error.assert_awaited_once_with(
+        report.assert_awaited_once_with(
             guild_id=100,
             source="CustomCommands",
             action="expire custom command delete prompt",
             error=failure,
             channel_id=200,
+            thread_id=None,
             message_id=300,
+            correlation_key=None,
         )
 
 

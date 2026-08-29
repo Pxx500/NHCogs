@@ -12,7 +12,11 @@ PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs" / "custom_commands"
 
 
 def load_workflow_modules():
-    package_name = "custom_commands_workflow_subject"
+    root_name = "custom_commands_workflow_subject"
+    root = types.ModuleType(root_name)
+    root.__path__ = [str(PACKAGE_PATH.parent)]
+    sys.modules[root_name] = root
+    package_name = f"{root_name}.custom_commands"
     package = types.ModuleType(package_name)
     package.__path__ = [str(PACKAGE_PATH)]
     sys.modules[package_name] = package
@@ -742,10 +746,10 @@ class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(session.finished)
 
     async def test_dashboard_send_failure_archives_thread_without_registering_session(self):
-        reporter = SimpleNamespace(report=mock.AsyncMock())
         manager = workflows.WorkflowManager(
             SimpleNamespace(),
-            SimpleNamespace(operational_errors=reporter),
+            SimpleNamespace(),
+            SimpleNamespace(),
             logger=mock.Mock(),
         )
         thread = SimpleNamespace(

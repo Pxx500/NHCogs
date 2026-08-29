@@ -10,6 +10,7 @@ import discord
 from redbot.core import Config, commands
 from redbot.core.data_manager import cog_data_path
 
+from ..operational_errors import report_operational_error
 from .catalog import CustomCommand, CustomCommandCatalog
 from .lifecycle import CutoverController, ReplacementActivator
 from .migration import (
@@ -93,7 +94,8 @@ class CustomCommandsMigration(commands.Cog):
             return
         if ctx.guild is None:
             return
-        await self.nhmisc.report_operational_error(
+        await report_operational_error(
+            self.bot,
             guild_id=ctx.guild.id,
             source="CustomCommands",
             action="legacy migration command",
@@ -223,7 +225,8 @@ class CustomCommandsMigration(commands.Cog):
             latest = await self.state_store.get()
             if latest.phase is not MigrationPhase.COMPLETE:
                 await self.controller.restore_official()
-            await self.nhmisc.report_operational_error(
+            await report_operational_error(
+                self.bot,
                 guild_id=ctx.guild.id,
                 source="CustomCommands",
                 action="apply legacy migration",
@@ -238,7 +241,8 @@ class CustomCommandsMigration(commands.Cog):
         try:
             await self.bot.remove_cog(self.qualified_name)
         except Exception as error:
-            await self.nhmisc.report_operational_error(
+            await report_operational_error(
+                self.bot,
                 guild_id=ctx.guild.id,
                 source="CustomCommands",
                 action="remove completed migration command",
@@ -287,7 +291,6 @@ class CustomCommandsMigration(commands.Cog):
             raise commands.UserFeedbackCheckFailure(
                 "Run migration in a channel hidden from @everyone"
             )
-        await self.nhmisc.require_private_error_channel(ctx.guild)
 
     @staticmethod
     def _write_artifacts(plan: MigrationPlan) -> Path:
@@ -366,7 +369,8 @@ async def build_custom_commands_component(bot: Any, nhmisc: Any):
         log.exception("Custom Commands replacement startup failed")
         guilds = tuple(bot.guilds)
         if guilds:
-            await nhmisc.report_operational_error(
+            await report_operational_error(
+                bot,
                 guild_id=guilds[0].id,
                 source="CustomCommands",
                 action="activate replacement startup",

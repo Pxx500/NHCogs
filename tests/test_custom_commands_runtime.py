@@ -14,7 +14,11 @@ PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs" / "custom_commands"
 
 
 def load_runtime_modules():
-    package_name = "custom_commands_runtime_subject"
+    root_name = "custom_commands_runtime_subject"
+    root = types.ModuleType(root_name)
+    root.__path__ = [str(PACKAGE_PATH.parent)]
+    sys.modules[root_name] = root
+    package_name = f"{root_name}.custom_commands"
     package = types.ModuleType(package_name)
     package.__path__ = [str(PACKAGE_PATH)]
     sys.modules[package_name] = package
@@ -146,7 +150,6 @@ class CustomCommandRuntimeTests(unittest.TestCase):
             engine = runtime.CustomCommandRuntime(
                 object(),
                 object(),
-                object(),
                 logger=mock.Mock(),
             )
             ctx = SimpleNamespace(send=mock.AsyncMock())
@@ -263,7 +266,6 @@ class CustomCommandRuntimeTests(unittest.TestCase):
         engine = runtime.CustomCommandRuntime(
             object(),
             object(),
-            object(),
             logger=mock.Mock(),
         )
         with mock.patch.object(runtime.time, "monotonic", return_value=1_000):
@@ -337,11 +339,9 @@ class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
             get_context=mock.AsyncMock(return_value=ctx),
             invoke=mock.AsyncMock(),
         )
-        reporter = SimpleNamespace(report=mock.AsyncMock())
         engine = runtime.CustomCommandRuntime(
             bot,
             store,
-            reporter,
             random_index=lambda _total: 0,
             logger=mock.Mock(),
         )
@@ -358,7 +358,6 @@ class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
 
         bot.invoke.assert_awaited_once_with(ctx)
         ctx.send.assert_awaited_once_with("Hello <@123>")
-        reporter.report.assert_not_awaited()
 
     async def test_repeated_command_is_silent_until_five_seconds_have_elapsed(self):
         first_ctx, first_message = self.invocation_context(author_id=300)
@@ -370,11 +369,9 @@ class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
             ),
             invoke=mock.AsyncMock(),
         )
-        reporter = SimpleNamespace(report=mock.AsyncMock())
         engine = runtime.CustomCommandRuntime(
             bot,
             SimpleNamespace(get=mock.AsyncMock(return_value=command)),
-            reporter,
             random_index=lambda _total: 0,
             logger=mock.Mock(),
         )
@@ -391,7 +388,6 @@ class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.invoke.await_count, 2)
         first_ctx.send.assert_awaited_once_with("response 0")
         second_ctx.send.assert_awaited_once_with("response 0")
-        reporter.report.assert_not_awaited()
 
     async def test_rejected_member_cooldown_does_not_reserve_the_channel(self):
         first_ctx, first_message = self.invocation_context(author_id=300)
@@ -407,11 +403,9 @@ class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
             ),
             invoke=mock.AsyncMock(),
         )
-        reporter = SimpleNamespace(report=mock.AsyncMock())
         engine = runtime.CustomCommandRuntime(
             bot,
             SimpleNamespace(get=mock.AsyncMock(return_value=command)),
-            reporter,
             random_index=lambda _total: 0,
             logger=mock.Mock(),
         )
@@ -429,7 +423,6 @@ class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
         first_ctx.send.assert_awaited_once_with("response 0")
         blocked_ctx.send.assert_awaited_once_with("Try again in 54 seconds")
         other_ctx.send.assert_awaited_once_with("response 0")
-        reporter.report.assert_not_awaited()
 
     async def test_invocation_cooldown_is_scoped_to_command_and_channel(self):
         first_ctx, first_message = self.invocation_context()
@@ -449,7 +442,6 @@ class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
             ),
             invoke=mock.AsyncMock(),
         )
-        reporter = SimpleNamespace(report=mock.AsyncMock())
         engine = runtime.CustomCommandRuntime(
             bot,
             SimpleNamespace(
@@ -461,7 +453,6 @@ class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
             ),
-            reporter,
             random_index=lambda _total: 0,
             logger=mock.Mock(),
         )
@@ -475,7 +466,6 @@ class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
         first_ctx.send.assert_awaited_once_with("response 0")
         other_channel_ctx.send.assert_awaited_once_with("response 0")
         other_command_ctx.send.assert_awaited_once_with("response 0")
-        reporter.report.assert_not_awaited()
 
     async def test_uppercase_invocation_does_not_match_lowercase_custom_command(self):
         store = SimpleNamespace(get=mock.AsyncMock())
@@ -484,7 +474,6 @@ class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
         engine = runtime.CustomCommandRuntime(
             bot,
             store,
-            SimpleNamespace(report=mock.AsyncMock()),
             logger=mock.Mock(),
         )
         message = SimpleNamespace(
@@ -502,10 +491,13 @@ class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
         ctx, message = self.invocation_context()
         store = SimpleNamespace(get=mock.AsyncMock(side_effect=OSError("sqlite failed")))
         reporter = SimpleNamespace(report=mock.AsyncMock())
+        bot = SimpleNamespace(
+            get_context=mock.AsyncMock(return_value=ctx),
+            get_cog=mock.Mock(return_value=reporter),
+        )
         engine = runtime.CustomCommandRuntime(
-            SimpleNamespace(get_context=mock.AsyncMock(return_value=ctx)),
+            bot,
             store,
-            reporter,
             logger=mock.Mock(),
         )
 
@@ -532,11 +524,11 @@ class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
         bot = SimpleNamespace(
             get_context=mock.AsyncMock(return_value=ctx),
             invoke=mock.AsyncMock(),
+            get_cog=mock.Mock(return_value=reporter),
         )
         engine = runtime.CustomCommandRuntime(
             bot,
             SimpleNamespace(get=mock.AsyncMock(return_value=command)),
-            reporter,
             random_index=lambda _total: 0,
             logger=mock.Mock(),
         )

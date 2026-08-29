@@ -98,7 +98,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 cog._record_operational_failure = mock.AsyncMock(
                     wraps=cog._record_operational_failure
                 )
-                cog._send_operational_alert = mock.AsyncMock()
 
                 with mock.patch.object(
                     honeypot.detection_runtime,
@@ -121,22 +120,14 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 ]
                 self.assertEqual(len(failure_calls), 1)
                 self.assertEqual(failure_calls[0].args[2], 3)
-                operational_failures = await asyncio.to_thread(
-                    cog._case_store.list_operational_failures, message.guild.id
-                )
-                self.assertEqual(len(operational_failures), 1)
-                self.assertEqual(operational_failures[0].source, "evidence_capture")
-                self.assertIn("Failed to capture 2 attachment(s)", operational_failures[0].summary)
                 evidence_failure = next(
                     call
                     for call in cog._record_operational_failure.await_args_list
                     if call.args[1] == "evidence_capture"
                 )
+                self.assertIn("Failed to capture 2 attachment(s)", evidence_failure.args[2])
                 self.assertEqual(evidence_failure.kwargs.get("attempts"), 3)
                 self.assertIs(evidence_failure.kwargs.get("terminal"), True)
-                alert = cog._send_operational_alert.await_args.args[1]
-                self.assertIn("terminal", alert)
-                self.assertNotIn("will retry", alert)
 
     async def test_two_cogs_do_not_apply_an_aggregate_case_byte_limit(self):
         with TemporaryDirectory() as directory:
@@ -944,6 +935,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 )
                 cog._imagescan_load_samples = mock.AsyncMock(side_effect=RuntimeError("model unavailable"))
                 cog._publish_detection_case = mock.AsyncMock()
+                cog._record_operational_failure = mock.AsyncMock()
 
                 await cog.on_message(message)
 
@@ -953,12 +945,12 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 self.assertEqual(snapshot.messages[0].delete_status.value, "deleted")
                 self.assertIn("model unavailable", snapshot.attachments[0].error)
                 self.assertEqual(cog._publish_detection_case.await_count, 2)
-                operational_failures = await asyncio.to_thread(
-                    cog._case_store.list_operational_failures, message.guild.id
+                setup_failure = next(
+                    call
+                    for call in cog._record_operational_failure.await_args_list
+                    if call.args[1] == "image_scan_setup"
                 )
-                self.assertEqual(len(operational_failures), 1)
-                self.assertEqual(operational_failures[0].source, "image_scan_setup")
-                self.assertIn("model unavailable", operational_failures[0].summary)
+                self.assertIn("model unavailable", setup_failure.args[2])
 
     async def test_forward_route_hashes_and_persists_every_image_attachment(self):
         with TemporaryDirectory() as directory:
