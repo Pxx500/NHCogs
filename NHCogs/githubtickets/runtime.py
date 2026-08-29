@@ -15,11 +15,9 @@ from .github_app import (
     GitHubRequestError,
 )
 from .models import GitHubDelivery, GitHubOutboxItem, GitHubOutboxOperation
-from .store import GitHubTicketsStore
+from .store import DELIVERY_IDENTITY_RETENTION, GitHubTicketsStore
 from .webhook import GitHubWebhookReceiver
 
-_HTTP_SUCCESS_MIN = 200
-_HTTP_REDIRECT_MIN = 300
 _DELIVERIES_PER_PAGE = 100
 _ResultT = TypeVar("_ResultT")
 
@@ -144,6 +142,7 @@ class GitHubIntegrationRuntime:
         if client is None:
             raise RuntimeError("GitHub integration is not configured")
         redeliveries = 0
+        identity_cutoff = self._clock() - DELIVERY_IDENTITY_RETENTION
         for page in range(1, self._max_recovery_pages + 1):
             try:
                 deliveries = await client.list_deliveries(page=page)
@@ -153,14 +152,10 @@ class GitHubIntegrationRuntime:
                 await self._report("list GitHub webhook deliveries", error)
                 return
             for delivery in deliveries:
-                if delivery.redelivery:
+                if delivery.redelivery or delivery.delivered_at < identity_cutoff:
                     continue
                 local_delivery = await self._await_store(self._store.get_delivery(delivery.guid))
-                failed = (
-                    delivery.status_code < _HTTP_SUCCESS_MIN
-                    or delivery.status_code >= _HTTP_REDIRECT_MIN
-                )
-                if not failed and local_delivery is not None:
+                if local_delivery is not None:
                     continue
                 if redeliveries >= self._max_redeliveries_per_recovery:
                     return

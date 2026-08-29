@@ -400,7 +400,7 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored.attempts, 2)
         self.assertEqual(len(reporter.reports), 1)
 
-    async def test_recovery_paginates_and_redelivers_only_failed_or_missing_deliveries(
+    async def test_recovery_paginates_and_redelivers_only_recent_missing_deliveries(
         self,
     ) -> None:
         for guid in ("failed-local", "successful-local"):
@@ -412,6 +412,15 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             summary(2, "failed-local", delivered_at, False, 500, "ping", None),
             summary(3, "successful-local", delivered_at, False, 200, "ping", None),
             summary(4, "redelivery-missing", delivered_at, True, 500, "ping", None),
+            summary(
+                5,
+                "expired-missing",
+                self.now - timedelta(days=8),
+                False,
+                500,
+                "ping",
+                None,
+            ),
         ]
         page_one.extend(
             summary(
@@ -423,7 +432,7 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "ping",
                 None,
             )
-            for index in range(96)
+            for index in range(95)
         )
         page_two = (summary(200, "later-failure", delivered_at, False, 502, "ping", None),)
         client = _Client({1: tuple(page_one), 2: page_two})
@@ -447,7 +456,7 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.run_recovery()
 
         self.assertEqual(client.listed_pages, [1, 2])
-        self.assertEqual(client.redelivered, [1, 2, 200])
+        self.assertEqual(client.redelivered, [1, 200])
         self.assertEqual(handled, [])
 
     async def test_recovery_applies_delivery_retention(self) -> None:
