@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import replace
 from typing import Any
 
 from NHCogs.operational_errors import report_operational_error
 
 from . import events
 from .coordinator import TicketCoordinator
-from .models import GitHubDelivery
+from .models import GitHubDelivery, GitHubPullRequest, PullRequestObservationState
 from .runtime import DeliveryDisposition
 from .store import GitHubTicketsStore
 
 _TICKET_LABEL = "discord-ticket"
+RefreshPullRequest = Callable[[GitHubPullRequest], Awaitable[GitHubPullRequest]]
 
 
 class _AmbiguousGitHubMapping(RuntimeError):
@@ -32,18 +34,37 @@ class GitHubEventHandler:
         bot: Any,
         guild_id: int,
         participant_role_ids: Iterable[int],
+        refresh_pull_request: RefreshPullRequest | None = None,
     ) -> None:
         self._store = store
         self._coordinator = coordinator
         self._bot = bot
         self._guild_id = guild_id
         self._participant_role_ids = frozenset(participant_role_ids)
+        self._refresh_pull_request = refresh_pull_request
 
     async def __call__(self, delivery: GitHubDelivery) -> DeliveryDisposition:
         parsed = events.parse_delivery(delivery)
         if parsed is None:
             return DeliveryDisposition.IGNORED
-        await self._store.observe_pull_request(parsed.pull_request)
+        observation = await self._store.observe_pull_request(parsed.pull_request)
+        if observation.state is PullRequestObservationState.STALE:
+            return DeliveryDisposition.PROCESSED
+        if observation.state is PullRequestObservationState.CONFLICT:
+            if self._refresh_pull_request is None:
+                raise GitHubEventTransitionDeferred(
+                    "GitHub pull request conflict could not be refreshed"
+                )
+            authoritative = await self._refresh_pull_request(parsed.pull_request)
+            observation = await self._store.observe_pull_request(
+                authoritative,
+                authoritative=True,
+            )
+            if observation.state is not PullRequestObservationState.APPLIED:
+                raise GitHubEventTransitionDeferred(
+                    "GitHub pull request conflict did not settle"
+                )
+        parsed = replace(parsed, pull_request=observation.pull_request)
         if isinstance(parsed, events.PullRequestEvent):
             await self._handle_pull_request(parsed)
         else:
