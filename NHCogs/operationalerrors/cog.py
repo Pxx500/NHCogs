@@ -561,6 +561,7 @@ class OperationalErrors(commands.Cog):
     @nhcogs_errors_channel.command(name="clear")
     async def nhcogs_errors_channel_clear(self, ctx: commands.Context) -> None:
         """Clear the private operational error channel."""
+        self._require_private_channel(ctx)
         await self.config.error_channel.clear()
         await ctx.send(
             "Operational error channel cleared",
@@ -589,6 +590,7 @@ class OperationalErrors(commands.Cog):
     @nhcogs_errors_maintainer.command(name="clear")
     async def nhcogs_errors_maintainer_clear(self, ctx: commands.Context) -> None:
         """Clear the maintainer pinged by operational alerts."""
+        self._require_private_channel(ctx)
         await self.config.error_maintainer_id.clear()
         await ctx.send(
             "Operational error maintainer cleared",
