@@ -1021,7 +1021,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
             cleanup = await cog.store.get_ticket(created.ticket_id)
             self.assertEqual(cleanup.state, modules.models.TicketState.FINISHING)
-            self.assertEqual(cleanup.author_id, 0)
+            self.assertIsNone(cleanup.author_id)
             self.assertEqual(cleanup.pr_title, "")
             self.assertEqual(cleanup.pr_url, "")
             self.assertEqual(cleanup.category_display, "")
