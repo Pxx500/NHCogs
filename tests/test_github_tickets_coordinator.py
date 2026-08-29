@@ -397,6 +397,31 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_failed_category_prompt_does_not_block_due_projection_sync(self):
+        self.projection.errors["prompt_categories"] = RuntimeError(
+            "controlled prompt failure"
+        )
+        ticket_id = await self.create_github_active()
+        self.projection.errors["edit_ticket"] = RuntimeError("controlled edit failure")
+
+        claimed = await self.coordinator.claim(ticket_id, self.actor(200))
+
+        self.assertFalse(claimed.success)
+        self.projection.errors.pop("edit_ticket")
+        self.projection.calls.clear()
+        self.now += timedelta(seconds=5)
+
+        recovered = await self.coordinator.process_due(ticket_id)
+
+        self.assertTrue(recovered.success)
+        self.assertEqual(
+            self.projection.calls,
+            [
+                ("prompt_categories", ticket_id, 400, None),
+                ("edit_ticket", ticket_id, models.TicketState.CLAIMED, None),
+            ],
+        )
+
     async def test_github_activation_failure_deletes_prompt_thread_and_ticket(self):
         async def lose_activation(*_args, **_kwargs):
             return False
@@ -1416,6 +1441,42 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 ("find_ticket_message", ticket.public_token),
                 ("find_ticket_thread", 999),
                 ("create_thread", ticket.ticket_id, 999),
+            ],
+        )
+
+    async def test_creating_github_recovery_sends_category_prompt(self):
+        pull_request = self.pull_request()
+        ticket = await self.store.create_ticket_for_pull_request(
+            models.NewTicket(
+                guild_id=10,
+                channel_id=20,
+                author_id=100,
+                pr_title=pull_request.title,
+                pr_url=pull_request.url,
+                category_display="",
+                routing_mode=models.RoutingMode.NONE,
+                direct_target_id=None,
+                category_ids=(),
+                created_at=self.now,
+                origin=models.TicketOrigin.GITHUB,
+            ),
+            pull_request,
+        )
+
+        result = await self.coordinator.recover_projection_cleanup(ticket.ticket_id)
+
+        self.assertTrue(result.success)
+        recovered = await self.store.get_ticket(ticket.ticket_id)
+        self.assertEqual(recovered.state, models.TicketState.OPEN)
+        self.assertIsNone(recovered.category_prompt_retry_at)
+        self.assertEqual(
+            self.projection.calls,
+            [
+                ("find_ticket_message", ticket.public_token),
+                ("send_ticket", ticket.ticket_id, None),
+                ("find_ticket_thread", 300),
+                ("create_thread", ticket.ticket_id, 300),
+                ("prompt_categories", ticket.ticket_id, 400, 100),
             ],
         )
 

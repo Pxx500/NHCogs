@@ -1004,6 +1004,9 @@ class TicketCoordinator:
             return TicketResult(False, ACTION_FAILED)
         if not activated:
             return TicketResult(False, ACTION_FAILED)
+        activated_ticket = await self._store.get_ticket(ticket.ticket_id)
+        if activated_ticket is not None:
+            await self._send_pending_category_prompt(activated_ticket)
         if next_action_at is not None:
             self._wake_deadlines()
         return TicketResult(True)
@@ -1038,8 +1041,7 @@ class TicketCoordinator:
                 and ticket.category_prompt_retry_at is not None
                 and ticket.category_prompt_retry_at <= self._clock()
             ):
-                if not await self._send_pending_category_prompt(ticket):
-                    return TicketResult(True)
+                await self._send_pending_category_prompt(ticket)
                 ticket = await self._store.get_ticket(ticket_id)
                 if ticket is None:
                     return TicketResult(False, INACTIVE_TICKET)
