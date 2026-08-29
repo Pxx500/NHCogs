@@ -93,9 +93,11 @@ categories in an ephemeral response. It does not show presence or automatic ping
 ## GitHub App integration
 
 The GitHub integration is configured by moderators through the `github` group. Every command
-in this group requires Manage Messages and is guild-only. A bare group shows a safe runtime
-overview. It never displays credentials, private key paths, installation IDs, client IDs, App
-IDs, webhook secrets, or raw network diagnostics.
+in this group requires Manage Messages and is invoked from a guild. The integration settings,
+receiver, and selected guild are process-wide. Running `enable` in a guild selects that one
+guild for this bot process. A bare group shows a safe runtime overview. It never displays
+credentials, private key paths, installation IDs, client IDs, App IDs, webhook secrets, or raw
+network diagnostics.
 
 | Command | Description |
 |---|---|
