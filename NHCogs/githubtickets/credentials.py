@@ -66,8 +66,11 @@ async def _secret(values: Mapping[str, object], name: str) -> bytes:
         raise InvalidGitHubAppCredentials("GitHub App credentials are incomplete")
     if has_inline:
         return inline.strip().encode()
+    secret_path = Path(path.strip())
+    if not secret_path.is_absolute():
+        raise InvalidGitHubAppCredentials("GitHub App secret file is unavailable")
     try:
-        secret = await asyncio.to_thread(_read_secret_file, Path(path.strip()))
+        secret = await asyncio.to_thread(_read_secret_file, secret_path)
     except (OSError, ValueError):
         raise InvalidGitHubAppCredentials("GitHub App secret file is unavailable") from None
     return secret

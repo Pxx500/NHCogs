@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -82,6 +83,28 @@ class GitHubCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(loaded.webhook_secret, b"webhook-secret-file")
         self.assertNotIn(str(private_key_path), repr(loaded))
         self.assertNotIn(str(webhook_secret_path), repr(loaded))
+
+    async def test_secret_file_paths_must_be_absolute(self) -> None:
+        root = Path(self.directory.name)
+        (root / "github-app.pem").write_bytes(b"private-key-file")
+        (root / "webhook-secret.txt").write_bytes(b"webhook-secret-file")
+        bot = _Bot(
+            {
+                "organization": "NewHorizons",
+                "client_id": "Iv1.example",
+                "app_id": "123",
+                "installation_id": "456",
+                "private_key_path": "github-app.pem",
+                "webhook_secret_path": "webhook-secret.txt",
+            }
+        )
+        previous_directory = Path.cwd()
+        os.chdir(root)
+        try:
+            with self.assertRaises(self.credentials.InvalidGitHubAppCredentials):
+                await self.credentials.load_github_app_credentials(bot)
+        finally:
+            os.chdir(previous_directory)
 
     async def test_missing_is_dormant_and_partial_or_ambiguous_values_are_rejected(self) -> None:
         self.assertIsNone(await self.credentials.load_github_app_credentials(_Bot({})))
