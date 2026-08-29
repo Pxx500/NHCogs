@@ -731,6 +731,8 @@ class TicketCoordinator:
             ):
                 return TicketResult(True)
             normalized_title = title.strip()
+            if not normalized_title:
+                return TicketResult(True)
             if ticket.pr_title == normalized_title:
                 return TicketResult(True)
             updated = await self._store.update_ticket_title(

@@ -297,7 +297,7 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.observed, [])
         self.assertEqual(self.coordinator.calls, [])
 
-    async def test_whitespace_title_is_observed_as_a_settled_no_op(self) -> None:
+    async def test_whitespace_title_does_not_block_closed_lifecycle(self) -> None:
         store = self.modules.store.GitHubTicketsStore(
             Path(self.directory.name) / "whitespace-title.sqlite"
         )
@@ -310,13 +310,13 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
             guild_id=10,
             member_is_eligible=_member_is_eligible,
         )
-        payload = self.payload(action="labeled")
+        payload = self.payload(action="closed", state="closed")
         payload["pull_request"]["title"] = "   "
 
         disposition = await handler(
             self.delivery(
                 event="pull_request",
-                action="labeled",
+                action="closed",
                 payload=payload,
             )
         )
@@ -325,7 +325,7 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(disposition, self.modules.runtime.DeliveryDisposition.PROCESSED)
         self.assertIsNotNone(observed)
         self.assertEqual(observed.title, "")
-        self.assertEqual(coordinator.calls, [])
+        self.assertEqual(coordinator.calls, [("finish", 100, 7)])
 
     async def test_stale_assignment_uses_newer_stored_assignees_without_refresh(
         self,
