@@ -873,6 +873,22 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             [("edit_ticket", ticket_id, models.TicketState.OPEN, None)],
         )
 
+    async def test_github_whitespace_title_edit_is_a_settled_no_op(self):
+        ticket_id = await self.create_github_active()
+        original = await self.store.get_ticket(ticket_id)
+        self.projection.calls.clear()
+
+        result = await self.coordinator.update_title_from_github(
+            100,
+            7,
+            title="   ",
+        )
+
+        self.assertTrue(result.success)
+        ticket = await self.store.get_ticket(ticket_id)
+        self.assertEqual(ticket.pr_title, original.pr_title)
+        self.assertEqual(self.projection.calls, [])
+
     async def test_github_replays_succeed_when_desired_state_is_already_settled(self):
         pull_request = self.pull_request()
         await self.create_github_active(pull_request=pull_request)

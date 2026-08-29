@@ -70,8 +70,6 @@ class GitHubEventHandler:
                 raise GitHubEventTransitionDeferred(
                     "GitHub pull request conflict did not settle"
                 )
-        if not observation.pull_request.title.strip():
-            return DeliveryDisposition.PROCESSED
         if isinstance(parsed, events.PullRequestEvent):
             parsed = replace(
                 parsed,
