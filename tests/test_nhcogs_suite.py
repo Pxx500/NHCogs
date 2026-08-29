@@ -551,7 +551,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("moderation case metadata", statement)
         self.assertIn("Custom Commands stores guild IDs", statement)
         self.assertIn("Operational error records store the guild", statement)
-        self.assertIn("GitHubTickets stores guild and user IDs", statement)
+        self.assertIn("GitHubTickets stores Discord guild and user IDs", statement)
         self.assertIn("NHModeration stores source observations", statement)
 
     async def test_teardown_removes_late_registered_replacement_cog(self):
