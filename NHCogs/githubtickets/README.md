@@ -55,13 +55,15 @@ channel and categories are optional.
 
 `/newticket`
 
-Opens an ephemeral form for a pull request title, pull request link, optional categories,
-ping behavior, and an optional direct reviewer. The bot does not call GitHub or verify the
-link. Automatic routing requires at least one category. Direct routing requires a selected
-reviewer. When automatic routing uses multiple categories, a second ephemeral page shows
-how many eligible reviewers have every selected category. Categories can be removed there
-before creating the ticket. For Direct then automatic, the count excludes the direct
-reviewer because that person cannot be selected again during automatic fallback.
+Opens an ephemeral form for a canonical GitHub pull request link, optional categories, ping
+behavior, and an optional direct reviewer. The title is read from GitHub and cannot be entered
+separately. The integration validates the organization, repository access, open state, draft
+state, and active ticket binding before creating the ticket. The `discord-ticket` label is not
+required for manual creation. Automatic routing requires at least one category. Direct routing
+requires a selected reviewer. When automatic routing uses multiple categories, a second
+ephemeral page shows how many eligible reviewers have every selected category. Categories can
+be removed there before creating the ticket. For Direct then automatic, the count excludes the
+direct reviewer because that person cannot be selected again during automatic fallback.
 
 The available ping behaviors are:
 
@@ -87,6 +89,50 @@ Saving an empty profile removes its stored row.
 
 The user context menu shows the selected member's optional GitHub username and
 categories in an ephemeral response. It does not show presence or automatic ping consent.
+
+## GitHub App integration
+
+The GitHub integration is configured by moderators through the `github` group. Every command
+in this group requires Manage Messages and is guild-only. A bare group shows a safe runtime
+overview. It never displays credentials, private key paths, installation IDs, client IDs, App
+IDs, webhook secrets, or raw network diagnostics.
+
+| Command | Description |
+|---|---|
+| `[p]githubtickets github` | Show the GitHub integration state and available commands |
+| `[p]githubtickets github enable` | Enable the integration when credentials and receiver settings are ready |
+| `[p]githubtickets github disable` | Disable the receiver and GitHub workers while preserving Discord ticket data |
+| `[p]githubtickets github receiver` | Show receiver state and commands |
+| `[p]githubtickets github receiver set <host> <port>` | Set the local receiver bind address and restart an enabled integration |
+| `[p]githubtickets github receiver clear` | Clear receiver settings and disable the integration |
+| `[p]githubtickets github recovery` | Show delivery recovery state and commands |
+| `[p]githubtickets github recovery interval <duration>` | Set the recovery interval using seconds, `s`, `m`, or `h` |
+| `[p]githubtickets github recovery run` | Queue one recovery pass when the integration is running |
+
+The receiver accepts signed `POST` requests at `/githubtickets/webhook`. Put it behind a
+public HTTPS reverse proxy and forward that path to the configured host and port. The receiver
+validates the raw body signature, installation, organization, and repository before durably
+accepting a delivery. It returns before Discord or GitHub processing, then workers process the
+delivery asynchronously. Recovery runs after startup and every 15 minutes by default. GitHub
+App delivery history is used to request redelivery for locally missing deliveries.
+
+Create one private GitHub App for the organization and install it on the organization's
+repositories. The App needs these repository permissions:
+
+- Metadata: Read-only
+- Pull requests: Read & write
+
+Subscribe the App to these webhook events:
+
+- Pull request
+- Pull request review
+
+Supply credentials through Red's shared API token service named `githubtickets`. The required
+keys are `organization`, `client_id`, `app_id`, and `installation_id`. Supply exactly one form
+of each secret as `private_key` or `private_key_path`, and `webhook_secret` or
+`webhook_secret_path`. Inline values are treated as secret material. File paths must be
+absolute. The private key and webhook secret must be stored outside the repository and are
+never shown in command output or public messages.
 
 ## Prefix command overviews
 
