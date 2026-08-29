@@ -40,6 +40,7 @@ from .ticket_views import TicketControls
 from .webhook import GitHubWebhookReceiver
 
 log = logging.getLogger(__name__)
+_MAX_NETWORK_PORT = 65535
 
 
 class GitHubTickets(commands.Cog):
@@ -161,7 +162,7 @@ class GitHubTickets(commands.Cog):
             await self.coordinator.process_due(ticket_id)
         await self._restart_github_integration()
 
-    async def _restart_github_integration(self) -> None:
+    async def _restart_github_integration(self) -> bool:
         report_guild_id = 0
         try:
             await self._stop_github_integration()
@@ -171,10 +172,10 @@ class GitHubTickets(commands.Cog):
             if integration_settings.guild_id is not None:
                 report_guild_id = integration_settings.guild_id
             if not integration_settings.enabled:
-                return
+                return False
             credentials = await load_github_app_credentials(self.bot)
             if credentials is None:
-                return
+                return False
             if (
                 integration_settings.guild_id is None
                 or not integration_settings.receiver_configured
@@ -232,6 +233,7 @@ class GitHubTickets(commands.Cog):
             self._github_client = client
             self._github_organization = credentials.organization
             self._github_runtime = runtime
+            return True
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -242,6 +244,7 @@ class GitHubTickets(commands.Cog):
                 action="start GitHub integration",
                 error=error,
             )
+            return False
 
     async def _stop_github_integration(self) -> None:
         runtime = self._github_runtime
@@ -801,10 +804,18 @@ class GitHubTickets(commands.Cog):
         titles = {
             "githubtickets": "GitHub Tickets",
             "logchannel": "Log channel",
+            "github": "GitHub integration",
+            "receiver": "GitHub receiver",
+            "recovery": "GitHub recovery",
         }
+        configuration_sender = (
+            self._send_github_configuration_overview
+            if ctx.command.name in {"github", "receiver", "recovery"}
+            else self._send_configuration_overview
+        )
         await command_overview.send_group_overview(
             ctx,
-            lambda: self._send_configuration_overview(ctx),
+            lambda: configuration_sender(ctx),
             include_descendants=include_descendants,
             title=titles.get(ctx.command.name),
         )
@@ -843,6 +854,145 @@ class GitHubTickets(commands.Cog):
                 chunk,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+
+    async def _send_github_configuration_overview(self, ctx: commands.Context) -> None:
+        integration_settings = settings.GitHubIntegrationSettings.from_mapping(
+            await self.config.all()
+        )
+        try:
+            credentials = await load_github_app_credentials(self.bot)
+        except Exception:
+            credentials = None
+        receiver = None
+        if integration_settings.receiver_configured:
+            receiver = f"{integration_settings.bind_host}:{integration_settings.bind_port}"
+        content = presentation.github_integration_overview(
+            enabled=integration_settings.enabled,
+            organization=(credentials.organization if credentials is not None else None),
+            receiver=receiver,
+            credentials_available=credentials is not None,
+            running=self._github_runtime is not None,
+            recovery_seconds=integration_settings.recovery_seconds,
+        )
+        await ctx.send(
+            content,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @githubtickets.group(name="github", invoke_without_command=True)
+    async def githubtickets_github(self, ctx: commands.Context) -> None:
+        """Configure the GitHub integration"""
+        await self._send_group_overview(ctx)
+
+    @githubtickets_github.command(name="enable")
+    async def githubtickets_github_enable(self, ctx: commands.Context) -> None:
+        """Enable the GitHub integration"""
+        integration_settings = settings.GitHubIntegrationSettings.from_mapping(
+            await self.config.all()
+        )
+        if not integration_settings.receiver_configured:
+            await ctx.send("GitHub receiver is not configured")
+            return
+        try:
+            credentials = await load_github_app_credentials(self.bot)
+        except Exception:
+            credentials = None
+        if credentials is None:
+            await ctx.send("GitHub credentials are not configured")
+            return
+        await self.config.set_raw("guild_id", value=ctx.guild.id)
+        await self.config.set_raw("enabled", value=True)
+        if await self._restart_github_integration():
+            await ctx.send("GitHub integration enabled")
+        else:
+            await ctx.send("Could not start GitHub integration")
+
+    @githubtickets_github.command(name="disable")
+    async def githubtickets_github_disable(self, ctx: commands.Context) -> None:
+        """Disable the GitHub integration"""
+        await self.config.set_raw("enabled", value=False)
+        await self._restart_github_integration()
+        await ctx.send("GitHub integration disabled")
+
+    @githubtickets_github.group(name="receiver", invoke_without_command=True)
+    async def githubtickets_github_receiver(self, ctx: commands.Context) -> None:
+        """Configure the GitHub webhook receiver"""
+        await self._send_group_overview(ctx)
+
+    @githubtickets_github_receiver.command(name="set")
+    async def githubtickets_github_receiver_set(
+        self,
+        ctx: commands.Context,
+        host: str,
+        port: int,
+    ) -> None:
+        """Set the GitHub webhook receiver"""
+        normalized_host = host.strip()
+        if not normalized_host:
+            await ctx.send("Invalid host")
+            return
+        if not 1 <= port <= _MAX_NETWORK_PORT:
+            await ctx.send("Invalid port")
+            return
+        await self.config.set_raw("bind_host", value=normalized_host)
+        await self.config.set_raw("bind_port", value=port)
+        integration_settings = settings.GitHubIntegrationSettings.from_mapping(
+            await self.config.all()
+        )
+        if integration_settings.enabled and not await self._restart_github_integration():
+            await ctx.send("GitHub receiver saved but integration could not start")
+            return
+        await ctx.send(f"GitHub receiver set to {normalized_host}:{port}")
+
+    @githubtickets_github_receiver.command(name="clear")
+    async def githubtickets_github_receiver_clear(self, ctx: commands.Context) -> None:
+        """Clear the GitHub webhook receiver"""
+        await self.config.set_raw("bind_host", value=None)
+        await self.config.set_raw("bind_port", value=None)
+        await self.config.set_raw("enabled", value=False)
+        await self._restart_github_integration()
+        await ctx.send("GitHub receiver cleared and integration disabled")
+
+    @githubtickets_github.group(name="recovery", invoke_without_command=True)
+    async def githubtickets_github_recovery(self, ctx: commands.Context) -> None:
+        """Configure GitHub delivery recovery"""
+        await self._send_group_overview(ctx)
+
+    @githubtickets_github_recovery.command(name="interval")
+    async def githubtickets_github_recovery_interval(
+        self,
+        ctx: commands.Context,
+        duration: str,
+    ) -> None:
+        """Set the GitHub recovery interval"""
+        try:
+            seconds = settings.parse_duration(duration)
+        except (settings.InvalidDuration, settings.NegativeDuration):
+            await ctx.send(presentation.INVALID_DURATION)
+            return
+        if seconds <= 0:
+            await ctx.send(presentation.INVALID_DURATION)
+            return
+        await self.config.set_raw("recovery_seconds", value=seconds)
+        integration_settings = settings.GitHubIntegrationSettings.from_mapping(
+            await self.config.all()
+        )
+        if integration_settings.enabled and not await self._restart_github_integration():
+            await ctx.send("Recovery interval saved but integration could not start")
+            return
+        await ctx.send(
+            f"GitHub recovery interval set to {presentation.duration_text(seconds)}"
+        )
+
+    @githubtickets_github_recovery.command(name="run")
+    async def githubtickets_github_recovery_run(self, ctx: commands.Context) -> None:
+        """Queue GitHub delivery recovery"""
+        runtime = self._github_runtime
+        if runtime is None:
+            await ctx.send("GitHub integration is not running")
+            return
+        runtime.request_recovery()
+        await ctx.send("GitHub recovery queued")
 
     @githubtickets.group(name="channel", invoke_without_command=True)
     async def githubtickets_channel(self, ctx: commands.Context) -> None:

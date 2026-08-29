@@ -8,6 +8,8 @@ from unittest import mock
 from tests.githubtickets_loader import isolated_githubtickets_modules
 
 COMMAND_SIGNATURES = {
+    "githubtickets github receiver set": "<host> <port>",
+    "githubtickets github recovery interval": "<duration>",
     "githubtickets channel set": "<channel>",
     "githubtickets logchannel set": "<channel>",
     "githubtickets role add": "<role>",
@@ -129,6 +131,15 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 "githubtickets timing direct",
                 "githubtickets profile",
                 "githubtickets profile clear",
+                "githubtickets github",
+                "githubtickets github enable",
+                "githubtickets github disable",
+                "githubtickets github receiver",
+                "githubtickets github receiver set",
+                "githubtickets github receiver clear",
+                "githubtickets github recovery",
+                "githubtickets github recovery interval",
+                "githubtickets github recovery run",
             },
         )
         self.assertEqual(
@@ -233,6 +244,11 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                     new=mock.AsyncMock(),
                 ) as configuration_sender,
                 mock.patch.object(
+                    cog,
+                    "_send_github_configuration_overview",
+                    new=mock.AsyncMock(),
+                ),
+                mock.patch.object(
                     modules.githubtickets.discord,
                     "Embed",
                     _OverviewEmbed,
@@ -270,6 +286,11 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                     new=mock.AsyncMock(),
                 ) as configuration_sender,
                 mock.patch.object(
+                    cog,
+                    "_send_github_configuration_overview",
+                    new=mock.AsyncMock(),
+                ) as github_configuration_sender,
+                mock.patch.object(
                     modules.githubtickets.discord,
                     "Embed",
                     _OverviewEmbed,
@@ -297,7 +318,16 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                         if group.qualified_name == "githubtickets logchannel":
                             self.assertEqual(embed.title, "Log channel")
 
-        self.assertEqual(configuration_sender.await_count, len(groups))
+        github_groups = {
+            "githubtickets github",
+            "githubtickets github receiver",
+            "githubtickets github recovery",
+        }
+        self.assertEqual(
+            configuration_sender.await_count,
+            len(groups) - len(github_groups),
+        )
+        self.assertEqual(github_configuration_sender.await_count, len(github_groups))
 
     async def test_resource_commands_store_values_and_use_accepted_confirmations(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
@@ -417,6 +447,77 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 "Invalid duration",
             ],
         )
+
+    async def test_github_configuration_commands_control_the_runtime(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            ctx = FakeContext()
+            restart = mock.AsyncMock(return_value=True)
+            cog._restart_github_integration = restart
+
+            await cog.githubtickets_github_enable(ctx)
+            restart.assert_not_awaited()
+
+            await cog.githubtickets_github_receiver_set(ctx, " 127.0.0.1 ", 8080)
+            restart.assert_not_awaited()
+
+            with mock.patch.object(
+                modules.githubtickets,
+                "load_github_app_credentials",
+                new=mock.AsyncMock(return_value=None),
+            ):
+                await cog.githubtickets_github_enable(ctx)
+            restart.assert_not_awaited()
+
+            with mock.patch.object(
+                modules.githubtickets,
+                "load_github_app_credentials",
+                new=mock.AsyncMock(return_value=object()),
+            ):
+                await cog.githubtickets_github_enable(ctx)
+            restart.assert_awaited_once()
+
+            await cog.githubtickets_github_recovery_interval(ctx, "0s")
+            self.assertEqual(restart.await_count, 1)
+
+            await cog.githubtickets_github_recovery_interval(ctx, "30m")
+            self.assertEqual(restart.await_count, 2)
+
+            runtime = SimpleNamespace(request_recovery=mock.Mock())
+            cog._github_runtime = runtime
+            await cog.githubtickets_github_recovery_run(ctx)
+            runtime.request_recovery.assert_called_once_with()
+            self.assertEqual(restart.await_count, 2)
+
+            await cog.githubtickets_github_disable(ctx)
+            self.assertEqual(restart.await_count, 3)
+
+            config = await cog.config.all()
+
+        self.assertEqual(config["guild_id"], 42)
+        self.assertFalse(config["enabled"])
+        self.assertEqual(config["bind_host"], "127.0.0.1")
+        self.assertEqual(config["bind_port"], 8080)
+        self.assertEqual(config["recovery_seconds"], 30 * 60)
+
+    async def test_clearing_the_receiver_disables_and_stops_the_integration(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            ctx = FakeContext()
+            await cog.config.set_raw("enabled", value=True)
+            await cog.config.set_raw("bind_host", value="127.0.0.1")
+            await cog.config.set_raw("bind_port", value=8080)
+            restart = mock.AsyncMock(return_value=False)
+            cog._restart_github_integration = restart
+
+            await cog.githubtickets_github_receiver_clear(ctx)
+
+            config = await cog.config.all()
+
+        restart.assert_awaited_once_with()
+        self.assertFalse(config["enabled"])
+        self.assertIsNone(config["bind_host"])
+        self.assertIsNone(config["bind_port"])
 
 
 if __name__ == "__main__":

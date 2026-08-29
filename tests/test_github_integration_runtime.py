@@ -533,6 +533,36 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cancelled_after_receiver_close, [True])
         self.assertEqual(stored.state, self.modules.models.GitHubDeliveryState.PROCESSING)
 
+    async def test_recovery_request_wakes_recovery_before_the_interval(self) -> None:
+        client = _Client()
+
+        async def handle(delivery):
+            return self.modules.runtime.DeliveryDisposition.PROCESSED
+
+        self.runtime = self.modules.runtime.GitHubIntegrationRuntime(
+            self.store,
+            client=client,
+            receiver=_Receiver(),
+            delivery_handler=handle,
+            bot=_Bot(),
+            guild_id=10,
+            clock=lambda: self.now,
+            poll_interval=0.001,
+            recovery_interval=timedelta(hours=1),
+        )
+        await self.runtime.start("127.0.0.1", 8080)
+
+        async def recovered_once() -> bool:
+            return len(client.listed_pages) >= 1
+
+        await _wait_until(recovered_once)
+        self.runtime.request_recovery()
+
+        async def recovered_twice() -> bool:
+            return len(client.listed_pages) >= 2
+
+        await _wait_until(recovered_twice)
+
     async def test_missing_credentials_leave_runtime_dormant_and_half_configuration_is_rejected(
         self,
     ) -> None:

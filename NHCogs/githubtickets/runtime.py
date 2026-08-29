@@ -81,6 +81,7 @@ class GitHubIntegrationRuntime:
         self._max_redeliveries_per_recovery = max_redeliveries_per_recovery
         self._random = random_source or random.Random()
         self._github_mutation_lock = asyncio.Lock()
+        self._recovery_requested = asyncio.Event()
         self._tasks: list[asyncio.Task[None]] = []
         self._started = False
 
@@ -136,6 +137,9 @@ class GitHubIntegrationRuntime:
                 raise
             except Exception as error:
                 await self._report("prune GitHub webhook deliveries", error)
+
+    def request_recovery(self) -> None:
+        self._recovery_requested.set()
 
     async def _recover_deliveries(self) -> None:
         client = self._client
@@ -326,8 +330,15 @@ class GitHubIntegrationRuntime:
 
     async def _recovery_loop(self) -> None:
         while True:
+            self._recovery_requested.clear()
             await self.run_recovery()
-            await asyncio.sleep(self._recovery_interval.total_seconds())
+            try:
+                await asyncio.wait_for(
+                    self._recovery_requested.wait(),
+                    timeout=self._recovery_interval.total_seconds(),
+                )
+            except asyncio.TimeoutError:
+                pass
 
     async def _await_store(self, operation: Awaitable[_ResultT]) -> _ResultT:
         task = asyncio.ensure_future(operation)
