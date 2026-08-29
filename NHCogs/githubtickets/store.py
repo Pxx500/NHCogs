@@ -589,9 +589,6 @@ def _migrate_to_github_durable_work(connection: sqlite3.Connection) -> None:
             FOREIGN KEY (current_ticket_id)
                 REFERENCES tickets (ticket_id) ON DELETE SET NULL
         );
-        CREATE UNIQUE INDEX idx_github_pull_requests_active_identity
-            ON github_pull_requests (repository_id, pr_number)
-            WHERE current_ticket_id IS NOT NULL;
         CREATE UNIQUE INDEX idx_github_pull_requests_active_ticket
             ON github_pull_requests (current_ticket_id)
             WHERE current_ticket_id IS NOT NULL;
@@ -1986,7 +1983,7 @@ class GitHubTicketsStore:
                 SET repository_full_name = ?, pr_url = ?, pr_title = ?,
                     github_author_login = ?, draft = ?, open = ?,
                     observed_labels = ?, github_updated_at = ?,
-                    last_processed_action = ?
+                    last_processed_action = COALESCE(?, last_processed_action)
                 WHERE repository_id = ? AND pr_number = ?
                 """,
                 (

@@ -170,6 +170,7 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
         title: str = "Add GitHub App integration",
         login: str = "octocat",
         updated_at: datetime | None = None,
+        last_processed_action: str | None = "labeled",
     ):
         return models.GitHubPullRequest(
             repository_id=repository_id,
@@ -184,7 +185,7 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
             open=True,
             labels=("discord-ticket", "python"),
             github_updated_at=updated_at or self.now,
-            last_processed_action="labeled",
+            last_processed_action=last_processed_action,
         )
 
     def new_ticket(self, *, author_id: int | None = None):
@@ -405,6 +406,23 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
             await self.store.create_ticket(self.new_ticket())
 
         self.assertEqual(await self.store.list_projection_cleanup_tickets(), ())
+
+    async def test_observation_without_action_preserves_last_processed_action(self):
+        await self.store.create_ticket_for_pull_request(
+            self.new_ticket(),
+            self.pull_request(),
+        )
+
+        observed = await self.store.observe_pull_request(
+            self.pull_request(
+                title="Title-only observation",
+                updated_at=self.now + timedelta(minutes=1),
+                last_processed_action=None,
+            )
+        )
+
+        self.assertEqual(observed.title, "Title-only observation")
+        self.assertEqual(observed.last_processed_action, "labeled")
 
     async def test_ticket_deletion_preserves_executable_github_intent(self):
         ticket = await self.store.create_ticket_for_pull_request(
