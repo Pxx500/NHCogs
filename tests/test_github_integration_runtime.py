@@ -128,9 +128,11 @@ class _Bot:
 
 
 async def _wait_until(predicate, *, timeout: float = 1.0) -> None:
-    async with asyncio.timeout(timeout):
+    async def wait() -> None:
         while not await predicate():  # noqa: ASYNC110
             await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait(), timeout=timeout)
 
 
 class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
