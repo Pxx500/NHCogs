@@ -4,11 +4,12 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 from . import presentation
 from .models import (
+    ActivePullRequestTicketExists,
     GitHubPullRequest,
     NewTicket,
     NextAction,
@@ -150,6 +151,8 @@ class TicketCoordinator:
                     ),
                     pull_request,
                 )
+            except ActivePullRequestTicketExists:
+                return TicketResult(True)
             except Exception:
                 return TicketResult(False, CREATE_FAILED)
             return await self._project_created_ticket(
@@ -181,7 +184,16 @@ class TicketCoordinator:
         settings = await self._get_settings(request.guild_id)
         if settings.ticket_channel_id is None:
             return TicketResult(False, MISSING_TICKET_CHANNEL)
-        validation_error = self._validate_request(request)
+        effective_request = (
+            request
+            if pull_request is None
+            else replace(
+                request,
+                pr_title=pull_request.title,
+                pr_url=pull_request.url,
+            )
+        )
+        validation_error = self._validate_request(effective_request)
         if validation_error is not None:
             return TicketResult(False, validation_error)
 
@@ -191,8 +203,8 @@ class TicketCoordinator:
                 guild_id=request.guild_id,
                 channel_id=settings.ticket_channel_id,
                 author_id=actor.user_id,
-                pr_title=request.pr_title,
-                pr_url=request.pr_url,
+                pr_title=effective_request.pr_title,
+                pr_url=effective_request.pr_url,
                 category_display=request.category_display,
                 routing_mode=request.routing_mode,
                 direct_target_id=direct_target_id,
@@ -309,7 +321,7 @@ class TicketCoordinator:
         ticket = await self._store.get_ticket(ticket_id)
         if ticket is None or ticket.state is not TicketState.OPEN:
             if ticket is not None and ticket.state is TicketState.CLAIMED:
-                return TicketResult(False, CLAIM_RACE_LOST)
+                return TicketResult(True)
             return TicketResult(False, INACTIVE_TICKET)
         if ticket.author_id == user_id:
             return TicketResult(False, SELF_REVIEW_DENIED)
@@ -454,7 +466,7 @@ class TicketCoordinator:
     ) -> TicketResult:
         ticket_id = await self._bound_ticket_id(repository_id, pr_number)
         if ticket_id is None:
-            return TicketResult(False, INACTIVE_TICKET)
+            return TicketResult(True)
         async with self._ticket_lock(ticket_id):
             ticket = await self._store.get_ticket(ticket_id)
             if (
@@ -462,7 +474,7 @@ class TicketCoordinator:
                 or ticket.state is not TicketState.CLAIMED
                 or ticket.assignee_id != user_id
             ):
-                return TicketResult(False, INACTIVE_TICKET)
+                return TicketResult(True)
             settings = await self._get_settings(ticket.guild_id)
             now = self._clock()
             protection_until = now + timedelta(seconds=settings.protection_seconds)
@@ -513,14 +525,14 @@ class TicketCoordinator:
     ) -> TicketResult:
         ticket_id = await self._bound_ticket_id(repository_id, pr_number)
         if ticket_id is None:
-            return TicketResult(False, INACTIVE_TICKET)
+            return TicketResult(True)
         async with self._ticket_lock(ticket_id):
             ticket = await self._store.get_ticket(ticket_id)
             if ticket is None or ticket.state not in (
                 TicketState.OPEN,
                 TicketState.CLAIMED,
             ):
-                return TicketResult(False, INACTIVE_TICKET)
+                return TicketResult(True)
             return await self._finish_ticket_locked(ticket)
 
     async def update_title_from_github(
@@ -532,14 +544,14 @@ class TicketCoordinator:
     ) -> TicketResult:
         ticket_id = await self._bound_ticket_id(repository_id, pr_number)
         if ticket_id is None:
-            return TicketResult(False, INACTIVE_TICKET)
+            return TicketResult(True)
         async with self._ticket_lock(ticket_id):
             ticket = await self._store.get_ticket(ticket_id)
             if ticket is None or ticket.state not in (
                 TicketState.OPEN,
                 TicketState.CLAIMED,
             ):
-                return TicketResult(False, INACTIVE_TICKET)
+                return TicketResult(True)
             normalized_title = title.strip()
             if ticket.pr_title == normalized_title:
                 return TicketResult(True)
