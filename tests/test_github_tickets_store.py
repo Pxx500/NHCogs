@@ -286,7 +286,9 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(routed.transition_version, ticket.transition_version + 1)
         self.assertEqual(await self.store.get_ticket(ticket.ticket_id), routed)
 
-    async def test_start_automatic_routing_preserves_claimed_active_ticket(self):
+    async def test_start_automatic_routing_attaches_claimed_categories_without_deadline(
+        self,
+    ):
         await self.store.initialize()
         rendering = await self.store.add_category(10, "rendering", self.now)
         ticket = await self._create_open_ticket(
@@ -315,8 +317,8 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(routed.state, models.TicketState.CLAIMED)
         self.assertEqual(routed.assignee_id, 200)
         self.assertEqual(routed.routing_mode, models.RoutingMode.AUTOMATIC)
-        self.assertEqual(routed.next_action, models.NextAction.AUTOMATIC_PING)
-        self.assertEqual(routed.next_action_at, next_action_at)
+        self.assertIsNone(routed.next_action)
+        self.assertIsNone(routed.next_action_at)
         self.assertEqual(routed.category_ids, (rendering.category_id,))
 
     async def test_start_automatic_routing_rejects_invalid_transitions_atomically(self):

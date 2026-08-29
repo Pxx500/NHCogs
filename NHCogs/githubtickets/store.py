@@ -1196,23 +1196,23 @@ class GitHubTicketsStore:
                 updated_at,
             )
 
-    async def claim_with_github_outbox(
+    async def claim_with_github_assignment(
         self,
         ticket_id: int,
         *,
         assignee_id: int,
         github_login: str,
+        github_write_required: bool,
         protection_until: datetime,
         updated_at: datetime,
     ) -> bool:
         async with self._lock:
             return await asyncio.to_thread(
-                self._claim_with_github_outbox_sync,
+                self._claim_with_github_assignment_sync,
                 ticket_id,
                 assignee_id,
                 github_login,
-                protection_until,
-                updated_at,
+                (github_write_required, protection_until, updated_at),
             )
 
     async def decline(
@@ -1257,7 +1257,6 @@ class GitHubTicketsStore:
         self,
         ticket_id: int,
         *,
-        github_login: str,
         protection_until: datetime,
         next_action: NextAction | None,
         next_action_at: datetime | None,
@@ -1267,7 +1266,6 @@ class GitHubTicketsStore:
             return await asyncio.to_thread(
                 self._unassign_with_github_outbox_sync,
                 ticket_id,
-                github_login,
                 (protection_until, next_action, next_action_at, updated_at),
             )
 
@@ -2041,7 +2039,6 @@ class GitHubTicketsStore:
             or pull_request.github_author_id <= 0
             or not repository_full_name
             or not url
-            or not title
             or not author_login
         ):
             raise ValueError("pull request identity and display fields are required")
@@ -2673,7 +2670,11 @@ class GitHubTicketsStore:
                     """
                     UPDATE tickets
                     SET category_display = ?, routing_mode = 'automatic',
-                        next_action = 'automatic_ping', next_action_at = ?,
+                        next_action = CASE state
+                            WHEN 'open' THEN 'automatic_ping'
+                            ELSE NULL
+                        END,
+                        next_action_at = CASE state WHEN 'open' THEN ? ELSE NULL END,
                         projection_sync_at = ?, updated_at = ?,
                         transition_version = transition_version + 1
                     WHERE ticket_id = ? AND state IN ('open', 'claimed')
@@ -2969,6 +2970,7 @@ class GitHubTicketsStore:
         github_login: str,
         actor_user_id: int,
         created_at: datetime,
+        state: GitHubOutboxState = GitHubOutboxState.PENDING,
     ) -> None:
         row = connection.execute(
             "SELECT transition_version FROM tickets WHERE ticket_id = ?",
@@ -2983,7 +2985,7 @@ class GitHubTicketsStore:
                 operation, ticket_id, transition_version, repository_id,
                 repository_full_name, pr_number, github_login, actor_user_id,
                 state, attempts, next_attempt_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
             """,
             (
                 operation.value,
@@ -2994,20 +2996,21 @@ class GitHubTicketsStore:
                 pr_number,
                 github_login,
                 actor_user_id,
-                timestamp,
+                state.value,
+                timestamp if state is GitHubOutboxState.PENDING else None,
                 timestamp,
                 timestamp,
             ),
         )
 
-    def _claim_with_github_outbox_sync(
+    def _claim_with_github_assignment_sync(
         self,
         ticket_id: int,
         assignee_id: int,
         github_login: str,
-        protection_until: datetime,
-        updated_at: datetime,
+        assignment: tuple[bool, datetime, datetime],
     ) -> bool:
+        github_write_required, protection_until, updated_at = assignment
         normalized_login = github_login.strip().casefold()
         if not normalized_login:
             raise ValueError("GitHub login cannot be empty")
@@ -3038,6 +3041,11 @@ class GitHubTicketsStore:
                     github_login=normalized_login,
                     actor_user_id=assignee_id,
                     created_at=updated_at,
+                    state=(
+                        GitHubOutboxState.PENDING
+                        if github_write_required
+                        else GitHubOutboxState.SUCCEEDED
+                    ),
                 )
                 connection.commit()
                 return True
@@ -3196,21 +3204,34 @@ class GitHubTicketsStore:
     def _unassign_with_github_outbox_sync(
         self,
         ticket_id: int,
-        github_login: str,
         schedule: tuple[datetime, NextAction | None, datetime | None, datetime],
     ) -> int | None:
         protection_until, next_action, next_action_at, updated_at = schedule
-        normalized_login = github_login.strip().casefold()
-        if not normalized_login:
-            raise ValueError("GitHub login cannot be empty")
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                (
-                    repository_id,
-                    pr_number,
-                    repository_full_name,
-                ) = self._pull_request_identity_for_ticket(connection, ticket_id)
+                add_intent = connection.execute(
+                    """
+                    SELECT outbox.repository_id, outbox.repository_full_name,
+                        outbox.pr_number, outbox.github_login
+                    FROM github_outbox AS outbox
+                    JOIN tickets AS ticket ON ticket.ticket_id = outbox.ticket_id
+                    WHERE outbox.ticket_id = ?
+                        AND outbox.outbox_id = (
+                            SELECT MAX(latest.outbox_id)
+                            FROM github_outbox AS latest
+                            WHERE latest.ticket_id = outbox.ticket_id
+                        )
+                        AND outbox.operation = 'add_assignee'
+                        AND outbox.actor_user_id = ticket.assignee_id
+                        AND outbox.state IN (
+                            'pending', 'processing', 'retry', 'succeeded'
+                        )
+                    ORDER BY outbox.outbox_id DESC
+                    LIMIT 1
+                    """,
+                    (ticket_id,),
+                ).fetchone()
                 assignee_id = self._unassign_ticket(
                     connection,
                     ticket_id,
@@ -3219,17 +3240,20 @@ class GitHubTicketsStore:
                 if assignee_id is None:
                     connection.rollback()
                     return None
-                self._insert_outbox_intent(
-                    connection,
-                    operation=GitHubOutboxOperation.REMOVE_ASSIGNEE,
-                    ticket_id=ticket_id,
-                    repository_id=repository_id,
-                    repository_full_name=repository_full_name,
-                    pr_number=pr_number,
-                    github_login=normalized_login,
-                    actor_user_id=assignee_id,
-                    created_at=updated_at,
-                )
+                if add_intent is not None:
+                    self._insert_outbox_intent(
+                        connection,
+                        operation=GitHubOutboxOperation.REMOVE_ASSIGNEE,
+                        ticket_id=ticket_id,
+                        repository_id=int(add_intent["repository_id"]),
+                        repository_full_name=str(
+                            add_intent["repository_full_name"]
+                        ),
+                        pr_number=int(add_intent["pr_number"]),
+                        github_login=str(add_intent["github_login"]),
+                        actor_user_id=assignee_id,
+                        created_at=updated_at,
+                    )
                 connection.commit()
                 return assignee_id
             except Exception:

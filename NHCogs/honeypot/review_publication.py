@@ -154,6 +154,7 @@ async def _finish_detection_case_deletions(cog, cases: tuple[tuple[int, str], ..
                     "case_publication_deletion",
                     f"{type(error).__name__}: {error}",
                     case_id=case_id,
+                    error=error,
                 )
                 errors.append(error)
         local_deleted = job.local_deleted
@@ -174,6 +175,7 @@ async def _finish_detection_case_deletions(cog, cases: tuple[tuple[int, str], ..
                     "case_evidence_deletion",
                     f"{type(error).__name__}: {error}",
                     case_id=case_id,
+                    error=error,
                 )
                 errors.append(error)
         if not job.rows_deleted and local_deleted:
@@ -798,6 +800,7 @@ async def _retry_detection_orphan_publications(cog) -> None:
                 "orphan_publication_deletion",
                 f"{type(error).__name__}: {error}",
                 case_id=case_id,
+                error=error,
             )
             continue
         await asyncio.to_thread(

@@ -405,6 +405,7 @@ async def _trigger_publication_preview(
                 f"{type(error).__name__}: {error}",
                 case_id=context.operation.case_id,
                 operation_id=review_publication.operation_id,
+                error=error,
             )
             log.warning(
                 "Detection case preview publication failed case=%s "

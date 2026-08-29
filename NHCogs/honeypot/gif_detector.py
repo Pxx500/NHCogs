@@ -311,6 +311,7 @@ async def _record_http_failure(cog: Any, message: Any, action: str, error: Excep
         message.guild.id,
         "gif_detector",
         f"{action}: {type(error).__name__}: {error}",
+        error=error,
     )
 
 
@@ -357,6 +358,7 @@ class _ShotDiagnostic:
                     "gif_debug",
                     f"Could not publish GIF diagnostic record: {type(error).__name__}: {error}",
                     terminal=True,
+                    error=error,
                 )
             except Exception:
                 log.warning(
@@ -1017,6 +1019,7 @@ async def on_raw_message_edit(cog: Any, payload: Any) -> None:
                 guild_id,
                 "gif_detector",
                 f"Could not fetch edited GIF message: {type(error).__name__}: {error}",
+                error=error,
             )
         return
     if local_evidence_source is not None:

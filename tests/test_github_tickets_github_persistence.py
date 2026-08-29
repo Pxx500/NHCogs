@@ -231,10 +231,11 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
             next_action_at=None,
             updated_at=self.now,
         )
-        await self.store.claim_with_github_outbox(
+        await self.store.claim_with_github_assignment(
             ticket.ticket_id,
             assignee_id=assignee_id,
             github_login=github_login,
+            github_write_required=True,
             protection_until=self.now,
             updated_at=self.now,
         )
@@ -490,10 +491,11 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
             updated_at=self.now,
         )
         self.assertTrue(
-            await self.store.claim_with_github_outbox(
+            await self.store.claim_with_github_assignment(
                 ticket.ticket_id,
                 assignee_id=222,
                 github_login="Reviewer",
+                github_write_required=True,
                 protection_until=self.now + timedelta(seconds=10),
                 updated_at=self.now,
             )
@@ -930,7 +932,6 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             await self.store.unassign_with_github_outbox(
                 ticket.ticket_id,
-                github_login="reviewer",
                 protection_until=self.now + timedelta(minutes=1),
                 next_action=None,
                 next_action_at=None,
@@ -967,7 +968,7 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_claim_and_unassign_commit_outbox_intents_atomically(self):
         self.assertTrue(
-            hasattr(self.store, "claim_with_github_outbox"),
+            hasattr(self.store, "claim_with_github_assignment"),
             "the store must own the local transition and outbox transaction",
         )
         ticket = await self.store.create_ticket_for_pull_request(
@@ -985,10 +986,11 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(
-            await self.store.claim_with_github_outbox(
+            await self.store.claim_with_github_assignment(
                 ticket.ticket_id,
                 assignee_id=222,
                 github_login=" OctoCat ",
+                github_write_required=True,
                 protection_until=self.now + timedelta(minutes=5),
                 updated_at=self.now,
             )
@@ -1036,7 +1038,6 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             await reopened.unassign_with_github_outbox(
                 ticket.ticket_id,
-                github_login="octocat",
                 protection_until=self.now + timedelta(minutes=10),
                 next_action=None,
                 next_action_at=None,
@@ -1052,7 +1053,6 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             await reopened.unassign_with_github_outbox(
                 ticket.ticket_id,
-                github_login="OCTOCAT",
                 protection_until=self.now + timedelta(minutes=10),
                 next_action=None,
                 next_action_at=None,
@@ -1110,10 +1110,11 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
             connection.commit()
 
         with self.assertRaises(sqlite3.IntegrityError):
-            await reopened.claim_with_github_outbox(
+            await reopened.claim_with_github_assignment(
                 second.ticket_id,
                 assignee_id=444,
                 github_login="other-user",
+                github_write_required=True,
                 protection_until=self.now + timedelta(minutes=5),
                 updated_at=self.now,
             )

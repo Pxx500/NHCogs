@@ -56,8 +56,6 @@ class GitHubEventHandler:
         if isinstance(parsed, events.GitHubAppLifecycleEvent):
             return DeliveryDisposition.STOPPED
         observation = await self._store.observe_pull_request(parsed.pull_request)
-        if observation.state is PullRequestObservationState.STALE:
-            return DeliveryDisposition.PROCESSED
         if observation.state is PullRequestObservationState.CONFLICT:
             if self._refresh_pull_request is None:
                 raise GitHubEventTransitionDeferred(
@@ -72,17 +70,12 @@ class GitHubEventHandler:
                 raise GitHubEventTransitionDeferred(
                     "GitHub pull request conflict did not settle"
                 )
+        if not observation.pull_request.title.strip():
+            return DeliveryDisposition.PROCESSED
         if isinstance(parsed, events.PullRequestEvent):
-            action = parsed.action
-            if action in {"assigned", "unassigned"} and parsed.assignee_login is not None:
-                assigned = any(
-                    login.casefold() == parsed.assignee_login.casefold()
-                    for login in observation.pull_request.assignees
-                )
-                action = "assigned" if assigned else "unassigned"
             parsed = replace(
                 parsed,
-                action=action,
+                action=self._reconciled_action(parsed, observation.pull_request),
                 pull_request=observation.pull_request,
                 assignee_logins=observation.pull_request.assignees,
             )
@@ -95,6 +88,28 @@ class GitHubEventHandler:
             )
             await self._handle_review(parsed)
         return DeliveryDisposition.PROCESSED
+
+    @staticmethod
+    def _reconciled_action(
+        event: events.PullRequestEvent,
+        pull_request: GitHubPullRequest,
+    ) -> events.PullRequestAction:
+        if event.action in {"assigned", "unassigned"} and event.assignee_login is not None:
+            assigned = any(
+                login.casefold() == event.assignee_login.casefold()
+                for login in pull_request.assignees
+            )
+            return "assigned" if assigned else "unassigned"
+        if event.action in {"labeled", "unlabeled"} and event.label is not None:
+            labeled = any(
+                label.casefold() == event.label.casefold() for label in pull_request.labels
+            )
+            return "labeled" if labeled else "unlabeled"
+        if event.action in {"closed", "reopened"}:
+            return "reopened" if pull_request.open else "closed"
+        if event.action in {"converted_to_draft", "ready_for_review"}:
+            return "converted_to_draft" if pull_request.draft else "ready_for_review"
+        return event.action
 
     async def _handle_pull_request(self, event: events.PullRequestEvent) -> None:
         pull_request = event.pull_request
@@ -150,17 +165,18 @@ class GitHubEventHandler:
             )
             self._require_settled(result)
         elif event.action == "assigned":
-            candidate, ambiguous = await self._first_eligible_assignee(
+            candidate, candidate_login, ambiguous = await self._first_eligible_assignee(
                 self._assignee_logins(event),
                 author_login=pull_request.github_author_login,
             )
-            if ambiguous or candidate is None:
+            if ambiguous or candidate is None or candidate_login is None:
                 return
             result = await self._coordinator.claim_ticket_from_github(
                 pull_request.repository_id,
                 pull_request.pr_number,
                 user_id=int(candidate.id),
-                ensure_assigned_login=None,
+                github_login=candidate_login,
+                github_write_required=False,
             )
             self._require_settled(result)
         elif event.action == "unassigned":
@@ -187,7 +203,8 @@ class GitHubEventHandler:
             event.pull_request.repository_id,
             event.pull_request.pr_number,
             user_id=int(reviewer.id),
-            ensure_assigned_login=None if already_assigned else reviewer_login,
+            github_login=reviewer_login,
+            github_write_required=not already_assigned,
         )
         self._require_settled(result)
 
@@ -206,7 +223,7 @@ class GitHubEventHandler:
             for login in event.assignee_logins
             if event.assignee_login is None or login.casefold() != event.assignee_login.casefold()
         )
-        candidate, ambiguous = await self._first_eligible_assignee(
+        candidate, candidate_login, ambiguous = await self._first_eligible_assignee(
             remaining_logins,
             author_login=pull_request.github_author_login,
         )
@@ -219,12 +236,13 @@ class GitHubEventHandler:
                 user_id=int(removed.id),
             )
             self._require_settled(result)
-        if candidate is not None:
+        if candidate is not None and candidate_login is not None:
             result = await self._coordinator.claim_ticket_from_github(
                 pull_request.repository_id,
                 pull_request.pr_number,
                 user_id=int(candidate.id),
-                ensure_assigned_login=None,
+                github_login=candidate_login,
+                github_write_required=False,
             )
             self._require_settled(result)
 
@@ -265,8 +283,9 @@ class GitHubEventHandler:
         logins: tuple[str, ...],
         *,
         author_login: str,
-    ) -> tuple[Any | None, bool]:
+    ) -> tuple[Any | None, str | None, bool]:
         first = None
+        first_login = None
         for login in logins:
             if login.casefold() == author_login.casefold():
                 continue
@@ -275,10 +294,11 @@ class GitHubEventHandler:
                 require_eligible=True,
             )
             if ambiguous:
-                return None, True
+                return None, None, True
             if first is None and member is not None:
                 first = member
-        return first, False
+                first_login = login
+        return first, first_login, False
 
     @staticmethod
     def _assignee_logins(event: events.PullRequestEvent) -> tuple[str, ...]:

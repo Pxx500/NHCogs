@@ -636,6 +636,7 @@ async def _settle_detection_operation_failure(
             operation_id=operation.operation_id,
             attempts=operation.attempts,
             terminal=retry_at is None,
+            error=error,
         )
     if operation.operation_type == OperationType.ROLE_APPLY:
         await review_publication._case_review_rerender_safely(cog, operation.case_id)
@@ -1411,6 +1412,7 @@ async def _delete_cached_message_ref(cog, guild: discord.Guild, user_id: int, re
             guild.id,
             "cached_message_deletion",
             f"{type(exc).__name__}: {exc}",
+            error=exc,
         )
         log.debug(
             "Failed to delete cached message %s for user %s in channel %s: %r",
@@ -1498,6 +1500,7 @@ async def _post_ban_message_sweep(cog, guild_id: int, user_id: int) -> None:
             guild_id,
             "post_ban_cached_purge",
             f"{type(error).__name__}: {error}",
+            error=error,
         )
         log.exception(
             "Post-ban cached message purge failed for user %s in guild %s",
@@ -1625,6 +1628,7 @@ async def _spam_suspicion_reasons(
                 message.guild.id,
                 "message_registry_spam_lookup",
                 f"{type(error).__name__}: {error}",
+                error=error,
             )
         except Exception:
             log.exception("Failed to record message registry spam lookup error")
@@ -1780,6 +1784,7 @@ async def on_message(cog, message: discord.Message) -> None:
                 message.guild.id,
                 "message_registry_observation",
                 f"{type(error).__name__}: {error}",
+                error=error,
             )
         except Exception:
             log.exception("Failed to record message registry observation error")

@@ -115,6 +115,7 @@ async def publish_completed_day(cog, now: datetime) -> None:
                     guild.id,
                     "daily_stats_publish",
                     f"Could not publish daily statistics for {report_date.isoformat()}: {error}",
+                    error=error,
                 )
             except Exception:
                 log.exception(

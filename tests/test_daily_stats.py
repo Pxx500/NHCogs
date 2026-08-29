@@ -166,6 +166,7 @@ class DailyStatsPublisherTests(unittest.IsolatedAsyncioTestCase):
                     failing_guild.id,
                     "daily_stats_publish",
                     mock.ANY,
+                    error=mock.ANY,
                 )
                 snapshot = store.get_daily_stats(
                     working_guild.id,
@@ -237,6 +238,7 @@ class DailyStatsPublisherTests(unittest.IsolatedAsyncioTestCase):
                     guild.id,
                     "daily_stats_publish",
                     mock.ANY,
+                    error=mock.ANY,
                 )
 
 
