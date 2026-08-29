@@ -553,6 +553,29 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Operational error records store the guild", statement)
         self.assertIn("GitHubTickets stores Discord guild and user IDs", statement)
         self.assertIn("NHModeration stores source observations", statement)
+        github_metadata = json.loads(
+            (PACKAGE_PATH / "githubtickets" / "info.json").read_text("utf-8")
+        )
+        for data_statement in (
+            statement,
+            github_metadata["end_user_data_statement"],
+        ):
+            self.assertIn(
+                "terminal failures, may retain raw request bodies until the three-day",
+                data_statement,
+            )
+            self.assertIn(
+                "Red user-data deletion removes or redacts matching Discord-user profile and ticket data",
+                data_statement,
+            )
+            self.assertIn(
+                "does not delete GitHub delivery identities or pull request rows that remain unbound",
+                data_statement,
+            )
+            self.assertNotIn(
+                "then cleared after successful or terminal processing",
+                data_statement,
+            )
 
     async def test_teardown_removes_late_registered_replacement_cog(self):
         with load_suite_module() as suite:

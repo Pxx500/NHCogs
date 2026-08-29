@@ -453,6 +453,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         ticket_id = await self.create_github_active(author_id=100)
         claimed = await self.coordinator.claim(ticket_id, self.actor(500))
         self.projection.calls.clear()
+        self.wake_count = 0
 
         categorized = await self.coordinator.add_ticket_categories(
             ticket_id,
@@ -466,10 +467,14 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ticket.state, models.TicketState.CLAIMED)
         self.assertEqual(ticket.assignee_id, 500)
         self.assertEqual(ticket.routing_mode, models.RoutingMode.AUTOMATIC)
+        self.assertEqual(ticket.category_ids, (self.category.category_id,))
+        self.assertIsNone(ticket.next_action)
+        self.assertIsNone(ticket.next_action_at)
         self.assertEqual(
             self.projection.calls,
             [("edit_ticket", ticket_id, models.TicketState.CLAIMED, None)],
         )
+        self.assertEqual(self.wake_count, 0)
 
     async def test_manual_github_creation_preserves_author_categories_and_routing(self):
         request = self.request(models.RoutingMode.DIRECT_AUTOMATIC, direct_target_id=500)
@@ -504,7 +509,8 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             100,
             7,
             user_id=222,
-            ensure_assigned_login=None,
+            github_login="Reviewer",
+            github_write_required=False,
         )
         unassigned = await self.coordinator.unassign_ticket_from_github(
             100,
@@ -524,6 +530,45 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_discord_unassign_removes_github_origin_claim_after_profile_deletion(
+        self,
+    ):
+        await self.store.save_profile(
+            guild_id=10,
+            user_id=222,
+            github_username="Reviewer",
+            category_ids=(),
+            automatic_pings=False,
+            updated_at=self.now,
+        )
+        ticket_id = await self.create_github_active()
+        claimed = await self.coordinator.claim_ticket_from_github(
+            100,
+            7,
+            user_id=222,
+            github_login="Reviewer",
+            github_write_required=False,
+        )
+        await self.store.delete_profile(10, 222)
+
+        unassigned = await self.coordinator.unassign(
+            ticket_id,
+            self.actor(999, participant=False, staff=True),
+        )
+        remove_intent = await self.store.claim_next_outbox(
+            now=self.now,
+            stale_before=self.now - timedelta(minutes=5),
+        )
+
+        self.assertTrue(claimed.success)
+        self.assertTrue(unassigned.success)
+        self.assertIsNotNone(remove_intent)
+        self.assertEqual(
+            remove_intent.operation,
+            models.GitHubOutboxOperation.REMOVE_ASSIGNEE,
+        )
+        self.assertEqual(remove_intent.github_login, "reviewer")
+
     async def test_review_claim_can_enqueue_github_assignment(self):
         ticket_id = await self.create_github_active()
 
@@ -531,7 +576,8 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             100,
             7,
             user_id=222,
-            ensure_assigned_login="Reviewer",
+            github_login="Reviewer",
+            github_write_required=True,
         )
 
         self.assertTrue(result.success)
@@ -618,7 +664,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(removed.finished_ticket.ticket_id, ticket_id)
         self.assertIsNone(await self.store.get_ticket(ticket_id))
 
-    async def test_discord_claim_and_unassign_enqueue_bound_mapped_github_writes(self):
+    async def test_discord_unassign_reuses_add_login_after_profile_deletion(self):
         await self.store.save_profile(
             guild_id=10,
             user_id=222,
@@ -635,6 +681,12 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             stale_before=self.now - timedelta(minutes=5),
         )
         await self.store.complete_outbox(add_intent.outbox_id, completed_at=self.now)
+        categorized = await self.coordinator.add_ticket_categories(
+            ticket_id,
+            (self.category.category_id,),
+            self.actor(200),
+        )
+        await self.store.delete_profile(10, 222)
         unassigned = await self.coordinator.unassign(
             ticket_id,
             self.actor(999, participant=False, staff=True),
@@ -647,6 +699,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(claimed.success)
         self.assertEqual(add_intent.operation, models.GitHubOutboxOperation.ADD_ASSIGNEE)
         self.assertEqual(add_intent.github_login, "reviewer")
+        self.assertTrue(categorized.success)
         self.assertTrue(unassigned.success)
         self.assertEqual(
             remove_intent.operation,
@@ -661,6 +714,51 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         current = await self.store.get_ticket(ticket_id)
         self.assertEqual(current.state, models.TicketState.OPEN)
         self.assertIsNone(current.assignee_id)
+
+    async def test_discord_unassign_reuses_add_login_after_mapping_becomes_ambiguous(
+        self,
+    ):
+        await self.store.save_profile(
+            guild_id=10,
+            user_id=222,
+            github_username="Reviewer",
+            category_ids=(),
+            automatic_pings=False,
+            updated_at=self.now,
+        )
+        ticket_id = await self.create_github_active()
+        claimed = await self.coordinator.claim(ticket_id, self.actor(222))
+        add_intent = await self.store.claim_next_outbox(
+            now=self.now,
+            stale_before=self.now - timedelta(minutes=5),
+        )
+        await self.store.complete_outbox(add_intent.outbox_id, completed_at=self.now)
+        await self.store.save_profile(
+            guild_id=10,
+            user_id=333,
+            github_username="Reviewer",
+            category_ids=(),
+            automatic_pings=False,
+            updated_at=self.now,
+        )
+
+        unassigned = await self.coordinator.unassign(
+            ticket_id,
+            self.actor(999, participant=False, staff=True),
+        )
+        remove_intent = await self.store.claim_next_outbox(
+            now=self.now,
+            stale_before=self.now - timedelta(minutes=5),
+        )
+
+        self.assertTrue(claimed.success)
+        self.assertTrue(unassigned.success)
+        self.assertIsNotNone(remove_intent)
+        self.assertEqual(
+            remove_intent.operation,
+            models.GitHubOutboxOperation.REMOVE_ASSIGNEE,
+        )
+        self.assertEqual(remove_intent.github_login, "reviewer")
 
     async def test_bound_claim_and_unassign_without_unique_mapping_stay_local(self):
         ticket_id = await self.create_github_active()
@@ -788,13 +886,15 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             100,
             7,
             user_id=222,
-            ensure_assigned_login=None,
+            github_login="Reviewer",
+            github_write_required=False,
         )
         duplicate_claim = await self.coordinator.claim_ticket_from_github(
             100,
             7,
             user_id=222,
-            ensure_assigned_login=None,
+            github_login="Reviewer",
+            github_write_required=False,
         )
         first_finish = await self.coordinator.finish_ticket_from_github(100, 7)
         duplicate_finish = await self.coordinator.finish_ticket_from_github(100, 7)

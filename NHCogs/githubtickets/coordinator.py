@@ -302,7 +302,8 @@ class TicketCoordinator:
         pr_number: int,
         *,
         user_id: int,
-        ensure_assigned_login: str | None,
+        github_login: str,
+        github_write_required: bool,
     ) -> TicketResult:
         ticket_id = await self._bound_ticket_id(repository_id, pr_number)
         if ticket_id is None:
@@ -311,7 +312,8 @@ class TicketCoordinator:
             return await self._claim_ticket_from_github_locked(
                 ticket_id,
                 user_id=user_id,
-                ensure_assigned_login=ensure_assigned_login,
+                github_login=github_login,
+                github_write_required=github_write_required,
             )
 
     async def _claim_ticket_from_github_locked(
@@ -319,7 +321,8 @@ class TicketCoordinator:
         ticket_id: int,
         *,
         user_id: int,
-        ensure_assigned_login: str | None,
+        github_login: str,
+        github_write_required: bool,
     ) -> TicketResult:
         ticket = await self._store.get_ticket(ticket_id)
         if ticket is None or ticket.state is not TicketState.OPEN:
@@ -331,21 +334,14 @@ class TicketCoordinator:
         settings = await self._get_settings(ticket.guild_id)
         now = self._clock()
         protection_until = now + timedelta(seconds=settings.protection_seconds)
-        if ensure_assigned_login is None:
-            claimed = await self._store.claim(
-                ticket_id,
-                user_id,
-                protection_until,
-                now,
-            )
-        else:
-            claimed = await self._store.claim_with_github_outbox(
-                ticket_id,
-                assignee_id=user_id,
-                github_login=ensure_assigned_login,
-                protection_until=protection_until,
-                updated_at=now,
-            )
+        claimed = await self._store.claim_with_github_assignment(
+            ticket_id,
+            assignee_id=user_id,
+            github_login=github_login,
+            github_write_required=github_write_required,
+            protection_until=protection_until,
+            updated_at=now,
+        )
         if not claimed:
             return TicketResult(False, CLAIM_RACE_LOST)
         current = await self._store.get_ticket(ticket_id)
@@ -359,10 +355,11 @@ class TicketCoordinator:
         protection_until = now + timedelta(seconds=settings.protection_seconds)
         github_login = await self._bound_unique_github_login(ticket, actor.user_id)
         transitioned = (
-            await self._store.claim_with_github_outbox(
+            await self._store.claim_with_github_assignment(
                 ticket.ticket_id,
                 assignee_id=actor.user_id,
                 github_login=github_login,
+                github_write_required=True,
                 protection_until=protection_until,
                 updated_at=now,
             )
@@ -455,27 +452,12 @@ class TicketCoordinator:
                 ticket.routing_mode,
                 protection_until,
             )
-            github_login = await self._bound_unique_github_login(
-                ticket,
-                ticket.assignee_id,
-            )
-            former_assignee = (
-                await self._store.unassign_with_github_outbox(
-                    ticket_id,
-                    github_login=github_login,
-                    protection_until=protection_until,
-                    next_action=next_action,
-                    next_action_at=next_action_at,
-                    updated_at=now,
-                )
-                if github_login is not None
-                else await self._store.unassign(
-                    ticket_id,
-                    protection_until=protection_until,
-                    next_action=next_action,
-                    next_action_at=next_action_at,
-                    updated_at=now,
-                )
+            former_assignee = await self._store.unassign_with_github_outbox(
+                ticket_id,
+                protection_until=protection_until,
+                next_action=next_action,
+                next_action_at=next_action_at,
+                updated_at=now,
             )
             if former_assignee is None:
                 return TicketResult(False, INACTIVE_TICKET)
@@ -684,7 +666,7 @@ class TicketCoordinator:
         if current is None:
             return TicketResult(False, INACTIVE_TICKET)
         result = await self._edit_after_transition(current)
-        if result.success:
+        if result.success and current.next_action_at is not None:
             self._wake_deadlines()
         return result
 

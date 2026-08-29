@@ -485,10 +485,11 @@ class GitHubTicketsStoreCleanupTests(unittest.IsolatedAsyncioTestCase):
             next_action_at=None,
             updated_at=self.now,
         )
-        await self.store.claim_with_github_outbox(
+        await self.store.claim_with_github_assignment(
             ticket.ticket_id,
             assignee_id=user_id,
             github_login="private-login",
+            github_write_required=True,
             protection_until=self.now,
             updated_at=self.now,
         )
@@ -535,10 +536,11 @@ class GitHubTicketsStoreCleanupTests(unittest.IsolatedAsyncioTestCase):
             next_action_at=None,
             updated_at=self.now,
         )
-        await self.store.claim_with_github_outbox(
+        await self.store.claim_with_github_assignment(
             pending_ticket.ticket_id,
             assignee_id=user_id,
             github_login="pending-login",
+            github_write_required=True,
             protection_until=self.now,
             updated_at=self.now,
         )

@@ -892,6 +892,7 @@ class Honeypot(Cog):
                         guild.id,
                         "member_resolution",
                         f"Could not resolve guild member {member.id}: {error}",
+                        error=error,
                     )
                     return True
             member = resolved_member
@@ -1093,6 +1094,7 @@ class Honeypot(Cog):
         operation_id: str | None = None,
         attempts: int = 1,
         terminal: bool = False,
+        error: BaseException | None = None,
     ) -> None:
         source_value = source.value if isinstance(source, OperationType) else source
         if terminal:
@@ -1101,14 +1103,21 @@ class Honeypot(Cog):
             state = "fast retries exhausted, slow retry scheduled"
         else:
             state = "will retry"
+        context = f"attempt {attempts}, {state}"
+        reported_error = (
+            error
+            if error is not None
+            else RuntimeError(f"{summary[:500]} ({context})")
+        )
+        action = (
+            f"{source_value} ({context})" if error is not None else source_value
+        )
         await report_operational_error(
             self.bot,
             guild_id=guild_id,
             source="Honeypot",
-            action=source_value,
-            error=RuntimeError(
-                f"{summary[:500]} (attempt {attempts}, {state})"
-            ),
+            action=action,
+            error=reported_error,
             correlation_key=operation_id or case_id,
         )
 

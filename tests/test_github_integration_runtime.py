@@ -254,10 +254,11 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             updated_at=self.now,
         )
         self.assertTrue(
-            await self.store.claim_with_github_outbox(
+            await self.store.claim_with_github_assignment(
                 ticket.ticket_id,
                 assignee_id=60,
                 github_login=" Reviewer ",
+                github_write_required=True,
                 protection_until=self.now,
                 updated_at=self.now,
             )
@@ -269,7 +270,6 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             await self.store.unassign_with_github_outbox(
                 ticket_id,
-                github_login="REVIEWER",
                 protection_until=self.now,
                 next_action=None,
                 next_action_at=None,
