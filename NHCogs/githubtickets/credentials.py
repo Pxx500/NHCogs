@@ -64,8 +64,10 @@ async def _secret(values: Mapping[str, object], name: str) -> bytes:
     has_path = isinstance(path, str) and bool(path.strip())
     if has_inline == has_path:
         raise InvalidGitHubAppCredentials("GitHub App credentials are incomplete")
-    if has_inline:
+    if has_inline and isinstance(inline, str):
         return inline.strip().encode()
+    if not isinstance(path, str):
+        raise InvalidGitHubAppCredentials("GitHub App credentials are incomplete")
     secret_path = Path(path.strip())
     if not secret_path.is_absolute():
         raise InvalidGitHubAppCredentials("GitHub App secret file is unavailable")

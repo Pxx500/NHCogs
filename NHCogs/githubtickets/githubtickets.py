@@ -666,7 +666,11 @@ class GitHubTickets(commands.Cog):
         matching_profile_ids = await self._automatic_candidate_ids(
             ticket.guild_id,
             ticket.category_ids,
-            frozenset({ticket.author_id}),
+            (
+                frozenset()
+                if ticket.author_id is None
+                else frozenset({ticket.author_id})
+            ),
         )
         histories = await self.store.candidate_history(
             ticket.ticket_id,
