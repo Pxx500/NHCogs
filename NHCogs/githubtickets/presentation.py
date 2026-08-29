@@ -363,6 +363,27 @@ def configuration_overview(
     return "\n".join(lines)
 
 
+def github_integration_overview(
+    *,
+    enabled: bool,
+    organization: str | None,
+    receiver: str | None,
+    credentials_available: bool,
+    running: bool,
+    recovery_seconds: int,
+) -> str:
+    return "\n".join(
+        (
+            f"Enabled: {'Yes' if enabled else 'No'}",
+            f"Organization: {organization or 'Not configured'}",
+            f"Receiver: {receiver or 'Not configured'}",
+            f"Credentials: {'Available' if credentials_available else 'Not configured'}",
+            f"Runtime: {'Running' if running else 'Stopped'}",
+            f"Recovery interval: {duration_text(recovery_seconds)}",
+        )
+    )
+
+
 def ticket_channel_set(channel_mention: str) -> str:
     return f"Ticket channel set to {channel_mention}"
 
