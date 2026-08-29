@@ -7,12 +7,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import discord
-from redbot.core import Config, commands, modlog
+from redbot.core import commands, modlog
 from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
 
 from ..command_overview import channel_is_private, send_group_overview
-from ..operational_errors import OperationalErrorReporter, OperationalFailure
+from ..operational_errors import (
+    mark_operational_error_recovered,
+    report_operational_error,
+)
 from ..ranked_donut_chart import render_ranked_donut_chart
 from .command_inputs import parse_banchart_arguments
 from .history import NHModerationHistory
@@ -32,21 +35,10 @@ AUDIT_BATCH_SIZE = 100
 class NHModeration(commands.Cog):
     """Store moderation history and render moderator charts."""
 
-    CONFIG_IDENTIFIER = 205192943327321000143939875896557571751
-
     def __init__(self, bot: Red) -> None:
         self.bot = bot
-        self.config = Config.get_conf(
-            self,
-            identifier=self.CONFIG_IDENTIFIER,
-            force_registration=True,
-        )
-        self.config.register_guild(error_channel=None, error_maintainer_id=None)
         database_path = cog_data_path(self) / "moderation.sqlite"
         self.history = NHModerationHistory(database_path)
-        self._operational_errors = OperationalErrorReporter(
-            bot, self.config, database_path, logger=log
-        )
         self._synchronizer: ModerationSynchronizer | None = None
         self._scheduler_task: asyncio.Task[None] | None = None
         self._startup_task: asyncio.Task[None] | None = None
@@ -55,7 +47,6 @@ class NHModeration(commands.Cog):
 
     async def cog_load(self) -> None:
         await self.history.initialize()
-        await self._operational_errors.initialize()
         self._synchronizer = ModerationSynchronizer(
             self.history,
             bot_user_id=lambda: getattr(getattr(self.bot, "user", None), "id", 0),
@@ -97,8 +88,6 @@ class NHModeration(commands.Cog):
     @commands.Cog.listener()
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         await self.history.delete_guild_data(guild.id)
-        await self._operational_errors.delete_guild(guild.id)
-        await self.config.guild(guild).clear()
 
     async def report_operational_error(
         self,
@@ -108,28 +97,22 @@ class NHModeration(commands.Cog):
         error: BaseException,
         channel_id: int | None = None,
         message_id: int | None = None,
-    ) -> OperationalFailure | None:
+    ):
         log.error(
             "NHModeration operational error during %s for guild %s",
             action,
             guild_id,
             exc_info=(type(error), error, error.__traceback__),
         )
-        try:
-            return await self._operational_errors.report(
-                guild_id=guild_id,
-                source="NHModeration",
-                action=action,
-                error=error,
-                channel_id=channel_id,
-                message_id=message_id,
-            )
-        except Exception:
-            log.exception(
-                "Failed to persist NHModeration operational error for guild %s",
-                guild_id,
-            )
-            return None
+        return await report_operational_error(
+            self.bot,
+            guild_id=guild_id,
+            source="NHModeration",
+            action=action,
+            error=error,
+            channel_id=channel_id,
+            message_id=message_id,
+        )
 
     async def cog_command_error(
         self, ctx: commands.Context, error: commands.CommandError
@@ -199,17 +182,12 @@ class NHModeration(commands.Cog):
     async def _mark_operational_recovered(
         self, guild: discord.Guild, action: str
     ) -> None:
-        try:
-            await self._operational_errors.mark_action_recovered(
-                guild_id=guild.id,
-                source="NHModeration",
-                action=action,
-            )
-        except Exception:
-            log.exception(
-                "Failed to mark NHModeration action recovered for guild %s",
-                guild.id,
-            )
+        await mark_operational_error_recovered(
+            self.bot,
+            guild_id=guild.id,
+            source="NHModeration",
+            action=action,
+        )
 
     async def _fetch_audit_entries(
         self,

@@ -17,7 +17,7 @@ import discord
 from redbot.core import Config, commands
 from redbot.core.data_manager import cog_data_path
 
-from ..operational_errors import OperationalErrorReporter, OperationalFailure
+from ..operational_errors import report_operational_error
 from ..ranked_donut_chart import OTHER_COLOR, SERIES_COLORS, render_ranked_donut_chart
 from .achievement_definitions import (
     SOLO_GATER_DEFINITION,
@@ -445,8 +445,6 @@ class NHMisc(commands.Cog):
             bot_proxy_channel=None,
             bot_proxy_delete_closed_sessions=False,
             bot_proxy_enabled=True,
-            error_channel=None,
-            error_maintainer_id=None,
             vcjumping_visit_count=DEFAULT_VCJUMPING_VISIT_COUNT,
             vcjumping_window_seconds=DEFAULT_VCJUMPING_WINDOW_SECONDS,
             activity_channel=None,
@@ -454,12 +452,6 @@ class NHMisc(commands.Cog):
             activity_history_retention_days=DEFAULT_ACTIVITY_HISTORY_RETENTION_DAYS,
             sticky_debug_logging_enabled=False,
             forum_autopin_channel_ids=[],
-        )
-        self._operational_errors = OperationalErrorReporter(
-            self.bot,
-            self.config,
-            cog_data_path(self) / "operational_errors.sqlite",
-            logger=log,
         )
         self._bot_proxy_store = BotProxyStore(cog_data_path(self) / "bot_proxy.sqlite")
         self._bot_proxy = None
@@ -546,7 +538,6 @@ class NHMisc(commands.Cog):
         self._achievement_commands_registered = False
 
     async def cog_load(self) -> None:
-        await self._operational_errors.initialize()
         await self._activity_store.initialize()
         await self._sticky_roles.initialize()
         await self._role_analytics_store.initialize()
@@ -567,10 +558,6 @@ class NHMisc(commands.Cog):
             self._recover_interrupted_gate_increments()
         )
 
-    @property
-    def operational_errors(self) -> OperationalErrorReporter:
-        return self._operational_errors
-
     async def report_operational_error(
         self,
         *,
@@ -581,23 +568,17 @@ class NHMisc(commands.Cog):
         channel_id: int | None = None,
         thread_id: int | None = None,
         message_id: int | None = None,
-    ) -> OperationalFailure | None:
-        try:
-            return await self._operational_errors.report(
-                guild_id=guild_id,
-                source=source,
-                action=action,
-                error=error,
-                channel_id=channel_id,
-                thread_id=thread_id,
-                message_id=message_id,
-            )
-        except Exception:
-            log.exception(
-                "Failed to persist NH operational error for guild %s",
-                guild_id,
-            )
-            return None
+    ):
+        return await report_operational_error(
+            self.bot,
+            guild_id=guild_id,
+            source=source,
+            action=action,
+            error=error,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            message_id=message_id,
+        )
 
     async def cog_command_error(
         self,
@@ -1167,9 +1148,6 @@ class NHMisc(commands.Cog):
         await self._role_analytics_store.delete_user_everywhere(user_id)
         await self._achievement_store.delete_user_everywhere(user_id)
         await self._gate_increment_store.redact_user_data(user_id)
-        for guild_id, guild_data in (await self.config.all_guilds()).items():
-            if guild_data.get("error_maintainer_id") == user_id:
-                await self.config.guild_from_id(guild_id).error_maintainer_id.clear()
 
     @staticmethod
     async def _defer_achievement_interaction(
@@ -3996,7 +3974,6 @@ class NHMisc(commands.Cog):
                 ctx,
                 preferred_order=(
                     "log",
-                    "errors",
                     "vcjumping",
                     "forumautopin",
                     "stickyroles",
@@ -4010,108 +3987,6 @@ class NHMisc(commands.Cog):
             inline=False,
         )
         await ctx.send(embed=embed)
-
-    @nhmisc.group(name="errors", invoke_without_command=True)
-    async def nhmisc_errors(self, ctx: commands.Context) -> None:
-        """Configure private operational error reporting."""
-        guild_config = self.config.guild(ctx.guild)
-        channel_id = await guild_config.error_channel()
-        maintainer_id = await guild_config.error_maintainer_id()
-        active_failures = await self._operational_errors.active_count(ctx.guild.id)
-        if self._channel_is_public(ctx):
-            channel_label = "Run this command in a channel hidden from @everyone."
-            maintainer_label = channel_label
-            failure_label = channel_label
-        else:
-            channel_label = self._configured_channel_label(ctx.guild, channel_id)
-            maintainer = (
-                ctx.guild.get_member(maintainer_id)
-                if maintainer_id is not None
-                else None
-            )
-            maintainer_label = (
-                maintainer.mention if maintainer is not None else "Not configured"
-            )
-            failure_label = str(active_failures)
-        embed = self._configuration_embed(
-            ctx=ctx,
-            title="Operational errors",
-            current=(
-                f"Channel: {channel_label}",
-                f"Maintainer: {maintainer_label}",
-                f"Active failures: {failure_label}",
-            ),
-        )
-        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-
-    @nhmisc_errors.group(name="channel", invoke_without_command=True)
-    async def nhmisc_errors_channel(
-        self,
-        ctx: commands.Context,
-        channel: discord.TextChannel | None = None,
-    ) -> None:
-        """Show or set the private operational error channel."""
-        if channel is None:
-            await self._show_log_destination(
-                ctx,
-                title="Operational error channel",
-                config_key="error_channel",
-            )
-            return
-        missing_permissions = self._missing_log_permissions(
-            ctx.guild,
-            channel,
-            require_attach_files=True,
-        )
-        if missing_permissions is not None:
-            raise commands.UserFeedbackCheckFailure(missing_permissions)
-        if self._channel_allows_everyone(channel, ctx.guild):
-            raise commands.UserFeedbackCheckFailure(
-                "Configure a channel that is private from @everyone"
-            )
-        await self.config.guild(ctx.guild).error_channel.set(channel.id)
-        await ctx.send(f"Operational error channel set to {channel.mention}.")
-
-    @nhmisc_errors_channel.command(name="clear")
-    async def nhmisc_errors_channel_clear(self, ctx: commands.Context) -> None:
-        """Clear the operational error channel."""
-        await self.config.guild(ctx.guild).error_channel.clear()
-        await ctx.send("Operational error channel cleared.")
-
-    @nhmisc_errors.group(name="maintainer", invoke_without_command=True)
-    async def nhmisc_errors_maintainer(
-        self,
-        ctx: commands.Context,
-        member: discord.Member | None = None,
-    ) -> None:
-        """Show or set the maintainer pinged for operational errors."""
-        setting = self.config.guild(ctx.guild).error_maintainer_id
-        if member is not None:
-            await setting.set(member.id)
-            await ctx.send(
-                f"Operational error maintainer set to {member.mention}.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-        maintainer_id = await setting()
-        if self._channel_is_public(ctx):
-            value = "Run this command in a channel hidden from @everyone."
-        else:
-            maintainer = (
-                ctx.guild.get_member(maintainer_id)
-                if maintainer_id is not None
-                else None
-            )
-            value = maintainer.mention if maintainer is not None else "Not configured"
-        embed = discord.Embed(title="Operational error maintainer")
-        embed.add_field(name="Current configuration", value=value, inline=False)
-        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-
-    @nhmisc_errors_maintainer.command(name="clear")
-    async def nhmisc_errors_maintainer_clear(self, ctx: commands.Context) -> None:
-        """Clear the operational error maintainer."""
-        await self.config.guild(ctx.guild).error_maintainer_id.clear()
-        await ctx.send("Operational error maintainer cleared.")
 
     @nhmisc.group(name="roleanalytics", invoke_without_command=True)
     @commands.has_permissions(manage_messages=True)
@@ -6323,17 +6198,6 @@ class NHMisc(commands.Cog):
             guild,
             "alert_channel",
             "alert",
-        )
-
-    async def require_private_error_channel(
-        self,
-        guild: discord.Guild,
-    ) -> discord.TextChannel:
-        """Return the configured private operational error channel."""
-        return await self._require_private_log_channel(
-            guild,
-            "error_channel",
-            "operational error",
         )
 
     async def _require_private_moderation_log_channel(

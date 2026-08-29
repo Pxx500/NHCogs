@@ -305,10 +305,16 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             list_definitions=mock.AsyncMock(return_value=()),
         )
         cog._build_achievements_embed = mock.Mock(return_value=object())
+        cog._respond_with_achievement_profile = mock.AsyncMock()
 
         with mock.patch.object(nhmisc.log, "info") as info:
             await cog._achievements_slash(interaction, target)
 
+        cog._respond_with_achievement_profile.assert_awaited_once_with(
+            interaction,
+            target,
+            command_mention="`/achievements`",
+        )
         info.assert_not_called()
 
     async def test_achievements_user_action_defers_before_waiting_for_store(self):

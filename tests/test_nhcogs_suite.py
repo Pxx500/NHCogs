@@ -37,6 +37,14 @@ class StubConsoleDump(StubLifecycle):
         _record_construction(bot, self.qualified_name)
 
 
+class StubOperationalErrors(StubLifecycle):
+    qualified_name = "OperationalErrors"
+
+    def __init__(self, bot):
+        self.bot = bot
+        _record_construction(bot, self.qualified_name)
+
+
 class StubNHMisc(StubLifecycle):
     qualified_name = "NHMisc"
     CONFIG_IDENTIFIER = 8597423150612235807
@@ -95,7 +103,7 @@ StubCustomCommandsMigration.__module__ = "NHCogs.custom_commands.migration_contr
 
 
 @contextmanager
-def load_suite_module():
+def load_suite_module():  # noqa: PLR0915
     names = (
         "redbot",
         "redbot.core",
@@ -103,6 +111,7 @@ def load_suite_module():
         "redbot.core.utils",
         "NHCogs",
         "NHCogs.consoledump",
+        "NHCogs.operationalerrors",
         "NHCogs.nhmisc",
         "NHCogs.honeypot",
         "NHCogs.cleanup",
@@ -119,6 +128,8 @@ def load_suite_module():
     redbot_utils.get_end_user_data_statement = lambda **_kwargs: "data statement"
     console_dump = types.ModuleType("NHCogs.consoledump")
     console_dump.ConsoleDump = StubConsoleDump
+    operational_errors = types.ModuleType("NHCogs.operationalerrors")
+    operational_errors.OperationalErrors = StubOperationalErrors
     nhmisc = types.ModuleType("NHCogs.nhmisc")
     nhmisc.NHMisc = StubNHMisc
     honeypot = types.ModuleType("NHCogs.honeypot")
@@ -171,6 +182,7 @@ def load_suite_module():
                 "redbot.core.utils": redbot_utils,
                 "NHCogs": module,
                 "NHCogs.consoledump": console_dump,
+                "NHCogs.operationalerrors": operational_errors,
                 "NHCogs.nhmisc": nhmisc,
                 "NHCogs.honeypot": honeypot,
                 "NHCogs.cleanup": cleanup,
@@ -238,6 +250,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
             bot.added,
             [
                 "ConsoleDump",
+                "OperationalErrors",
                 "NHMisc",
                 "Honeypot",
                 "Cleanup",
@@ -250,6 +263,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
             set(bot.cogs),
             {
                 "ConsoleDump",
+                "OperationalErrors",
                 "NHMisc",
                 "Honeypot",
                 "Cleanup",
@@ -274,6 +288,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
             set(bot.cogs),
             {
                 "ConsoleDump",
+                "OperationalErrors",
                 "NHMisc",
                 "Honeypot",
                 "Cleanup",
@@ -297,6 +312,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
             set(bot.cogs),
             {
                 "ConsoleDump",
+                "OperationalErrors",
                 "NHMisc",
                 "Honeypot",
                 "GitHubTickets",
@@ -311,6 +327,8 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
         failures = (
             ("ConsoleDump", "before"),
             ("ConsoleDump", "after"),
+            ("OperationalErrors", "before"),
+            ("OperationalErrors", "after"),
             ("NHMisc", "before"),
             ("NHMisc", "after"),
             ("Honeypot", "before"),
@@ -337,6 +355,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
                 if failure[0] != "CustomCommandsMigration":
                     for name in (
                         "ConsoleDump",
+                        "OperationalErrors",
                         "NHMisc",
                         "Honeypot",
                         "Cleanup",
@@ -356,6 +375,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
     async def test_each_subcog_construction_failure_is_isolated_and_logged(self):
         for name in (
             "ConsoleDump",
+            "OperationalErrors",
             "NHMisc",
             "Honeypot",
             "Cleanup",
@@ -372,6 +392,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(name, bot.cogs)
                 for other in (
                     "ConsoleDump",
+                    "OperationalErrors",
                     "NHMisc",
                     "Honeypot",
                     "Cleanup",
@@ -390,6 +411,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
     async def test_each_subcog_cog_load_failure_is_cleaned_up_and_isolated(self):
         for name in (
             "ConsoleDump",
+            "OperationalErrors",
             "NHMisc",
             "Honeypot",
             "Cleanup",
@@ -408,6 +430,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(f"failed loading {name}", "\n".join(captured.output))
                 for other in (
                     "ConsoleDump",
+                    "OperationalErrors",
                     "NHMisc",
                     "Honeypot",
                     "Cleanup",
@@ -427,8 +450,14 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
                 await suite.setup(bot)
 
         self.assertEqual(bot.cogs, {})
-        self.assertEqual(bot.removed, ["NHMisc", "ConsoleDump"])
-        self.assertEqual(bot.unloaded, ["Honeypot", "NHMisc", "ConsoleDump"])
+        self.assertEqual(
+            bot.removed,
+            ["NHMisc", "OperationalErrors", "ConsoleDump"],
+        )
+        self.assertEqual(
+            bot.unloaded,
+            ["Honeypot", "NHMisc", "OperationalErrors", "ConsoleDump"],
+        )
 
     async def test_framework_cleanup_is_not_repeated_by_supervisor(self):
         with load_suite_module() as suite:
@@ -459,6 +488,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
             set(bot.cogs),
             {
                 "ConsoleDump",
+                "OperationalErrors",
                 "NHMisc",
                 "Honeypot",
                 "Cleanup",
@@ -484,6 +514,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
             set(bot.cogs),
             {
                 "ConsoleDump",
+                "OperationalErrors",
                 "NHMisc",
                 "Honeypot",
                 "Cleanup",
@@ -501,7 +532,7 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata["name"], "NHCogs")
         self.assertEqual(
             metadata["description"],
-            "Loads ConsoleDump, NHMisc, Honeypot, Cleanup, GitHubTickets, NHModeration, and Custom Commands together "
+            "Loads ConsoleDump, OperationalErrors, NHMisc, Honeypot, Cleanup, GitHubTickets, NHModeration, and Custom Commands together "
             "while preserving their separate commands, configuration, and stored data",
         )
         self.assertEqual(metadata["min_bot_version"], "3.5.23")

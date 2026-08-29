@@ -6,7 +6,7 @@ import asyncio
 import logging
 import sys
 import unittest
-from dataclasses import FrozenInstanceError, fields
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, get_ident
@@ -15,7 +15,6 @@ from unittest import mock
 
 from tests.harness import (
     _MISSING,
-    EXPECTED_GUILD_DEFAULTS,
     _async_noop,
     _Bot,
     _isolated_honeypot_modules,
@@ -179,8 +178,6 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         implementation_names = (
             "config_dump",
             "honeypot_doctor",
-            "honeypot_errors",
-            "honeypot_errors_clear",
             "honeypot_mod_stats",
             "honeypot_reset_stats",
             "honeypot_stats",
@@ -231,20 +228,6 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                             expected,
                         )
                         self.assertEqual(getattr(honeypot, tuple_name), expected)
-
-    async def test_empty_guild_settings_use_registered_defaults(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                settings_type = getattr(honeypot, "GuildSettings", None)
-                self.assertIsNotNone(settings_type)
-
-                guild_settings = settings_type.from_mapping({})
-
-                observed = {
-                    field.name: getattr(guild_settings, field.name)
-                    for field in fields(guild_settings)
-                }
-                self.assertEqual(observed, EXPECTED_GUILD_DEFAULTS)
 
     async def test_guild_settings_ignore_unknown_keys_and_keep_known_values(self):
         with TemporaryDirectory() as directory:
@@ -321,7 +304,6 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_guild_settings_coerce_optional_discord_ids(self):
         raw = {
-            "errors_channel": 11,
             "mute_role": "invalid",
             "review_channel": 44,
             "joinwatch_channel": 55,
@@ -333,7 +315,6 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertLogs("red.Honeypot", level=logging.WARNING) as captured:
                     guild_settings = honeypot.GuildSettings.from_mapping(raw)
 
-                self.assertEqual(guild_settings.errors_channel, 11)
                 self.assertIsNone(guild_settings.mute_role)
                 self.assertEqual(guild_settings.review_channel, 44)
                 self.assertEqual(guild_settings.joinwatch_channel, 55)
@@ -358,7 +339,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(set(guild_settings.scam_keywords), {"alpha", "beta"})
                 self.assertEqual(
                     guild_settings.attachment_patterns,
-                    EXPECTED_GUILD_DEFAULTS["attachment_patterns"],
+                    honeypot.settings.DEFAULTS["attachment_patterns"],
                 )
                 self.assertIn("attachment_patterns", "\n".join(captured.output))
 
@@ -464,29 +445,6 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
                 with self.assertRaises(FrozenInstanceError):
                     guild_settings.enabled = True
-
-    async def test_guild_settings_defaults_exactly_match_registered_config(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
-
-                self.assertEqual(dict(honeypot.settings.DEFAULTS), EXPECTED_GUILD_DEFAULTS)
-                self.assertEqual(cog.config.defaults, EXPECTED_GUILD_DEFAULTS)
-
-    async def test_guild_settings_never_raise_for_non_mapping_config(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                with self.assertLogs("red.Honeypot", level=logging.WARNING):
-                    try:
-                        guild_settings = honeypot.GuildSettings.from_mapping(None)
-                    except Exception as exc:
-                        self.fail(f"from_mapping raised for config input: {exc!r}")
-
-                observed = {
-                    field.name: getattr(guild_settings, field.name)
-                    for field in fields(guild_settings)
-                }
-                self.assertEqual(observed, EXPECTED_GUILD_DEFAULTS)
 
     async def test_isolation_removes_new_nested_honeypot_module(self):
         module_name = "NHCogs.honeypot.operations.source_delete"

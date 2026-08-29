@@ -12,6 +12,7 @@ from redbot.core import commands
 from redbot.core.commands import Parameter
 from redbot.core.utils.chat_formatting import humanize_list
 
+from ..operational_errors import report_operational_error
 from .arguments import (
     MAX_ARGUMENT_INDEX,
     PLACEHOLDER_PATTERN,
@@ -45,14 +46,12 @@ class CustomCommandRuntime:
         self,
         bot: Any,
         catalog: CustomCommandCatalog,
-        operational_errors: Any,
         *,
         random_index: Callable[[int], int] = random.randrange,
         logger: Any,
     ):
         self._bot = bot
         self._catalog = catalog
-        self._operational_errors = operational_errors
         self._random_index = random_index
         self._logger = logger
         self._cooldown_deadlines: dict[tuple[str, int, str, int], float] = {}
@@ -330,18 +329,16 @@ class CustomCommandRuntime:
             if getattr(channel, "parent", None) is not None
             else None
         )
-        try:
-            await self._operational_errors.report(
-                guild_id=guild.id,
-                source="CustomCommands",
-                action=action,
-                error=error,
-                channel_id=getattr(channel, "id", None),
-                thread_id=thread_id,
-                message_id=getattr(getattr(ctx, "message", None), "id", None),
-            )
-        except Exception:
-            self._logger.exception("Failed to report CustomCommands operational error")
+        await report_operational_error(
+            self._bot,
+            guild_id=guild.id,
+            source="CustomCommands",
+            action=action,
+            error=error,
+            channel_id=getattr(channel, "id", None),
+            thread_id=thread_id,
+            message_id=getattr(getattr(ctx, "message", None), "id", None),
+        )
 
     @staticmethod
     async def _callback(*_args: Any, **_kwargs: Any) -> None:

@@ -441,6 +441,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                     joinwatch_pending_roles=lambda: self._Store(roles),
                 )
                 cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
+                cog._record_operational_failure = mock.AsyncMock()
                 honeypot.joinwatch.joinwatch_publication.publish_joinwatch_incident = mock.AsyncMock()
                 now = datetime(2026, 7, 15, 12, tzinfo=timezone.utc)
 
@@ -467,11 +468,11 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                     datetime.fromisoformat(roles["200"]["expires_at"]),
                     now + timedelta(minutes=1),
                 )
-                failures = await asyncio.to_thread(
-                    cog._case_store.list_operational_failures, guild.id
-                )
                 self.assertEqual(
-                    {failure.source for failure in failures},
+                    {
+                        call.args[1]
+                        for call in cog._record_operational_failure.await_args_list
+                    },
                     {"joinwatch_role_assignment", "joinwatch_role_action"},
                 )
 
@@ -487,6 +488,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                     joinwatch_pending_role_assignments=lambda: self._Store(assignments),
                 )
                 cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
+                cog._record_operational_failure = mock.AsyncMock()
                 honeypot.joinwatch.joinwatch_publication.publish_joinwatch_incident = mock.AsyncMock()
 
                 scheduled = await honeypot.joinwatch._reschedule_joinwatch_assignment_retry(
@@ -500,8 +502,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertFalse(scheduled)
                 self.assertNotIn("200", assignments)
-                failures = await asyncio.to_thread(
-                    cog._case_store.list_operational_failures, guild.id
-                )
-                self.assertEqual(len(failures), 1)
-                self.assertEqual(failures[0].source, "joinwatch_role_assignment")
+                cog._record_operational_failure.assert_awaited_once()
+                failure = cog._record_operational_failure.await_args
+                self.assertEqual(failure.args[1], "joinwatch_role_assignment")
+                self.assertIs(failure.kwargs["terminal"], True)

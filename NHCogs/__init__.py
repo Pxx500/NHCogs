@@ -131,6 +131,10 @@ async def setup(bot: Red) -> None:
     try:
         if consoledump := await _load_subcog(bot, ".consoledump", "ConsoleDump"):
             loaded.append(consoledump)
+        if operational_errors := await _load_subcog(
+            bot, ".operationalerrors", "OperationalErrors"
+        ):
+            loaded.append(operational_errors)
         nhmisc = await _load_subcog(bot, ".nhmisc", "NHMisc")
         if nhmisc is not None:
             loaded.append(nhmisc)

@@ -150,9 +150,7 @@ DEFAULTS: Mapping[str, object] = MappingProxyType(
         "action": None,
         "fallback_action": "review",
         "dry_run": False,
-        "errors_channel": None,
         "daily_stats_channel": None,
-        "maintainer_id": None,
         "manual_evidence_channel": None,
         "manual_punishment_roles": {},
         "honeypot_channels": [],
@@ -387,9 +385,7 @@ class GuildSettings:
     action: CoreActionOption | None
     fallback_action: FallbackActionOption
     dry_run: bool
-    errors_channel: int | None
     daily_stats_channel: int | None
-    maintainer_id: int | None
     manual_evidence_channel: int | None
     manual_punishment_roles: dict[int, ManualPunishmentRoleSettings]
     honeypot_channels: list[int]
@@ -455,9 +451,7 @@ class GuildSettings:
                 raw, "fallback_action", FallbackActionOption, FallbackActionOption.REVIEW
             ),
             dry_run=_bool(raw, "dry_run"),
-            errors_channel=_optional_int(raw, "errors_channel"),
             daily_stats_channel=_optional_int(raw, "daily_stats_channel"),
-            maintainer_id=_optional_int(raw, "maintainer_id"),
             manual_evidence_channel=_optional_int(raw, "manual_evidence_channel"),
             manual_punishment_roles=_manual_punishment_roles(raw),
             honeypot_channels=_list(raw, "honeypot_channels", int),

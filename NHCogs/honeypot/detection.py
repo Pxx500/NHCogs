@@ -27,6 +27,7 @@ from redbot.core import commands, modlog
 from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import box
 
+from ..operational_errors import mark_operational_error_recovered
 from . import detection_runtime, imagescan, review_publication
 from .case_review import case_feedback_items
 from .detection_cases import (
@@ -684,17 +685,13 @@ async def _settle_detection_operation_success(
     elif context.snapshot is not None and (
         operation.attempts > 1 or outcome.resolve_failure_on_first_attempt
     ):
-        recovered = await asyncio.to_thread(
-            cog._case_store.resolve_operational_failure,
-            operation.operation_id,
-            context.now,
+        await mark_operational_error_recovered(
+            cog.bot,
+            guild_id=context.snapshot.case.guild_id,
+            source="Honeypot",
+            action=operation.operation_type.value,
+            correlation_key=operation.operation_id,
         )
-        if recovered and operation.attempts > 1:
-            await cog._send_operational_alert(
-                context.snapshot.case.guild_id,
-                f"✅ Recovered: {operation.operation_type.value} succeeded after "
-                f"{operation.attempts} attempts.",
-            )
     elif outcome.role_was_added and context.snapshot is not None:
         guild = cog.bot.get_guild(context.snapshot.case.guild_id)
         if guild is not None:

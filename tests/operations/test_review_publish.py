@@ -4,6 +4,7 @@ from importlib import import_module
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest import mock
 
 from tests.harness import _Bot, _isolated_honeypot_modules
 
@@ -240,39 +241,6 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(outcome.result)
                 self.assertEqual(outcome.follow_ups, ())
 
-    async def test_errors_channel_is_not_a_review_publication_fallback(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                handler_module = import_module("NHCogs.honeypot.operations.review_publish")
-                now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
-                appended, _operation, _claimed, context = (
-                    self._claim_review_publish(honeypot, cog, now)
-                )
-                self._configure(
-                    cog,
-                    review_channel=None,
-                    extra={"errors_channel": 202},
-                )
-                publications = []
-
-                async def publish_case(*args, **kwargs):
-                    publications.append((args, kwargs))
-
-                cog._publish_detection_case = publish_case
-
-                await handler_module.review_publish_handler(cog, context)
-
-                self.assertEqual(
-                    publications,
-                    [
-                        (
-                            (appended.case.case_id, None),
-                            {"message_sequence": appended.message.sequence},
-                        )
-                    ],
-                )
-
     async def test_guild_unavailable_still_uses_configured_review_channel_id(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -312,6 +280,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                     self._claim_review_publish(honeypot, cog, now)
                 )
                 self._configure(cog)
+                cog._record_operational_failure = mock.AsyncMock()
                 publication_error = RuntimeError("review publication unavailable")
 
                 async def fail_publication(*args, **kwargs):
@@ -332,9 +301,6 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                     for item in snapshot.operations
                     if item.operation_id == operation.operation_id
                 )
-                failures = cog._case_store.list_operational_failures(
-                    appended.case.guild_id
-                )
                 self.assertIs(failed.status, honeypot.OperationStatus.FAILED)
                 self.assertIsNone(failed.result)
                 self.assertEqual(
@@ -342,10 +308,13 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                     timedelta(seconds=10),
                 )
                 self.assertIn("review publication unavailable", failed.last_error)
-                self.assertEqual(len(failures), 1)
-                self.assertEqual(failures[0].operation_id, operation.operation_id)
+                cog._record_operational_failure.assert_awaited_once()
+                self.assertEqual(
+                    cog._record_operational_failure.await_args.kwargs["operation_id"],
+                    operation.operation_id,
+                )
 
-    async def test_first_attempt_resolves_failure_without_recovery_alert_or_follow_up(
+    async def test_first_attempt_marks_matching_shared_failure_recovered_without_follow_up(
         self,
     ):
         with TemporaryDirectory() as directory:
@@ -357,22 +326,10 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                     self._claim_review_publish(honeypot, cog, now)
                 )
                 self._configure(cog)
-                cog._case_store.record_operational_failure(
-                    guild_id=appended.case.guild_id,
-                    source=honeypot.OperationType.REVIEW_PUBLISH,
-                    summary="previous publication failure",
-                    occurred_at=now,
-                    case_id=appended.case.case_id,
-                    operation_id=operation.operation_id,
-                )
                 publications = []
-                recovery_alerts = []
-
-                async def send_recovery_alert(guild_id, message):
-                    recovery_alerts.append((guild_id, message))
 
                 cog._publish_detection_case = self._record_publications(publications)
-                cog._send_operational_alert = send_recovery_alert
+                honeypot.detection.mark_operational_error_recovered = mock.AsyncMock()
 
                 await cog._execute_detection_case_operation(claimed, now)
 
@@ -382,21 +339,17 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                     for item in snapshot.operations
                     if item.operation_id == operation.operation_id
                 )
-                unresolved = cog._case_store.list_operational_failures(
-                    appended.case.guild_id
-                )
-                failures = cog._case_store.list_operational_failures(
-                    appended.case.guild_id,
-                    include_resolved=True,
-                )
                 policy = operations.executor_operation_policy(
                     honeypot.OperationType.REVIEW_PUBLISH
                 )
                 self.assertEqual(len(publications), 1)
                 self.assertIs(completed.status, honeypot.OperationStatus.SUCCEEDED)
                 self.assertIsNone(completed.result)
-                self.assertEqual(unresolved, ())
-                self.assertEqual(len(failures), 1)
-                self.assertIsNotNone(failures[0].resolved_at)
-                self.assertEqual(recovery_alerts, [])
+                honeypot.detection.mark_operational_error_recovered.assert_awaited_once_with(
+                    cog.bot,
+                    guild_id=appended.case.guild_id,
+                    source="Honeypot",
+                    action="review_publish",
+                    correlation_key=operation.operation_id,
+                )
                 self.assertEqual(policy.follow_ups, ())

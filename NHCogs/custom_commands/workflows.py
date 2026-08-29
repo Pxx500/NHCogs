@@ -8,6 +8,7 @@ from typing import Any
 
 import discord
 
+from ..operational_errors import report_operational_error
 from .arguments import ArgumentSignatureError, argument_signature
 from .catalog import (
     MAX_RESPONSE_LENGTH,
@@ -730,15 +731,16 @@ class WorkflowSession:
 class WorkflowManager:
     def __init__(
         self,
+        bot: Any,
         catalog: CustomCommandCatalog,
         nhmisc: Any,
         *,
         logger: logging.Logger,
         session_timeout_seconds: float = SESSION_TIMEOUT_SECONDS,
     ):
+        self._bot = bot
         self.catalog = catalog
         self._nhmisc = nhmisc
-        self._operational_errors = nhmisc.operational_errors
         self.logger = logger
         self.session_timeout_seconds = session_timeout_seconds
         self._sessions: dict[int, WorkflowSession] = {}
@@ -865,14 +867,12 @@ class WorkflowManager:
         thread_id: int | None = None,
         message_id: int | None = None,
     ) -> None:
-        try:
-            await self._operational_errors.report(
-                guild_id=guild_id,
-                source="CustomCommands",
-                action=action,
-                error=error,
-                thread_id=thread_id,
-                message_id=message_id,
-            )
-        except Exception:
-            self.logger.exception("Failed to report CustomCommands workflow error")
+        await report_operational_error(
+            self._bot,
+            guild_id=guild_id,
+            source="CustomCommands",
+            action=action,
+            error=error,
+            thread_id=thread_id,
+            message_id=message_id,
+        )
