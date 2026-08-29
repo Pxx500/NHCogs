@@ -738,6 +738,64 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_deferred_outbox_intent_blocks_later_intents_for_same_pr(self):
+        ticket = await self.create_pending_outbox(
+            repository_id=102,
+            pr_number=9,
+            github_pr_id=900,
+            assignee_id=201,
+            github_login="reviewer",
+        )
+        add_intent = await self.store.claim_next_outbox(
+            now=self.now,
+            stale_before=self.now - timedelta(minutes=5),
+        )
+        retry_at = self.now + timedelta(minutes=5)
+        self.assertTrue(
+            await self.store.defer_outbox(
+                add_intent.outbox_id,
+                next_attempt_at=retry_at,
+                error_summary="temporary failure",
+            )
+        )
+        self.assertEqual(
+            await self.store.unassign_with_github_outbox(
+                ticket.ticket_id,
+                github_login="reviewer",
+                protection_until=self.now + timedelta(minutes=1),
+                next_action=None,
+                next_action_at=None,
+                updated_at=self.now + timedelta(seconds=1),
+            ),
+            201,
+        )
+
+        self.assertIsNone(
+            await self.store.claim_next_outbox(
+                now=self.now + timedelta(seconds=1),
+                stale_before=self.now - timedelta(minutes=5),
+            )
+        )
+        retried_add = await self.store.claim_next_outbox(
+            now=retry_at,
+            stale_before=self.now - timedelta(minutes=5),
+        )
+        self.assertEqual(retried_add.outbox_id, add_intent.outbox_id)
+        self.assertTrue(
+            await self.store.complete_outbox(
+                retried_add.outbox_id,
+                completed_at=retry_at,
+            )
+        )
+        remove_intent = await self.store.claim_next_outbox(
+            now=retry_at,
+            stale_before=self.now - timedelta(minutes=5),
+        )
+        self.assertEqual(
+            remove_intent.operation,
+            models.GitHubOutboxOperation.REMOVE_ASSIGNEE,
+        )
+
     async def test_claim_and_unassign_commit_outbox_intents_atomically(self):
         self.assertTrue(
             hasattr(self.store, "claim_with_github_outbox"),
@@ -783,6 +841,7 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(add_intent.github_login, "octocat")
         self.assertEqual(add_intent.actor_user_id, 222)
         self.assertEqual(add_intent.repository_id, 100)
+        self.assertEqual(add_intent.repository_full_name, "NewHorizons/NHCogs")
         self.assertEqual(add_intent.pr_number, 7)
         self.assertEqual(add_intent.transition_version, claimed_ticket.transition_version)
         self.assertTrue(
@@ -841,6 +900,7 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
             models.GitHubOutboxOperation.REMOVE_ASSIGNEE,
         )
         self.assertEqual(remove_intent.github_login, "octocat")
+        self.assertEqual(remove_intent.repository_full_name, "NewHorizons/NHCogs")
         self.assertEqual(remove_intent.actor_user_id, 222)
         recovered_remove = await reopened.claim_next_outbox(
             now=self.now + timedelta(minutes=10),
