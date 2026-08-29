@@ -163,6 +163,7 @@ class Ticket:
     public_token: str = ""
     pending_ping_reserved_at: datetime | None = None
     origin: TicketOrigin = TicketOrigin.DISCORD
+    category_prompt_retry_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

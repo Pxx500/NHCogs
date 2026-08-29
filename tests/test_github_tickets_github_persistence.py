@@ -323,7 +323,7 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(await migrated.list_exclusions(1)), 1)
         self.assertEqual(len(await migrated.list_pings(1)), 1)
         with closing(store_module.connect(legacy_path)) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
 
     async def test_pull_request_binding_reserves_one_active_ticket_and_keeps_identity_immutable(

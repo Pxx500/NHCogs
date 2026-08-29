@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_CATEGORIES = 25
 MAX_CATEGORY_NAME_LENGTH = 100
 MAX_DELIVERY_BODY_BYTES = 1_048_576
@@ -173,6 +173,9 @@ def _decode_ticket(connection: sqlite3.Connection, row: sqlite3.Row) -> Ticket:
         category_ids=category_ids,
         public_token=str(row["public_token"]),
         origin=TicketOrigin(str(row["origin"])),
+        category_prompt_retry_at=_deserialize_optional_datetime(
+            row["category_prompt_retry_at"]
+        ),
     )
 
 
@@ -673,7 +676,24 @@ def _migrate_to_github_durable_work(connection: sqlite3.Connection) -> None:
             connection.execute(statement)
 
 
-MIGRATIONS = (_create_schema, _migrate_to_github_durable_work)
+def _add_category_prompt_retry(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "ALTER TABLE tickets ADD COLUMN category_prompt_retry_at TEXT"
+    )
+    connection.execute(
+        """
+        CREATE INDEX idx_ticket_category_prompt_retry
+        ON tickets (category_prompt_retry_at, ticket_id)
+        WHERE category_prompt_retry_at IS NOT NULL
+        """
+    )
+
+
+MIGRATIONS = (
+    _create_schema,
+    _migrate_to_github_durable_work,
+    _add_category_prompt_retry,
+)
 
 
 class GitHubTicketsStore:
@@ -1153,6 +1173,28 @@ class GitHubTicketsStore:
                 self._defer_projection_sync_sync,
                 ticket_id,
                 transition_version,
+                retry_at,
+            )
+
+    async def acknowledge_category_prompt(
+        self,
+        ticket_id: int,
+    ) -> bool:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._acknowledge_category_prompt_sync,
+                ticket_id,
+            )
+
+    async def defer_category_prompt(
+        self,
+        ticket_id: int,
+        retry_at: datetime,
+    ) -> bool:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._defer_category_prompt_sync,
+                ticket_id,
                 retry_at,
             )
 
@@ -2607,6 +2649,10 @@ class GitHubTicketsStore:
             UPDATE tickets
             SET message_id = ?, thread_id = ?, state = 'open',
                 protection_until = ?, next_action = ?, next_action_at = ?,
+                category_prompt_retry_at = CASE
+                    WHEN origin = 'github' THEN ?
+                    ELSE NULL
+                END,
                 projection_sync_at = NULL, updated_at = ?,
                 transition_version = transition_version + 1
             WHERE ticket_id = ? AND state = 'creating'
@@ -2617,6 +2663,7 @@ class GitHubTicketsStore:
                 _serialize_optional_datetime(protection_until),
                 next_action.value if next_action is not None else None,
                 _serialize_optional_datetime(next_action_at),
+                _serialize_datetime(updated_at),
                 _serialize_datetime(updated_at),
                 ticket_id,
             ),
@@ -2670,6 +2717,7 @@ class GitHubTicketsStore:
                     """
                     UPDATE tickets
                     SET category_display = ?, routing_mode = 'automatic',
+                        category_prompt_retry_at = NULL,
                         next_action = CASE state
                             WHEN 'open' THEN 'automatic_ping'
                             ELSE NULL
@@ -2843,6 +2891,38 @@ class GitHubTicketsStore:
                 _serialize_datetime(retry_at),
                 ticket_id,
                 transition_version,
+            ),
+        )
+        return changed > 0
+
+    def _acknowledge_category_prompt_sync(
+        self,
+        ticket_id: int,
+    ) -> bool:
+        changed = self._execute_update(
+            """
+            UPDATE tickets
+            SET category_prompt_retry_at = NULL
+            WHERE ticket_id = ? AND category_prompt_retry_at IS NOT NULL
+            """,
+            (ticket_id,),
+        )
+        return changed > 0
+
+    def _defer_category_prompt_sync(
+        self,
+        ticket_id: int,
+        retry_at: datetime,
+    ) -> bool:
+        changed = self._execute_update(
+            """
+            UPDATE tickets
+            SET category_prompt_retry_at = ?
+            WHERE ticket_id = ? AND category_prompt_retry_at IS NOT NULL
+            """,
+            (
+                _serialize_datetime(retry_at),
+                ticket_id,
             ),
         )
         return changed > 0
@@ -3721,6 +3801,10 @@ class GitHubTicketsStore:
                     SELECT projection_sync_at AS deadline
                     FROM tickets
                     WHERE projection_sync_at IS NOT NULL
+                    UNION ALL
+                    SELECT category_prompt_retry_at AS deadline
+                    FROM tickets
+                    WHERE category_prompt_retry_at IS NOT NULL
                 )
                 """
             ).fetchone()
@@ -3735,13 +3819,22 @@ class GitHubTicketsStore:
                     state = 'open' AND next_action_at <= ?
                 ) OR (
                     projection_sync_at <= ?
+                ) OR (
+                    category_prompt_retry_at <= ?
                 )
                 ORDER BY CASE
-                    WHEN projection_sync_at IS NOT NULL THEN projection_sync_at
+                    WHEN category_prompt_retry_at IS NOT NULL
+                        THEN category_prompt_retry_at
+                    WHEN projection_sync_at IS NOT NULL
+                        THEN projection_sync_at
                     ELSE next_action_at
                 END, ticket_id
                 """,
-                (_serialize_datetime(now), _serialize_datetime(now)),
+                (
+                    _serialize_datetime(now),
+                    _serialize_datetime(now),
+                    _serialize_datetime(now),
+                ),
             ).fetchall()
         return tuple(int(row["ticket_id"]) for row in rows)
 
