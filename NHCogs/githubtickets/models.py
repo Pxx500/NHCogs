@@ -47,6 +47,7 @@ class GitHubDeliveryState(str, Enum):
     PENDING = "pending"
     PROCESSING = "processing"
     RETRY = "retry"
+    AWAITING_REDELIVERY = "awaiting_redelivery"
     PROCESSED = "processed"
     IGNORED = "ignored"
     FAILED = "failed"
