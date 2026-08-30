@@ -54,6 +54,10 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                 "nhmod migrate",
                 "nhmod migrate plan",
                 "nhmod migrate run",
+                "nhmod filter",
+                "nhmod filter add",
+                "nhmod filter remove",
+                "nhmod filter list",
                 "nhmod sync",
                 "nhmod repair",
             },
@@ -61,6 +65,7 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_maintenance_commands_inherit_manage_messages_permission(self):
         with loaded_nhmoderation() as module:
+
             def context(*, red_mod=False, manage_messages=False):
                 return SimpleNamespace(
                     is_red_mod=red_mod,
@@ -77,6 +82,9 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
             manage_messages = context(manage_messages=True)
             unauthorized = context()
             for command_name in (
+                "nhmod_filter_add",
+                "nhmod_filter_remove",
+                "nhmod_filter_list",
                 "nhmod_migrate_run",
                 "nhmod_sync",
                 "nhmod_repair",
@@ -117,6 +125,208 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                 subject._require_private_channel.call_args_list,
                 [mock.call(ctx), mock.call(ctx)],
             )
+
+    async def test_filter_commands_normalize_persist_list_and_remove_phrases(self):
+        with loaded_nhmoderation() as module:
+            subject = module.NHModeration(SimpleNamespace())
+            subject._require_private_channel = mock.Mock()
+            subject._mark_operational_recovered = mock.AsyncMock()
+            guild = SimpleNamespace(id=10)
+            ctx = SimpleNamespace(guild=guild, send=mock.AsyncMock())
+
+            await module.NHModeration.nhmod_filter_add.callback(
+                subject,
+                ctx,
+                phrase="  Mixed CASE Phrase  ",
+            )
+
+            stored = await subject.config.guild(guild).get_raw("message_filter_phrases")
+            self.assertEqual(stored, ["mixed case phrase"])
+            self.assertEqual(subject._message_filter_phrases[10], ("mixed case phrase",))
+            self.assertFalse(ctx.send.await_args.kwargs["allowed_mentions"].everyone)
+
+            with self.assertRaisesRegex(Exception, "already configured"):
+                await module.NHModeration.nhmod_filter_add.callback(
+                    subject,
+                    ctx,
+                    phrase="MIXED CASE PHRASE",
+                )
+
+            ctx.send.reset_mock()
+            embed = object()
+            with mock.patch.object(
+                module,
+                "overview_embeds",
+                return_value=[embed],
+            ) as renderer:
+                await module.NHModeration.nhmod_filter_list.callback(subject, ctx)
+            self.assertIn(
+                "mixed case phrase",
+                renderer.call_args.args[2][0][1],
+            )
+            self.assertEqual(ctx.send.await_args.args, ())
+            self.assertIs(ctx.send.await_args.kwargs["embed"], embed)
+            self.assertFalse(ctx.send.await_args.kwargs["allowed_mentions"].everyone)
+
+            await module.NHModeration.nhmod_filter_remove.callback(
+                subject,
+                ctx,
+                phrase="MIXED CASE PHRASE",
+            )
+
+            stored = await subject.config.guild(guild).get_raw("message_filter_phrases")
+            self.assertEqual(stored, [])
+            self.assertEqual(subject._message_filter_phrases[10], ())
+
+            with self.assertRaisesRegex(Exception, "cannot be empty"):
+                await module.NHModeration.nhmod_filter_add.callback(
+                    subject,
+                    ctx,
+                    phrase="   ",
+                )
+
+    async def test_bare_filter_group_shows_overview_and_current_configuration(self):
+        with loaded_nhmoderation() as module:
+            subject = module.NHModeration(SimpleNamespace())
+            subject._message_filter_phrases = {10: ("blocked phrase",)}
+            subject._require_private_channel = mock.Mock()
+            subject._mark_operational_recovered = mock.AsyncMock()
+            ctx = SimpleNamespace(
+                guild=SimpleNamespace(id=10),
+                send=mock.AsyncMock(),
+            )
+
+            async def render_overview(_ctx, config_sender):
+                await config_sender()
+
+            embed = object()
+            with (
+                mock.patch.object(
+                    module,
+                    "send_group_overview",
+                    new=mock.AsyncMock(side_effect=render_overview),
+                ) as overview,
+                mock.patch.object(
+                    module,
+                    "overview_embeds",
+                    return_value=[embed],
+                ) as renderer,
+            ):
+                await module.NHModeration.nhmod_filter.callback(subject, ctx)
+
+            overview.assert_awaited_once()
+            self.assertIn("blocked phrase", renderer.call_args.args[2][0][1])
+            self.assertEqual(ctx.send.await_args.args, ())
+            self.assertIs(ctx.send.await_args.kwargs["embed"], embed)
+            self.assertFalse(ctx.send.await_args.kwargs["allowed_mentions"].everyone)
+            subject._require_private_channel.assert_called_once_with(ctx)
+
+    async def test_message_filter_deletes_case_insensitive_substring_matches(self):
+        with loaded_nhmoderation() as module:
+            subject = module.NHModeration(SimpleNamespace())
+            subject._message_filter_phrases = {10: ("blocked phrase",)}
+            subject.report_operational_error = mock.AsyncMock()
+            subject._mark_operational_recovered = mock.AsyncMock()
+            message = SimpleNamespace(
+                id=30,
+                guild=SimpleNamespace(id=10),
+                channel=SimpleNamespace(id=20),
+                content="prefixBLOCKED PHRASEsuffix",
+                author=SimpleNamespace(bot=True),
+                webhook_id=40,
+                delete=mock.AsyncMock(),
+            )
+
+            await module.NHModeration.on_message(subject, message)
+
+            message.delete.assert_awaited_once_with()
+            subject.report_operational_error.assert_not_awaited()
+            subject._mark_operational_recovered.assert_awaited_once_with(
+                message.guild,
+                "delete filtered message",
+            )
+
+    async def test_message_filter_reports_discord_delete_failures(self):
+        with loaded_nhmoderation() as module:
+            subject = module.NHModeration(SimpleNamespace())
+            subject._message_filter_phrases = {10: ("blocked",)}
+            subject.report_operational_error = mock.AsyncMock()
+            subject._mark_operational_recovered = mock.AsyncMock()
+            error = module.discord.Forbidden()
+            message = SimpleNamespace(
+                id=30,
+                guild=SimpleNamespace(id=10),
+                channel=SimpleNamespace(id=20),
+                content="blocked",
+                delete=mock.AsyncMock(side_effect=error),
+            )
+
+            await module.NHModeration.on_message(subject, message)
+
+            subject.report_operational_error.assert_awaited_once_with(
+                guild_id=10,
+                action="delete filtered message",
+                error=error,
+                channel_id=20,
+                message_id=30,
+            )
+
+    async def test_message_filter_ignores_dms_nonmatches_and_already_gone_messages(self):
+        with loaded_nhmoderation() as module:
+            subject = module.NHModeration(SimpleNamespace())
+            subject._message_filter_phrases = {10: ("blocked",)}
+            subject.report_operational_error = mock.AsyncMock()
+            subject._mark_operational_recovered = mock.AsyncMock()
+            dm = SimpleNamespace(
+                guild=None,
+                content="blocked",
+                delete=mock.AsyncMock(),
+            )
+            nonmatch = SimpleNamespace(
+                guild=SimpleNamespace(id=10),
+                content="allowed",
+                delete=mock.AsyncMock(),
+            )
+            already_gone = SimpleNamespace(
+                id=30,
+                guild=SimpleNamespace(id=10),
+                channel=SimpleNamespace(id=20),
+                content="blocked",
+                delete=mock.AsyncMock(side_effect=module.discord.NotFound()),
+            )
+
+            await module.NHModeration.on_message(subject, dm)
+            await module.NHModeration.on_message(subject, nonmatch)
+            await module.NHModeration.on_message(subject, already_gone)
+
+            dm.delete.assert_not_awaited()
+            nonmatch.delete.assert_not_awaited()
+            already_gone.delete.assert_awaited_once_with()
+            subject.report_operational_error.assert_not_awaited()
+            subject._mark_operational_recovered.assert_awaited_once_with(
+                already_gone.guild,
+                "delete filtered message",
+            )
+
+    async def test_message_filter_cache_is_restored_during_cog_load(self):
+        with loaded_nhmoderation() as module:
+            subject = module.NHModeration(SimpleNamespace())
+            await subject.config.guild_from_id(10).set_raw(
+                "message_filter_phrases",
+                value=["first phrase", "second phrase"],
+            )
+            subject.history.initialize = mock.AsyncMock()
+            subject._weekly_scheduler = mock.AsyncMock()
+            subject._startup_catchup = mock.AsyncMock()
+
+            await module.NHModeration.cog_load(subject)
+            try:
+                self.assertEqual(
+                    subject._message_filter_phrases[10],
+                    ("first phrase", "second phrase"),
+                )
+            finally:
+                await module.NHModeration.cog_unload(subject)
 
     async def test_banchart_reads_history_and_sends_shared_chart(self):
         with loaded_nhmoderation() as module:

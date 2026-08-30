@@ -52,6 +52,7 @@ from .activity_storage import (
     UserStats,
 )
 from .bot_proxy_store import BotProxyStore
+from .discord_links import MESSAGE_LINK_PATTERN
 from .forum_autopin import ForumAutopinService
 from .gate_increment_store import (
     GateIncrementMemberPlan,
@@ -1829,30 +1830,15 @@ class NHMisc(commands.Cog):
                 source_message,
             ):
                 return
-            members = _build_achievement_candidates(source_message)
-            if not members:
-                await interaction.edit_original_response(
-                    content="This message has no eligible recipients"
+            try:
+                view = await self._build_normal_gate_proof_view(
+                    interaction.guild,
+                    source_message,
+                    interaction.user.id,
                 )
+            except ValueError as error:
+                await interaction.edit_original_response(content=str(error))
                 return
-            missing_by_user = await self._await_achievement_interaction_data(
-                self._achievement_store.missing_stargate_proofs(
-                    interaction.guild.id,
-                    tuple(member.id for member in members),
-                )
-            )
-            candidates = _build_gate_proof_candidates(
-                source_message,
-                missing_by_user,
-            )
-            from .achievement_views import GateProofView
-
-            view = GateProofView(
-                self,
-                source_message,
-                interaction.user.id,
-                candidates,
-            )
             await interaction.edit_original_response(
                 embed=view.render_embed(),
                 view=view,
@@ -1867,38 +1853,143 @@ class NHMisc(commands.Cog):
                 public_defer=False,
             )
 
+    async def _build_normal_gate_proof_view(
+        self,
+        guild: discord.Guild,
+        source_message: discord.Message,
+        opener_id: int,
+    ):
+        members = _build_achievement_candidates(source_message)
+        if not members:
+            raise ValueError("This message has no eligible recipients")
+        missing_by_user = await self._await_achievement_interaction_data(
+            self._achievement_store.missing_stargate_proofs(
+                guild.id,
+                tuple(member.id for member in members),
+            )
+        )
+        candidates = _build_gate_proof_candidates(
+            source_message,
+            missing_by_user,
+        )
+        from .achievement_views import GateProofView
+
+        return GateProofView(
+            self,
+            source_message,
+            opener_id,
+            candidates,
+        )
+
+    async def _open_normal_gate_proof_fallback(
+        self,
+        interaction: discord.Interaction,
+        fallback_view,
+    ) -> None:
+        await interaction.response.defer()
+        try:
+            view = await self._build_normal_gate_proof_view(
+                interaction.guild,
+                fallback_view.source_message,
+                fallback_view.opener_id,
+            )
+        except ValueError as error:
+            await interaction.edit_original_response(
+                content=str(error),
+                embed=None,
+                view=fallback_view,
+            )
+            return
+        except Exception as error:
+            await self._handle_achievement_interaction_failure(
+                interaction,
+                "open normal gate proof fallback",
+                error,
+                public_defer=False,
+            )
+            return
+        fallback_view.stop()
+        await interaction.edit_original_response(
+            content=None,
+            embed=view.render_embed(),
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        view.message = interaction.message
+
+    async def _show_gate_proof_batch_fallback(
+        self,
+        interaction: discord.Interaction,
+        source_message: discord.Message,
+        error_message: str,
+    ) -> None:
+        from .achievement_views import GateProofBatchFallbackView
+
+        view = GateProofBatchFallbackView(
+            self,
+            source_message,
+            interaction.user.id,
+            error_message,
+        )
+        await interaction.edit_original_response(
+            content=f"Gate proof batch failed\n{error_message}",
+            embed=None,
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        view.message = await interaction.original_response()
+
     async def _maybe_open_gate_proof_batch(
         self,
         interaction: discord.Interaction,
         source_message: discord.Message,
     ) -> bool:
         try:
-            entries = _parse_gate_proof_batch(
-                source_message.content,
-                expected_guild_id=interaction.guild.id,
-            )
-        except ValueError as error:
-            await interaction.edit_original_response(content=str(error))
-            return True
-        if entries is None:
-            return False
-
-        try:
-            entries, members = await self._resolve_gate_proof_batch_members(
+            view = await self._build_gate_proof_batch_view(
                 interaction.guild,
                 source_message,
-                entries,
+                interaction.user.id,
             )
         except ValueError as error:
-            await interaction.edit_original_response(content=str(error))
+            await self._show_gate_proof_batch_fallback(
+                interaction,
+                source_message,
+                str(error),
+            )
             return True
+        if view is None:
+            return False
 
+        await interaction.edit_original_response(
+            embed=view.render_embed(),
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        view.message = await interaction.original_response()
+        return True
+
+    async def _build_gate_proof_batch_view(
+        self,
+        guild: discord.Guild,
+        source_message: discord.Message,
+        opener_id: int,
+    ):
+        entries = _parse_gate_proof_batch(
+            source_message.content,
+            expected_guild_id=guild.id,
+        )
+        if entries is None:
+            return None
+        entries, members = await self._resolve_gate_proof_batch_members(
+            guild,
+            source_message,
+            entries,
+        )
         profiles = {}
-        error_message = None
         for member in members.values():
             profile = await self._await_achievement_interaction_data(
                 self._achievement_store.get_profile(
-                    interaction.guild.id,
+                    guild.id,
                     member.id,
                 )
             )
@@ -1906,21 +1997,17 @@ class NHMisc(commands.Cog):
         for entry in entries:
             profile = profiles[entry.user_id]
             if entry.ordinal > profile.stargate_count:
-                error_message = (
+                raise ValueError(
                     f"Gate {entry.ordinal} does not exist for <@{entry.user_id}>"
                 )
-                break
-        if error_message is not None:
-            await interaction.edit_original_response(content=error_message)
-            return True
 
         from .achievement_views import GateProofBatchView
 
         requested_keys = {(entry.user_id, entry.ordinal) for entry in entries}
-        view = GateProofBatchView(
+        return GateProofBatchView(
             self,
             source_message,
-            interaction.user.id,
+            opener_id,
             members,
             entries,
             existing_proofs={
@@ -1930,13 +2017,6 @@ class NHMisc(commands.Cog):
                 if (user_id, proof.ordinal) in requested_keys
             },
         )
-        await interaction.edit_original_response(
-            embed=view.render_embed(),
-            view=view,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-        view.message = await interaction.original_response()
-        return True
 
     async def _resolve_gate_proof_batch_members(
         self,
@@ -1978,7 +2058,7 @@ class NHMisc(commands.Cog):
             if member is None:
                 try:
                     member = await guild.fetch_member(user_id)
-                except (discord.NotFound, discord.HTTPException):
+                except discord.NotFound:
                     member = None
             if member is None or member.bot:
                 raise ValueError(
@@ -2009,6 +2089,14 @@ class NHMisc(commands.Cog):
                 embed=view.render_embed(notice=str(error)),
                 view=view,
                 allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        except Exception as error:
+            await self._handle_achievement_interaction_failure(
+                interaction,
+                "confirm gate proofs",
+                error,
+                public_defer=False,
             )
             return
         current_candidate_ids = tuple(
@@ -2086,6 +2174,14 @@ class NHMisc(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
+        except Exception as error:
+            await self._handle_achievement_interaction_failure(
+                interaction,
+                "confirm gate proof batch",
+                error,
+                public_defer=False,
+            )
+            return
         current_members: dict[int, discord.Member] = {}
         try:
             current_entries = _parse_gate_proof_batch(
@@ -2102,6 +2198,14 @@ class NHMisc(commands.Cog):
                 )
         except ValueError:
             current_entries = None
+        except Exception as error:
+            await self._handle_achievement_interaction_failure(
+                interaction,
+                "confirm gate proof batch",
+                error,
+                public_defer=False,
+            )
+            return
         if (
             current_entries != view.entries
             or set(current_members) != set(view.members)
@@ -2199,6 +2303,14 @@ class NHMisc(commands.Cog):
                 embed=view.render_embed(notice=str(error)),
                 view=view,
                 allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        except Exception as error:
+            await self._handle_achievement_interaction_failure(
+                interaction,
+                "confirm achievement grant",
+                error,
+                public_defer=False,
             )
             return
         candidates = _build_achievement_candidates(source_message)
@@ -2325,8 +2437,12 @@ class NHMisc(commands.Cog):
         embed = discord.Embed(
             title="Achievements",
             description=(
-                "View profiles with `/achievements` or Apps → View achievements. "
-                "Grant achievements from Apps → Grant achievements."
+                "View profiles with `/achievements` or Apps → View achievements\n"
+                "Grant achievements with Apps → Grant achievements\n"
+                "Increment Gates with Apps → Increment Gate roles\n"
+                "Revoke Gates with `/gaterevoke` or Apps → Revoke Gate\n"
+                "Attach proofs with Apps → Add Gate Proof or "
+                f"`{ctx.clean_prefix}achievement proof <message_link>`"
             ),
         )
         embed.add_field(
@@ -2334,7 +2450,99 @@ class NHMisc(commands.Cog):
             value=self._format_direct_commands(ctx),
             inline=False,
         )
-        await ctx.send(embed=embed)
+        await ctx.send(
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @achievement.command(name="proof")
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def achievement_proof(
+        self,
+        ctx: commands.Context,
+        message_link: str,
+    ) -> None:
+        """Open a review for attaching the linked message as a Gate proof."""
+        self._require_private_achievement_channel(ctx)
+        if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
+            raise commands.UserFeedbackCheckFailure(
+                "Achievement data is still initializing. Run "
+                f"`{ctx.clean_prefix}rolesync discord` first"
+            )
+        source_message = await self._resolve_gate_proof_message_link(
+            ctx,
+            message_link,
+        )
+
+        try:
+            view = await self._build_gate_proof_batch_view(
+                ctx.guild,
+                source_message,
+                ctx.author.id,
+            )
+        except ValueError as error:
+            from .achievement_views import GateProofBatchFallbackView
+
+            view = GateProofBatchFallbackView(
+                self,
+                source_message,
+                ctx.author.id,
+                str(error),
+            )
+            view.message = await ctx.send(
+                content=f"Gate proof batch failed\n{error}",
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+
+        if view is None:
+            try:
+                view = await self._build_normal_gate_proof_view(
+                    ctx.guild,
+                    source_message,
+                    ctx.author.id,
+                )
+            except ValueError as error:
+                raise commands.UserFeedbackCheckFailure(str(error)) from error
+        view.message = await ctx.send(
+            embed=view.render_embed(),
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def _resolve_gate_proof_message_link(
+        self,
+        ctx: commands.Context,
+        value: str,
+    ) -> discord.Message:
+        match = MESSAGE_LINK_PATTERN.fullmatch(value)
+        if match is None or int(match.group(1)) != ctx.guild.id:
+            raise commands.UserFeedbackCheckFailure(
+                "The proof message link must be from the current server"
+            )
+        channel_id = int(match.group(2))
+        message_id = int(match.group(3))
+        channel = ctx.guild.get_channel_or_thread(channel_id)
+        if channel is None:
+            try:
+                channel = await ctx.guild.fetch_channel(channel_id)
+            except (discord.NotFound, discord.Forbidden) as error:
+                raise commands.UserFeedbackCheckFailure(
+                    "The proof message channel is unavailable"
+                ) from error
+        fetch_message = getattr(channel, "fetch_message", None)
+        if not callable(fetch_message):
+            raise commands.UserFeedbackCheckFailure(
+                "The proof message channel is unavailable"
+            )
+        try:
+            return await fetch_message(message_id)
+        except (discord.NotFound, discord.Forbidden) as error:
+            raise commands.UserFeedbackCheckFailure(
+                "The proof message is unavailable"
+            ) from error
 
     @achievement.command(name="create")
     @commands.guild_only()
@@ -2586,7 +2794,23 @@ class NHMisc(commands.Cog):
     @commands.has_permissions(manage_messages=True)
     async def achievement_role(self, ctx: commands.Context) -> None:
         """Manage optional Discord role bindings for achievements."""
-        await self.achievement_role_list.callback(self, ctx)
+        embed = discord.Embed(
+            title="Achievement roles",
+            description="Manage optional Discord role bindings for achievements",
+        )
+        embed.add_field(
+            name="Commands",
+            value=self._format_direct_commands(
+                ctx,
+                preferred_order=("bind", "unbind", "replace", "list"),
+                include_descriptions=True,
+            ),
+            inline=False,
+        )
+        await ctx.send(
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @achievement_role.command(name="bind")
     @commands.guild_only()
@@ -3718,6 +3942,7 @@ class NHMisc(commands.Cog):
         *,
         preferred_order: tuple[str, ...] = (),
         expand_singletons: bool = False,
+        include_descriptions: bool = False,
     ) -> str:
         order = {name: index for index, name in enumerate(preferred_order)}
         commands_to_render = sorted(
@@ -3753,6 +3978,10 @@ class NHMisc(commands.Cog):
             if signature:
                 usage = f"{usage} {signature}"
             lines.append(f"`{usage}`")
+            if include_descriptions:
+                description = rendered_command.short_doc.strip()
+                if description:
+                    lines.append(description)
         return "\n".join(lines) or "No subcommands available."
 
     @staticmethod
@@ -4505,6 +4734,14 @@ class NHMisc(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
+        except Exception as error:
+            await self._handle_achievement_interaction_failure(
+                interaction,
+                "resume gate increment review",
+                error,
+                public_defer=False,
+            )
+            return
         await self._finish_gate_increment_review(
             interaction,
             view,
@@ -4528,6 +4765,14 @@ class NHMisc(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
+        except Exception as error:
+            await self._handle_achievement_interaction_failure(
+                interaction,
+                "refresh gate increment review",
+                error,
+                public_defer=False,
+            )
+            return
         view.source_message = source_message
         view.replace_candidates(candidates)
         await interaction.edit_original_response(
@@ -4536,6 +4781,35 @@ class NHMisc(commands.Cog):
             view=view,
             allowed_mentions=discord.AllowedMentions.none(),
         )
+
+    async def _prepare_gate_increment_confirmation(self, interaction, view):
+        try:
+            source_message = await self._fetch_gate_increment_source(
+                self._gate_increment_key(view.source_message)
+            )
+            _validate_gate_increment_configuration(source_message.guild)
+            live_candidates = await self._fetch_gate_increment_candidates(
+                source_message
+            )
+            self._validate_gate_increment_candidate_count(live_candidates)
+            await self._require_private_moderation_log_channel(source_message.guild)
+        except commands.UserFeedbackCheckFailure as error:
+            await interaction.edit_original_response(
+                content=None,
+                embed=view.render_embed(notice=str(error)),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return None
+        except Exception as error:
+            await self._handle_achievement_interaction_failure(
+                interaction,
+                "confirm gate increment review",
+                error,
+                public_defer=False,
+            )
+            return None
+        return source_message, live_candidates
 
     async def _confirm_gate_increment_review(self, interaction, view) -> None:
         await interaction.response.defer()
@@ -4558,24 +4832,10 @@ class NHMisc(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
-        try:
-            source_message = await self._fetch_gate_increment_source(
-                self._gate_increment_key(view.source_message)
-            )
-            _validate_gate_increment_configuration(source_message.guild)
-            live_candidates = await self._fetch_gate_increment_candidates(
-                source_message
-            )
-            self._validate_gate_increment_candidate_count(live_candidates)
-            await self._require_private_moderation_log_channel(source_message.guild)
-        except commands.UserFeedbackCheckFailure as error:
-            await interaction.edit_original_response(
-                content=None,
-                embed=view.render_embed(notice=str(error)),
-                view=view,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+        prepared = await self._prepare_gate_increment_confirmation(interaction, view)
+        if prepared is None:
             return
+        source_message, live_candidates = prepared
 
         if self._gate_increment_review_is_stale(view, live_candidates):
             view.source_message = source_message
@@ -5045,7 +5305,7 @@ class NHMisc(commands.Cog):
             )
         try:
             return await channel.fetch_message(key.message_id)
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as error:
+        except (discord.NotFound, discord.Forbidden) as error:
             raise commands.UserFeedbackCheckFailure(
                 "The source message is unavailable"
             ) from error

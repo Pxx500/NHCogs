@@ -200,8 +200,9 @@ Gate 6 users remain visible but cannot be selected.
 The action requires Manage Messages and uses a durable one-use source lock. A second
 message cannot reserve the same member's next Gate while an earlier increment is still
 pending. Successful users are publicly pinged beside a non-pinging mention of their
-new Gate role. Manual Gate role changes are reverted; Gate progress must be changed
-through the bot.
+new Gate role. The completion message used for the increment is stored as the new Gate's
+proof. Manual Gate role changes are reverted; Gate progress must be changed through the
+bot.
 
 ## Gate Revoke
 
@@ -226,14 +227,16 @@ increment action.
 
 ```ini
 Apps → Add Gate Proof
+[p]achievement proof <message_link>
 ```
 
-Use a historical completion message's Apps menu to attach it as proof for Gate records
-that were imported without one. The action requires Manage Messages and opens an
-ephemeral review for the message author and mentioned members. Each user defaults to
-`Don't add proof` and can independently select one of their completed Gate ordinals that
-still has no proof. Four users are shown per page, with no total candidate limit imposed
-by the action.
+Use a historical completion message's Apps menu or pass its link to the text command to
+attach it as proof for Gate records that were imported without one. Both entry points
+require Manage Messages and open the same review for the message author and mentioned
+members. The text command is available only in private moderator channels. Each user
+defaults to `Don't add proof` and can independently select one of their completed Gate
+ordinals that still has no proof. Four users are shown per page, with no total candidate
+limit imposed by the action.
 
 Confirmation changes only the selected proof-message references. It does not increment
 Gate progress or change any roles. The interactive picker only offers Gates without a
@@ -260,23 +263,36 @@ attach only missing proofs, or cancel. The entire multi-user operation is atomic
 invalid target, missing Gate, duplicate user-and-ordinal pair, changed proof, or stale
 source message prevents every write.
 
+Content beginning with a number and one space is treated as an intended batch. If its
+format or Gate assignments are invalid, the review shows the error and lets the moderator
+open the same message as a normal Gate proof instead or cancel. The fallback never writes
+without the normal review and confirmation.
+
 ## Achievements
 
 ```ini
+[p]achievement
 /achievements [user]
 Apps → View achievements
 Apps → Grant achievements
+[p]achievement proof <message_link>
 [p]achievement create <display name>
 [p]achievement list
 [p]achievement missingproofs
 [p]achievement rename <key> <new display name>
 [p]achievement delete <key>
+[p]achievement role
 [p]achievement role bind @Role
 [p]achievement role unbind @Role
 [p]achievement role replace @OldRole @NewRole
 [p]achievement role list
 [p]achievement revoke <users...>
 ```
+
+`achievement` shows a compact overview of the profile, Apps, Gate proof, Gate
+increment, Gate revoke, and text-command entry points. `achievement role` shows the
+complete syntax and a short description for `bind`, `unbind`, `replace`, and `list`.
+Listing the configured bindings remains an explicit `achievement role list` action.
 
 `/achievements` and the user Apps action show the same member profile ephemerally, with
 the same `Send publicly` button and published attribution. Both are available to every
@@ -305,7 +321,8 @@ stable keys required by these commands. Because keys are internal identifiers, `
 `achievement missingproofs` reports current non-bot server members who have at least one
 Gate without a proof link. It previews the first 20 affected members and attaches the full
 result as CSV, or as a ZIP when needed. The command requires a complete member cache and
-is unavailable in channels visible to `@everyone`.
+is unavailable in channels visible to `@everyone`. Attach missing proofs with
+`achievement proof <message_link>` or Apps → Add Gate Proof.
 
 Gate increments, proof attachments and revokes, achievement grants and revokes,
 achievement definition changes, and role binding changes are recorded in the configured
