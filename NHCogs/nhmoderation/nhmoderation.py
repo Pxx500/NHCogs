@@ -10,8 +10,14 @@ import discord
 from redbot.core import Config, commands, modlog
 from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
+from redbot.core.utils.chat_formatting import pagify
 
-from ..command_overview import channel_is_private, send_group_overview
+from ..command_overview import (
+    MAX_FIELD_VALUE_LENGTH,
+    channel_is_private,
+    overview_embeds,
+    send_group_overview,
+)
 from ..operational_errors import OperationalErrorReporter, OperationalFailure
 from ..ranked_donut_chart import render_ranked_donut_chart
 from .command_inputs import parse_banchart_arguments
@@ -41,7 +47,11 @@ class NHModeration(commands.Cog):
             identifier=self.CONFIG_IDENTIFIER,
             force_registration=True,
         )
-        self.config.register_guild(error_channel=None, error_maintainer_id=None)
+        self.config.register_guild(
+            error_channel=None,
+            error_maintainer_id=None,
+            message_filter_phrases=[],
+        )
         database_path = cog_data_path(self) / "moderation.sqlite"
         self.history = NHModerationHistory(database_path)
         self._operational_errors = OperationalErrorReporter(
@@ -52,10 +62,17 @@ class NHModeration(commands.Cog):
         self._startup_task: asyncio.Task[None] | None = None
         self._gateway_catchup_task: asyncio.Task[None] | None = None
         self._sync_tasks: dict[int, asyncio.Task[Any]] = {}
+        self._message_filter_phrases: dict[int, tuple[str, ...]] = {}
+        self._message_filter_lock = asyncio.Lock()
 
     async def cog_load(self) -> None:
         await self.history.initialize()
         await self._operational_errors.initialize()
+        guild_configs = await self.config.all_guilds()
+        self._message_filter_phrases = {
+            int(guild_id): tuple(settings.get("message_filter_phrases", ()))
+            for guild_id, settings in guild_configs.items()
+        }
         self._synchronizer = ModerationSynchronizer(
             self.history,
             bot_user_id=lambda: getattr(getattr(self.bot, "user", None), "id", 0),
@@ -98,7 +115,37 @@ class NHModeration(commands.Cog):
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         await self.history.delete_guild_data(guild.id)
         await self._operational_errors.delete_guild(guild.id)
-        await self.config.guild(guild).clear()
+        async with self._message_filter_lock:
+            self._message_filter_phrases.pop(guild.id, None)
+            await self.config.guild(guild).clear()
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        if message.guild is None or not message.content:
+            return
+        phrases = self._message_filter_phrases.get(message.guild.id, ())
+        if not phrases:
+            return
+        content = message.content.casefold()
+        if not any(phrase in content for phrase in phrases):
+            return
+        try:
+            await message.delete()
+        except discord.NotFound:
+            pass
+        except (discord.Forbidden, discord.HTTPException) as error:
+            await self.report_operational_error(
+                guild_id=message.guild.id,
+                action="delete filtered message",
+                error=error,
+                channel_id=message.channel.id,
+                message_id=message.id,
+            )
+            return
+        await self._mark_operational_recovered(
+            message.guild,
+            "delete filtered message",
+        )
 
     async def report_operational_error(
         self,
@@ -546,6 +593,96 @@ class NHModeration(commands.Cog):
         embed.add_field(name="Next weekly reconciliation", value=next_run.isoformat(), inline=False)
         await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         await self._mark_operational_recovered(ctx.guild, "nhmod status")
+
+    @nhmod.group(name="filter", invoke_without_command=True)
+    async def nhmod_filter(self, ctx: commands.Context) -> None:
+        """Manage phrases that cause matching messages to be deleted."""
+        self._require_private_channel(ctx)
+        await send_group_overview(
+            ctx,
+            lambda: self._send_filter_phrases(ctx),
+        )
+        await self._mark_operational_recovered(ctx.guild, "nhmod filter")
+
+    @nhmod_filter.command(name="add")
+    async def nhmod_filter_add(self, ctx: commands.Context, *, phrase: str) -> None:
+        """Add a phrase to the message filter."""
+        self._require_private_channel(ctx)
+        normalized = phrase.strip().casefold()
+        if not normalized:
+            raise commands.UserFeedbackCheckFailure("Phrase cannot be empty")
+        async with self._message_filter_lock:
+            phrases = list(self._message_filter_phrases.get(ctx.guild.id, ()))
+            if normalized in phrases:
+                raise commands.UserFeedbackCheckFailure("That phrase is already configured")
+            phrases.append(normalized)
+            await self.config.guild(ctx.guild).set_raw(
+                "message_filter_phrases",
+                value=phrases,
+            )
+            self._message_filter_phrases[ctx.guild.id] = tuple(phrases)
+        await ctx.send(
+            f"Phrase added: `{normalized}`",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        await self._mark_operational_recovered(ctx.guild, "nhmod filter add")
+
+    @nhmod_filter.command(name="remove")
+    async def nhmod_filter_remove(self, ctx: commands.Context, *, phrase: str) -> None:
+        """Remove a phrase from the message filter."""
+        self._require_private_channel(ctx)
+        normalized = phrase.strip().casefold()
+        if not normalized:
+            raise commands.UserFeedbackCheckFailure("Phrase cannot be empty")
+        async with self._message_filter_lock:
+            phrases = list(self._message_filter_phrases.get(ctx.guild.id, ()))
+            if normalized not in phrases:
+                raise commands.UserFeedbackCheckFailure("Phrase is not configured")
+            phrases.remove(normalized)
+            await self.config.guild(ctx.guild).set_raw(
+                "message_filter_phrases",
+                value=phrases,
+            )
+            self._message_filter_phrases[ctx.guild.id] = tuple(phrases)
+        await ctx.send(
+            f"Phrase removed: `{normalized}`",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        await self._mark_operational_recovered(ctx.guild, "nhmod filter remove")
+
+    @nhmod_filter.command(name="list")
+    async def nhmod_filter_list(self, ctx: commands.Context) -> None:
+        """List phrases in the message filter."""
+        self._require_private_channel(ctx)
+        await self._send_filter_phrases(ctx)
+        await self._mark_operational_recovered(ctx.guild, "nhmod filter list")
+
+    async def _send_filter_phrases(self, ctx: commands.Context) -> None:
+        phrases = self._message_filter_phrases.get(ctx.guild.id, ())
+        if not phrases:
+            description = "No message filter phrases are configured"
+            fields = []
+        else:
+            description = "Messages containing any configured phrase are deleted"
+            content = "\n".join(f"{index}. {phrase}" for index, phrase in enumerate(phrases, 1))
+            fields = [
+                (
+                    "Configured phrases" if index == 0 else "Configured phrases continued",
+                    page,
+                )
+                for index, page in enumerate(
+                    pagify(
+                        content,
+                        page_length=MAX_FIELD_VALUE_LENGTH,
+                        delims=["\n"],
+                    )
+                )
+            ]
+        for embed in overview_embeds("Message filter", description, fields):
+            await ctx.send(
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
 
     @nhmod.group(name="migrate", invoke_without_command=True)
     async def nhmod_migrate(self, ctx: commands.Context) -> None:

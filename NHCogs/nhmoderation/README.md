@@ -1,6 +1,6 @@
 # NHModeration
 
-NHModeration stores ban-related moderation evidence in SQLite and renders BanChart from local history. Chart rendering never reads the Discord API.
+NHModeration stores ban-related moderation evidence in SQLite, renders BanChart from local history, and deletes messages containing configured phrases. Chart rendering and message filtering never read the Discord API.
 
 Version 1 does not replace ban, unban, mute, warn, or softban commands.
 
@@ -12,7 +12,7 @@ Version 1 does not replace ban, unban, mute, warn, or softban commands.
 [p]load NHModeration
 ```
 
-The bot needs View Audit Log and Ban Members for migration and synchronization. Administrative `nhmod` output must be used in a channel hidden from `@everyone`. BanChart may be posted in public channels.
+The bot needs View Audit Log and Ban Members for migration and synchronization. It needs Manage Messages to delete filtered messages. Message Content intent must be enabled for phrase matching. Administrative `nhmod` output must be used in a channel hidden from `@everyone`. BanChart may be posted in public channels.
 
 ## Initial migration
 
@@ -49,6 +49,10 @@ Names are resolved only from the Discord cache. The command does not call `fetch
 |---|---|
 | `[p]nhmod` | Show the NHModeration command overview |
 | `[p]nhmod status` | Show private migration, historical coverage, synchronization, and schedule health |
+| `[p]nhmod filter` | Show filter commands and the configured phrases |
+| `[p]nhmod filter add <phrase>` | Add a phrase to the message filter |
+| `[p]nhmod filter remove <phrase>` | Remove a phrase from the message filter |
+| `[p]nhmod filter list` | List the configured phrases |
 | `[p]nhmod migrate` | Show migration commands |
 | `[p]nhmod migrate plan` | Check cached permissions and local readiness without importing history |
 | `[p]nhmod migrate run` | Start or resume the initial import |
@@ -56,6 +60,12 @@ Names are resolved only from the Discord cache. The command does not call `fetch
 | `[p]nhmod repair [confirm]` | Re-import all available sources, read the active ban list, and rebuild the projection |
 
 The `nhmod` root, all maintenance commands, and BanChart require Manage Messages.
+
+## Message phrase filter
+
+The filter applies to guild message content. Matching is a case-insensitive plain substring check. It also matches a phrase inside a larger word. The first match deletes the whole message without posting a public response. Messages from moderators, bots, and webhooks use the same rules.
+
+Phrases are configured per guild and normalized before storage. The listener reads a memory cache that is restored when the cog loads and updated by the filter commands. Deletion is not recorded as a moderation action and does not affect BanChart.
 
 ## Synchronization
 
@@ -73,6 +83,6 @@ Expected input and permission errors return a short useful response. Public outp
 
 ## Stored data and deletion
 
-NHModeration stores immutable source observations and rebuildable canonical actions. Stored fields may include guild, target, technical executor, credited moderator, and channel IDs, action type, timestamps, reasons, expiry, source identity, migration identity, attribution, synchronization cursors, and operational failures.
+NHModeration stores immutable source observations and rebuildable canonical actions. Stored fields may include guild, target, technical executor, credited moderator, and channel IDs, action type, timestamps, reasons, expiry, source identity, migration identity, attribution, synchronization cursors, and operational failures. Configured message filter phrases are stored per guild in Red Config.
 
 Red user-data deletion anonymizes matching identities and reasons, then rebuilds affected actions. Guild removal deletes the guild's history, synchronization state, migration state, failures, and configuration.

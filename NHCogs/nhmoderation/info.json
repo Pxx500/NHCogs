@@ -4,8 +4,8 @@
   ],
   "name": "NHModeration",
   "install_msg": "Thank you for installing NHModeration. Run `[p]nhmod` in a private moderator channel to get started.",
-  "short": "Store moderation history and render BanChart without live API reads.",
-  "description": "Import and retain moderation evidence in SQLite, reconcile missed ban events, and render a local BanChart by credited moderator.",
+  "short": "Store moderation history, render BanChart, and filter configured phrases.",
+  "description": "Import and retain moderation evidence in SQLite, reconcile missed ban events, render a local BanChart, and delete messages containing configured phrases.",
   "tags": [
     "moderation",
     "statistics",
