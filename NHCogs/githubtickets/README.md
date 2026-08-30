@@ -78,10 +78,10 @@ The available ping behaviors are:
 
 `/developerprofile`
 
-Opens an ephemeral dashboard where a participant can edit their optional GitHub username,
+Opens an ephemeral dashboard where a participant can enter their optional GitHub profile link,
 select categories, allow or disable automatic pings, browse profiles by category, find
 Discord members by an exact GitHub username, or clear their profile after confirmation.
-Saving an empty profile removes its stored row.
+The link must use `https://github.com/<login>`. Saving an empty profile removes its stored row.
 
 ### View another developer profile
 
@@ -141,12 +141,27 @@ Subscribe the App to these webhook events:
 - Pull request
 - Pull request review
 
-Supply credentials through Red's shared API token service named `githubtickets`. The required
-keys are `organization`, `client_id`, `app_id`, and `installation_id`. Supply exactly one form
-of each secret as `private_key` or `private_key_path`, and `webhook_secret` or
-`webhook_secret_path`. Inline values are treated as secret material. File paths must be
-absolute. The private key and webhook secret must be stored outside the repository and are
-never shown in command output or public messages.
+Supply `organization`, `client_id`, `app_id`, and `installation_id` through Red's shared API
+token service named `githubtickets`.
+
+Store the secret files under the Red-managed GitHubTickets cog data directory using these
+fixed relative paths:
+
+```text
+secrets/github-app.pem
+secrets/webhook-secret.txt
+```
+
+With the standard container layout, the files are visible inside the container as:
+
+```text
+/data/cogs/GitHubTickets/secrets/github-app.pem
+/data/cogs/GitHubTickets/secrets/webhook-secret.txt
+```
+
+The external host path depends on the volume mounted at `/data`. Both files must be readable
+by the account running Red. Their contents and paths are never shown in command output or
+public messages.
 
 ## Prefix command overviews
 

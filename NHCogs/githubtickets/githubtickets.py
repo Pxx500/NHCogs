@@ -58,7 +58,8 @@ class GitHubTickets(commands.Cog):
         )
         self.config.register_guild(**settings.DEFAULTS)
         self.config.register_global(**settings.GITHUB_INTEGRATION_DEFAULTS)
-        self.store = GitHubTicketsStore(cog_data_path(self) / "githubtickets.sqlite")
+        self._data_path = cog_data_path(self)
+        self.store = GitHubTicketsStore(self._data_path / "githubtickets.sqlite")
         self._participant_roles: dict[int, frozenset[int]] = {}
         self.projection = DiscordTicketProjection(
             bot,
@@ -202,7 +203,7 @@ class GitHubTickets(commands.Cog):
                 report_guild_id = integration_settings.guild_id
             if not integration_settings.enabled:
                 return False
-            credentials = await load_github_app_credentials(self.bot)
+            credentials = await load_github_app_credentials(self.bot, self._data_path)
             if credentials is None:
                 raise RuntimeError("GitHub App credentials are not configured")
             if (
@@ -962,7 +963,7 @@ class GitHubTickets(commands.Cog):
         )
         credentials_valid: bool | None
         try:
-            credentials = await load_github_app_credentials(self.bot)
+            credentials = await load_github_app_credentials(self.bot, self._data_path)
         except Exception:
             credentials = None
             credentials_valid = False
@@ -999,7 +1000,7 @@ class GitHubTickets(commands.Cog):
             await ctx.send("GitHub receiver is not configured")
             return
         try:
-            credentials = await load_github_app_credentials(self.bot)
+            credentials = await load_github_app_credentials(self.bot, self._data_path)
         except InvalidGitHubAppCredentials as error:
             await report_operational_error(
                 self.bot,

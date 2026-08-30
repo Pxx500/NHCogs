@@ -32,6 +32,10 @@ _PULL_REQUEST_LINK = re.compile(
     r"https://github\.com/([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/"
     r"([A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)"
 )
+_GITHUB_PROFILE_LINK = re.compile(
+    r"https://github\.com/"
+    r"([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)/?"
+)
 
 
 def _utc_now() -> datetime:
@@ -44,6 +48,15 @@ def _parse_pull_request_link(value: str) -> tuple[str, str, int] | None:
         return None
     owner, repository, number = match.groups()
     return owner, repository, int(number)
+
+
+def _parse_github_profile_link(value: str) -> str | None:
+    match = _GITHUB_PROFILE_LINK.fullmatch(value.strip())
+    return match.group(1) if match is not None else None
+
+
+def _github_profile_link(github_username: str) -> str:
+    return f"https://github.com/{github_username}"
 
 
 def _validated_pull_request(
@@ -224,10 +237,14 @@ class EditProfileModal(_DashboardModal):
         self._clock = clock
         visible_categories = tuple(categories[:25])
 
-        self.github_username = discord.ui.TextInput(
-            default=profile.github_username if profile is not None else None,
+        self.github_profile_link = discord.ui.TextInput(
+            default=(
+                _github_profile_link(profile.github_username)
+                if profile is not None and profile.github_username
+                else None
+            ),
             required=False,
-            max_length=presentation.MAX_GITHUB_USERNAME_LENGTH,
+            max_length=presentation.MAX_GITHUB_PROFILE_LINK_LENGTH,
         )
         self.categories = discord.ui.Select(
             placeholder=presentation.SELECT_YOUR_CATEGORIES,
@@ -246,9 +263,9 @@ class EditProfileModal(_DashboardModal):
                 option.default = int(option.value) in selected_ids if option.value != "none" else False
         self.add_item(
             discord.ui.Label(
-                text=presentation.GITHUB_USERNAME,
-                description=presentation.GITHUB_USERNAME_DESCRIPTION,
-                component=self.github_username,
+                text=presentation.GITHUB_PROFILE_LINK,
+                description=presentation.GITHUB_PROFILE_LINK_DESCRIPTION,
+                component=self.github_profile_link,
             )
         )
         self.add_item(
@@ -266,6 +283,17 @@ class EditProfileModal(_DashboardModal):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if not await _check_participant(interaction, self._actor_factory):
+            return
+        profile_link = str(self.github_profile_link.value).strip()
+        github_username = (
+            _parse_github_profile_link(profile_link) if profile_link else None
+        )
+        if profile_link and github_username is None:
+            await interaction.response.send_message(
+                presentation.INVALID_GITHUB_PROFILE_LINK,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             return
         category_ids = tuple(int(value) for value in self.categories.values)
         if self.automatic_pings.value and not category_ids:
@@ -291,7 +319,7 @@ class EditProfileModal(_DashboardModal):
         await self._store.save_profile(
             guild_id=self._guild_id,
             user_id=actor.user_id,
-            github_username=str(self.github_username.value),
+            github_username=github_username,
             category_ids=category_ids,
             automatic_pings=self.automatic_pings.value,
             updated_at=self._clock(),

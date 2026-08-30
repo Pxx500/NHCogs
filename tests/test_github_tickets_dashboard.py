@@ -541,21 +541,24 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [label.text for label in modal.children],
             [
-                presentation.GITHUB_USERNAME,
+                presentation.GITHUB_PROFILE_LINK,
                 presentation.CATEGORIES,
                 presentation.ALLOW_AUTOMATIC_PINGS,
             ],
         )
         self.assertEqual(
             [label.description for label in modal.children],
-            [presentation.GITHUB_USERNAME_DESCRIPTION, None, None],
+            [presentation.GITHUB_PROFILE_LINK_DESCRIPTION, None, None],
         )
-        self.assertIsInstance(modal.github_username, discord.ui.TextInput)
-        self.assertFalse(modal.github_username.required)
-        self.assertEqual(modal.github_username.default, "old-name")
+        self.assertIsInstance(modal.github_profile_link, discord.ui.TextInput)
+        self.assertFalse(modal.github_profile_link.required)
         self.assertEqual(
-            modal.github_username.max_length,
-            presentation.MAX_GITHUB_USERNAME_LENGTH,
+            modal.github_profile_link.default,
+            "https://github.com/old-name",
+        )
+        self.assertEqual(
+            modal.github_profile_link.max_length,
+            presentation.MAX_GITHUB_PROFILE_LINK_LENGTH,
         )
         self.assertIsInstance(modal.categories, discord.ui.Select)
         self.assertFalse(modal.categories.required)
@@ -571,7 +574,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(modal.automatic_pings, discord.ui.Checkbox)
         self.assertTrue(modal.automatic_pings.default)
 
-        modal.github_username.value = "  new-name  "
+        modal.github_profile_link.value = "  https://github.com/new-name/  "
         modal.categories.values = ["2"]
         modal.automatic_pings.value = True
         submit_interaction = FakeInteraction()
@@ -583,7 +586,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "guild_id": 100,
                     "user_id": 10,
-                    "github_username": "  new-name  ",
+                    "github_username": "new-name",
                     "category_ids": (2,),
                     "automatic_pings": True,
                     "updated_at": datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc),
@@ -592,6 +595,31 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(submit_interaction.response.defer_calls, 1)
         self.assertEqual(submit_interaction.response.messages, [])
+
+    async def test_edit_profile_rejects_non_profile_github_links_without_saving(self):
+        view, store, _actor = self.make_dashboard()
+        open_interaction = FakeInteraction()
+        await view.children[0].callback(open_interaction)
+        modal = open_interaction.response.modals[0]
+
+        for invalid_value in (
+            "some-user",
+            "http://github.com/some-user",
+            "https://github.com/some-user/repositories",
+            "https://example.com/some-user",
+        ):
+            with self.subTest(value=invalid_value):
+                modal.github_profile_link.value = invalid_value
+                submit_interaction = FakeInteraction()
+
+                await modal.on_submit(submit_interaction)
+
+                content, kwargs = submit_interaction.response.messages[0]
+                self.assertEqual(content, presentation.INVALID_GITHUB_PROFILE_LINK)
+                self.assertTrue(kwargs["ephemeral"])
+                self.assertFalse(kwargs["allowed_mentions"].users)
+
+        self.assertEqual(store.save_calls, [])
 
     async def test_edit_profile_rejects_automatic_pings_without_categories(self):
         view, store, _actor = self.make_dashboard()

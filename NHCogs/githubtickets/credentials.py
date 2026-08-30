@@ -9,13 +9,18 @@ from .github_app import GitHubAppCredentials
 
 _TOKEN_SERVICE = "githubtickets"
 _MAX_SECRET_BYTES = 1024 * 1024
+_PRIVATE_KEY_PATH = Path("secrets/github-app.pem")
+_WEBHOOK_SECRET_PATH = Path("secrets/webhook-secret.txt")
 
 
 class InvalidGitHubAppCredentials(ValueError):
     pass
 
 
-async def load_github_app_credentials(bot: Any) -> GitHubAppCredentials | None:
+async def load_github_app_credentials(
+    bot: Any,
+    data_path: Path,
+) -> GitHubAppCredentials | None:
     raw = await bot.get_shared_api_tokens(_TOKEN_SERVICE)
     if not raw:
         return None
@@ -25,8 +30,8 @@ async def load_github_app_credentials(bot: Any) -> GitHubAppCredentials | None:
     client_id = _required_text(raw, "client_id")
     app_id = _positive_integer(raw, "app_id")
     installation_id = _positive_integer(raw, "installation_id")
-    private_key = await _secret(raw, "private_key")
-    webhook_secret = await _secret(raw, "webhook_secret")
+    private_key = await _secret_file(data_path / _PRIVATE_KEY_PATH)
+    webhook_secret = await _secret_file(data_path / _WEBHOOK_SECRET_PATH)
     return GitHubAppCredentials(
         organization=organization,
         client_id=client_id,
@@ -57,20 +62,7 @@ def _positive_integer(values: Mapping[str, object], name: str) -> int:
     return parsed
 
 
-async def _secret(values: Mapping[str, object], name: str) -> bytes:
-    inline = values.get(name)
-    path = values.get(f"{name}_path")
-    has_inline = isinstance(inline, str) and bool(inline.strip())
-    has_path = isinstance(path, str) and bool(path.strip())
-    if has_inline == has_path:
-        raise InvalidGitHubAppCredentials("GitHub App credentials are incomplete")
-    if has_inline and isinstance(inline, str):
-        return inline.strip().encode()
-    if not isinstance(path, str):
-        raise InvalidGitHubAppCredentials("GitHub App credentials are incomplete")
-    secret_path = Path(path.strip())
-    if not secret_path.is_absolute():
-        raise InvalidGitHubAppCredentials("GitHub App secret file is unavailable")
+async def _secret_file(secret_path: Path) -> bytes:
     try:
         secret = await asyncio.to_thread(_read_secret_file, secret_path)
     except (OSError, ValueError):
