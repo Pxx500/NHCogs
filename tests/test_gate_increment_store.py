@@ -29,6 +29,39 @@ class GateIncrementStoreTests(unittest.IsolatedAsyncioTestCase):
         await self.first_store.initialize()
         await self.second_store.initialize()
 
+    def _insert_definitions(self, *definitions):
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS achievement_definitions (
+                    guild_id INTEGER NOT NULL,
+                    achievement_key TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    role_id INTEGER,
+                    grantable INTEGER NOT NULL,
+                    revocable INTEGER NOT NULL,
+                    display_order INTEGER NOT NULL,
+                    PRIMARY KEY (guild_id, achievement_key)
+                )
+                """
+            )
+            connection.executemany(
+                """
+                INSERT INTO achievement_definitions VALUES (
+                    20, ?, ?, 'boolean', ?, 1, 1, ?
+                )
+                """,
+                (
+                    (key, display_name, role_id, position)
+                    for position, (key, display_name, role_id) in enumerate(definitions)
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
     async def test_concurrent_claims_consume_source_message_once(self):
         key = gate_increment_store.SourceMessageKey(1, 2, 3)
         plans = (
@@ -148,6 +181,188 @@ class GateIncrementStoreTests(unittest.IsolatedAsyncioTestCase):
                 ("solo_gater", None, "active", 21, 22),
             ],
         )
+
+    async def test_claim_persists_custom_definitions_and_only_new_member_awards(self):
+        self._insert_definitions(
+            ("garden_of_grind", "Garden of Grind", 30),
+            ("flawless", "Flawless", None),
+        )
+        connection = sqlite3.connect(self.path)
+        try:
+            connection.executemany(
+                """
+                INSERT INTO achievement_awards (
+                    guild_id, user_id, achievement_key, awarded_at, state
+                ) VALUES (20, 23, ?, 'earlier', 'active')
+                """,
+                (("garden_of_grind",), ("solo_gater",)),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        key = gate_increment_store.SourceMessageKey(20, 21, 22)
+        plans = (
+            gate_increment_store.GateIncrementMemberPlan(
+                23, (), 24, grant_solo=True
+            ),
+            gate_increment_store.GateIncrementMemberPlan(25, (), 24),
+        )
+        achievements = (
+            gate_increment_store.GateIncrementAchievementPlan(
+                "garden_of_grind", "Garden of Grind", 30
+            ),
+            gate_increment_store.GateIncrementAchievementPlan(
+                "flawless", "Flawless"
+            ),
+        )
+
+        await self.first_store.claim(key, 26, plans, achievements)
+        reopened = gate_increment_store.GateIncrementStore(self.path)
+        await reopened.initialize()
+
+        snapshot = await reopened.get_operation(key)
+
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.custom_achievements, achievements)
+        self.assertFalse(snapshot.members[0].solo_awarded)
+        self.assertEqual(snapshot.members[0].custom_achievement_keys, ("flawless",))
+        self.assertEqual(
+            snapshot.members[1].custom_achievement_keys,
+            ("garden_of_grind", "flawless"),
+        )
+
+    async def test_completed_member_activates_reserved_custom_awards(self):
+        self._insert_definitions(
+            ("garden_of_grind", "Garden of Grind", 30),
+            ("flawless", "Flawless", None),
+        )
+        key = gate_increment_store.SourceMessageKey(20, 21, 22)
+        plan = gate_increment_store.GateIncrementMemberPlan(23, (), 24)
+        achievements = (
+            gate_increment_store.GateIncrementAchievementPlan(
+                "garden_of_grind", "Garden of Grind", 30
+            ),
+            gate_increment_store.GateIncrementAchievementPlan(
+                "flawless", "Flawless"
+            ),
+        )
+        await self.first_store.claim(key, 25, (plan,), achievements)
+
+        await self.first_store.mark_member_completed(key, 0)
+
+        connection = sqlite3.connect(self.path)
+        try:
+            rows = connection.execute(
+                """
+                SELECT achievement_key, state
+                FROM achievement_awards
+                ORDER BY award_id
+                """
+            ).fetchall()
+        finally:
+            connection.close()
+        self.assertEqual(
+            rows,
+            [
+                ("stargate_completed", "active"),
+                ("garden_of_grind", "active"),
+                ("flawless", "active"),
+            ],
+        )
+
+    async def test_claim_rejects_a_changed_custom_definition_atomically(self):
+        self._insert_definitions(("garden_of_grind", "Garden of Grind", 31))
+        key = gate_increment_store.SourceMessageKey(20, 21, 22)
+
+        with self.assertRaises(gate_increment_store.AchievementDefinitionConflict):
+            await self.first_store.claim(
+                key,
+                25,
+                (gate_increment_store.GateIncrementMemberPlan(23, (), 24),),
+                (
+                    gate_increment_store.GateIncrementAchievementPlan(
+                        "garden_of_grind", "Garden of Grind", 30
+                    ),
+                ),
+            )
+
+        self.assertIsNone(await self.first_store.get_operation(key))
+
+    async def test_moderation_log_delivery_survives_store_reopen(self):
+        key = gate_increment_store.SourceMessageKey(20, 21, 22)
+        await self.first_store.claim(
+            key,
+            25,
+            (gate_increment_store.GateIncrementMemberPlan(23, (), 24),),
+        )
+        await self.first_store.mark_member_completed(key, 0)
+
+        await self.first_store.mark_moderation_logged(key, (0,))
+        reopened = gate_increment_store.GateIncrementStore(self.path)
+        await reopened.initialize()
+        snapshot = await reopened.get_operation(key)
+
+        self.assertTrue(snapshot.members[0].moderation_logged)
+
+    async def test_schema_upgrade_marks_existing_deliveries_as_settled(self):
+        legacy_path = Path(self.temp_dir.name) / "legacy-gate-increment.sqlite"
+        connection = sqlite3.connect(legacy_path)
+        try:
+            connection.executescript(
+                """
+                CREATE TABLE gate_increment_operations (
+                    operation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    source_message_id INTEGER NOT NULL,
+                    moderator_id INTEGER,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    selected_count INTEGER NOT NULL,
+                    completed_count INTEGER NOT NULL DEFAULT 0,
+                    failed_count INTEGER NOT NULL DEFAULT 0,
+                    conflict_count INTEGER NOT NULL DEFAULT 0,
+                    result_channel_id INTEGER,
+                    result_message_id INTEGER,
+                    lease_token TEXT,
+                    publication_token TEXT,
+                    UNIQUE (guild_id, channel_id, source_message_id)
+                );
+                CREATE TABLE gate_increment_members (
+                    operation_id INTEGER NOT NULL,
+                    position INTEGER NOT NULL,
+                    user_id INTEGER,
+                    expected_gate_role_ids TEXT NOT NULL,
+                    target_role_id INTEGER,
+                    state TEXT NOT NULL,
+                    failure_code TEXT,
+                    grant_solo INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (operation_id, position),
+                    UNIQUE (operation_id, user_id)
+                );
+                INSERT INTO gate_increment_operations VALUES (
+                    1, 20, 21, 22, 25, 'now', 'now', 'completed',
+                    1, 1, 0, 0, 21, 30, NULL, NULL
+                );
+                INSERT INTO gate_increment_members VALUES (
+                    1, 0, 23, '[]', 24, 'completed', NULL, 0
+                );
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        store = gate_increment_store.GateIncrementStore(legacy_path)
+
+        await store.initialize()
+        snapshot = await store.get_operation(
+            gate_increment_store.SourceMessageKey(20, 21, 22)
+        )
+
+        self.assertEqual(snapshot.operation.published_completed_count, 1)
+        self.assertTrue(snapshot.members[0].moderation_logged)
+        self.assertEqual(await store.list_interrupted_operations(), ())
 
     async def test_claimed_targets_survive_store_reopen(self):
         key = gate_increment_store.SourceMessageKey(10, 20, 30)
@@ -315,6 +530,7 @@ class GateIncrementStoreTests(unittest.IsolatedAsyncioTestCase):
             "publisher",
             8001,
             8006,
+            1,
         )
 
         self.assertEqual(snapshot.operation.result_channel_id, 8001)
@@ -370,6 +586,7 @@ class GateIncrementStoreTests(unittest.IsolatedAsyncioTestCase):
         await self.first_store.claim(completed_key, 10004, (completed_plan,))
         await self.first_store.mark_member_completed(completed_key, 0)
         await self.first_store.finalize_operation(completed_key)
+        await self.first_store.mark_moderation_logged(completed_key, (0,))
         self.assertTrue(
             await self.first_store.acquire_publication_lease(
                 completed_key,
@@ -381,6 +598,7 @@ class GateIncrementStoreTests(unittest.IsolatedAsyncioTestCase):
             "publisher",
             10001,
             10007,
+            1,
         )
         await self.first_store.claim(active_key, 10004, (completed_plan,))
 
@@ -407,6 +625,15 @@ class GateIncrementStoreTests(unittest.IsolatedAsyncioTestCase):
         await self.first_store.claim(completed_key, 11006, (plan,))
         await self.first_store.mark_member_completed(completed_key, 0)
         await self.first_store.finalize_operation(completed_key)
+        await self.first_store.mark_moderation_logged(completed_key, (0,))
+        self.assertTrue(
+            await self.first_store.acquire_publication_lease(
+                completed_key, "publisher"
+            )
+        )
+        await self.first_store.record_result_message(
+            completed_key, "publisher", 11001, 11007, 1
+        )
 
         interrupted = await self.first_store.list_interrupted_operations()
 
