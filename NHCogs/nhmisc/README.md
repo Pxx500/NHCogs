@@ -193,9 +193,13 @@ Apps → Increment Gate roles
 
 Use the completion message's Apps menu to review a one-tier Gate increment for its
 author and explicitly mentioned members. The review supports up to 25 eligible users
-and lets the moderator remove accidental mentions before confirming. When exactly one
-user remains selected, the moderator can grant `Solo Gater` in the same role update.
-Gate 6 users remain visible but cannot be selected.
+and lets the moderator remove accidental mentions before confirming. Additional custom
+achievements can be selected for every chosen user and start unselected. When exactly
+one user remains selected, the moderator can grant `Solo Gater` in the same role update.
+The public congratulations message includes the Gate and every new achievement in one
+result. The selector supports up to 25 custom achievements. A selection that would not
+fit in one Discord message is rejected before any roles or awards change. Gate 6 users
+remain visible but cannot be selected.
 
 The action requires Manage Messages and uses a durable one-use source lock. A second
 message cannot reserve the same member's next Gate while an earlier increment is still
