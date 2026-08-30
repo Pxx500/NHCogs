@@ -87,6 +87,7 @@ def _load_nhmisc():
     discord.Color = _Color
     discord.Embed = _Embed
     discord.AllowedMentions = _AllowedMentions
+    discord.Object = SimpleNamespace
     discord.HTTPException = _HTTPException
     discord.NotFound = _NotFound
     discord.Forbidden = _Forbidden
