@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -36,19 +35,22 @@ class GitHubCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.modules_context.__exit__(None, None, None)
         self.directory.cleanup()
 
-    async def test_inline_runtime_credentials_form_one_immutable_value(self) -> None:
+    async def test_fixed_secret_files_form_one_immutable_value(self) -> None:
+        data_path = Path(self.directory.name)
+        secret_path = data_path / "secrets"
+        secret_path.mkdir()
+        (secret_path / "github-app.pem").write_bytes(b"private-key")
+        (secret_path / "webhook-secret.txt").write_bytes(b"webhook-secret\n")
         bot = _Bot(
             {
                 "organization": "NewHorizons",
                 "client_id": "Iv1.example",
                 "app_id": "123",
                 "installation_id": "456",
-                "private_key": "private-key",
-                "webhook_secret": "webhook-secret",
             }
         )
 
-        loaded = await self.credentials.load_github_app_credentials(bot)
+        loaded = await self.credentials.load_github_app_credentials(bot, data_path)
 
         self.assertEqual(bot.requested_services, ["githubtickets"])
         self.assertEqual(loaded.organization, "NewHorizons")
@@ -60,70 +62,31 @@ class GitHubCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private-key", repr(loaded))
         self.assertNotIn("webhook-secret", repr(loaded))
 
-    async def test_secret_files_are_loaded_without_persisting_their_paths(self) -> None:
-        root = Path(self.directory.name)
-        private_key_path = root / "github-app.pem"
-        webhook_secret_path = root / "webhook-secret.txt"
-        private_key_path.write_bytes(b"private-key-file")
-        webhook_secret_path.write_bytes(b"webhook-secret-file\n")
+    async def test_missing_fixed_secret_files_are_rejected(self) -> None:
+        data_path = Path(self.directory.name)
         bot = _Bot(
             {
                 "organization": "NewHorizons",
                 "client_id": "Iv1.example",
                 "app_id": "123",
                 "installation_id": "456",
-                "private_key_path": str(private_key_path),
-                "webhook_secret_path": str(webhook_secret_path),
             }
         )
 
-        loaded = await self.credentials.load_github_app_credentials(bot)
+        with self.assertRaises(self.credentials.InvalidGitHubAppCredentials):
+            await self.credentials.load_github_app_credentials(bot, data_path)
 
-        self.assertEqual(loaded.private_key, b"private-key-file")
-        self.assertEqual(loaded.webhook_secret, b"webhook-secret-file")
-        self.assertNotIn(str(private_key_path), repr(loaded))
-        self.assertNotIn(str(webhook_secret_path), repr(loaded))
-
-    async def test_secret_file_paths_must_be_absolute(self) -> None:
-        root = Path(self.directory.name)
-        (root / "github-app.pem").write_bytes(b"private-key-file")
-        (root / "webhook-secret.txt").write_bytes(b"webhook-secret-file")
-        bot = _Bot(
-            {
-                "organization": "NewHorizons",
-                "client_id": "Iv1.example",
-                "app_id": "123",
-                "installation_id": "456",
-                "private_key_path": "github-app.pem",
-                "webhook_secret_path": "webhook-secret.txt",
-            }
+    async def test_missing_is_dormant_and_partial_metadata_is_rejected(self) -> None:
+        data_path = Path(self.directory.name)
+        self.assertIsNone(
+            await self.credentials.load_github_app_credentials(_Bot({}), data_path)
         )
-        previous_directory = Path.cwd()
-        os.chdir(root)
-        try:
-            with self.assertRaises(self.credentials.InvalidGitHubAppCredentials):
-                await self.credentials.load_github_app_credentials(bot)
-        finally:
-            os.chdir(previous_directory)
 
-    async def test_missing_is_dormant_and_partial_or_ambiguous_values_are_rejected(self) -> None:
-        self.assertIsNone(await self.credentials.load_github_app_credentials(_Bot({})))
-
-        for tokens in (
-            {"organization": "NewHorizons"},
-            {
-                "organization": "NewHorizons",
-                "client_id": "Iv1.example",
-                "app_id": "123",
-                "installation_id": "456",
-                "private_key": "inline",
-                "private_key_path": "also-a-path",
-                "webhook_secret": "secret",
-            },
-        ):
-            with self.subTest(tokens=tuple(tokens)):
-                with self.assertRaises(self.credentials.InvalidGitHubAppCredentials):
-                    await self.credentials.load_github_app_credentials(_Bot(tokens))
+        with self.assertRaises(self.credentials.InvalidGitHubAppCredentials):
+            await self.credentials.load_github_app_credentials(
+                _Bot({"organization": "NewHorizons"}),
+                data_path,
+            )
 
 
 if __name__ == "__main__":

@@ -136,6 +136,10 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.temporary_directory = TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
         self.data_path = Path(self.temporary_directory.name)
+        secret_path = self.data_path / "secrets"
+        secret_path.mkdir()
+        (secret_path / "github-app.pem").write_bytes(b"private-key")
+        (secret_path / "webhook-secret.txt").write_bytes(b"webhook-secret")
 
     async def test_startup_restores_views_locally_then_starts_deadline_scheduler(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
@@ -228,8 +232,6 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 "client_id": "Iv1.client",
                 "app_id": "123",
                 "installation_id": "456",
-                "private_key": "private-key",
-                "webhook_secret": "webhook-secret",
             }
             cog = modules.githubtickets.GitHubTickets(bot)
             await cog.config.set_raw("guild_id", value=10)
@@ -320,8 +322,6 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 "client_id": "Iv1.client",
                 "app_id": "123",
                 "installation_id": "456",
-                "private_key": "private-key",
-                "webhook_secret": "webhook-secret",
             }
             cog = modules.githubtickets.GitHubTickets(bot)
             await cog.config.set_raw("guild_id", value=10)
