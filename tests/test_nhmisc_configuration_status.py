@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import types
 import unittest
 from unittest import mock
@@ -57,12 +58,20 @@ class FakeInvocationChannel:
         return types.SimpleNamespace(view_channel=self.public)
 
 
-def command_metadata(qualified_name, signature="", *, hidden=False, children=()):
+def command_metadata(
+    qualified_name,
+    signature="",
+    *,
+    hidden=False,
+    children=(),
+    short_doc="",
+):
     return types.SimpleNamespace(
         qualified_name=qualified_name,
         signature=signature,
         hidden=hidden,
         commands=children,
+        short_doc=short_doc,
     )
 
 
@@ -635,13 +644,17 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("!nhmisc channel", commands)
         self.ctx.send_help.assert_not_awaited()
 
-    async def test_achievement_group_shows_revoke_command_instead_of_generic_help(self):
+    async def test_achievement_group_explains_every_proof_and_profile_entry_point(self):
         nested = command_metadata(
             "achievement revoke confirm",
             "<members...>",
         )
         self.ctx.command = types.SimpleNamespace(
             commands=(
+                command_metadata(
+                    "achievement proof",
+                    "<message_link>",
+                ),
                 command_metadata(
                     "achievement revoke",
                     children=(nested,),
@@ -655,8 +668,80 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         embed = self.ctx.send.await_args.kwargs["embed"]
         fields = {field.name: field.value for field in embed.fields}
         self.assertEqual(embed.title, "Achievements")
+        self.assertIn("/achievements", embed.description)
+        self.assertIn("Apps → View achievements", embed.description)
+        self.assertIn("Apps → Grant achievements", embed.description)
+        self.assertIn("Apps → Increment Gate roles", embed.description)
+        self.assertIn("Apps → Add Gate Proof", embed.description)
+        self.assertIn("/gaterevoke", embed.description)
+        self.assertIn("Apps → Revoke Gate", embed.description)
+        self.assertIn("!achievement proof <message_link>", embed.description)
+        self.assertIn("!achievement proof <message_link>", fields["Commands"])
         self.assertIn("!achievement revoke", fields["Commands"])
         self.assertNotIn("confirm", fields["Commands"])
+        self.assertEqual(
+            self.ctx.send.await_args.kwargs["allowed_mentions"],
+            nhmisc.discord.AllowedMentions.none(),
+        )
+        self.ctx.send_help.assert_not_awaited()
+
+    def test_achievement_proof_command_keeps_its_permission_and_link_contract(self):
+        callback = nhmisc.NHMisc.achievement_proof.callback
+        parameters = inspect.signature(callback).parameters
+
+        self.assertIn("message_link", parameters)
+        self.assertEqual(parameters["message_link"].annotation, "str")
+        self.assertEqual(callback.required_permissions, {"manage_messages": True})
+
+    async def test_achievement_role_group_lists_its_direct_commands(self):
+        self.ctx.command = types.SimpleNamespace(
+            commands=(
+                command_metadata(
+                    "achievement role bind",
+                    "<role>",
+                    short_doc="Bind an existing Discord role to an achievement",
+                ),
+                command_metadata(
+                    "achievement role unbind",
+                    "<role>",
+                    short_doc="Stop tracking an achievement role",
+                ),
+                command_metadata(
+                    "achievement role replace",
+                    "<old_role> <new_role>",
+                    short_doc="Replace an achievement role binding",
+                ),
+                command_metadata(
+                    "achievement role list",
+                    short_doc="List active achievement role bindings",
+                ),
+            )
+        )
+
+        await nhmisc.NHMisc.achievement_role.callback(self.cog, self.ctx)
+
+        self.ctx.send.assert_awaited_once()
+        embed = self.ctx.send.await_args.kwargs["embed"]
+        self.assertEqual(embed.title, "Achievement roles")
+        self.assertIn("Discord role bindings", embed.description)
+        commands = embed.fields[0].value
+        self.assertEqual(
+            commands.splitlines(),
+            [
+                "`!achievement role bind <role>`",
+                "Bind an existing Discord role to an achievement",
+                "`!achievement role unbind <role>`",
+                "Stop tracking an achievement role",
+                "`!achievement role replace <old_role> <new_role>`",
+                "Replace an achievement role binding",
+                "`!achievement role list`",
+                "List active achievement role bindings",
+            ],
+        )
+        self.assertEqual(
+            self.ctx.send.await_args.kwargs["allowed_mentions"],
+            nhmisc.discord.AllowedMentions.none(),
+        )
         self.ctx.send_help.assert_not_awaited()
 
 

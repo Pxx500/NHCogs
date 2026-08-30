@@ -27,10 +27,8 @@ from .bot_proxy_workflow import (
     _get_channel_or_thread,
     _moderator_mention,
 )
+from .discord_links import MESSAGE_LINK_PATTERN
 
-MESSAGE_LINK_PATTERN = re.compile(
-    r"^https://(?:canary\.|ptb\.)?discord\.com/channels/(\d+)/(\d+)/(\d+)$"
-)
 CHANNEL_MENTION_PATTERN = re.compile(r"^<#(\d+)>$")
 LOG_CONTENT_PREVIEW_LENGTH = 300
 log = logging.getLogger(__name__)

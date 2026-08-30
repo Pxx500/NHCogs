@@ -344,6 +344,38 @@ class GateProofCandidateTests(unittest.TestCase):
 
 
 class GateProofViewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_batch_fallback_is_limited_to_its_opener(self):
+        views, _fake_select = _load_achievement_views()
+        cog = SimpleNamespace(_open_normal_gate_proof_fallback=mock.AsyncMock())
+        source_message = SimpleNamespace()
+        view = views.GateProofBatchFallbackView(
+            cog,
+            source_message,
+            opener_id=99,
+            error_message="Invalid Gate proof batch line 1",
+        )
+        rejected = SimpleNamespace(
+            user=SimpleNamespace(id=100),
+            response=SimpleNamespace(send_message=mock.AsyncMock()),
+        )
+
+        self.assertFalse(await view.interaction_check(rejected))
+        rejected.response.send_message.assert_awaited_once_with(
+            "Only the moderator who opened this review can control it",
+            ephemeral=True,
+        )
+
+        accepted = SimpleNamespace(
+            user=SimpleNamespace(id=99),
+            response=SimpleNamespace(),
+        )
+        await view.use_normal.callback(accepted)
+
+        cog._open_normal_gate_proof_fallback.assert_awaited_once_with(
+            accepted,
+            view,
+        )
+
     def test_four_users_per_page_preserves_individual_default_and_selection(self):
         views, fake_select = _load_achievement_views()
         candidates = tuple(
@@ -533,6 +565,204 @@ class GateProofViewTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GateProofEntryPointTests(unittest.IsolatedAsyncioTestCase):
+    async def test_text_command_checks_private_channel_before_proof_work(self):
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._require_private_achievement_channel = mock.Mock(
+            side_effect=RuntimeError("public channel")
+        )
+        cog._achievement_store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock()
+        )
+        cog._resolve_gate_proof_message_link = mock.AsyncMock()
+        guild = SimpleNamespace(id=1)
+        ctx = SimpleNamespace(guild=guild, channel=SimpleNamespace(), send=mock.AsyncMock())
+
+        with self.assertRaisesRegex(RuntimeError, "public channel"):
+            await nhmisc.NHMisc.achievement_proof(
+                cog,
+                ctx,
+                "https://discord.com/channels/1/20/30",
+            )
+
+        cog._achievement_store.is_bootstrapped.assert_not_awaited()
+        cog._resolve_gate_proof_message_link.assert_not_awaited()
+
+    async def test_text_command_resolves_an_uncached_archived_thread(self):
+        source_message = SimpleNamespace()
+        thread = SimpleNamespace(fetch_message=mock.AsyncMock(return_value=source_message))
+        guild = SimpleNamespace(
+            id=1,
+            get_channel_or_thread=mock.Mock(return_value=None),
+            fetch_channel=mock.AsyncMock(return_value=thread),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        ctx = SimpleNamespace(guild=guild)
+
+        resolved = await cog._resolve_gate_proof_message_link(
+            ctx,
+            "https://discord.com/channels/1/20/30",
+        )
+
+        self.assertIs(resolved, source_message)
+        guild.fetch_channel.assert_awaited_once_with(20)
+        thread.fetch_message.assert_awaited_once_with(30)
+
+    async def test_text_command_rejects_a_message_from_another_guild(self):
+        guild = SimpleNamespace(
+            id=1,
+            get_channel_or_thread=mock.Mock(),
+            fetch_channel=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        ctx = SimpleNamespace(guild=guild)
+
+        with self.assertRaisesRegex(
+            nhmisc.commands.UserFeedbackCheckFailure,
+            "current server",
+        ):
+            await cog._resolve_gate_proof_message_link(
+                ctx,
+                "https://discord.com/channels/2/20/30",
+            )
+
+        guild.get_channel_or_thread.assert_not_called()
+        guild.fetch_channel.assert_not_awaited()
+
+    async def test_text_command_opens_the_shared_normal_review(self):
+        guild = SimpleNamespace(id=1)
+        source_message = SimpleNamespace(guild=guild)
+        sent_message = SimpleNamespace()
+        ctx = SimpleNamespace(
+            guild=guild,
+            author=SimpleNamespace(id=99),
+            send=mock.AsyncMock(return_value=sent_message),
+        )
+        view = SimpleNamespace(render_embed=mock.Mock(return_value="normal"), message=None)
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._require_private_achievement_channel = mock.Mock()
+        cog._achievement_store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(return_value=True)
+        )
+        cog._resolve_gate_proof_message_link = mock.AsyncMock(
+            return_value=source_message
+        )
+        cog._build_gate_proof_batch_view = mock.AsyncMock(return_value=None)
+        cog._build_normal_gate_proof_view = mock.AsyncMock(return_value=view)
+
+        await nhmisc.NHMisc.achievement_proof(
+            cog,
+            ctx,
+            "https://discord.com/channels/1/20/30",
+        )
+
+        cog._build_gate_proof_batch_view.assert_awaited_once_with(
+            guild,
+            source_message,
+            99,
+        )
+        cog._build_normal_gate_proof_view.assert_awaited_once_with(
+            guild,
+            source_message,
+            99,
+        )
+        ctx.send.assert_awaited_once_with(
+            embed="normal",
+            view=view,
+            allowed_mentions="no-mentions",
+        )
+        self.assertIs(view.message, sent_message)
+
+    async def test_text_command_opens_the_shared_batch_review(self):
+        guild = SimpleNamespace(id=1)
+        source_message = SimpleNamespace(guild=guild)
+        sent_message = SimpleNamespace()
+        ctx = SimpleNamespace(
+            guild=guild,
+            author=SimpleNamespace(id=99),
+            send=mock.AsyncMock(return_value=sent_message),
+        )
+        view = SimpleNamespace(render_embed=mock.Mock(return_value="batch"), message=None)
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._require_private_achievement_channel = mock.Mock()
+        cog._achievement_store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(return_value=True)
+        )
+        cog._resolve_gate_proof_message_link = mock.AsyncMock(
+            return_value=source_message
+        )
+        cog._build_gate_proof_batch_view = mock.AsyncMock(return_value=view)
+        cog._build_normal_gate_proof_view = mock.AsyncMock()
+
+        await nhmisc.NHMisc.achievement_proof(
+            cog,
+            ctx,
+            "https://discord.com/channels/1/20/30",
+        )
+
+        cog._build_gate_proof_batch_view.assert_awaited_once_with(
+            guild,
+            source_message,
+            99,
+        )
+        cog._build_normal_gate_proof_view.assert_not_awaited()
+        ctx.send.assert_awaited_once_with(
+            embed="batch",
+            view=view,
+            allowed_mentions="no-mentions",
+        )
+        self.assertIs(view.message, sent_message)
+
+    async def test_text_command_offers_fallback_for_an_invalid_batch(self):
+        guild = SimpleNamespace(id=1)
+        source_message = SimpleNamespace(guild=guild)
+        sent_message = SimpleNamespace()
+        ctx = SimpleNamespace(
+            guild=guild,
+            author=SimpleNamespace(id=99),
+            send=mock.AsyncMock(return_value=sent_message),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._require_private_achievement_channel = mock.Mock()
+        cog._achievement_store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(return_value=True)
+        )
+        cog._resolve_gate_proof_message_link = mock.AsyncMock(
+            return_value=source_message
+        )
+        cog._build_gate_proof_batch_view = mock.AsyncMock(
+            side_effect=ValueError("Invalid Gate proof batch line 2")
+        )
+
+        class FakeFallbackView:
+            def __init__(self, cog, source_message, opener_id, error_message):
+                self.error_message = error_message
+                self.message = None
+
+        package = ModuleType("_gatecount_root.nhmisc")
+        package.__path__ = []
+        views = ModuleType("_gatecount_root.nhmisc.achievement_views")
+        views.GateProofBatchFallbackView = FakeFallbackView
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "_gatecount_root.nhmisc": package,
+                "_gatecount_root.nhmisc.achievement_views": views,
+            },
+        ):
+            await nhmisc.NHMisc.achievement_proof(
+                cog,
+                ctx,
+                "https://discord.com/channels/1/20/30",
+            )
+
+        kwargs = ctx.send.await_args.kwargs
+        self.assertEqual(
+            kwargs["content"],
+            "Gate proof batch failed\nInvalid Gate proof batch line 2",
+        )
+        self.assertIsInstance(kwargs["view"], FakeFallbackView)
+        self.assertIs(kwargs["view"].message, sent_message)
+
     async def test_batch_targets_resolve_cached_and_uncached_current_members(self):
         cached = SimpleNamespace(id=11, bot=False)
         fetched = SimpleNamespace(id=12, bot=False)
@@ -559,6 +789,93 @@ class GateProofEntryPointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normalized, entries)
         self.assertEqual(tuple(members), (11, 12))
         guild.fetch_member.assert_awaited_once_with(12)
+
+    async def test_batch_member_http_failure_remains_operational(self):
+        guild = SimpleNamespace(
+            get_member=lambda _user_id: None,
+            fetch_member=mock.AsyncMock(
+                side_effect=nhmisc.discord.HTTPException("Discord unavailable")
+            ),
+        )
+        source_message = SimpleNamespace(
+            author=SimpleNamespace(id=10),
+            webhook_id=None,
+        )
+        entries = (nhmisc.GateProofBatchEntry(12, 1, 1, 20, 30),)
+        cog = object.__new__(nhmisc.NHMisc)
+
+        with self.assertRaises(nhmisc.discord.HTTPException):
+            await cog._resolve_gate_proof_batch_members(
+                guild,
+                source_message,
+                entries,
+            )
+
+    async def test_text_command_bootstrap_error_uses_the_active_prefix(self):
+        guild = SimpleNamespace(id=1)
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._require_private_achievement_channel = mock.Mock()
+        cog._achievement_store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(return_value=False)
+        )
+        cog._resolve_gate_proof_message_link = mock.AsyncMock()
+        ctx = SimpleNamespace(
+            guild=guild,
+            clean_prefix="?",
+            send=mock.AsyncMock(),
+        )
+
+        with self.assertRaisesRegex(
+            nhmisc.commands.UserFeedbackCheckFailure,
+            r"\?rolesync discord",
+        ):
+            await nhmisc.NHMisc.achievement_proof(
+                cog,
+                ctx,
+                "https://discord.com/channels/1/20/30",
+            )
+
+        cog._resolve_gate_proof_message_link.assert_not_awaited()
+
+    async def test_fallback_opens_the_shared_normal_review(self):
+        guild = SimpleNamespace(id=1)
+        source_message = SimpleNamespace()
+        fallback_view = SimpleNamespace(
+            source_message=source_message,
+            opener_id=99,
+            stop=mock.Mock(),
+        )
+        normal_view = SimpleNamespace(
+            render_embed=mock.Mock(return_value="normal"),
+            message=None,
+        )
+        interaction = SimpleNamespace(
+            guild=guild,
+            message=SimpleNamespace(),
+            response=SimpleNamespace(defer=mock.AsyncMock()),
+            edit_original_response=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._build_normal_gate_proof_view = mock.AsyncMock(
+            return_value=normal_view
+        )
+
+        await cog._open_normal_gate_proof_fallback(interaction, fallback_view)
+
+        interaction.response.defer.assert_awaited_once_with()
+        cog._build_normal_gate_proof_view.assert_awaited_once_with(
+            guild,
+            source_message,
+            99,
+        )
+        fallback_view.stop.assert_called_once_with()
+        interaction.edit_original_response.assert_awaited_once_with(
+            content=None,
+            embed="normal",
+            view=normal_view,
+            allowed_mentions="no-mentions",
+        )
+        self.assertIs(normal_view.message, interaction.message)
 
     async def test_action_requires_manage_messages_at_runtime(self):
         interaction = SimpleNamespace(
@@ -759,7 +1076,7 @@ class GateProofEntryPointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["view"].existing_proofs, {(10, 1): old_proof})
         self.assertIs(kwargs["view"].message, response_message)
 
-    async def test_batch_rejects_gate_that_author_does_not_have(self):
+    async def test_failed_batch_offers_normal_gate_proof_without_writing(self):
         author = SimpleNamespace(id=10, display_name="Author", bot=False)
         guild = SimpleNamespace(id=1, get_member=lambda user_id: author)
         source_message = SimpleNamespace(
@@ -778,6 +1095,7 @@ class GateProofEntryPointTests(unittest.IsolatedAsyncioTestCase):
                 defer=mock.AsyncMock(),
             ),
             edit_original_response=mock.AsyncMock(),
+            original_response=mock.AsyncMock(return_value=SimpleNamespace()),
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._achievement_store = SimpleNamespace(
@@ -791,11 +1109,91 @@ class GateProofEntryPointTests(unittest.IsolatedAsyncioTestCase):
         )
         cog._log_achievement_interaction_start = mock.Mock()
 
-        await cog._add_gate_proof_context_action(interaction, source_message)
+        class FakeFallbackView:
+            def __init__(self, cog, source_message, opener_id, error_message):
+                self.cog = cog
+                self.source_message = source_message
+                self.opener_id = opener_id
+                self.error_message = error_message
+                self.message = None
 
-        interaction.edit_original_response.assert_awaited_with(
-            content="Gate 2 does not exist for <@10>"
+        package = ModuleType("_gatecount_root.nhmisc")
+        package.__path__ = []
+        views = ModuleType("_gatecount_root.nhmisc.achievement_views")
+        views.GateProofBatchFallbackView = FakeFallbackView
+
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "_gatecount_root.nhmisc": package,
+                "_gatecount_root.nhmisc.achievement_views": views,
+            },
+        ):
+            await cog._add_gate_proof_context_action(interaction, source_message)
+
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        self.assertEqual(
+            kwargs["content"],
+            "Gate proof batch failed\nGate 2 does not exist for <@10>",
         )
+        self.assertIsInstance(kwargs["view"], FakeFallbackView)
+        self.assertEqual(kwargs["view"].opener_id, 99)
+        self.assertEqual(kwargs["view"].source_message, source_message)
+        self.assertFalse(hasattr(cog._achievement_store, "attach_stargate_proofs"))
+
+    async def test_invalid_later_batch_line_offers_fallback_atomically(self):
+        author = SimpleNamespace(id=10, display_name="Author", bot=False)
+        guild = SimpleNamespace(id=1, get_member=lambda _user_id: author)
+        source_message = SimpleNamespace(
+            guild=guild,
+            content="\n".join(
+                (
+                    "1 https://discord.com/channels/1/50/60",
+                    "ordinary text",
+                )
+            ),
+            webhook_id=None,
+            author=author,
+            raw_mentions=(),
+        )
+        interaction = SimpleNamespace(
+            guild=guild,
+            user=SimpleNamespace(id=99),
+            permissions=SimpleNamespace(manage_messages=True),
+            response=SimpleNamespace(
+                send_message=mock.AsyncMock(),
+                defer=mock.AsyncMock(),
+            ),
+            edit_original_response=mock.AsyncMock(),
+            original_response=mock.AsyncMock(return_value=SimpleNamespace()),
+        )
+        store = SimpleNamespace(is_bootstrapped=mock.AsyncMock(return_value=True))
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = store
+        cog._log_achievement_interaction_start = mock.Mock()
+
+        class FakeFallbackView:
+            def __init__(self, cog, source_message, opener_id, error_message):
+                self.error_message = error_message
+                self.message = None
+
+        package = ModuleType("_gatecount_root.nhmisc")
+        package.__path__ = []
+        views = ModuleType("_gatecount_root.nhmisc.achievement_views")
+        views.GateProofBatchFallbackView = FakeFallbackView
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "_gatecount_root.nhmisc": package,
+                "_gatecount_root.nhmisc.achievement_views": views,
+            },
+        ):
+            await cog._add_gate_proof_context_action(interaction, source_message)
+
+        kwargs = interaction.edit_original_response.await_args.kwargs
+        self.assertIn("line 2", kwargs["content"])
+        self.assertIsInstance(kwargs["view"], FakeFallbackView)
+        self.assertFalse(hasattr(store, "attach_stargate_proofs"))
 
 
 class _CommandTree:
@@ -848,6 +1246,79 @@ class GateProofRegistrationTests(unittest.TestCase):
 
 
 class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_source_fetch_http_failure_remains_operational(self):
+        channel = SimpleNamespace(
+            fetch_message=mock.AsyncMock(
+                side_effect=nhmisc.discord.HTTPException("Discord unavailable")
+            )
+        )
+        guild = SimpleNamespace(get_channel=lambda _channel_id: channel)
+        cog = object.__new__(nhmisc.NHMisc)
+        cog.bot = SimpleNamespace(
+            get_guild=lambda _guild_id: guild,
+            get_channel=lambda _channel_id: None,
+        )
+
+        with self.assertRaises(nhmisc.discord.HTTPException):
+            await cog._fetch_gate_increment_source(
+                nhmisc.SourceMessageKey(1, 20, 30)
+            )
+
+    async def test_normal_confirmation_reports_source_fetch_http_failure(self):
+        error = nhmisc.discord.HTTPException("Discord unavailable")
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(defer=mock.AsyncMock()),
+        )
+        view = SimpleNamespace(
+            selected_assignments={10: 1},
+            source_message=SimpleNamespace(
+                id=30,
+                channel=SimpleNamespace(id=20),
+                guild=SimpleNamespace(id=1),
+            ),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._fetch_gate_increment_source = mock.AsyncMock(side_effect=error)
+        cog._handle_achievement_interaction_failure = mock.AsyncMock()
+
+        await cog._confirm_gate_proofs(interaction, view)
+
+        cog._handle_achievement_interaction_failure.assert_awaited_once_with(
+            interaction,
+            "confirm gate proofs",
+            error,
+            public_defer=False,
+        )
+
+    async def test_batch_confirmation_reports_source_fetch_http_failure(self):
+        error = nhmisc.discord.HTTPException("Discord unavailable")
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(defer=mock.AsyncMock()),
+        )
+        view = SimpleNamespace(
+            source_message=SimpleNamespace(
+                id=30,
+                channel=SimpleNamespace(id=20),
+                guild=SimpleNamespace(id=1),
+            ),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._fetch_gate_increment_source = mock.AsyncMock(side_effect=error)
+        cog._handle_achievement_interaction_failure = mock.AsyncMock()
+
+        await cog._confirm_gate_proof_batch(
+            interaction,
+            view,
+            replace_existing=False,
+        )
+
+        cog._handle_achievement_interaction_failure.assert_awaited_once_with(
+            interaction,
+            "confirm gate proof batch",
+            error,
+            public_defer=False,
+        )
+
     async def test_confirmation_attaches_selected_proofs_and_logs_the_mapping(self):
         members = {
             10: SimpleNamespace(id=10, bot=False),
@@ -1036,6 +1507,52 @@ class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Gate 1: https://discord.com/channels/1/50/60", log_message)
         self.assertIn("Gate 2: https://discord.com/channels/1/51/61", log_message)
         interaction.delete_original_response.assert_awaited_once_with()
+
+    async def test_batch_confirmation_reports_member_lookup_http_failure(self):
+        author = SimpleNamespace(id=10, bot=False)
+        guild = SimpleNamespace(id=1)
+        source_message = SimpleNamespace(
+            id=30,
+            channel=SimpleNamespace(id=20),
+            guild=guild,
+            content="1 https://discord.com/channels/1/50/60 <@10>",
+        )
+        view = SimpleNamespace(
+            source_message=source_message,
+            members={10: author},
+            entries=(nhmisc.GateProofBatchEntry(10, 1, 1, 50, 60),),
+            existing_proofs={},
+        )
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(defer=mock.AsyncMock()),
+            edit_original_response=mock.AsyncMock(),
+        )
+        error = nhmisc.discord.HTTPException("Discord unavailable")
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._fetch_gate_increment_source = mock.AsyncMock(
+            return_value=source_message
+        )
+        cog._require_private_moderation_log_channel = mock.AsyncMock()
+        cog._resolve_gate_proof_batch_members = mock.AsyncMock(side_effect=error)
+        cog._handle_achievement_interaction_failure = mock.AsyncMock()
+        cog._achievement_store = SimpleNamespace(
+            apply_stargate_proof_batch=mock.AsyncMock()
+        )
+
+        await cog._confirm_gate_proof_batch(
+            interaction,
+            view,
+            replace_existing=False,
+        )
+
+        interaction.response.defer.assert_awaited_once_with()
+        cog._handle_achievement_interaction_failure.assert_awaited_once_with(
+            interaction,
+            "confirm gate proof batch",
+            error,
+            public_defer=False,
+        )
+        cog._achievement_store.apply_stargate_proof_batch.assert_not_awaited()
 
     async def test_batch_confirmation_adds_only_missing_proofs_when_requested(self):
         author = SimpleNamespace(id=10, bot=False)

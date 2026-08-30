@@ -1091,6 +1091,64 @@ class GateProofView(discord.ui.View):
         self.review.disabled = not self.selected_assignments
 
 
+class GateProofBatchFallbackView(discord.ui.View):
+    def __init__(
+        self,
+        cog: NHMisc,
+        source_message: discord.Message,
+        opener_id: int,
+        error_message: str,
+    ) -> None:
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.source_message = source_message
+        self.opener_id = opener_id
+        self.error_message = error_message
+        self.message: discord.Message | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.opener_id:
+            return True
+        await interaction.response.send_message(
+            "Only the moderator who opened this review can control it",
+            ephemeral=True,
+        )
+        return False
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    @discord.ui.button(
+        label="Use normal Gate proof",
+        style=discord.ButtonStyle.primary,
+    )
+    async def use_normal(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        await self.cog._open_normal_gate_proof_fallback(interaction, self)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+    async def cancel(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        self.stop()
+        await interaction.response.edit_message(
+            content="Gate proof attachment cancelled",
+            embed=None,
+            view=None,
+        )
+
+
 class GateProofBatchView(discord.ui.View):
     def __init__(
         self,
