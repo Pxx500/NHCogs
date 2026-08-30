@@ -134,11 +134,16 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
             guild = SimpleNamespace(id=10)
             ctx = SimpleNamespace(guild=guild, send=mock.AsyncMock())
 
-            await module.NHModeration.nhmod_filter_add.callback(
-                subject,
-                ctx,
-                phrase="  Mixed CASE Phrase  ",
-            )
+            with mock.patch.object(
+                module,
+                "overview_embeds",
+                return_value=[object()],
+            ):
+                await module.NHModeration.nhmod_filter_add.callback(
+                    subject,
+                    ctx,
+                    phrase="  Mixed CASE Phrase  ",
+                )
 
             stored = await subject.config.guild(guild).get_raw("message_filter_phrases")
             self.assertEqual(stored, ["mixed case phrase"])
@@ -168,11 +173,16 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(ctx.send.await_args.kwargs["embed"], embed)
             self.assertFalse(ctx.send.await_args.kwargs["allowed_mentions"].everyone)
 
-            await module.NHModeration.nhmod_filter_remove.callback(
-                subject,
-                ctx,
-                phrase="MIXED CASE PHRASE",
-            )
+            with mock.patch.object(
+                module,
+                "overview_embeds",
+                return_value=[object()],
+            ):
+                await module.NHModeration.nhmod_filter_remove.callback(
+                    subject,
+                    ctx,
+                    phrase="MIXED CASE PHRASE",
+                )
 
             stored = await subject.config.guild(guild).get_raw("message_filter_phrases")
             self.assertEqual(stored, [])
@@ -232,6 +242,7 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                 guild=SimpleNamespace(id=10),
                 channel=SimpleNamespace(id=20),
                 content="prefixBLOCKED PHRASEsuffix",
+                embeds=(),
                 author=SimpleNamespace(bot=True),
                 webhook_id=40,
                 delete=mock.AsyncMock(),
@@ -246,6 +257,149 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                 "delete filtered message",
             )
 
+    async def test_message_filter_checks_every_supported_embed_text_part(self):
+        with loaded_nhmoderation() as module:
+            subject = module.NHModeration(SimpleNamespace(user=SimpleNamespace(id=50)))
+            subject._message_filter_phrases = {10: ("blocked",)}
+            subject.report_operational_error = mock.AsyncMock()
+            subject._mark_operational_recovered = mock.AsyncMock()
+            empty_embed = {
+                "title": None,
+                "description": None,
+                "fields": (),
+                "author": SimpleNamespace(name=None),
+                "footer": SimpleNamespace(text=None),
+            }
+            cases = {
+                "title": {"title": "prefix BLOCKED suffix"},
+                "description": {"description": "prefix BLOCKED suffix"},
+                "field name": {
+                    "fields": (SimpleNamespace(name="BLOCKED", value="allowed"),)
+                },
+                "field value": {
+                    "fields": (SimpleNamespace(name="allowed", value="BLOCKED"),)
+                },
+                "author name": {"author": SimpleNamespace(name="BLOCKED")},
+                "footer text": {"footer": SimpleNamespace(text="BLOCKED")},
+            }
+
+            for label, overrides in cases.items():
+                with self.subTest(part=label):
+                    embed = SimpleNamespace(**(empty_embed | overrides))
+                    message = SimpleNamespace(
+                        id=30,
+                        guild=SimpleNamespace(id=10),
+                        channel=SimpleNamespace(id=20),
+                        content="",
+                        embeds=(embed,),
+                        author=SimpleNamespace(id=60, bot=True),
+                        webhook_id=40,
+                        delete=mock.AsyncMock(),
+                    )
+
+                    await module.NHModeration.on_message(subject, message)
+
+                    message.delete.assert_awaited_once_with()
+
+    async def test_message_filter_checks_embeds_added_by_message_edit(self):
+        with loaded_nhmoderation() as module:
+            subject = module.NHModeration(SimpleNamespace())
+            subject._message_filter_phrases = {10: ("blocked",)}
+            subject.report_operational_error = mock.AsyncMock()
+            subject._mark_operational_recovered = mock.AsyncMock()
+            before = SimpleNamespace(content="allowed", embeds=())
+            after = SimpleNamespace(
+                id=30,
+                guild=SimpleNamespace(id=10),
+                channel=SimpleNamespace(id=20),
+                content="allowed",
+                embeds=(
+                    SimpleNamespace(
+                        title=None,
+                        description="BLOCKED",
+                        fields=(),
+                        author=SimpleNamespace(name=None),
+                        footer=SimpleNamespace(text=None),
+                    ),
+                ),
+                delete=mock.AsyncMock(),
+            )
+
+            await module.NHModeration.on_message_edit(subject, before, after)
+
+            after.delete.assert_awaited_once_with()
+
+    async def test_message_filter_preserves_its_own_configuration_embed(self):
+        with loaded_nhmoderation() as module:
+            subject = module.NHModeration(SimpleNamespace(user=SimpleNamespace(id=50)))
+            subject._message_filter_phrases = {10: ("blocked",)}
+            subject.report_operational_error = mock.AsyncMock()
+            subject._mark_operational_recovered = mock.AsyncMock()
+            message = SimpleNamespace(
+                id=30,
+                guild=SimpleNamespace(id=10),
+                channel=SimpleNamespace(id=20),
+                content="",
+                author=SimpleNamespace(id=50),
+                embeds=(
+                    SimpleNamespace(
+                        title="Message filter",
+                        description="1. blocked",
+                        fields=(),
+                        author=SimpleNamespace(name=None),
+                        footer=SimpleNamespace(text=None),
+                    ),
+                ),
+                delete=mock.AsyncMock(),
+            )
+
+            await module.NHModeration.on_message(subject, message)
+
+            message.delete.assert_not_awaited()
+
+    async def test_filter_command_confirmation_is_preserved_by_message_filter(self):
+        with loaded_nhmoderation() as module:
+            subject = module.NHModeration(SimpleNamespace(user=SimpleNamespace(id=50)))
+            subject._require_private_channel = mock.Mock()
+            subject._mark_operational_recovered = mock.AsyncMock()
+            guild = SimpleNamespace(id=10)
+            ctx = SimpleNamespace(guild=guild, send=mock.AsyncMock())
+            def render_confirmation(title, description, fields):
+                return [
+                    SimpleNamespace(
+                        title=title,
+                        description=description,
+                        fields=fields,
+                        author=SimpleNamespace(name=None),
+                        footer=SimpleNamespace(text=None),
+                    )
+                ]
+
+            with mock.patch.object(
+                module,
+                "overview_embeds",
+                side_effect=render_confirmation,
+            ):
+                await module.NHModeration.nhmod_filter_add.callback(
+                    subject,
+                    ctx,
+                    phrase="blocked",
+                )
+
+            confirmation_embed = ctx.send.await_args.kwargs["embed"]
+            sent_message = SimpleNamespace(
+                id=30,
+                guild=guild,
+                channel=SimpleNamespace(id=20),
+                content="",
+                author=SimpleNamespace(id=50),
+                embeds=(confirmation_embed,),
+                delete=mock.AsyncMock(),
+            )
+            await module.NHModeration.on_message(subject, sent_message)
+
+            sent_message.delete.assert_not_awaited()
+
     async def test_message_filter_reports_discord_delete_failures(self):
         with loaded_nhmoderation() as module:
             subject = module.NHModeration(SimpleNamespace())
@@ -258,6 +412,7 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                 guild=SimpleNamespace(id=10),
                 channel=SimpleNamespace(id=20),
                 content="blocked",
+                embeds=(),
                 delete=mock.AsyncMock(side_effect=error),
             )
 
@@ -285,6 +440,17 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
             nonmatch = SimpleNamespace(
                 guild=SimpleNamespace(id=10),
                 content="allowed",
+                embeds=(
+                    SimpleNamespace(
+                        title="allowed",
+                        description="still allowed",
+                        fields=(
+                            SimpleNamespace(name="allowed", value="also allowed"),
+                        ),
+                        author=SimpleNamespace(name="allowed"),
+                        footer=SimpleNamespace(text="allowed"),
+                    ),
+                ),
                 delete=mock.AsyncMock(),
             )
             already_gone = SimpleNamespace(
@@ -292,6 +458,7 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                 guild=SimpleNamespace(id=10),
                 channel=SimpleNamespace(id=20),
                 content="blocked",
+                embeds=(),
                 delete=mock.AsyncMock(side_effect=module.discord.NotFound()),
             )
 

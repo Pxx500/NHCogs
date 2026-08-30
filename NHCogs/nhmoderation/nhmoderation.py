@@ -33,6 +33,7 @@ from .synchronization import (
 
 log = logging.getLogger("red.NHModeration")
 AUDIT_BATCH_SIZE = 100
+FILTER_CONFIG_EMBED_TITLE = "Message filter"
 
 
 class NHModeration(commands.Cog):
@@ -121,13 +122,29 @@ class NHModeration(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        if message.guild is None or not message.content:
+        await self._filter_message(message)
+
+    @commands.Cog.listener()
+    async def on_message_edit(
+        self,
+        before: discord.Message,
+        after: discord.Message,
+    ) -> None:
+        del before
+        await self._filter_message(after)
+
+    async def _filter_message(self, message: discord.Message) -> None:
+        if message.guild is None:
+            return
+        bot_user_id = getattr(getattr(self.bot, "user", None), "id", None)
+        if bot_user_id is not None and message.author.id == bot_user_id and any(
+            embed.title == FILTER_CONFIG_EMBED_TITLE for embed in message.embeds
+        ):
             return
         phrases = self._message_filter_phrases.get(message.guild.id, ())
         if not phrases:
             return
-        content = message.content.casefold()
-        if not any(phrase in content for phrase in phrases):
+        if not self._message_matches_phrases(message, phrases):
             return
         try:
             await message.delete()
@@ -145,6 +162,24 @@ class NHModeration(commands.Cog):
         await self._mark_operational_recovered(
             message.guild,
             "delete filtered message",
+        )
+
+    @staticmethod
+    def _message_matches_phrases(
+        message: discord.Message,
+        phrases: tuple[str, ...],
+    ) -> bool:
+        texts = [message.content]
+        for embed in message.embeds:
+            texts.extend((embed.title, embed.description))
+            texts.extend(field.name for field in embed.fields)
+            texts.extend(field.value for field in embed.fields)
+            texts.extend((embed.author.name, embed.footer.text))
+        return any(
+            phrase in text.casefold()
+            for text in texts
+            if text
+            for phrase in phrases
         )
 
     async def report_operational_error(
@@ -621,9 +656,10 @@ class NHModeration(commands.Cog):
                 value=phrases,
             )
             self._message_filter_phrases[ctx.guild.id] = tuple(phrases)
-        await ctx.send(
+        await self._send_filter_output(
+            ctx,
             f"Phrase added: `{normalized}`",
-            allowed_mentions=discord.AllowedMentions.none(),
+            [],
         )
         await self._mark_operational_recovered(ctx.guild, "nhmod filter add")
 
@@ -644,9 +680,10 @@ class NHModeration(commands.Cog):
                 value=phrases,
             )
             self._message_filter_phrases[ctx.guild.id] = tuple(phrases)
-        await ctx.send(
+        await self._send_filter_output(
+            ctx,
             f"Phrase removed: `{normalized}`",
-            allowed_mentions=discord.AllowedMentions.none(),
+            [],
         )
         await self._mark_operational_recovered(ctx.guild, "nhmod filter remove")
 
@@ -678,7 +715,15 @@ class NHModeration(commands.Cog):
                     )
                 )
             ]
-        for embed in overview_embeds("Message filter", description, fields):
+        await self._send_filter_output(ctx, description, fields)
+
+    @staticmethod
+    async def _send_filter_output(
+        ctx: commands.Context,
+        description: str,
+        fields: list[tuple[str, str]],
+    ) -> None:
+        for embed in overview_embeds(FILTER_CONFIG_EMBED_TITLE, description, fields):
             await ctx.send(
                 embed=embed,
                 allowed_mentions=discord.AllowedMentions.none(),

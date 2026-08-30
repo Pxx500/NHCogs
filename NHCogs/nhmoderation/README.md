@@ -63,7 +63,9 @@ The `nhmod` root, all maintenance commands, and BanChart require Manage Messages
 
 ## Message phrase filter
 
-The filter applies to guild message content. Matching is a case-insensitive plain substring check. It also matches a phrase inside a larger word. The first match deletes the whole message without posting a public response. Messages from moderators, bots, and webhooks use the same rules.
+The filter applies to guild message content and text inside embeds. It checks embed titles, descriptions, field names, field values, author names, and footer text. Matching is a case-insensitive plain substring check. It also matches a phrase inside a larger word. The first match deletes the whole message without posting a public response. Messages from moderators, bots, and webhooks use the same rules.
+
+New messages and cached message edits are checked. This covers embeds that Discord adds or updates after the original message without fetching the message from the Discord API.
 
 Phrases are configured per guild and normalized before storage. The listener reads a memory cache that is restored when the cog loads and updated by the filter commands. Deletion is not recorded as a moderation action and does not affect BanChart.
 
