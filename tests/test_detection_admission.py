@@ -5,6 +5,7 @@ admission order, containment, redelivery and restart recovery.
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
+from importlib import import_module
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -71,6 +72,45 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
 
                 cog._collect_detection_signals.assert_awaited_once()
                 cog._record_operational_failure.assert_awaited_once()
+
+    async def test_registry_failure_reports_original_exception_and_traceback(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot())
+                message = self._message(honeypot, attachment_count=0)
+                self._configure_public_boundary(cog, {"enabled": True})
+                original_error = RuntimeError("registry unavailable")
+                cog._observe_message = mock.AsyncMock(side_effect=original_error)
+                cog._collect_detection_signals = mock.AsyncMock(return_value=())
+                reports = []
+
+                async def capture_report(*_args, **kwargs):
+                    reports.append(
+                        (
+                            kwargs["error"],
+                            kwargs["error"].__traceback__,
+                            kwargs["action"],
+                        )
+                    )
+
+                honeypot_cog = import_module("NHCogs.honeypot.honeypot")
+                with mock.patch.object(
+                    honeypot_cog,
+                    "report_operational_error",
+                    side_effect=capture_report,
+                ):
+                    await cog.on_message(message)
+
+                self.assertEqual(len(reports), 1)
+                reported_error, reported_traceback, action = reports[0]
+                self.assertIs(reported_error, original_error)
+                self.assertIsNotNone(reported_traceback)
+                self.assertIs(reported_traceback, original_error.__traceback__)
+                self.assertEqual(
+                    action,
+                    "message_registry_observation (attempt 1, will retry)",
+                )
+                cog._collect_detection_signals.assert_awaited_once()
 
     async def test_malformed_enabled_setting_does_not_enter_detection_pipeline(self):
         with TemporaryDirectory() as directory:

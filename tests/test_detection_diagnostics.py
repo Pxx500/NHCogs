@@ -128,31 +128,6 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(rows[1]["file"])
                 self.assertFalse(rows[1]["active"])
 
-    async def test_honeypot_errors_uses_persisted_operation_value(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                occurred_at = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
-                cog._case_store.initialize()
-                cog._case_store.record_operational_failure(
-                    guild_id=10,
-                    source=honeypot.OperationType.ROLE_APPLY,
-                    summary="temporary",
-                    occurred_at=occurred_at,
-                )
-                ctx = SimpleNamespace(
-                    guild=SimpleNamespace(id=10),
-                    send=mock.AsyncMock(),
-                )
-
-                await cog.honeypot_errors(ctx)
-
-                ctx.send.assert_awaited_once_with(
-                    "**Honeypot operational errors:**\n"
-                    f"- <t:{int(occurred_at.timestamp())}:R> "
-                    "`role_apply` (active, x1): temporary"
-                )
-
     @staticmethod
     def _append_case(
         honeypot,
@@ -705,37 +680,6 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("Stale resolving cases: 0", report)
                 self.assertNotIn("Failed containment cases: 0", report)
                 self.assertNotIn("Outstanding durable operations", report)
-
-    async def test_doctor_reports_active_operational_failures(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
-                cog._case_store.initialize()
-                cog._case_store.record_operational_failure(
-                    guild_id=10,
-                    source="review_publish",
-                    summary="Could not create the case thread",
-                    occurred_at=datetime.now(timezone.utc),
-                )
-                cog.config = SimpleNamespace(
-                    guild=lambda guild: SimpleNamespace(
-                        all=mock.AsyncMock(
-                            return_value={
-                                "enabled": False,
-                                "action": "none",
-                                "fallback_action": "none",
-                                "whitelist_mode": "bypass",
-                            }
-                        )
-                    )
-                )
-                ctx = self._doctor_context()
-
-                await cog.honeypot_doctor(ctx)
-
-                report = "\n".join(call.args[0] for call in ctx.send.await_args_list)
-                self.assertIn("Active operational failures: 1", report)
-                self.assertIn("honeypot errors", report)
 
     async def test_doctor_checks_evidence_directory_off_event_loop_thread(self):
         with TemporaryDirectory() as directory:

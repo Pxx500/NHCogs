@@ -3,7 +3,6 @@ resolution, summary and thread creation, reclaim and rerender.
 """
 
 import asyncio
-import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -142,7 +141,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                 self.assertIn("review unavailable", operation.last_error)
                 message.delete.assert_awaited_once()
 
-    async def test_preview_thread_failure_is_visible_until_later_publication_succeeds(self):
+    async def test_preview_thread_failure_and_recovery_share_operation_identity(self):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
@@ -179,50 +178,29 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                         True,
                     ]
                 )
+                cog._record_operational_failure = mock.AsyncMock()
+                honeypot.detection.mark_operational_error_recovered = mock.AsyncMock()
 
                 processing = asyncio.create_task(cog.on_message(message))
                 await asyncio.wait_for(scan_started.wait(), timeout=1)
 
-                failures = await asyncio.to_thread(
-                    cog._case_store.list_operational_failures,
-                    message.guild.id,
+                failure = next(
+                    call
+                    for call in cog._record_operational_failure.await_args_list
+                    if call.args[1] == "review_publish"
                 )
+                operation_id = failure.kwargs["operation_id"]
+                self.assertIn("case thread", failure.args[2])
 
                 finish_scan.set()
                 await processing
-                self.assertEqual(
-                    [failure.source for failure in failures],
-                    ["review_publish"],
+                honeypot.detection.mark_operational_error_recovered.assert_awaited_once_with(
+                    cog.bot,
+                    guild_id=message.guild.id,
+                    source="Honeypot",
+                    action="review_publish",
+                    correlation_key=operation_id,
                 )
-                self.assertIn("case thread", failures[0].summary)
-                active_after_recovery = await asyncio.to_thread(
-                    cog._case_store.list_operational_failures,
-                    message.guild.id,
-                )
-                failure_history = await asyncio.to_thread(
-                    cog._case_store.list_operational_failures,
-                    message.guild.id,
-                    include_resolved=True,
-                )
-                self.assertEqual(active_after_recovery, ())
-                self.assertIsNotNone(failure_history[0].resolved_at)
-
-    async def test_operational_logger_failure_does_not_escape(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
-                cog._case_store.record_operational_failure = mock.Mock(
-                    side_effect=sqlite3.OperationalError("disk unavailable")
-                )
-                cog._send_operational_alert = mock.AsyncMock()
-
-                await cog._record_operational_failure(
-                    10,
-                    "review_publish",
-                    "Could not create the case thread",
-                )
-
-                cog._send_operational_alert.assert_not_awaited()
 
     async def test_missing_publication_destination_is_durable_after_delete(self):
         with TemporaryDirectory() as directory:

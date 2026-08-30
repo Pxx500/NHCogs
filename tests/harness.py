@@ -21,135 +21,6 @@ from unittest import mock
 PACKAGE_DIR = Path(__file__).resolve().parents[1] / "NHCogs" / "honeypot"
 _MISSING = object()
 
-EXPECTED_GUILD_DEFAULTS = {
-    "enabled": False,
-    "action": None,
-    "fallback_action": "review",
-    "dry_run": False,
-    "errors_channel": None,
-    "daily_stats_channel": None,
-    "maintainer_id": None,
-    "manual_evidence_channel": None,
-    "manual_punishment_roles": {},
-    "honeypot_channels": [],
-    "mute_role": None,
-    "purge_backward_seconds": 60,
-    "purge_forward_seconds": 10,
-    "whitelisted_roles": [],
-    "firstpost_collect_enabled": False,
-    "firstpost_enabled": False,
-    "firstpost_action": "review",
-    "spam_enabled": False,
-    "spam_action": "review",
-    "spam_window_seconds": 10,
-    "spam_min_channels": 2,
-    "imagescan_detector_enabled": False,
-    "imagescan_detector_action": "review",
-    "imagescan_detector_threshold": 20,
-    "review_enabled": False,
-    "review_channel": None,
-    "review_kick_fail_warning": "false",
-    "automated_kick_fail_warning": False,
-    "whitelist_mode": "bypass",
-    "stats": {
-        "detections": 0,
-        "suspicious": 0,
-        "reviewed": 0,
-        "review_expired": 0,
-        "ignored": 0,
-        "kicked": 0,
-        "banned": 0,
-        "failed_actions": 0,
-        "dry_run_actions": 0,
-        "whitelisted": 0,
-        "pending_mutes": 0,
-        "pending_mute_failures": 0,
-        "purged_messages": 0,
-        "cached_purge_deletes": 0,
-        "forward_purge_deletes": 0,
-        "forward_purge_delete_failures": 0,
-        "evidence_capture_failures": 0,
-        "delete_forbidden": 0,
-        "delete_transient_failures": 0,
-        "firstpost_seen": 0,
-        "firstpost_hits": 0,
-        "firstpost_reviews": 0,
-        "firstpost_kicks": 0,
-        "firstpost_bans": 0,
-        "early_catches": 0,
-        "spam_hits": 0,
-        "spam_reviews": 0,
-        "spam_kicks": 0,
-        "spam_bans": 0,
-        "spam_catches": 0,
-        "honeypot_hits": 0,
-        "honeypot_reviews": 0,
-        "honeypot_kicks": 0,
-        "honeypot_bans": 0,
-        "honeypot_catches": 0,
-        "image_hits": 0,
-        "image_reviews": 0,
-        "image_kicks": 0,
-        "image_bans": 0,
-        "image_catches": 0,
-        "joinwatch_total_joins": 0,
-        "joinwatch_young_joins": 0,
-        "joinwatch_auto_roles_scheduled": 0,
-        "joinwatch_auto_roles": 0,
-        "joinwatch_auto_role_failures": 0,
-        "joinwatch_auto_roles_cleared": 0,
-        "joinwatch_auto_role_punishments": 0,
-    },
-    "scam_keywords": [
-        "free nitro",
-        "giveaway",
-        "steam gift",
-        "free discord",
-        "discord.gift",
-        "claim your",
-        "you won",
-        "free vbucks",
-        "free robux",
-        "free coins",
-        "boost your server",
-        "limited time",
-        "exclusive offer",
-        "free membership",
-        "hack",
-        "crack",
-        "generator",
-    ],
-    "attachment_patterns": ["^image$", "^image ?\\(\\d+\\)$", "^\\d+$"],
-    "gif_detector_enabled": False,
-    "gif_detector_debug_enabled": False,
-    "gif_detector_debug_channel": None,
-    "gif_detector_animation_enabled": True,
-    "gif_detector_channels": [],
-    "gif_detector_secondary_message": "No gifs!",
-    "gif_detector_retention_seconds": 5,
-    "gif_detector_threshold": 3,
-    "gif_detector_window_seconds": 60,
-    "gif_detector_mute_duration_seconds": 3600,
-    "joinwatch_enabled": False,
-    "joinwatch_alert_enabled": True,
-    "joinwatch_channel": None,
-    "joinwatch_min_age_hours": 24,
-    "joinwatch_auto_role_enabled": False,
-    "joinwatch_auto_role_id": None,
-    "joinwatch_auto_role_timer_minutes": 1440,
-    "joinwatch_auto_role_action": "none",
-    "joinwatch_auto_role_random_delay_enabled": False,
-    "joinwatch_auto_role_random_delay_min_minutes": 1,
-    "joinwatch_auto_role_random_delay_max_minutes": 10,
-    "joinwatch_pending_role_assignments": {},
-    "joinwatch_pending_roles": {},
-    "baitrole_enabled": False,
-    "baitrole_channel": None,
-    "baitrole_id": None,
-    "baitrole_action": "ban",
-}
-
-
 def _load_module(name: str, path: Path):
     spec = util.spec_from_file_location(name, path)
     module = util.module_from_spec(spec)
@@ -244,11 +115,29 @@ class _GuildConfig:
 class _Config:
     def __init__(self):
         self.defaults = {}
+        self.global_defaults = {}
+        self.global_values = {}
         self._guilds = {}
         self._stats = {}
 
     def register_guild(self, **defaults):
         self.defaults = defaults
+
+    def register_global(self, **defaults):
+        self.global_defaults = defaults
+
+    async def all(self):
+        return {**self.global_defaults, **self.global_values}
+
+    async def get_raw(self, key, *, default=None):
+        key = str(key)
+        return self.global_values.get(key, self.global_defaults.get(key, default))
+
+    async def set_raw(self, key, *, value):
+        self.global_values[str(key)] = value
+
+    async def clear_raw(self, key):
+        self.global_values.pop(str(key), None)
 
     def guild(self, guild):
         return self.guild_from_id(guild.id)

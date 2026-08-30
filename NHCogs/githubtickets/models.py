@@ -19,6 +19,11 @@ class TicketState(str, Enum):
     FINISHING = "finishing"
 
 
+class TicketOrigin(str, Enum):
+    DISCORD = "discord"
+    GITHUB = "github"
+
+
 class NextAction(str, Enum):
     DIRECT_PING = "direct_ping"
     AUTOMATIC_PING = "automatic_ping"
@@ -38,6 +43,35 @@ class ExclusionReason(str, Enum):
     TIMED_OUT = "timed_out"
 
 
+class GitHubDeliveryState(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    RETRY = "retry"
+    AWAITING_REDELIVERY = "awaiting_redelivery"
+    PROCESSED = "processed"
+    IGNORED = "ignored"
+    FAILED = "failed"
+
+
+class GitHubOutboxOperation(str, Enum):
+    ADD_ASSIGNEE = "add_assignee"
+    REMOVE_ASSIGNEE = "remove_assignee"
+
+
+class GitHubOutboxState(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    RETRY = "retry"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+class PullRequestObservationState(str, Enum):
+    APPLIED = "applied"
+    STALE = "stale"
+    CONFLICT = "conflict"
+
+
 class InvalidCategoryName(ValueError):
     pass
 
@@ -47,6 +81,10 @@ class CategoryAlreadyExists(ValueError):
 
 
 class CategoryLimitReached(ValueError):
+    pass
+
+
+class ActivePullRequestTicketExists(ValueError):
     pass
 
 
@@ -83,7 +121,7 @@ class CandidateHistory:
 class NewTicket:
     guild_id: int
     channel_id: int
-    author_id: int
+    author_id: int | None
     pr_title: str
     pr_url: str
     category_display: str
@@ -91,6 +129,7 @@ class NewTicket:
     direct_target_id: int | None
     category_ids: tuple[int, ...]
     created_at: datetime
+    origin: TicketOrigin = TicketOrigin.DISCORD
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +139,7 @@ class Ticket:
     channel_id: int
     message_id: int | None
     thread_id: int | None
-    author_id: int
+    author_id: int | None
     pr_title: str
     pr_url: str
     category_display: str
@@ -123,6 +162,72 @@ class Ticket:
     category_ids: tuple[int, ...]
     public_token: str = ""
     pending_ping_reserved_at: datetime | None = None
+    origin: TicketOrigin = TicketOrigin.DISCORD
+    category_prompt_retry_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubPullRequest:
+    repository_id: int
+    pr_number: int
+    github_pr_id: int
+    github_author_id: int
+    repository_full_name: str
+    url: str
+    title: str
+    github_author_login: str
+    draft: bool
+    open: bool
+    labels: tuple[str, ...]
+    github_updated_at: datetime
+    assignees: tuple[str, ...] = ()
+    current_ticket_id: int | None = None
+    last_processed_action: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequestObservation:
+    state: PullRequestObservationState
+    pull_request: GitHubPullRequest
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubDelivery:
+    delivery_guid: str
+    github_delivery_id: int | None
+    event: str
+    action: str | None
+    installation_id: int
+    repository_id: int | None
+    pr_number: int | None
+    received_at: datetime
+    state: GitHubDeliveryState
+    attempts: int
+    next_attempt_at: datetime | None
+    processing_started_at: datetime | None
+    completed_at: datetime | None
+    error_summary: str | None
+    raw_body: bytes | None
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubOutboxItem:
+    outbox_id: int
+    operation: GitHubOutboxOperation
+    ticket_id: int
+    transition_version: int
+    repository_id: int
+    repository_full_name: str
+    pr_number: int
+    github_login: str
+    actor_user_id: int | None
+    state: GitHubOutboxState
+    attempts: int
+    next_attempt_at: datetime | None
+    processing_started_at: datetime | None
+    error_summary: str | None
+    created_at: datetime
+    updated_at: datetime
 
 
 @dataclass(frozen=True, slots=True)

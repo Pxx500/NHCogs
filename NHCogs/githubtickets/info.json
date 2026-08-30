@@ -13,12 +13,15 @@
     "utility",
     "redbot"
   ],
-  "requirements": [],
+  "requirements": [
+    "PyJWT>=2.8.0",
+    "cryptography>=41.0.0"
+  ],
   "min_bot_version": "3.5.23",
   "min_python_version": [
     3,
     10,
     0
   ],
-  "end_user_data_statement": "GitHubTickets stores guild and user IDs, optional GitHub usernames, expertise categories, pull request titles and links, Discord ticket locations, reviewer routing state, exclusions, ping history, and deadlines in SQLite. Finished tickets, deleted ticket messages or threads, guild removal, and Red user-data deletion remove the corresponding data. Discord message content is not read back into the database."
+  "end_user_data_statement": "GitHubTickets stores Discord guild and user IDs, optional GitHub user IDs and logins, categories, pull request repository IDs, pull request IDs and numbers, URLs, titles, authors, labels, draft and open state, update timestamps, Discord ticket locations, reviewer routing state, exclusions, ping history, and deadlines in SQLite. It stores GitHub delivery GUIDs and related event metadata for deduplication and recovery. Raw webhook request bodies are cleared after successful processing. Pending and failed deliveries, including terminal failures, may retain raw request bodies until the three-day delivery-body pruning window expires. Delivery identity and minimal result metadata are retained for at least seven days. GitHub add-assignee and remove-assignee outbox intents store ticket and transition IDs, repository and pull request identity, normalized GitHub login, state, retry counters, error summaries, and timestamps until their work is completed or cleaned up. Finished tickets and deleted ticket messages or threads remove corresponding ticket data. Guild removal clears the guild's GitHubTickets data. Red user-data deletion removes or redacts matching Discord-user profile and ticket data, but does not delete GitHub delivery identities or pull request rows that remain unbound. Discord message content is not read back into the database."
 }

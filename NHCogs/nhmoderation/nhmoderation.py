@@ -18,7 +18,10 @@ from ..command_overview import (
     overview_embeds,
     send_group_overview,
 )
-from ..operational_errors import OperationalErrorReporter, OperationalFailure
+from ..operational_errors import (
+    mark_operational_error_recovered,
+    report_operational_error,
+)
 from ..ranked_donut_chart import render_ranked_donut_chart
 from .command_inputs import parse_banchart_arguments
 from .history import NHModerationHistory
@@ -47,16 +50,9 @@ class NHModeration(commands.Cog):
             identifier=self.CONFIG_IDENTIFIER,
             force_registration=True,
         )
-        self.config.register_guild(
-            error_channel=None,
-            error_maintainer_id=None,
-            message_filter_phrases=[],
-        )
+        self.config.register_guild(message_filter_phrases=[])
         database_path = cog_data_path(self) / "moderation.sqlite"
         self.history = NHModerationHistory(database_path)
-        self._operational_errors = OperationalErrorReporter(
-            bot, self.config, database_path, logger=log
-        )
         self._synchronizer: ModerationSynchronizer | None = None
         self._scheduler_task: asyncio.Task[None] | None = None
         self._startup_task: asyncio.Task[None] | None = None
@@ -67,7 +63,6 @@ class NHModeration(commands.Cog):
 
     async def cog_load(self) -> None:
         await self.history.initialize()
-        await self._operational_errors.initialize()
         guild_configs = await self.config.all_guilds()
         self._message_filter_phrases = {
             int(guild_id): tuple(settings.get("message_filter_phrases", ()))
@@ -114,7 +109,6 @@ class NHModeration(commands.Cog):
     @commands.Cog.listener()
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         await self.history.delete_guild_data(guild.id)
-        await self._operational_errors.delete_guild(guild.id)
         async with self._message_filter_lock:
             self._message_filter_phrases.pop(guild.id, None)
             await self.config.guild(guild).clear()
@@ -155,28 +149,22 @@ class NHModeration(commands.Cog):
         error: BaseException,
         channel_id: int | None = None,
         message_id: int | None = None,
-    ) -> OperationalFailure | None:
+    ):
         log.error(
             "NHModeration operational error during %s for guild %s",
             action,
             guild_id,
             exc_info=(type(error), error, error.__traceback__),
         )
-        try:
-            return await self._operational_errors.report(
-                guild_id=guild_id,
-                source="NHModeration",
-                action=action,
-                error=error,
-                channel_id=channel_id,
-                message_id=message_id,
-            )
-        except Exception:
-            log.exception(
-                "Failed to persist NHModeration operational error for guild %s",
-                guild_id,
-            )
-            return None
+        return await report_operational_error(
+            self.bot,
+            guild_id=guild_id,
+            source="NHModeration",
+            action=action,
+            error=error,
+            channel_id=channel_id,
+            message_id=message_id,
+        )
 
     async def cog_command_error(
         self, ctx: commands.Context, error: commands.CommandError
@@ -246,17 +234,12 @@ class NHModeration(commands.Cog):
     async def _mark_operational_recovered(
         self, guild: discord.Guild, action: str
     ) -> None:
-        try:
-            await self._operational_errors.mark_action_recovered(
-                guild_id=guild.id,
-                source="NHModeration",
-                action=action,
-            )
-        except Exception:
-            log.exception(
-                "Failed to mark NHModeration action recovered for guild %s",
-                guild.id,
-            )
+        await mark_operational_error_recovered(
+            self.bot,
+            guild_id=guild.id,
+            source="NHModeration",
+            action=action,
+        )
 
     async def _fetch_audit_entries(
         self,

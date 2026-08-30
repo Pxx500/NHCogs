@@ -1,0 +1,21 @@
+{
+  "author": [
+    "Pxx500"
+  ],
+  "name": "OperationalErrors",
+  "install_msg": "OperationalErrors is loaded automatically by the combined NHCogs extension.",
+  "short": "Report process-wide operational failures to one private channel.",
+  "description": "Persist process-wide operational failures and publish one private alert for each report.",
+  "tags": [
+    "utility",
+    "moderation",
+    "errors"
+  ],
+  "min_bot_version": "3.5.23",
+  "min_python_version": [
+    3,
+    10,
+    0
+  ],
+  "end_user_data_statement": "Operational error records store the guild, source, action, bounded error summary, exception type, occurrence times and count, failure fingerprint, recovery state, and optional Discord location IDs. Tracebacks are sent only to the configured private Discord error channel and are not stored in SQLite."
+}

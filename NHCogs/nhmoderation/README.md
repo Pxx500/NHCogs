@@ -77,12 +77,12 @@ Weekly reconciliation runs every Sunday at `04:20 UTC`. It re-reads a 14-day aud
 
 ## Operational errors
 
-Unexpected command, event, migration, synchronization, repair, scheduler, database, and rendering failures are stored in SQLite and written to the Python logger. NHModeration does not own separate error channel or maintainer commands.
+Unexpected command, event, migration, synchronization, repair, scheduler, database, and rendering failures are written to the Python logger and sent through the process-wide OperationalErrors reporter. NHModeration does not own separate error channel or maintainer commands.
 
 Expected input and permission errors return a short useful response. Public output never includes raw exceptions, audit IDs, case numbers, source keys, reasons, or database identifiers.
 
 ## Stored data and deletion
 
-NHModeration stores immutable source observations and rebuildable canonical actions. Stored fields may include guild, target, technical executor, credited moderator, and channel IDs, action type, timestamps, reasons, expiry, source identity, migration identity, attribution, synchronization cursors, and operational failures. Configured message filter phrases are stored per guild in Red Config.
+NHModeration stores immutable source observations and rebuildable canonical actions. Stored fields may include guild, target, technical executor, credited moderator, and channel IDs, action type, timestamps, reasons, expiry, source identity, migration identity, attribution, and synchronization cursors. Configured message filter phrases are stored per guild in Red Config.
 
-Red user-data deletion anonymizes matching identities and reasons, then rebuilds affected actions. Guild removal deletes the guild's history, synchronization state, migration state, failures, and configuration.
+Red user-data deletion anonymizes matching identities and reasons, then rebuilds affected actions. Guild removal deletes the guild's history, synchronization state, and migration state.

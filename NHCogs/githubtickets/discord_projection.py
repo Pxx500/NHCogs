@@ -8,8 +8,10 @@ import discord
 
 from .models import Ticket
 from .presentation import (
+    add_categories_notification,
     automatic_review_notification,
     direct_review_notification,
+    draft_ticket_notification,
     thread_name,
     ticket_message,
 )
@@ -23,9 +25,14 @@ class DiscordTicketProjection:
         self,
         bot,
         view_factory: Callable[[Ticket], discord.ui.View],
+        *,
+        category_prompt_view_factory: Callable[[Ticket], discord.ui.View],
+        draft_prompt_view_factory: Callable[[Ticket], discord.ui.View],
     ) -> None:
         self._bot = bot
         self._view_factory = view_factory
+        self._category_prompt_view_factory = category_prompt_view_factory
+        self._draft_prompt_view_factory = draft_prompt_view_factory
         self._sent_messages: dict[int, Any] = {}
 
     async def send_ticket(
@@ -95,6 +102,35 @@ class DiscordTicketProjection:
         self._sent_messages.pop(message_id, None)
         return thread.id
 
+    async def prompt_categories(self, ticket: Ticket, thread_id: int) -> None:
+        author_mention = (
+            f"<@{ticket.author_id}>" if ticket.author_id is not None else None
+        )
+        content = (
+            add_categories_notification(author_mention)
+            if author_mention is not None
+            else "Add categories to start automatic routing"
+        )
+        await self._send_thread_prompt(
+            thread_id,
+            content,
+            view=self._category_prompt_view_factory(ticket),
+            user_id=ticket.author_id,
+        )
+
+    async def prompt_draft_decision(self, ticket: Ticket) -> None:
+        if ticket.thread_id is None:
+            raise ProjectionNotFound
+        author_mention = (
+            f"<@{ticket.author_id}>" if ticket.author_id is not None else None
+        )
+        await self._send_thread_prompt(
+            ticket.thread_id,
+            draft_ticket_notification(author_mention),
+            view=self._draft_prompt_view_factory(ticket),
+            user_id=ticket.author_id,
+        )
+
     async def edit_ticket(
         self,
         ticket: Ticket,
@@ -140,6 +176,34 @@ class DiscordTicketProjection:
         )
         try:
             await thread.send(content, allowed_mentions=allowed_mentions)
+        except discord.NotFound as error:
+            raise ProjectionNotFound from error
+
+    async def _send_thread_prompt(
+        self,
+        thread_id: int,
+        content: str,
+        *,
+        view: discord.ui.View,
+        user_id: int | None,
+    ) -> None:
+        thread = self._cached_channel(thread_id)
+        allowed_mentions = (
+            discord.AllowedMentions.none()
+            if user_id is None
+            else discord.AllowedMentions(
+                everyone=False,
+                users=[discord.Object(id=user_id)],
+                roles=False,
+                replied_user=False,
+            )
+        )
+        try:
+            await thread.send(
+                content,
+                view=view,
+                allowed_mentions=allowed_mentions,
+            )
         except discord.NotFound as error:
             raise ProjectionNotFound from error
 

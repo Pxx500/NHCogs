@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -9,10 +10,15 @@ import discord
 
 from . import presentation
 from .coordinator import SELF_REVIEW_DENIED, TicketActor, TicketRequest, TicketResult
-from .models import Category, Profile, RoutingMode
+from .github_app import PullRequestSnapshot, pull_request_from_snapshot
+from .models import Category, GitHubPullRequest, Profile, RoutingMode
 from .store import GitHubTicketsStore
 
-CreateTicket = Callable[[TicketRequest, TicketActor], Awaitable[TicketResult]]
+CreateTicket = Callable[
+    [TicketRequest, TicketActor, GitHubPullRequest],
+    Awaitable[TicketResult],
+]
+FetchPullRequest = Callable[[str, str, int], Awaitable[PullRequestSnapshot]]
 CountAutomaticCandidates = Callable[
     [int, tuple[int, ...], frozenset[int]],
     Awaitable[int],
@@ -21,10 +27,60 @@ ActorFactory = Callable[[discord.Interaction], TicketActor]
 MemberLookup = Callable[[int], discord.Member | None]
 MemberActorFactory = Callable[[discord.Member], TicketActor]
 log = logging.getLogger("red.NHCogs.GitHubTickets")
+GITHUB_INTEGRATION_UNAVAILABLE = "GitHub integration is unavailable"
+_PULL_REQUEST_LINK = re.compile(
+    r"https://github\.com/([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/"
+    r"([A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)"
+)
+_GITHUB_PROFILE_LINK = re.compile(
+    r"https://github\.com/"
+    r"([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)/?"
+)
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _parse_pull_request_link(value: str) -> tuple[str, str, int] | None:
+    match = _PULL_REQUEST_LINK.fullmatch(value)
+    if match is None:
+        return None
+    owner, repository, number = match.groups()
+    return owner, repository, int(number)
+
+
+def _parse_github_profile_link(value: str) -> str | None:
+    match = _GITHUB_PROFILE_LINK.fullmatch(value.strip())
+    return match.group(1) if match is not None else None
+
+
+def _github_profile_link(github_username: str) -> str:
+    return f"https://github.com/{github_username}"
+
+
+def _validated_pull_request(
+    snapshot: PullRequestSnapshot,
+    *,
+    owner: str,
+    repository: str,
+    number: int,
+    expected_organization: str,
+) -> GitHubPullRequest | None:
+    expected_full_name = f"{owner}/{repository}"
+    repository_full_name = snapshot.repository_full_name.strip()
+    repository_owner, separator, _ = repository_full_name.partition("/")
+    if (
+        not separator
+        or repository_full_name.casefold() != expected_full_name.casefold()
+        or repository_owner.casefold() != expected_organization.casefold()
+        or snapshot.number != number
+        or snapshot.state.casefold() != "open"
+        or snapshot.draft
+        or snapshot.merged
+    ):
+        return None
+    return pull_request_from_snapshot(snapshot)
 
 
 async def _check_participant(
@@ -181,10 +237,14 @@ class EditProfileModal(_DashboardModal):
         self._clock = clock
         visible_categories = tuple(categories[:25])
 
-        self.github_username = discord.ui.TextInput(
-            default=profile.github_username if profile is not None else None,
+        self.github_profile_link = discord.ui.TextInput(
+            default=(
+                _github_profile_link(profile.github_username)
+                if profile is not None and profile.github_username
+                else None
+            ),
             required=False,
-            max_length=presentation.MAX_GITHUB_USERNAME_LENGTH,
+            max_length=presentation.MAX_GITHUB_PROFILE_LINK_LENGTH,
         )
         self.categories = discord.ui.Select(
             placeholder=presentation.SELECT_YOUR_CATEGORIES,
@@ -203,9 +263,9 @@ class EditProfileModal(_DashboardModal):
                 option.default = int(option.value) in selected_ids if option.value != "none" else False
         self.add_item(
             discord.ui.Label(
-                text=presentation.GITHUB_USERNAME,
-                description=presentation.GITHUB_USERNAME_DESCRIPTION,
-                component=self.github_username,
+                text=presentation.GITHUB_PROFILE_LINK,
+                description=presentation.GITHUB_PROFILE_LINK_DESCRIPTION,
+                component=self.github_profile_link,
             )
         )
         self.add_item(
@@ -223,6 +283,17 @@ class EditProfileModal(_DashboardModal):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if not await _check_participant(interaction, self._actor_factory):
+            return
+        profile_link = str(self.github_profile_link.value).strip()
+        github_username = (
+            _parse_github_profile_link(profile_link) if profile_link else None
+        )
+        if profile_link and github_username is None:
+            await interaction.response.send_message(
+                presentation.INVALID_GITHUB_PROFILE_LINK,
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             return
         category_ids = tuple(int(value) for value in self.categories.values)
         if self.automatic_pings.value and not category_ids:
@@ -248,7 +319,7 @@ class EditProfileModal(_DashboardModal):
         await self._store.save_profile(
             guild_id=self._guild_id,
             user_id=actor.user_id,
-            github_username=str(self.github_username.value),
+            github_username=github_username,
             category_ids=category_ids,
             automatic_pings=self.automatic_pings.value,
             updated_at=self._clock(),
@@ -264,6 +335,8 @@ class NewTicketModal(_DashboardModal):
         guild_id: int,
         categories: Sequence[Category],
         create_ticket: CreateTicket,
+        fetch_pull_request: FetchPullRequest,
+        expected_organization: str,
         actor_factory: ActorFactory,
         count_automatic_candidates: CountAutomaticCandidates,
         draft: TicketRequest | None = None,
@@ -272,16 +345,12 @@ class NewTicketModal(_DashboardModal):
         self._store = store
         self._guild_id = guild_id
         self._create_ticket = create_ticket
+        self._fetch_pull_request = fetch_pull_request
+        self._expected_organization = expected_organization
         self._actor_factory = actor_factory
         self._count_automatic_candidates = count_automatic_candidates
         visible_categories = tuple(categories[:25])
 
-        self.pr_title = discord.ui.TextInput(
-            placeholder=presentation.ENTER_PR_TITLE,
-            default=draft.pr_title if draft is not None else None,
-            required=True,
-            max_length=presentation.MAX_PR_TITLE_LENGTH,
-        )
         self.pr_link = discord.ui.TextInput(
             placeholder=presentation.ENTER_PR_LINK,
             default=draft.pr_url if draft is not None else None,
@@ -345,7 +414,6 @@ class NewTicketModal(_DashboardModal):
                     int(option.value) in selected_ids if option.value != "none" else False
                 )
         for label, component, description in (
-            (presentation.PR_TITLE, self.pr_title, None),
             (presentation.PR_LINK, self.pr_link, None),
             (presentation.CATEGORIES, self.categories, None),
             (
@@ -366,6 +434,36 @@ class NewTicketModal(_DashboardModal):
                     component=component,
                 )
             )
+
+    async def _linked_pull_request(
+        self,
+        interaction: discord.Interaction,
+    ) -> GitHubPullRequest | None:
+        identity = _parse_pull_request_link(str(self.pr_link.value).strip())
+        if identity is None:
+            await self._send_error(interaction, presentation.COULD_NOT_CREATE_TICKET)
+            return None
+        owner, repository, number = identity
+        if owner.casefold() != self._expected_organization.casefold():
+            await self._send_error(interaction, presentation.COULD_NOT_CREATE_TICKET)
+            return None
+        await interaction.response.defer(ephemeral=True)
+        try:
+            snapshot = await self._fetch_pull_request(owner, repository, number)
+        except Exception:
+            log.exception("GitHub Tickets pull request lookup failed")
+            await self._send_error(interaction, presentation.COULD_NOT_CREATE_TICKET)
+            return None
+        pull_request = _validated_pull_request(
+            snapshot,
+            owner=owner,
+            repository=repository,
+            number=number,
+            expected_organization=self._expected_organization,
+        )
+        if pull_request is None:
+            await self._send_error(interaction, presentation.COULD_NOT_CREATE_TICKET)
+        return pull_request
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if not await _check_participant(interaction, self._actor_factory):
@@ -398,10 +496,13 @@ class NewTicketModal(_DashboardModal):
         if any(category_id not in current_categories for category_id in category_ids):
             await self._send_error(interaction, presentation.CATEGORY_NO_LONGER_EXISTS)
             return
+        pull_request = await self._linked_pull_request(interaction)
+        if pull_request is None:
+            return
         request = TicketRequest(
             guild_id=self._guild_id,
-            pr_title=str(self.pr_title.value).strip(),
-            pr_url=str(self.pr_link.value).strip(),
+            pr_title=pull_request.title,
+            pr_url=pull_request.url,
             category_display=", ".join(
                 current_categories[category_id].name for category_id in category_ids
             ),
@@ -421,7 +522,7 @@ class NewTicketModal(_DashboardModal):
                 category_ids,
                 frozenset(excluded_user_ids),
             )
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 presentation.confirm_categories(candidate_count),
                 view=ConfirmCategoriesView(
                     self._store,
@@ -430,7 +531,10 @@ class NewTicketModal(_DashboardModal):
                         current_categories[category_id] for category_id in category_ids
                     ),
                     request=request,
+                    pull_request=pull_request,
                     create_ticket=self._create_ticket,
+                    fetch_pull_request=self._fetch_pull_request,
+                    expected_organization=self._expected_organization,
                     actor_factory=self._actor_factory,
                     count_automatic_candidates=self._count_automatic_candidates,
                     automatic_candidate_exclusions=frozenset(excluded_user_ids),
@@ -438,35 +542,45 @@ class NewTicketModal(_DashboardModal):
                 ephemeral=True,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-            return
-        await _create_ticket_request(
-            interaction,
-            request=request,
-            create_ticket=self._create_ticket,
-            actor_factory=self._actor_factory,
-        )
+        else:
+            await _create_ticket_request(
+                interaction,
+                request=request,
+                pull_request=pull_request,
+                create_ticket=self._create_ticket,
+                actor_factory=self._actor_factory,
+            )
 
     @staticmethod
     async def _send_error(
         interaction: discord.Interaction,
         message: str | None,
     ) -> None:
-        await interaction.response.send_message(
-            message,
-            ephemeral=True,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        kwargs = {
+            "ephemeral": True,
+            "allowed_mentions": discord.AllowedMentions.none(),
+        }
+        if interaction.response.is_done():
+            await interaction.followup.send(message, **kwargs)
+        else:
+            await interaction.response.send_message(message, **kwargs)
 
 
 async def _create_ticket_request(
     interaction: discord.Interaction,
     *,
     request: TicketRequest,
+    pull_request: GitHubPullRequest,
     create_ticket: CreateTicket,
     actor_factory: ActorFactory,
 ) -> bool:
-    await interaction.response.defer()
-    result = await create_ticket(request, actor_factory(interaction))
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+    result = await create_ticket(
+        request,
+        actor_factory(interaction),
+        pull_request,
+    )
     if result.success:
         return True
     await interaction.followup.send(result.response, ephemeral=True)
@@ -481,7 +595,10 @@ class ConfirmCategoriesView(_DashboardView):
         guild_id: int,
         categories: Sequence[Category],
         request: TicketRequest,
+        pull_request: GitHubPullRequest,
         create_ticket: CreateTicket,
+        fetch_pull_request: FetchPullRequest,
+        expected_organization: str,
         actor_factory: ActorFactory,
         count_automatic_candidates: CountAutomaticCandidates,
         automatic_candidate_exclusions: frozenset[int],
@@ -491,7 +608,10 @@ class ConfirmCategoriesView(_DashboardView):
         self._guild_id = guild_id
         self._categories = tuple(categories)
         self._request = request
+        self._pull_request = pull_request
         self._create_ticket = create_ticket
+        self._fetch_pull_request = fetch_pull_request
+        self._expected_organization = expected_organization
         self._actor_factory = actor_factory
         self._count_automatic_candidates = count_automatic_candidates
         self._automatic_candidate_exclusions = automatic_candidate_exclusions
@@ -597,6 +717,8 @@ class ConfirmCategoriesView(_DashboardView):
                 guild_id=self._guild_id,
                 categories=categories,
                 create_ticket=self._create_ticket,
+                fetch_pull_request=self._fetch_pull_request,
+                expected_organization=self._expected_organization,
                 actor_factory=self._actor_factory,
                 count_automatic_candidates=self._count_automatic_candidates,
                 draft=self._selected_request(),
@@ -624,6 +746,7 @@ class ConfirmCategoriesView(_DashboardView):
         if await _create_ticket_request(
             interaction,
             request=request,
+            pull_request=self._pull_request,
             create_ticket=self._create_ticket,
             actor_factory=self._actor_factory,
         ):
@@ -636,10 +759,19 @@ async def send_new_ticket_modal(
     *,
     guild_id: int,
     create_ticket: CreateTicket,
+    fetch_pull_request: FetchPullRequest | None,
+    expected_organization: str | None,
     actor_factory: ActorFactory,
     count_automatic_candidates: CountAutomaticCandidates,
 ) -> None:
     if not await _check_participant(interaction, actor_factory):
+        return
+    if fetch_pull_request is None or not expected_organization:
+        await interaction.response.send_message(
+            GITHUB_INTEGRATION_UNAVAILABLE,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         return
     categories = await store.list_categories(guild_id)
     await interaction.response.send_modal(
@@ -648,6 +780,8 @@ async def send_new_ticket_modal(
             guild_id=guild_id,
             categories=categories,
             create_ticket=create_ticket,
+            fetch_pull_request=fetch_pull_request,
+            expected_organization=expected_organization,
             actor_factory=actor_factory,
             count_automatic_candidates=count_automatic_candidates,
         )

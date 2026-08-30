@@ -7,6 +7,7 @@ DISCORD_EMBED_DESCRIPTION_LIMIT = 4_096
 MAX_PR_TITLE_LENGTH = 256
 MAX_PR_URL_LENGTH = 1_024
 MAX_GITHUB_USERNAME_LENGTH = 100
+MAX_GITHUB_PROFILE_LINK_LENGTH = 100
 _MAX_USER_MENTION = "<@18446744073709551615>"
 
 NEW_TICKET_COMMAND = "newticket"
@@ -21,7 +22,8 @@ BROWSE_CATEGORIES = "Browse Categories"
 FIND_BY_GITHUB_USERNAME = "Find by GitHub username"
 CLEAR_PROFILE = "Clear Profile"
 GITHUB_USERNAME = "GitHub username"
-GITHUB_USERNAME_DESCRIPTION = "Leave empty if it matches your Discord name"
+GITHUB_PROFILE_LINK = "GitHub profile link"
+GITHUB_PROFILE_LINK_DESCRIPTION = "Used to assign you to pull requests"
 ENTER_GITHUB_USERNAME = "Enter a GitHub username"
 CATEGORIES = "Categories"
 SELECT_YOUR_CATEGORIES = "Select your categories"
@@ -54,6 +56,10 @@ MARK_FINISHED = "Mark Finished"
 CLAIM = "Claim"
 DECLINE = "Decline"
 UNASSIGN = "Unassign"
+ADD_CATEGORIES = "Add Categories"
+KEEP_TICKET = "Keep Ticket"
+REMOVE_TICKET = "Remove Ticket"
+CATEGORIES_ADDED = "Categories added"
 TICKET_CHANNEL_NOT_CONFIGURED = "Ticket channel is not configured"
 CANNOT_USE_ACTION = "You cannot use this action"
 TICKET_NOT_ACTIVE = "This ticket is no longer active"
@@ -77,6 +83,7 @@ MAXIMUM_PINGS_NEGATIVE = "Maximum pings cannot be negative"
 INVALID_DURATION = "Invalid duration"
 DURATION_NEGATIVE = "Duration cannot be negative"
 INVALID_USER_ID = "Invalid user ID"
+INVALID_GITHUB_PROFILE_LINK = "Enter a valid GitHub profile link"
 
 HELP_COPY = (
     "Configure GitHub Tickets",
@@ -116,7 +123,8 @@ FIXED_COPY = (
     BROWSE_CATEGORIES,
     CLEAR_PROFILE,
     GITHUB_USERNAME,
-    GITHUB_USERNAME_DESCRIPTION,
+    GITHUB_PROFILE_LINK,
+    GITHUB_PROFILE_LINK_DESCRIPTION,
     CATEGORIES,
     SELECT_YOUR_CATEGORIES,
     ALLOW_AUTOMATIC_PINGS,
@@ -146,6 +154,10 @@ FIXED_COPY = (
     CLAIM,
     DECLINE,
     UNASSIGN,
+    ADD_CATEGORIES,
+    KEEP_TICKET,
+    REMOVE_TICKET,
+    CATEGORIES_ADDED,
     TICKET_CHANNEL_NOT_CONFIGURED,
     CANNOT_USE_ACTION,
     TICKET_NOT_ACTIVE,
@@ -168,6 +180,7 @@ FIXED_COPY = (
     INVALID_DURATION,
     DURATION_NEGATIVE,
     INVALID_USER_ID,
+    INVALID_GITHUB_PROFILE_LINK,
     *HELP_COPY,
 )
 
@@ -182,6 +195,15 @@ def confirm_categories(candidate_count: int) -> str:
             f"{candidate_count} people can receive automatic pings for all selected categories"
         )
     return f"{CONFIRM_CATEGORIES}\n{detail}"
+
+
+def add_categories_notification(author_mention: str) -> str:
+    return f"{author_mention} add categories to start automatic routing"
+
+
+def draft_ticket_notification(author_mention: str | None) -> str:
+    prompt = "This pull request was converted to a draft. Keep or remove its ticket?"
+    return prompt if author_mention is None else f"{author_mention} {prompt}"
 
 
 def _linked_title(title: str, url: str) -> str:
@@ -212,11 +234,15 @@ def finished_ticket_log(
     *,
     title: str,
     url: str,
-    actor_id: int,
-    author_id: int,
+    actor_id: int | None,
+    author_id: int | None,
     reviewer_id: int | None,
 ) -> str:
-    metadata = [f"Finished by <@{actor_id}>", f"Author <@{author_id}>"]
+    metadata = [
+        f"Finished by <@{actor_id}>" if actor_id is not None else "Finished from GitHub"
+    ]
+    if author_id is not None:
+        metadata.append(f"Author <@{author_id}>")
     if reviewer_id is not None:
         metadata.append(f"Reviewer <@{reviewer_id}>")
     return f"{_linked_title(title, url)}\n{' | '.join(metadata)}"
@@ -361,6 +387,34 @@ def configuration_overview(
         f"Direct response time: {duration_text(direct_response_seconds)}",
     )
     return "\n".join(lines)
+
+
+def github_integration_overview(
+    *,
+    enabled: bool,
+    organization: str | None,
+    receiver: str | None,
+    credentials_valid: bool | None,
+    running: bool,
+    recovery_seconds: int,
+) -> str:
+    credentials = (
+        "Available"
+        if credentials_valid is True
+        else "Invalid"
+        if credentials_valid is False
+        else "Not configured"
+    )
+    return "\n".join(
+        (
+            f"Enabled: {'Yes' if enabled else 'No'}",
+            f"Organization: {organization or 'Not configured'}",
+            f"Receiver: {receiver or 'Not configured'}",
+            f"Credentials: {credentials}",
+            f"Runtime: {'Running' if running else 'Stopped'}",
+            f"Recovery interval: {duration_text(recovery_seconds)}",
+        )
+    )
 
 
 def ticket_channel_set(channel_mention: str) -> str:

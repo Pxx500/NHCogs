@@ -181,7 +181,7 @@ class GitHubTicketsStoreCleanupTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(cleanup)
         self.assertEqual(cleanup.state, models.TicketState.FINISHING)
-        self.assertEqual(cleanup.author_id, 0)
+        self.assertIsNone(cleanup.author_id)
         self.assertEqual(cleanup.pr_title, "")
         self.assertEqual(cleanup.pr_url, "")
         self.assertEqual(cleanup.category_display, "")
@@ -207,7 +207,7 @@ class GitHubTicketsStoreCleanupTests(unittest.IsolatedAsyncioTestCase):
         await reopened.initialize()
         persisted = await reopened.get_ticket(ticket.ticket_id)
         self.assertEqual(persisted.state, models.TicketState.FINISHING)
-        self.assertEqual(persisted.author_id, 0)
+        self.assertIsNone(persisted.author_id)
         self.assertEqual(persisted.message_id, ticket.message_id)
         self.assertEqual(persisted.thread_id, ticket.thread_id)
 
@@ -244,7 +244,7 @@ class GitHubTicketsStoreCleanupTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(cleanup)
         self.assertEqual(cleanup.state, models.TicketState.FINISHING)
-        self.assertEqual(cleanup.author_id, 0)
+        self.assertIsNone(cleanup.author_id)
         self.assertEqual(cleanup.pr_title, "")
         self.assertEqual(cleanup.pr_url, "")
         self.assertEqual(cleanup.message_id, ticket.message_id)
@@ -443,3 +443,180 @@ class GitHubTicketsStoreCleanupTests(unittest.IsolatedAsyncioTestCase):
         unchanged = await self.store.get_ticket(assigned.ticket_id)
         self.assertEqual(unchanged.state, models.TicketState.CLAIMED)
         self.assertEqual(unchanged.assignee_id, user_id)
+
+    async def test_user_and_guild_cleanup_preserve_nonterminal_github_intents(self):
+        user_id = 500
+        pull_request = models.GitHubPullRequest(
+            repository_id=100,
+            pr_number=7,
+            github_pr_id=700,
+            github_author_id=900,
+            repository_full_name="NewHorizons/NHCogs",
+            url="https://github.com/NewHorizons/NHCogs/pull/7",
+            title="Private linked ticket",
+            github_author_login="octocat",
+            draft=False,
+            open=True,
+            labels=("discord-ticket",),
+            github_updated_at=self.now,
+        )
+        ticket = await self.store.create_ticket_for_pull_request(
+            models.NewTicket(
+                guild_id=10,
+                channel_id=30,
+                author_id=100,
+                pr_title=pull_request.title,
+                pr_url=pull_request.url,
+                category_display="",
+                routing_mode=models.RoutingMode.NONE,
+                direct_target_id=None,
+                category_ids=(),
+                created_at=self.now,
+                origin=models.TicketOrigin.GITHUB,
+            ),
+            pull_request,
+        )
+        await self.store.activate_ticket(
+            ticket.ticket_id,
+            message_id=1000,
+            thread_id=2000,
+            protection_until=self.now,
+            next_action=None,
+            next_action_at=None,
+            updated_at=self.now,
+        )
+        await self.store.claim_with_github_assignment(
+            ticket.ticket_id,
+            assignee_id=user_id,
+            github_login="private-login",
+            github_write_required=True,
+            protection_until=self.now,
+            updated_at=self.now,
+        )
+        outbox = await self.store.claim_next_outbox(
+            now=self.now,
+            stale_before=self.now - timedelta(minutes=5),
+        )
+        pending_pull_request = models.GitHubPullRequest(
+            repository_id=101,
+            pr_number=8,
+            github_pr_id=701,
+            github_author_id=901,
+            repository_full_name="NewHorizons/NHCogs",
+            url="https://github.com/NewHorizons/NHCogs/pull/8",
+            title="Second linked ticket",
+            github_author_login="other-author",
+            draft=False,
+            open=True,
+            labels=("discord-ticket",),
+            github_updated_at=self.now,
+        )
+        pending_ticket = await self.store.create_ticket_for_pull_request(
+            models.NewTicket(
+                guild_id=10,
+                channel_id=30,
+                author_id=101,
+                pr_title=pending_pull_request.title,
+                pr_url=pending_pull_request.url,
+                category_display="",
+                routing_mode=models.RoutingMode.NONE,
+                direct_target_id=None,
+                category_ids=(),
+                created_at=self.now,
+                origin=models.TicketOrigin.GITHUB,
+            ),
+            pending_pull_request,
+        )
+        await self.store.activate_ticket(
+            pending_ticket.ticket_id,
+            message_id=1001,
+            thread_id=2001,
+            protection_until=self.now,
+            next_action=None,
+            next_action_at=None,
+            updated_at=self.now,
+        )
+        await self.store.claim_with_github_assignment(
+            pending_ticket.ticket_id,
+            assignee_id=user_id,
+            github_login="pending-login",
+            github_write_required=True,
+            protection_until=self.now,
+            updated_at=self.now,
+        )
+        await self.store.accept_delivery(
+            delivery_guid="private-delivery",
+            github_delivery_id=None,
+            event="pull_request",
+            action="assigned",
+            installation_id=123,
+            repository_id=100,
+            pr_number=7,
+            received_at=self.now,
+            raw_body=b'{"private":"payload"}',
+        )
+
+        self.assertEqual(await self.store.user_reference_guild_ids(user_id), (10,))
+        await self.store.redact_user(
+            user_id,
+            protection_until_by_guild={10: self.now + timedelta(minutes=1)},
+            updated_at=self.now,
+        )
+
+        processing_after_redaction = await self.store.get_outbox_item(outbox.outbox_id)
+        self.assertEqual(processing_after_redaction.state, models.GitHubOutboxState.PROCESSING)
+        self.assertIsNone(processing_after_redaction.actor_user_id)
+        self.assertEqual(processing_after_redaction.github_login, "private-login")
+        redacted = await self.store.get_ticket(ticket.ticket_id)
+        self.assertEqual(redacted.state, models.TicketState.OPEN)
+        self.assertIsNone(redacted.assignee_id)
+        self.assertIsNotNone(await self.store.get_pull_request(100, 7))
+
+        self.assertTrue(await self.store.delete_guild_state(10))
+        self.assertIsNone(await self.store.get_pull_request(100, 7))
+        self.assertIsNone(await self.store.get_delivery("private-delivery"))
+        processing_after_cleanup = await self.store.get_outbox_item(outbox.outbox_id)
+        self.assertEqual(processing_after_cleanup.state, models.GitHubOutboxState.PROCESSING)
+        self.assertEqual(
+            processing_after_cleanup.repository_full_name,
+            "NewHorizons/NHCogs",
+        )
+        self.assertIsNone(processing_after_cleanup.actor_user_id)
+        self.assertTrue(
+            await self.store.complete_outbox(
+                processing_after_cleanup.outbox_id,
+                completed_at=self.now,
+            )
+        )
+        pending = await self.store.claim_next_outbox(
+            now=self.now,
+            stale_before=self.now - timedelta(minutes=5),
+        )
+        self.assertEqual(pending.github_login, "pending-login")
+        self.assertEqual(pending.repository_full_name, "NewHorizons/NHCogs")
+        self.assertIsNone(pending.actor_user_id)
+        retry_at = self.now + timedelta(minutes=1)
+        self.assertTrue(
+            await self.store.defer_outbox(
+                pending.outbox_id,
+                next_attempt_at=retry_at,
+                error_summary="retry after cleanup",
+            )
+        )
+        self.assertIsNone(
+            await self.store.claim_next_outbox(
+                now=self.now,
+                stale_before=self.now - timedelta(minutes=5),
+            )
+        )
+        retried = await self.store.claim_next_outbox(
+            now=retry_at,
+            stale_before=self.now - timedelta(minutes=5),
+        )
+        self.assertEqual(retried.outbox_id, pending.outbox_id)
+        self.assertTrue(
+            await self.store.complete_outbox(
+                retried.outbox_id,
+                completed_at=retry_at,
+            )
+        )
