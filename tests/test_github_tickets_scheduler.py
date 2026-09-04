@@ -7,6 +7,7 @@ import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_NAME = "NHCogs"
@@ -62,7 +63,7 @@ class DeadlineSchedulerTests(unittest.IsolatedAsyncioTestCase):
             source.deadlines.pop(ticket_id)
             processed.set()
 
-        scheduler = scheduler_module.DeadlineScheduler(source, on_due)
+        scheduler = scheduler_module.DeadlineScheduler(source, on_due, support=mock.Mock(report_global_error=mock.AsyncMock()), report_ticket_error=mock.AsyncMock())
         scheduler.start()
         try:
             await asyncio.wait_for(source.nearest_queried.wait(), timeout=0.5)
@@ -84,14 +85,14 @@ class DeadlineSchedulerTests(unittest.IsolatedAsyncioTestCase):
             source.deadlines.pop(ticket_id)
             (first_processed if ticket_id == 1 else second_processed).set()
 
-        first_scheduler = scheduler_module.DeadlineScheduler(source, on_due)
+        first_scheduler = scheduler_module.DeadlineScheduler(source, on_due, support=mock.Mock(report_global_error=mock.AsyncMock()), report_ticket_error=mock.AsyncMock())
         first_scheduler.start()
         try:
             await asyncio.wait_for(first_processed.wait(), timeout=0.5)
         finally:
             await first_scheduler.close()
 
-        second_scheduler = scheduler_module.DeadlineScheduler(source, on_due)
+        second_scheduler = scheduler_module.DeadlineScheduler(source, on_due, support=mock.Mock(report_global_error=mock.AsyncMock()), report_ticket_error=mock.AsyncMock())
         second_scheduler.start()
         try:
             await asyncio.wait_for(second_processed.wait(), timeout=0.5)
@@ -113,7 +114,7 @@ class DeadlineSchedulerTests(unittest.IsolatedAsyncioTestCase):
             source.deadlines.clear()
             later_processed.set()
 
-        scheduler = scheduler_module.DeadlineScheduler(source, on_due)
+        scheduler = scheduler_module.DeadlineScheduler(source, on_due, support=mock.Mock(report_global_error=mock.AsyncMock()), report_ticket_error=mock.AsyncMock())
         with self.assertLogs(scheduler_module.log, level="ERROR"):
             scheduler.start()
             try:
@@ -129,7 +130,7 @@ class DeadlineSchedulerTests(unittest.IsolatedAsyncioTestCase):
         async def on_due(_ticket_id):
             self.fail("no ticket was due")
 
-        scheduler = scheduler_module.DeadlineScheduler(source, on_due)
+        scheduler = scheduler_module.DeadlineScheduler(source, on_due, support=mock.Mock(report_global_error=mock.AsyncMock()), report_ticket_error=mock.AsyncMock())
         scheduler.start()
         scheduler.start()
         await asyncio.wait_for(source.nearest_queried.wait(), timeout=0.5)
@@ -158,11 +159,15 @@ class DeadlineSchedulerTests(unittest.IsolatedAsyncioTestCase):
             self.fail("no ticket was due")
 
         source = FailingSource()
-        scheduler = scheduler_module.DeadlineScheduler(source, on_due)
+        scheduler = scheduler_module.DeadlineScheduler(source, on_due, support=mock.Mock(report_global_error=mock.AsyncMock()), report_ticket_error=mock.AsyncMock())
         with self.assertLogs(scheduler_module.log, level="ERROR") as captured:
             scheduler.start()
             await asyncio.wait_for(recovered.wait(), timeout=1.5)
             await scheduler.close()
 
         self.assertEqual(source.calls, 2)
+        scheduler._support.report_global_error.assert_awaited_once()
+        report = scheduler._support.report_global_error.await_args.kwargs
+        self.assertEqual(report["source"], "GitHubTickets")
+        self.assertEqual(str(report["error"]), "controlled query failure")
         self.assertTrue(any("deadline scheduler iteration failed" in message for message in captured.output))

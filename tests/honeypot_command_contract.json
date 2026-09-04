@@ -1,6 +1,6 @@
 {
-  "command_count": 149,
-  "command_structure_sha256": "2b4a7904a83112c7c40f63a8b9cf428b668846182465f495d0b66ff67e1e843c",
+  "command_count": 141,
+  "command_structure_sha256": "e8293cfb107fffa42e90ab8a4265de623082aeefa1aba7245b33ed73fd4e1baf",
   "intentionally_undocumented_debug_commands": [
     "honeypot debug imagescan cleanup_events",
     "honeypot debug imagescan dump",
@@ -28,8 +28,8 @@
     "purge_cache_cleanup_loop"
   ],
   "readme": {
-    "leaf_count": 117,
-    "row_count": 112,
+    "leaf_count": 111,
+    "row_count": 106,
     "rows_without_command": [],
     "undocumented_commands": [
       "honeypot debug imagescan cleanup_events",

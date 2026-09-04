@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.harness import _isolated_honeypot_modules
+from tests.harness import _isolated_honeypot_modules, _operational_support
 
 
 @contextmanager
@@ -128,7 +128,7 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_filter_commands_normalize_persist_list_and_remove_phrases(self):
         with loaded_nhmoderation() as module:
-            subject = module.NHModeration(SimpleNamespace())
+            subject = module.NHModeration(SimpleNamespace(), _operational_support())
             subject._require_private_channel = mock.Mock()
             subject._mark_operational_recovered = mock.AsyncMock()
             guild = SimpleNamespace(id=10)
@@ -197,7 +197,7 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_bare_filter_group_shows_overview_and_current_configuration(self):
         with loaded_nhmoderation() as module:
-            subject = module.NHModeration(SimpleNamespace())
+            subject = module.NHModeration(SimpleNamespace(), _operational_support())
             subject._message_filter_phrases = {10: ("blocked phrase",)}
             subject._require_private_channel = mock.Mock()
             subject._mark_operational_recovered = mock.AsyncMock()
@@ -233,7 +233,7 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_message_filter_deletes_case_insensitive_substring_matches(self):
         with loaded_nhmoderation() as module:
-            subject = module.NHModeration(SimpleNamespace())
+            subject = module.NHModeration(SimpleNamespace(), _operational_support())
             subject._message_filter_phrases = {10: ("blocked phrase",)}
             subject.report_operational_error = mock.AsyncMock()
             subject._mark_operational_recovered = mock.AsyncMock()
@@ -259,7 +259,7 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_message_filter_checks_every_supported_embed_text_part(self):
         with loaded_nhmoderation() as module:
-            subject = module.NHModeration(SimpleNamespace(user=SimpleNamespace(id=50)))
+            subject = module.NHModeration(SimpleNamespace(user=SimpleNamespace(id=50)), _operational_support())
             subject._message_filter_phrases = {10: ("blocked",)}
             subject.report_operational_error = mock.AsyncMock()
             subject._mark_operational_recovered = mock.AsyncMock()
@@ -303,7 +303,7 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_message_filter_checks_embeds_added_by_message_edit(self):
         with loaded_nhmoderation() as module:
-            subject = module.NHModeration(SimpleNamespace())
+            subject = module.NHModeration(SimpleNamespace(), _operational_support())
             subject._message_filter_phrases = {10: ("blocked",)}
             subject.report_operational_error = mock.AsyncMock()
             subject._mark_operational_recovered = mock.AsyncMock()
@@ -331,7 +331,7 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_message_filter_preserves_its_own_configuration_embed(self):
         with loaded_nhmoderation() as module:
-            subject = module.NHModeration(SimpleNamespace(user=SimpleNamespace(id=50)))
+            subject = module.NHModeration(SimpleNamespace(user=SimpleNamespace(id=50)), _operational_support())
             subject._message_filter_phrases = {10: ("blocked",)}
             subject.report_operational_error = mock.AsyncMock()
             subject._mark_operational_recovered = mock.AsyncMock()
@@ -359,7 +359,7 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_filter_command_confirmation_is_preserved_by_message_filter(self):
         with loaded_nhmoderation() as module:
-            subject = module.NHModeration(SimpleNamespace(user=SimpleNamespace(id=50)))
+            subject = module.NHModeration(SimpleNamespace(user=SimpleNamespace(id=50)), _operational_support())
             subject._require_private_channel = mock.Mock()
             subject._mark_operational_recovered = mock.AsyncMock()
             guild = SimpleNamespace(id=10)
@@ -402,7 +402,7 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_message_filter_reports_discord_delete_failures(self):
         with loaded_nhmoderation() as module:
-            subject = module.NHModeration(SimpleNamespace())
+            subject = module.NHModeration(SimpleNamespace(), _operational_support())
             subject._message_filter_phrases = {10: ("blocked",)}
             subject.report_operational_error = mock.AsyncMock()
             subject._mark_operational_recovered = mock.AsyncMock()
@@ -428,7 +428,7 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_message_filter_ignores_dms_nonmatches_and_already_gone_messages(self):
         with loaded_nhmoderation() as module:
-            subject = module.NHModeration(SimpleNamespace())
+            subject = module.NHModeration(SimpleNamespace(), _operational_support())
             subject._message_filter_phrases = {10: ("blocked",)}
             subject.report_operational_error = mock.AsyncMock()
             subject._mark_operational_recovered = mock.AsyncMock()
@@ -477,7 +477,7 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_message_filter_cache_is_restored_during_cog_load(self):
         with loaded_nhmoderation() as module:
-            subject = module.NHModeration(SimpleNamespace())
+            subject = module.NHModeration(SimpleNamespace(), _operational_support())
             await subject.config.guild_from_id(10).set_raw(
                 "message_filter_phrases",
                 value=["first phrase", "second phrase"],

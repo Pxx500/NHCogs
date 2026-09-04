@@ -225,14 +225,36 @@ class OperationalErrorReporter:
         return failure
 
     async def _publish_alert(self, failure: OperationalFailure, trace: str) -> None:
-        guild = self._bot.get_guild(failure.guild_id)
+        lines = [
+            f"**{failure.source} operational error**",
+            f"Action: {failure.action}",
+            f"Error: {failure.exception_type}: {failure.summary}",
+            f"Occurrences: {failure.occurrences}",
+        ]
+        context = self._format_context(failure)
+        if context is not None:
+            lines.append(f"Context: {context}")
+        payload = trace or f"{failure.exception_type}: {failure.summary}\n"
+        await self.send_alert(
+            failure.guild_id,
+            "\n".join(lines),
+            file=discord.File(
+                io.BytesIO(payload.encode("utf-8")),
+                filename=f"nh-error-{failure.fingerprint[:12]}.txt",
+            ),
+        )
+
+    async def send_alert(
+        self, guild_id: int, content: str, *, file: discord.File | None = None
+    ) -> None:
+        """Publish technical failure details only to the shared private destination."""
+        guild = self._bot.get_guild(guild_id)
         if guild is None:
             self._logger.error(
-                "Cannot publish NH operational error because guild %s is unavailable",
-                failure.guild_id,
+                "Cannot publish NH operational error because guild %s is unavailable", guild_id
             )
             return
-        guild_config = self._config.guild_from_id(failure.guild_id)
+        guild_config = self._config.guild_from_id(guild_id)
         channel_id = await guild_config.error_channel()
         maintainer_id = await guild_config.error_maintainer_id()
         channel = guild.get_channel(channel_id) if channel_id is not None else None
@@ -243,46 +265,23 @@ class OperationalErrorReporter:
             return
         if channel.permissions_for(guild.default_role).view_channel:
             self._logger.error(
-                "Cannot publish NH operational error because channel %s is public",
-                channel.id,
+                "Cannot publish NH operational error because channel %s is public", channel.id
             )
             return
-
         maintainer = guild.get_member(maintainer_id) if maintainer_id is not None else None
-        mention = maintainer.mention if maintainer is not None else None
-        mention_target = maintainer
-        if maintainer_id is not None and mention_target is None:
-            mention = f"<@{maintainer_id}>"
-            mention_target = discord.Object(id=maintainer_id)
-        lines = []
-        if mention is not None:
-            lines.append(mention)
-        lines.extend(
-            (
-                f"**{failure.source} operational error**",
-                f"Action: {failure.action}",
-                f"Error: {failure.exception_type}: {failure.summary}",
-                f"Occurrences: {failure.occurrences}",
-            )
-        )
-        context = self._format_context(failure)
-        if context is not None:
-            lines.append(f"Context: {context}")
+        if maintainer_id is not None:
+            mention = maintainer.mention if maintainer is not None else f"<@{maintainer_id}>"
+            target = maintainer if maintainer is not None else discord.Object(id=maintainer_id)
+            content = f"{mention}\n{content}"
+        else:
+            target = None
         allowed_mentions = discord.AllowedMentions(
             everyone=False,
-            users=[mention_target] if mention_target is not None else False,
+            users=[target] if target is not None else False,
             roles=False,
             replied_user=False,
         )
-        payload = trace or f"{failure.exception_type}: {failure.summary}\n"
-        await channel.send(
-            "\n".join(lines),
-            file=discord.File(
-                io.BytesIO(payload.encode("utf-8")),
-                filename=f"nh-error-{failure.fingerprint[:12]}.txt",
-            ),
-            allowed_mentions=allowed_mentions,
-        )
+        await channel.send(content, file=file, allowed_mentions=allowed_mentions)
 
     @staticmethod
     def _format_context(failure: OperationalFailure) -> str | None:

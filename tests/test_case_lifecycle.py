@@ -10,14 +10,20 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.detection_case_fixtures import capture_attachment, publish_primary
-from tests.harness import CaseExpiryTestCase, _async_noop, _Bot, _isolated_honeypot_modules
+from tests.harness import (
+    CaseExpiryTestCase,
+    _async_noop,
+    _Bot,
+    _isolated_honeypot_modules,
+    _operational_support,
+)
 
 
 class CaseLifecycleTests(CaseExpiryTestCase):
     async def test_resolution_failure_releases_the_case_lease(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(
                     honeypot, cog, datetime.now(timezone.utc)
                 )
@@ -41,7 +47,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 appended = await asyncio.to_thread(
                     cog._case_store.append_message,
@@ -145,7 +151,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
     async def test_cancelled_operation_worker_stops_its_lease_heartbeat(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = self._config({})
                 appended = self._append_case(
                     honeypot, cog, datetime.now(timezone.utc)
@@ -194,7 +200,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, cog, now)
                 operation = cog._case_store.ensure_operation(
                     appended.case.case_id,
@@ -224,7 +230,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, cog, now)
 
                 with self.assertLogs(level="WARNING") as store_logs:
@@ -264,7 +270,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
                     "\n".join(operation_logs.output),
                 )
 
-    async def test_recovered_operation_alert_uses_persisted_value(self):
+    async def test_recovered_operation_does_not_send_error_alert(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
@@ -275,7 +281,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = self._config({"errors_channel": 30})
                 honeypot.discord.AllowedMentions = SimpleNamespace(none=lambda: None)
                 appended = self._append_case(honeypot, cog, now)
@@ -312,16 +318,13 @@ class CaseLifecycleTests(CaseExpiryTestCase):
                     now + timedelta(seconds=1),
                 )
 
-                channel.send.assert_awaited_once()
-                self.assertEqual(
-                    channel.send.await_args.args[0],
-                    "✅ Recovered: evidence_cleanup succeeded after 2 attempts.",
-                )
+                channel.send.assert_not_awaited()
+                cog._support.send_technical_alert.assert_not_awaited()
 
     async def test_terminal_capture_failure_is_a_current_case_note(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._case_store.initialize()
                 now = datetime.now(timezone.utc)
                 appended = cog._case_store.append_message(
@@ -370,7 +373,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, cog, now)
                 operation = cog._case_store.ensure_operation(
                     appended.case.case_id,
@@ -404,7 +407,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
                 created_at = datetime.now(timezone.utc) - timedelta(hours=25)
-                first_cog = honeypot.Honeypot(_Bot())
+                first_cog = honeypot.Honeypot(_Bot(), _operational_support())
                 first_cog._case_store.initialize()
                 appended = first_cog._case_store.append_message(
                     honeypot.NewMessage(
@@ -420,7 +423,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
                     (),
                 )
 
-                restarted = honeypot.Honeypot(_Bot())
+                restarted = honeypot.Honeypot(_Bot(), _operational_support())
                 restarted._init_firstpost_seen_store = _async_noop
                 restarted._init_imagescan_store = _async_noop
                 restarted._restore_pending_reviews = _async_noop
@@ -445,7 +448,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
     async def test_scheduler_and_moderator_cannot_resolve_same_case_twice(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(
                     honeypot, cog, datetime.now(timezone.utc) - timedelta(hours=25)
                 )
@@ -464,7 +467,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
     async def test_stale_resolving_case_is_reclaimed(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 now = datetime.now(timezone.utc)
                 appended = self._append_case(honeypot, cog, now - timedelta(hours=25))
                 cog._case_store.claim_resolution(
@@ -482,7 +485,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
     async def test_reconciliation_reclaims_stale_resolving_but_not_fresh_lease(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 now = datetime.now(timezone.utc)
                 stale = self._append_case(
                     honeypot, cog, now - timedelta(hours=25), message_id=41
@@ -518,12 +521,12 @@ class CaseLifecycleTests(CaseExpiryTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                first = honeypot.Honeypot(_Bot())
+                first = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, first, datetime.now(timezone.utc))
                 publish_primary(first._case_store, appended.case.case_id, 30, 77)
 
                 bot = _Bot()
-                restarted = honeypot.Honeypot(bot)
+                restarted = honeypot.Honeypot(bot, _operational_support())
                 restarted._case_review_rerender = mock.AsyncMock()
                 await restarted._restore_detection_case_views()
 
@@ -538,7 +541,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
     async def test_missing_discord_review_does_not_block_expiry(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = self._config({"review_channel": None})
                 appended = self._append_case(
                     honeypot, cog, datetime.now(timezone.utc) - timedelta(hours=25)
@@ -558,7 +561,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
     async def test_live_operation_heartbeat_prevents_stale_reclaim(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._detection_heartbeat_interval_seconds = 0.05
                 appended = self._append_case(honeypot, cog, datetime.now(timezone.utc))
                 operation = cog._case_store.ensure_operation(
@@ -609,7 +612,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
     async def test_failed_review_edit_does_not_revert_expired_state(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = self._config({})
                 cog._case_review_rerender = mock.AsyncMock(
                     side_effect=honeypot.discord.HTTPException()
@@ -632,7 +635,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
     async def test_reconciliation_retries_due_operation(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = self._config({})
                 appended = self._append_case(honeypot, cog, datetime.now(timezone.utc))
                 operation = cog._case_store.ensure_operation(
@@ -654,7 +657,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
     async def test_terminal_case_atomically_contains_required_operations(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = self._config({"mute_role": 55})
                 appended = self._append_case(honeypot, cog, datetime.now(timezone.utc))
                 ownership = cog._case_store.ensure_operation(
@@ -687,7 +690,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
     async def test_evidence_cleanup_retries_then_removes_case_files(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = self._config({"mute_role": None})
                 cog._case_review_rerender = mock.AsyncMock()
                 appended = self._append_case(honeypot, cog, datetime.now(timezone.utc))
@@ -734,7 +737,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
     async def test_evidence_cleanup_treats_already_missing_sample_as_removed(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = self._config({"mute_role": None})
                 cog._case_review_rerender = mock.AsyncMock()
                 cog._case_store.initialize()
@@ -790,7 +793,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
     async def test_evidence_cleanup_refuses_path_outside_case_root(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = self._config({"mute_role": None})
                 cog._case_review_rerender = mock.AsyncMock()
                 cog._case_store.initialize()

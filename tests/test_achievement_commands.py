@@ -7,6 +7,7 @@ import unittest
 from types import ModuleType, SimpleNamespace
 from unittest import mock
 
+from tests.test_forum_autopin import make_support
 from tests.test_gate_proof_flow import _load_achievement_views
 from tests.test_gatecount import nhmisc
 
@@ -306,10 +307,16 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         )
         cog._build_achievements_embed = mock.Mock(return_value=object())
 
-        with mock.patch.object(nhmisc.log, "info") as info:
+        views = ModuleType("_gatecount_root.nhmisc.achievement_views")
+        views.AchievementProfileView = mock.Mock()
+        with (
+            mock.patch.dict(sys.modules, {views.__name__: views}),
+            mock.patch.object(nhmisc.log, "info") as info,
+        ):
             await cog._achievements_slash(interaction, target)
 
         info.assert_not_called()
+        self.assertIn("view", interaction.edit_original_response.await_args.kwargs)
 
     async def test_achievements_user_action_defers_before_waiting_for_store(self):
         target = SimpleNamespace(id=123)
@@ -1931,8 +1938,9 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         config = SimpleNamespace(alert_channel=mock.AsyncMock(return_value=2))
         cog = object.__new__(nhmisc.NHMisc)
         cog.config = SimpleNamespace(guild=mock.Mock(return_value=config))
-        cog._get_log_channel = mock.Mock(return_value=channel)
-        cog._send_voice_log = mock.AsyncMock(return_value=object())
+        cog._support = make_support(SimpleNamespace(), cog.config, module=nhmisc)
+        cog._support.get_log_channel = mock.Mock(return_value=channel)
+        cog._support.send_log_message = mock.AsyncMock(return_value=object())
 
         delivered = await cog._send_guild_alert(
             guild,
@@ -1941,7 +1949,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(delivered)
-        allowed_mentions = cog._send_voice_log.await_args.kwargs[
+        allowed_mentions = cog._support.send_log_message.await_args.kwargs[
             "allowed_mentions"
         ]
         self.assertEqual(allowed_mentions.users, [user])

@@ -21,14 +21,24 @@ from unittest import mock
 PACKAGE_DIR = Path(__file__).resolve().parents[1] / "NHCogs" / "honeypot"
 _MISSING = object()
 
+
+def _operational_support():
+    """External reporting dependency for isolated cog behavior tests."""
+    return SimpleNamespace(
+        config=_Config(),
+        report_operational_error=mock.AsyncMock(),
+        report_global_error=mock.AsyncMock(),
+        send_technical_alert=mock.AsyncMock(),
+        schedule_error=mock.Mock(),
+        handle_command_error=mock.AsyncMock(),
+    )
+
 EXPECTED_GUILD_DEFAULTS = {
     "enabled": False,
     "action": None,
     "fallback_action": "review",
     "dry_run": False,
-    "errors_channel": None,
     "daily_stats_channel": None,
-    "maintainer_id": None,
     "manual_evidence_channel": None,
     "manual_punishment_roles": {},
     "honeypot_channels": [],
@@ -801,7 +811,7 @@ def _isolated_honeypot_modules(data_path: Path):
     redbot.core.bot = ModuleType("redbot.core.bot")
     redbot.core.bot.Red = object
     redbot.core.data_manager = ModuleType("redbot.core.data_manager")
-    redbot.core.data_manager.cog_data_path = lambda cog: data_path
+    redbot.core.data_manager.cog_data_path = lambda cog=None, **_kwargs: data_path
     redbot.core.i18n = ModuleType("redbot.core.i18n")
     redbot.core.i18n.Translator = lambda *args, **kwargs: (lambda text: text)
     redbot.core.i18n.cog_i18n = lambda translator: (lambda cls: cls)

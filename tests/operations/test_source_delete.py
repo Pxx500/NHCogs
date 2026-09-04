@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
-from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 
 
 class SourceDeleteHandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -50,7 +50,7 @@ class SourceDeleteHandlerTests(unittest.IsolatedAsyncioTestCase):
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild if guild_id == 10 else None
                 bot.get_channel = lambda channel_id: None
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 appended = self._append_source(honeypot, cog, now)
                 cog._case_store.update_message_delete(
                     appended.case.case_id,
@@ -126,7 +126,7 @@ class SourceDeleteHandlerTests(unittest.IsolatedAsyncioTestCase):
                     bot = _Bot()
                     bot.get_guild = lambda guild_id: guild
                     bot.get_channel = lambda channel_id: None
-                    cog = honeypot.Honeypot(bot)
+                    cog = honeypot.Honeypot(bot, _operational_support())
                     appended = self._append_source(honeypot, cog, now)
                     cog._case_store.update_message_delete(
                         appended.case.case_id,
@@ -211,7 +211,7 @@ class SourceDeleteHandlerTests(unittest.IsolatedAsyncioTestCase):
                     bot = _Bot()
                     bot.get_guild = lambda guild_id: guild
                     bot.get_channel = lambda channel_id: None
-                    cog = honeypot.Honeypot(bot)
+                    cog = honeypot.Honeypot(bot, _operational_support())
                     appended = self._append_source(honeypot, cog, now)
                     cog._case_store.update_message_delete(
                         appended.case.case_id,
@@ -288,7 +288,7 @@ class SourceDeleteHandlerTests(unittest.IsolatedAsyncioTestCase):
                     bot = _Bot()
                     bot.get_guild = lambda guild_id: guild
                     bot.get_channel = lambda channel_id: None
-                    cog = honeypot.Honeypot(bot)
+                    cog = honeypot.Honeypot(bot, _operational_support())
                     appended = self._append_source(honeypot, cog, now)
                     cog._case_store.update_message_delete(
                         appended.case.case_id,
@@ -405,7 +405,7 @@ class SourceDeleteHandlerTests(unittest.IsolatedAsyncioTestCase):
                     bot = _Bot()
                     bot.get_guild = lambda guild_id: guild
                     bot.get_channel = lambda channel_id: None
-                    cog = honeypot.Honeypot(bot)
+                    cog = honeypot.Honeypot(bot, _operational_support())
                     appended = self._append_source(
                         honeypot, cog, now, signals=source_signals
                     )
@@ -531,7 +531,7 @@ class SourceDeleteHandlerTests(unittest.IsolatedAsyncioTestCase):
                     bot = _Bot()
                     bot.get_guild = lambda guild_id: guild
                     bot.get_channel = lambda channel_id: None
-                    cog = honeypot.Honeypot(bot)
+                    cog = honeypot.Honeypot(bot, _operational_support())
                     appended = self._append_source(honeypot, cog, now)
                     if idempotency_key is None:
                         channel_id = (
@@ -582,7 +582,7 @@ class SourceDeleteHandlerTests(unittest.IsolatedAsyncioTestCase):
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
                 bot.get_channel = lambda channel_id: None
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 appended = self._append_source(honeypot, cog, now)
                 cog._case_store.update_message_delete(
                     appended.case.case_id,

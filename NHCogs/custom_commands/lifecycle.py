@@ -41,9 +41,9 @@ def assert_safe_to_replace(bot: Any) -> None:
 class ReplacementActivator:
     """Make the managed Custom Commands cog the permanent runtime owner."""
 
-    def __init__(self, bot: Any, nhmisc: Any, catalog: CustomCommandCatalog):
+    def __init__(self, bot: Any, support: Any, catalog: CustomCommandCatalog):
         self.bot = bot
-        self.nhmisc = nhmisc
+        self.support = support
         self.catalog = catalog
         self._activation_lock = asyncio.Lock()
 
@@ -65,7 +65,7 @@ class ReplacementActivator:
                     self.verify_public_commands(active)
                     return active
                 raise MigrationApplyError("Another cog owns the CustomCommands name")
-            runtime = CustomCommands(self.bot, self.nhmisc, catalog=self.catalog)
+            runtime = CustomCommands(self.bot, self.support, catalog=self.catalog)
             try:
                 await self.bot.add_cog(runtime)
                 self.verify_public_commands(runtime)
@@ -109,16 +109,16 @@ class CutoverController:
     def __init__(
         self,
         bot: Any,
-        nhmisc: Any,
+        support: Any,
         catalog: CustomCommandCatalog,
         state_store: MigrationStateStore,
     ):
         self.bot = bot
-        self.nhmisc = nhmisc
+        self.support = support
         self.catalog = catalog
         self.state_store = state_store
         self._activation_lock = asyncio.Lock()
-        self._runtime = ReplacementActivator(bot, nhmisc, catalog)
+        self._runtime = ReplacementActivator(bot, support, catalog)
 
     async def activate_imported(self) -> CustomCommands:
         async with self._activation_lock:
