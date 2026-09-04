@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.test_forum_autopin import make_support
+
 ROOT_PACKAGE_NAME = "nhmisc_role_analytics_commands_test_root"
 PACKAGE_NAME = f"{ROOT_PACKAGE_NAME}.nhmisc"
 ROOT_PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs"
@@ -238,6 +240,7 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
     def make_cog(self):
         cog = object.__new__(nhmisc.NHMisc)
         cog.bot = types.SimpleNamespace(guilds=[], wait_for=mock.AsyncMock())
+        cog._support = make_support(cog.bot, types.SimpleNamespace(), module=nhmisc)
         cog._activity_store = mock.AsyncMock()
         cog._sticky_roles = mock.AsyncMock()
         cog._role_analytics_store = mock.AsyncMock()
@@ -589,14 +592,14 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         alert_setting = mock.AsyncMock(return_value=999)
         maintenance_setting = mock.AsyncMock(return_value=321)
-        cog.config = types.SimpleNamespace(
+        cog._support.log_config = cog.config = types.SimpleNamespace(
             guild=lambda _guild: types.SimpleNamespace(
                 alert_channel=alert_setting,
                 maintenance_channel=maintenance_setting,
             )
         )
-        cog._get_log_channel = mock.Mock(return_value=maintenance_channel)
-        cog._send_voice_log = mock.AsyncMock(return_value=types.SimpleNamespace())
+        cog._support.get_log_channel = mock.Mock(return_value=maintenance_channel)
+        cog._support.send_log_message = mock.AsyncMock(return_value=types.SimpleNamespace())
         cog.bot.wait_for = mock.AsyncMock(
             return_value=types.SimpleNamespace(
                 guild=guild,
@@ -657,19 +660,19 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         cog._achievement_store.is_bootstrapped.return_value = False
         cog._achievement_discord_snapshot = mock.AsyncMock(return_value=snapshot)
-        cog.config = types.SimpleNamespace(
+        cog._support.log_config = cog.config = types.SimpleNamespace(
             guild=lambda _guild: types.SimpleNamespace(
                 maintenance_channel=mock.AsyncMock(return_value=321)
             )
         )
-        cog._get_log_channel = mock.Mock(return_value=alert_channel)
-        cog._send_voice_log = mock.AsyncMock(return_value=types.SimpleNamespace())
+        cog._support.get_log_channel = mock.Mock(return_value=alert_channel)
+        cog._support.send_log_message = mock.AsyncMock(return_value=types.SimpleNamespace())
         cog._upload_achievement_sync_backup.side_effect = UserFeedbackCheckFailure("backup failed")
 
         with self.assertRaisesRegex(UserFeedbackCheckFailure, "backup failed"):
             await nhmisc.NHMisc.rolesync_discord.callback(cog, ctx)
 
-        cog._send_voice_log.assert_not_awaited()
+        cog._support.send_log_message.assert_not_awaited()
         cog._achievement_store.bootstrap_guild.assert_not_awaited()
 
     async def test_rolesync_discord_rejects_a_public_maintenance_channel(self):
@@ -683,12 +686,12 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
             boolean_users={"solo_gater": (11,)},
         )
         cog._achievement_discord_snapshot = mock.AsyncMock(return_value=snapshot)
-        cog.config = types.SimpleNamespace(
+        cog._support.log_config = cog.config = types.SimpleNamespace(
             guild=lambda _guild: types.SimpleNamespace(
                 maintenance_channel=mock.AsyncMock(return_value=321)
             )
         )
-        cog._get_log_channel = mock.Mock(return_value=alert_channel)
+        cog._support.get_log_channel = mock.Mock(return_value=alert_channel)
 
         with self.assertRaisesRegex(
             UserFeedbackCheckFailure,
@@ -718,12 +721,12 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
             boolean_users={"solo_gater": (11,)},
         )
         cog._achievement_discord_snapshot = mock.AsyncMock(return_value=snapshot)
-        cog.config = types.SimpleNamespace(
+        cog._support.log_config = cog.config = types.SimpleNamespace(
             guild=lambda _guild: types.SimpleNamespace(
                 maintenance_channel=mock.AsyncMock(return_value=321)
             )
         )
-        cog._get_log_channel = mock.Mock(return_value=maintenance_channel)
+        cog._support.get_log_channel = mock.Mock(return_value=maintenance_channel)
 
         with self.assertRaisesRegex(UserFeedbackCheckFailure, "attach files"):
             await nhmisc.NHMisc.rolesync_discord.callback(cog, ctx)
@@ -744,13 +747,13 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
         cog._achievement_discord_sync_summary = mock.AsyncMock(
             side_effect=("original plan", "changed plan")
         )
-        cog.config = types.SimpleNamespace(
+        cog._support.log_config = cog.config = types.SimpleNamespace(
             guild=lambda _guild: types.SimpleNamespace(
                 maintenance_channel=mock.AsyncMock(return_value=321)
             )
         )
-        cog._get_log_channel = mock.Mock(return_value=alert_channel)
-        cog._send_voice_log = mock.AsyncMock(return_value=types.SimpleNamespace())
+        cog._support.get_log_channel = mock.Mock(return_value=alert_channel)
+        cog._support.send_log_message = mock.AsyncMock(return_value=types.SimpleNamespace())
         cog.bot.wait_for = mock.AsyncMock(
             return_value=types.SimpleNamespace(
                 guild=guild,
@@ -768,7 +771,7 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
             snapshot,
         )
         self.assertEqual(
-            cog._send_voice_log.await_args_list[-1].args,
+            cog._support.send_log_message.await_args_list[-1].args,
             (
                 alert_channel,
                 "Achievement data changed. Run `!rolesync discord` again.",
@@ -906,7 +909,7 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_data_deletion_removes_user_from_all_guilds(self):
         cog = self.make_cog()
-        cog.config = types.SimpleNamespace(all_guilds=mock.AsyncMock(return_value={}))
+        cog._support.log_config = cog.config = types.SimpleNamespace(all_guilds=mock.AsyncMock(return_value={}))
 
         await cog.red_delete_data_for_user(requester="discord_deleted_user", user_id=42)
 

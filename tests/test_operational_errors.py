@@ -105,11 +105,6 @@ class _Bot:
         return self._guild if guild_id == self._guild_id else None
 
 
-class OperationalErrorCommandTests(unittest.TestCase):
-    def test_nhmisc_exposes_error_configuration_group(self):
-        self.assertTrue(hasattr(nhmisc.NHMisc, "nhmisc_errors"))
-
-
 class OperationalErrorReporterTests(unittest.IsolatedAsyncioTestCase):
     async def test_report_persists_occurrences_and_alerts_each_time(self):
         guild_id = 100

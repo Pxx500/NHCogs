@@ -15,6 +15,9 @@ The combined `NHCogs` extension loads the maintained cogs:
 - [`GitHubTickets`](NHCogs/githubtickets/README.md) publishes pull request review tickets,
   manages developer expertise profiles, and routes reviewer requests.
 
+The combined extension also provides shared technical error reporting. See the
+[NHCogs command catalog](NHCogs/README.md) for its configuration commands.
+
 ## Installation
 
 `[p]` means your bot prefix.

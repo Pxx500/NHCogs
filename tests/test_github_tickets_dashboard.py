@@ -215,6 +215,7 @@ class FakeInteraction:
     def __init__(self):
         self.response = FakeResponse()
         self.followup = types.SimpleNamespace(send=mock.AsyncMock())
+        self.guild_id = 100
         self.deleted_original_responses = 0
 
     async def delete_original_response(self):
@@ -267,6 +268,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         )
         view = dashboard_module.GitHubTicketsDashboard(
             store,
+            support=mock.Mock(report_operational_error=mock.AsyncMock()),
             guild_id=100,
             member_lookup=guild.get_member,
             actor_factory=lambda _interaction: actor,
@@ -295,6 +297,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         await dashboard_module.send_new_ticket_modal(
             interaction,
             store,
+            support=mock.Mock(report_operational_error=mock.AsyncMock()),
             guild_id=100,
             create_ticket=create_ticket or successful_create,
             actor_factory=lambda _interaction: actor,
@@ -397,6 +400,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
 
         dashboard = dashboard_module.GitHubTicketsDashboard(
             store,
+            support=mock.Mock(report_operational_error=mock.AsyncMock()),
             guild_id=100,
             member_lookup=FakeGuild().get_member,
             actor_factory=lambda _interaction: current_actor[0],
@@ -487,6 +491,10 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("private database detail", interaction.response.messages[0][0])
         self.assertTrue(interaction.response.messages[0][1]["ephemeral"])
+        view._support.report_operational_error.assert_awaited_once()
+        report = view._support.report_operational_error.await_args.kwargs
+        self.assertIs(report["error"], failure)
+        self.assertEqual(report["guild_id"], 100)
 
     async def test_edit_profile_modal_uses_exact_components_and_saves_silently(self):
         store = FakeStore()

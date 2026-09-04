@@ -226,3 +226,6 @@ whether they still exist.
 
 All profile dashboards and profile lookups are ephemeral. The ticket channel and optional
 completed-ticket log channel are the normal non-ephemeral surfaces created by this cog.
+
+
+Technical failures are sent to the shared maintainer destination configured with `!nhcogs errors`. GitHubTickets keeps its ticket state and retry schedules in its own database. User-facing interaction failures contain a short generic message.

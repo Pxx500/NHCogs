@@ -11,14 +11,20 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.detection_case_fixtures import capture_attachment, publish_evidence, publish_primary
-from tests.harness import DetectionPipelineTestCase, _Bot, _isolated_honeypot_modules, active_case
+from tests.harness import (
+    DetectionPipelineTestCase,
+    _Bot,
+    _isolated_honeypot_modules,
+    _operational_support,
+    active_case,
+)
 
 
 class DetectionPublicationTests(DetectionPipelineTestCase):
     async def test_disabled_review_keeps_containment_but_suppresses_interactive_case(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0, channel_id=9)
                 config = {
@@ -57,7 +63,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
     async def test_queued_message_with_ready_evidence_publishes_only_final_state(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1)
                 self._configure_public_boundary(
@@ -105,7 +111,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0)
                 self._configure_public_boundary(
@@ -146,7 +152,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1)
                 self._configure_public_boundary(
@@ -210,7 +216,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
     async def test_operational_logger_failure_does_not_escape(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._case_store.record_operational_failure = mock.Mock(
                     side_effect=sqlite3.OperationalError("disk unavailable")
                 )
@@ -228,7 +234,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0)
                 self._configure_public_boundary(
@@ -262,7 +268,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
     async def test_missing_saved_review_message_is_replaced(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0)
                 appended = await asyncio.to_thread(
@@ -342,7 +348,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                original = honeypot.Honeypot(_Bot())
+                original = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(original._case_store.initialize)
                 message = self._message(honeypot, attachment_count=11)
                 appended = await asyncio.to_thread(
@@ -419,7 +425,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                     send=mock.AsyncMock(),
                 )
                 primary.channel = channel
-                fresh = honeypot.Honeypot(_Bot())
+                fresh = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(fresh._case_store.initialize)
                 fresh.bot.get_guild = mock.Mock(return_value=message.guild)
                 fresh._get_text_channel_or_thread = mock.Mock(return_value=channel)
@@ -482,8 +488,8 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                first = honeypot.Honeypot(_Bot())
-                second = honeypot.Honeypot(_Bot())
+                first = honeypot.Honeypot(_Bot(), _operational_support())
+                second = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(first._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1)
                 appended = await asyncio.to_thread(
@@ -586,8 +592,8 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
     async def test_reclaimed_primary_publication_deletes_loser_orphan(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                loser = honeypot.Honeypot(_Bot())
-                winner = honeypot.Honeypot(_Bot())
+                loser = honeypot.Honeypot(_Bot(), _operational_support())
+                winner = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(loser._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0)
                 appended = await asyncio.to_thread(
@@ -646,7 +652,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0)
                 appended = await asyncio.to_thread(
@@ -713,7 +719,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 publication_started = asyncio.Event()
                 release_publication = asyncio.Event()
@@ -796,7 +802,7 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 cog._execute_action = mock.AsyncMock(return_value=("banned", None))
                 cog._send_operational_alert = mock.AsyncMock()

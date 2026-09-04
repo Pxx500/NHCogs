@@ -41,22 +41,21 @@ class NHModeration(commands.Cog):
 
     CONFIG_IDENTIFIER = 205192943327321000143939875896557571751
 
-    def __init__(self, bot: Red) -> None:
+    def __init__(self, bot: Red, support) -> None:
         self.bot = bot
+        self._support = support
         self.config = Config.get_conf(
             self,
             identifier=self.CONFIG_IDENTIFIER,
             force_registration=True,
         )
         self.config.register_guild(
-            error_channel=None,
-            error_maintainer_id=None,
             message_filter_phrases=[],
         )
         database_path = cog_data_path(self) / "moderation.sqlite"
         self.history = NHModerationHistory(database_path)
         self._operational_errors = OperationalErrorReporter(
-            bot, self.config, database_path, logger=log
+            bot, support.config, database_path, logger=log
         )
         self._synchronizer: ModerationSynchronizer | None = None
         self._scheduler_task: asyncio.Task[None] | None = None

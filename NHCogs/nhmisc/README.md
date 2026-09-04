@@ -65,9 +65,10 @@ Sets the alert channel used by higher-priority alerts, such as voice-channel jum
 [p]nhmisc log maintenance #bot-maintenance
 ```
 
-Sets the private channel used for operational messages, including achievement syncs and
-backups, sticky-role maintenance, and forum-autopin failures. The bot needs View Channel,
-Send Messages, and Attach Files in this channel.
+Sets the private channel used for maintenance notices, including achievement syncs and
+backups and sticky-role maintenance. The bot needs View Channel, Send Messages, and
+Attach Files in this channel. Technical failures use the shared `[p]nhcogs errors`
+configuration.
 
 ```ini
 [p]nhmisc log moderation #moderator-actions
@@ -330,8 +331,8 @@ is unavailable in channels visible to `@everyone`. Attach missing proofs with
 
 Gate increments, proof attachments and revokes, achievement grants and revokes,
 achievement definition changes, and role binding changes are recorded in the configured
-moderator action channel. Operational failures and partial results are sent to the
-maintenance channel.
+moderator action channel. Technical failures use the shared `[p]nhcogs errors`
+configuration.
 
 ## Tier Distribution
 
@@ -688,21 +689,9 @@ own activity.
 
 ## Operational errors
 
-NHMisc and Custom Commands share one private operational error destination. Configure it
-with:
-
-```ini
-[p]nhmisc errors
-[p]nhmisc errors channel [channel]
-[p]nhmisc errors channel clear
-[p]nhmisc errors maintainer [member]
-[p]nhmisc errors maintainer clear
-```
-
-The channel must be hidden from `@everyone`, and the bot needs View Channel, Send
-Messages, and Attach Files there. Alerts include a short summary and a traceback file.
-Only the configured maintainer can be pinged. If the alert itself cannot be sent, the
-error remains in SQLite and the failure is written to the bot console.
+Technical failures from the NHCogs cogs use the shared `[p]nhcogs errors` configuration.
+See the [shared command catalog](../README.md) for the setup commands and privacy rules.
+Expected command, permission, and validation outcomes use normal command feedback.
 
 ## Stored Data
 

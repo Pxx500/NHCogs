@@ -14,6 +14,7 @@ from tests.harness import (
     CaseExpiryTestCase,
     _Bot,
     _isolated_honeypot_modules,
+    _operational_support,
     drain_background_work,
 )
 
@@ -32,7 +33,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._case_store.initialize()
                 appended = cog._case_store.append_message(
                     honeypot.NewMessage(
@@ -73,7 +74,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, cog, now)
                 self._complete_case_operation(
                     cog, appended.case.case_id, "planned_ban", now
@@ -94,7 +95,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
     async def test_case_ignore_control_resolves_without_image_decisions(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = self._config({})
                 guild = SimpleNamespace(id=10)
                 cog.bot.get_guild = lambda guild_id: guild
@@ -159,7 +160,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
     async def test_case_ignore_keeps_captured_image_review_open(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = self._config({})
                 cog._case_store.initialize()
                 appended = cog._case_store.append_message(
@@ -233,7 +234,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 self.assertTrue(any(":resolve:" in item for item in custom_ids))
                 self.assertTrue(any(":images:" in item for item in custom_ids))
 
-                restarted = honeypot.Honeypot(_Bot())
+                restarted = honeypot.Honeypot(_Bot(), _operational_support())
                 restarted.config = self._config({})
                 restarted._execute_detection_case_operation = mock.AsyncMock()
 
@@ -270,7 +271,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 member.guild = guild
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = self._config({"mute_role": role.id})
                 cog._increment_stat = mock.AsyncMock()
                 cog._is_joinwatch_active_role = mock.AsyncMock(return_value=False)
@@ -370,7 +371,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
     async def test_ignore_records_moderation_while_attachment_capture_finishes(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._case_store.initialize()
                 now = datetime.now(timezone.utc)
                 appended = cog._case_store.append_message(
@@ -432,7 +433,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
                 bot.loop = asyncio.get_running_loop()
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 config = {"dry_run": False}
                 cog.config = self._config(config)
                 cog.config.guild = lambda target_guild: SimpleNamespace(
@@ -492,7 +493,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
     async def test_automatic_ban_does_not_inherit_image_reviewer_attribution(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._case_store.initialize()
                 now = datetime.now(timezone.utc)
                 appended = cog._case_store.append_message(
@@ -598,7 +599,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = self._config({"dry_run": True})
                 cog._execute_action = mock.AsyncMock(
                     side_effect=AssertionError("dry-run must not execute punishment")
@@ -654,7 +655,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 bot.fetch_user = mock.AsyncMock(
                     side_effect=lambda user_id: target if user_id == 20 else actor
                 )
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = self._config({"dry_run": False})
                 cog.config.guild = lambda guild: cog.config.guild_from_id(guild.id)
                 cog._missing_action_permission = mock.Mock(return_value=None)
@@ -715,7 +716,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = self._config({"dry_run": False})
                 cog._execute_action = mock.AsyncMock(
                     side_effect=AssertionError("missing member cannot be kicked")
@@ -779,7 +780,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = self._config({"dry_run": False})
                 cog._execute_action = mock.AsyncMock(
                     side_effect=[
@@ -859,7 +860,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = self._config({"dry_run": False})
                 cog.config.guild = lambda guild: cog.config.guild_from_id(guild.id)
                 cog._missing_action_permission = mock.Mock(return_value=None)
@@ -927,7 +928,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = self._config({"dry_run": False})
                 cog._execute_action = blocked_action
                 appended = self._append_case(
@@ -1013,7 +1014,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
                 bot.loop = asyncio.get_running_loop()
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = self._config({"dry_run": False})
                 cog._execute_action = blocked_action
                 appended = self._append_case(
@@ -1115,7 +1116,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                first = honeypot.Honeypot(bot)
+                first = honeypot.Honeypot(bot, _operational_support())
                 appended = self._append_case(honeypot, first, old)
                 operation = first._case_store.claim_moderator_action(
                     appended.case.case_id, "ban", 99, old
@@ -1129,7 +1130,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                     )
                 )
 
-                restarted = honeypot.Honeypot(bot)
+                restarted = honeypot.Honeypot(bot, _operational_support())
                 restarted.config = self._config({"dry_run": False})
                 restarted._execute_action = mock.AsyncMock(
                     side_effect=AssertionError("ban effect must not repeat")
@@ -1158,8 +1159,8 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                first = honeypot.Honeypot(_Bot())
-                second = honeypot.Honeypot(_Bot())
+                first = honeypot.Honeypot(_Bot(), _operational_support())
+                second = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, first, now)
                 operation = first._case_store.claim_moderator_action(
                     appended.case.case_id, "ban", 99, now

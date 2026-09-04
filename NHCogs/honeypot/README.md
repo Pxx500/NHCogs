@@ -20,7 +20,6 @@ Requires `AAA3A_utils`. Red will show the pip install command if missing.
 
 ```ini
 [p]honeypot channels honeypot create
-[p]honeypot channels errors #your-errors-channel
 [p]honeypot channels review #your-review-channel
 [p]honeypot channels daily-stats #your-public-stats-channel
 [p]honeypot honeypot action ban
@@ -88,7 +87,6 @@ By default, three GIFs from one member inside a rolling 60-second window trigger
 | Command | Description |
 |---------|-------------|
 | `!honeypot channels review [channel]` | Show or set the review destination |
-| `!honeypot channels errors [channel]` | Show or set the shared technical error destination |
 | `!honeypot channels daily-stats [channel]` | Show or set the public daily statistics destination |
 | `!honeypot channels manual-evidence [channel]` | Show or set the private manual evidence destination |
 | `!honeypot channels joinwatch [channel]` | Show or set the JoinWatch destination |
@@ -202,17 +200,11 @@ Detection cases expire 24 hours after the first detection. This lifetime is fixe
 | `!honeypot bait_role action <kick\|ban>` | Action to take when users take the bait role |
 | `!honeypot bait_role channel [channel]` | Show or set the bait-role destination |
 
-### errors
+### Operational errors
 
-`!honeypot errors` and `!honeypot errors maintainer` show their available subcommands.
-
-| Command | Description |
-|---------|-------------|
-| `!honeypot errors list` | List unacknowledged operational failures |
-| `!honeypot errors clear` | Acknowledge all currently visible operational failures |
-| `!honeypot errors maintainer show` | Show the configured error maintainer |
-| `!honeypot errors maintainer set <member>` | Set the person pinged for new failures |
-| `!honeypot errors maintainer clear` | Stop pinging the configured maintainer |
+Technical failures from Honeypot use the shared `[p]nhcogs errors` configuration. See the
+[shared command catalog](../README.md) for the setup commands and privacy rules. Expected
+detection outcomes and normal command feedback aren't reported as operational errors.
 
 ### other
 
@@ -459,7 +451,7 @@ Channel routing is declared in `channel_routing.py`. To add a category:
 2. Otherwise add one `ChannelCategory` entry with its config field, type, permissions, central command, and module command
 3. Route publication through that category and use the shared configuration operations
 4. Add the declared static commands. The registry contract tests name any missing central or module path
-5. Send every technical failure through the shared `errors` category. Never add a cross-category fallback
+5. Send every technical failure through the shared `[p]nhcogs errors` configuration. Never add a cross-category fallback
 
 ## Permissions
 

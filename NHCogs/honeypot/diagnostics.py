@@ -23,7 +23,6 @@ from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import box, pagify
 
 from . import channel_routing
-from .detection_cases import OperationType
 from .remote_media import media_decoder_support
 from .settings import (
     CORE_ACTION_OPTIONS,
@@ -364,84 +363,6 @@ async def config_dump(
 ) -> None:
     """Show current honeypot configuration by section."""
     return await cog._send_group_overview(ctx, config_sender)
-
-
-async def honeypot_errors(cog, ctx: commands.Context) -> None:
-    """Show unacknowledged Honeypot operational failures."""
-    failures = await asyncio.to_thread(
-        cog._case_store.list_operational_failures,
-        ctx.guild.id,
-        include_resolved=True,
-    )
-    if not failures:
-        await ctx.send(_("No unacknowledged Honeypot errors"))
-        return
-    lines = []
-    for failure in failures:
-        state = "recovered" if failure.resolved_at is not None else "active"
-        source = (
-            failure.source.value if isinstance(failure.source, OperationType) else failure.source
-        )
-        lines.append(
-            f"- <t:{int(failure.last_seen_at.timestamp())}:R> "
-            f"`{source}` ({state}, x{failure.occurrences}): "
-            f"{failure.summary[:500]}"
-        )
-    body = "\n".join(lines)
-    header = _("**Honeypot operational errors:**\n")
-    for page in pagify(body, page_length=2000 - len(header)):
-        await ctx.send(header + page)
-
-
-async def honeypot_errors_clear(cog, ctx: commands.Context) -> None:
-    """Acknowledge all currently visible Honeypot operational failures."""
-    count = await asyncio.to_thread(
-        cog._case_store.clear_operational_failures,
-        ctx.guild.id,
-        datetime.now(timezone.utc),
-    )
-    await ctx.send(_("Acknowledged {count} Honeypot errors").format(count=count))
-
-
-async def honeypot_errors_maintainer_show(cog, ctx: commands.Context) -> None:
-    """Show the person pinged for Honeypot operational failures."""
-    setting = cog.config.guild(ctx.guild).maintainer_id
-    maintainer_id = await setting()
-    maintainer = ctx.guild.get_member(maintainer_id) if maintainer_id else None
-    if maintainer is not None:
-        label = maintainer.mention
-    elif maintainer_id is not None:
-        label = f"<@{maintainer_id}>"
-    else:
-        label = _("Not configured")
-    prefix = ctx.clean_prefix
-    await ctx.send(
-        _(
-            "Error maintainer: {maintainer}\n"
-            "Set: `{prefix}honeypot errors maintainer set <member>`\n"
-            "Clear: `{prefix}honeypot errors maintainer clear`"
-        ).format(maintainer=label, prefix=prefix),
-        allowed_mentions=discord.AllowedMentions.none(),
-    )
-
-
-async def honeypot_errors_maintainer_set(
-    cog,
-    ctx: commands.Context,
-    member: discord.Member,
-) -> None:
-    """Set the person pinged for Honeypot operational failures."""
-    await cog.config.guild(ctx.guild).maintainer_id.set(member.id)
-    await ctx.send(
-        _("✅ Error maintainer set to {member.mention}").format(member=member),
-        allowed_mentions=discord.AllowedMentions.none(),
-    )
-
-
-async def honeypot_errors_maintainer_clear(cog, ctx: commands.Context) -> None:
-    """Stop pinging a maintainer for Honeypot operational failures."""
-    await cog.config.guild(ctx.guild).maintainer_id.set(None)
-    await ctx.send(_("✅ Error maintainer cleared"))
 
 
 async def honeypot_mod_stats(cog, ctx: commands.Context) -> None:

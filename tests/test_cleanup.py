@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 
 CLEANUP_PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs" / "cleanup"
 
@@ -71,7 +71,7 @@ class CleanupOrchestrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_channel_cleanup_uses_registry_and_bulk_delete_without_history_fetch(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 records = (self.record(honeypot, 101), self.record(honeypot, 102))
                 cog._message_registry.recent_in_channel = mock.AsyncMock(return_value=records)
                 cog._message_registry.forget_many = mock.AsyncMock()
@@ -112,7 +112,7 @@ class CleanupOrchestrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_channel_cleanup_with_no_candidates_only_removes_invocation(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._message_registry.recent_in_channel = mock.AsyncMock(return_value=())
                 cog._message_registry.forget = mock.AsyncMock()
                 channel = SimpleNamespace(
@@ -135,7 +135,7 @@ class CleanupOrchestrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_permission_failure_retains_candidates_and_reports_aggregate(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 records = (self.record(honeypot, 101), self.record(honeypot, 102))
                 cog._message_registry.recent_in_channel = mock.AsyncMock(return_value=records)
                 cog._message_registry.forget = mock.AsyncMock()
@@ -160,7 +160,7 @@ class CleanupOrchestrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_stale_bulk_batch_falls_back_to_individual_outcomes(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 records = (self.record(honeypot, 101), self.record(honeypot, 102))
                 cog._message_registry.recent_in_channel = mock.AsyncMock(return_value=records)
                 cog._message_registry.forget_many = mock.AsyncMock()
@@ -194,7 +194,7 @@ class CleanupOrchestrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_bulk_not_found_is_terminal_without_individual_retry(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 records = (self.record(honeypot, 101), self.record(honeypot, 102))
                 cog._message_registry.recent_in_channel = mock.AsyncMock(return_value=records)
                 cog._message_registry.forget_many = mock.AsyncMock()
@@ -227,7 +227,7 @@ class CleanupOrchestrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_user_cleanup_groups_channels_and_reports_unavailable_candidates(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 records = (
                     self.record(honeypot, 101, channel_id=20),
                     self.record(honeypot, 102, channel_id=21),
@@ -262,7 +262,7 @@ class CleanupOrchestrationTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 self.assertTrue(hasattr(honeypot.cleanup, "cleanup_after"))
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 boundary = self.record(honeypot, 100)
                 records = (self.record(honeypot, 200), self.record(honeypot, 300))
                 cog._message_registry.get_in_channel = mock.AsyncMock(return_value=boundary)
@@ -303,7 +303,7 @@ class CleanupOrchestrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_range_over_one_thousand_is_rejected_before_deletion(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._message_registry.get_in_channel = mock.AsyncMock(
                     return_value=self.record(honeypot, 100)
                 )
@@ -327,7 +327,7 @@ class CleanupOrchestrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_before_cleanup_uses_exclusive_boundary_and_can_include_pins(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._message_registry.get_in_channel = mock.AsyncMock(
                     return_value=self.record(honeypot, 500)
                 )
@@ -365,7 +365,7 @@ class CleanupOrchestrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_between_cleanup_rejects_reversed_boundaries_without_deleting(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._message_registry.get_in_channel = mock.AsyncMock()
                 cog._message_registry.recent_in_channel = mock.AsyncMock()
                 channel = SimpleNamespace(
@@ -384,7 +384,7 @@ class CleanupOrchestrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_or_cross_channel_boundary_is_rejected_before_selection(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._message_registry.get_in_channel = mock.AsyncMock(return_value=None)
                 cog._message_registry.recent_in_channel = mock.AsyncMock()
                 ctx = self.context(SimpleNamespace())
@@ -398,7 +398,7 @@ class CleanupOrchestrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_exactly_one_thousand_records_use_ten_bulk_batches(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._message_registry.get_in_channel = mock.AsyncMock(
                     return_value=self.record(honeypot, 100)
                 )
@@ -500,7 +500,7 @@ class CleanupCommandAdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_cleanup_rejects_out_of_range_count(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot_module:
-                cog = honeypot_module.Honeypot(_Bot())
+                cog = honeypot_module.Honeypot(_Bot(), _operational_support())
                 ctx = SimpleNamespace()
                 with self.assertRaisesRegex(ValueError, "between 1 and 1000"):
                     await honeypot_module.cleanup.cleanup_channel(cog, ctx, 1001)

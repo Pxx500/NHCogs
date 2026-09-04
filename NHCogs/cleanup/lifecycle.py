@@ -33,9 +33,9 @@ def assert_safe_to_replace(bot: Any) -> None:
 
 
 class ReplacementActivator:
-    def __init__(self, bot: Any, nhmisc: Any, honeypot: Any) -> None:
+    def __init__(self, bot: Any, support: Any, honeypot: Any) -> None:
         self.bot = bot
-        self.nhmisc = nhmisc
+        self.support = support
         self.honeypot = honeypot
         self._activation_lock = asyncio.Lock()
 
@@ -59,7 +59,7 @@ class ReplacementActivator:
                     return active
                 if active is not None:
                     raise CleanupReplacementError("Another cog owns the Cleanup name")
-                runtime = Cleanup(self.bot, self.nhmisc, self.honeypot)
+                runtime = Cleanup(self.bot, self.support, self.honeypot)
                 await self.bot.add_cog(runtime)
                 self._verify_command(runtime)
             except Exception:
@@ -112,5 +112,5 @@ class ReplacementActivator:
             raise CleanupReplacementError("Replacement does not own the cleanup command")
 
 
-async def build_cleanup_component(bot: Any, nhmisc: Any, honeypot: Any) -> Cleanup:
-    return await ReplacementActivator(bot, nhmisc, honeypot).activate()
+async def build_cleanup_component(bot: Any, support: Any, honeypot: Any) -> Cleanup:
+    return await ReplacementActivator(bot, support, honeypot).activate()

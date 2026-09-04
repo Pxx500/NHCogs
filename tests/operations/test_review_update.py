@@ -4,7 +4,7 @@ from importlib import import_module
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 
 
 class ReviewUpdateHandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -56,7 +56,7 @@ class ReviewUpdateHandlerTests(unittest.IsolatedAsyncioTestCase):
                 except ModuleNotFoundError:
                     self.fail("review_update has no dedicated handler module")
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, cog, now)
                 operation = cog._case_store.ensure_operation(
                     appended.case.case_id,
@@ -93,7 +93,7 @@ class ReviewUpdateHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 handler_module = import_module("NHCogs.honeypot.operations.review_update")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
 
                 registered = cog._detection_operation_handlers.resolve(
                     honeypot.OperationType.REVIEW_UPDATE
@@ -110,7 +110,7 @@ class ReviewUpdateHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, cog, now)
                 operation = cog._case_store.ensure_operation(
                     appended.case.case_id,
@@ -141,7 +141,7 @@ class ReviewUpdateHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 terminal, terminal_claim = self._claim_terminal_review_update(
                     honeypot, cog, now, user_id=21, message_id=41
                 )
@@ -165,7 +165,7 @@ class ReviewUpdateHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 deleted, deleted_claim = self._claim_terminal_review_update(
                     honeypot, cog, now, user_id=22, message_id=42
                 )

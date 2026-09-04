@@ -40,8 +40,9 @@ class GitHubTickets(commands.Cog):
 
     CONFIG_IDENTIFIER = 228724500916148494760637198509440112622
 
-    def __init__(self, bot: Red) -> None:
+    def __init__(self, bot: Red, support) -> None:
         self.bot = bot
+        self.support = support
         self.config = Config.get_conf(
             self,
             identifier=self.CONFIG_IDENTIFIER,
@@ -54,12 +55,17 @@ class GitHubTickets(commands.Cog):
         self.coordinator = TicketCoordinator(
             self.store,
             self.projection,
+            support=support,
             get_settings=self._get_guild_settings,
             get_candidates=self._get_candidates,
             wake_deadlines=self._wake_deadlines,
         )
-        self.scheduler = DeadlineScheduler(self.store, self._process_due_deadline)
+        self.scheduler = DeadlineScheduler(
+            self.store, self._process_due_deadline, support=support,
+            report_ticket_error=self._report_deadline_error,
+        )
         self._startup_task: asyncio.Task[None] | None = None
+        self._restoring_ticket_id: int | None = None
         self._new_ticket_command = discord.app_commands.Command(
             name=presentation.NEW_TICKET_COMMAND,
             description=presentation.NEW_TICKET_COMMAND_DESCRIPTION,
@@ -85,6 +91,9 @@ class GitHubTickets(commands.Cog):
             ),
         ] = {}
         self._restored_view_message_ids: set[int] = set()
+
+    async def cog_command_error(self, ctx: commands.Context, error: commands.CommandError) -> None:
+        await self.support.handle_command_error(ctx, error, source="GitHubTickets")
 
     async def cog_check(self, ctx: commands.Context) -> bool:
         if ctx.guild is None:
@@ -126,26 +135,36 @@ class GitHubTickets(commands.Cog):
                 return
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
                 log.exception("GitHub Tickets startup restore iteration failed")
+                if self._restoring_ticket_id is not None:
+                    await self._report_deadline_error(self._restoring_ticket_id, error, action="restore ticket")
+                else:
+                    await self.support.report_global_error(source="GitHubTickets", action="startup restore", error=error)
                 self.scheduler.start()
                 await asyncio.sleep(1)
 
     async def _restore_runtime_once(self) -> None:
+        self._restoring_ticket_id = None
         await self._refresh_participant_roles()
         for ticket in await self.store.list_projection_cleanup_tickets():
+            self._restoring_ticket_id = ticket.ticket_id
             await self.coordinator.recover_projection_cleanup(ticket.ticket_id)
+        self._restoring_ticket_id = None
         for ticket in await self.store.list_active_tickets():
             if ticket.message_id is None or ticket.message_id in self._restored_view_message_ids:
                 continue
+            self._restoring_ticket_id = ticket.ticket_id
             self.bot.add_view(self._ticket_view(ticket), message_id=ticket.message_id)
             self._restored_view_message_ids.add(ticket.message_id)
+        self._restoring_ticket_id = None
         now = datetime.now(timezone.utc)
         for ticket_id in await self.store.due_ticket_ids(now):
+            self._restoring_ticket_id = ticket_id
             await self.coordinator.process_due(ticket_id)
+        self._restoring_ticket_id = None
 
-    @staticmethod
-    def _observe_startup_task(task: asyncio.Task[None]) -> None:
+    def _observe_startup_task(self, task: asyncio.Task[None]) -> None:
         if task.cancelled():
             return
         try:
@@ -153,6 +172,7 @@ class GitHubTickets(commands.Cog):
         except asyncio.CancelledError:
             return
         if error is not None:
+            self.support.schedule_error(source="GitHubTickets", action="startup task", error=error)
             log.error(
                 "GitHub Tickets startup failed",
                 exc_info=(type(error), error, error.__traceback__),
@@ -182,7 +202,8 @@ class GitHubTickets(commands.Cog):
                 if command is not None:
                     try:
                         self.bot.tree.add_command(command, override=True)
-                    except Exception:
+                    except Exception as error:
+                        self.support.schedule_error(source="GitHubTickets", action="restore application command", error=error)
                         log.exception(
                             "GitHub Tickets failed to restore an application command"
                         )
@@ -204,7 +225,8 @@ class GitHubTickets(commands.Cog):
                 if displaced is not None:
                     try:
                         self.bot.tree.add_command(displaced, override=True)
-                    except Exception:
+                    except Exception as error:
+                        self.support.schedule_error(source="GitHubTickets", action="restore application command", error=error)
                         log.exception(
                             "GitHub Tickets failed to restore a displaced application command"
                         )
@@ -234,6 +256,7 @@ class GitHubTickets(commands.Cog):
         await send_new_ticket_modal(
             interaction,
             self.store,
+            self.support,
             guild_id=guild_id,
             create_ticket=self.coordinator.create_ticket,
             actor_factory=self._actor_from_interaction,
@@ -256,6 +279,7 @@ class GitHubTickets(commands.Cog):
             return
         await GitHubTicketsDashboard(
             self.store,
+            self.support,
             guild_id=guild_id,
             actor_factory=self._actor_from_interaction,
             member_lookup=lambda user_id: self._cached_member(guild_id, user_id),
@@ -271,7 +295,11 @@ class GitHubTickets(commands.Cog):
             await self._open_new_ticket(interaction)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
+            await self.support.report_operational_error(
+                guild_id=interaction.guild_id, source="GitHubTickets", action="open new ticket", error=error,
+                channel_id=getattr(interaction, "channel_id", None),
+            )
             log.exception("GitHub Tickets new ticket callback failed")
             await self._send_interaction_failure(interaction)
 
@@ -284,7 +312,11 @@ class GitHubTickets(commands.Cog):
             await self._open_profile_dashboard(interaction)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
+            await self.support.report_operational_error(
+                guild_id=interaction.guild_id, source="GitHubTickets", action="open profile dashboard", error=error,
+                channel_id=getattr(interaction, "channel_id", None),
+            )
             log.exception("GitHub Tickets developer profile dashboard callback failed")
             await self._send_interaction_failure(interaction)
 
@@ -298,7 +330,11 @@ class GitHubTickets(commands.Cog):
             await self._open_developer_profile(interaction, member)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
+            await self.support.report_operational_error(
+                guild_id=interaction.guild_id, source="GitHubTickets", action="open developer profile", error=error,
+                channel_id=getattr(interaction, "channel_id", None),
+            )
             log.exception("GitHub Tickets profile callback failed")
             await self._send_interaction_failure(interaction)
 
@@ -372,6 +408,8 @@ class GitHubTickets(commands.Cog):
         return TicketControls(
             ticket.ticket_id,
             ticket.public_token,
+            support=self.support,
+            guild_id=ticket.guild_id,
             claimed=ticket.state is TicketState.CLAIMED,
             actor_factory=self._actor_from_interaction,
             claim=self._claim_ticket,
@@ -424,7 +462,10 @@ class GitHubTickets(commands.Cog):
             )
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
+            await self.support.report_operational_error(
+                guild_id=ticket.guild_id, source="GitHubTickets", action="finished ticket log", error=error,
+            )
             log.exception("GitHub Tickets finished ticket log failed")
 
     async def _get_guild_settings(self, guild_id: int) -> settings.GuildSettings:
@@ -442,6 +483,25 @@ class GitHubTickets(commands.Cog):
 
     def _wake_deadlines(self) -> None:
         self.scheduler.wake()
+
+    async def _report_deadline_error(
+        self, ticket_id: int, error: Exception, *, action: str = "process ticket deadline"
+    ) -> None:
+        try:
+            ticket = await self.store.get_ticket(ticket_id)
+        except Exception:
+            log.exception("Could not identify the guild for ticket %s failure", ticket_id)
+            log.exception("Ticket %s failed during %s", ticket_id, action,
+                      exc_info=(type(error), error, error.__traceback__))
+            return
+        if ticket is not None:
+            await self.support.report_operational_error(
+                guild_id=ticket.guild_id, source="GitHubTickets", action=action, error=error,
+                channel_id=ticket.channel_id, thread_id=ticket.thread_id, message_id=ticket.message_id,
+            )
+        else:
+            log.error("Removed ticket %s failed during %s", ticket_id, action,
+                      exc_info=(type(error), error, error.__traceback__))
 
     async def _process_due_deadline(self, ticket_id: int) -> None:
         await self.coordinator.process_due(ticket_id)
@@ -542,6 +602,7 @@ class GitHubTickets(commands.Cog):
         await self._run_listener(
             lambda: self.coordinator.handle_message_deleted(int(payload.message_id)),
             "raw message deletion",
+            guild_id=getattr(payload, "guild_id", None),
         )
 
     @commands.Cog.listener()
@@ -552,6 +613,7 @@ class GitHubTickets(commands.Cog):
                     int(message_id)
                 ),
                 "bulk message deletion",
+                guild_id=getattr(payload, "guild_id", None),
             )
 
     @commands.Cog.listener()
@@ -559,6 +621,7 @@ class GitHubTickets(commands.Cog):
         await self._run_listener(
             lambda: self.coordinator.handle_thread_deleted(int(thread.id)),
             "thread deletion",
+            guild_id=thread.guild.id,
         )
 
     @commands.Cog.listener()
@@ -567,18 +630,25 @@ class GitHubTickets(commands.Cog):
             await self.store.delete_profile(int(member.guild.id), int(member.id))
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
+            await self.support.report_operational_error(
+                guild_id=member.guild.id, source="GitHubTickets", action="delete member profile", error=error,
+            )
             log.exception("GitHub Tickets member profile deletion failed")
 
-    async def _run_listener(self, operation, label: str) -> None:
+    async def _run_listener(self, operation, label: str, guild_id: int | None) -> None:
         for attempt in range(2):
             try:
                 await operation()
                 return
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
                 log.exception("GitHub Tickets %s failed", label)
+                if guild_id is not None:
+                    await self.support.report_operational_error(guild_id=guild_id, source="GitHubTickets", action=label, error=error)
+                else:
+                    await self.support.report_global_error(source="GitHubTickets", action=label, error=error)
                 if attempt == 0:
                     await asyncio.sleep(1)
 
@@ -587,6 +657,7 @@ class GitHubTickets(commands.Cog):
         await self._run_listener(
             lambda: self._handle_guild_channel_delete(channel),
             "guild channel deletion",
+            guild_id=channel.guild.id,
         )
 
     async def _handle_guild_channel_delete(self, channel) -> None:
@@ -622,6 +693,7 @@ class GitHubTickets(commands.Cog):
         await self._run_listener(
             lambda: self._handle_guild_role_delete(role),
             "guild role deletion",
+            guild_id=role.guild.id,
         )
 
     async def _handle_guild_role_delete(self, role) -> None:
@@ -639,6 +711,7 @@ class GitHubTickets(commands.Cog):
         await self._run_listener(
             lambda: self._handle_guild_remove(guild),
             "guild removal",
+            guild_id=guild.id,
         )
 
     async def _handle_guild_remove(self, guild) -> None:

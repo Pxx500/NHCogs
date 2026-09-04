@@ -14,10 +14,11 @@ from typing import TypeVar
 from uuid import uuid4
 
 import discord
-from redbot.core import Config, commands
+from redbot.core import commands
 from redbot.core.data_manager import cog_data_path
 
-from ..operational_errors import OperationalErrorReporter, OperationalFailure
+from ..operational_errors import OperationalFailure
+from ..operational_support import NHMISC_CONFIG_IDENTIFIER, OperationalSupport
 from ..ranked_donut_chart import OTHER_COLOR, SERIES_COLORS, render_ranked_donut_chart
 from .achievement_definitions import (
     SOLO_GATER_DEFINITION,
@@ -516,28 +517,19 @@ def _plan_gate_revoke_roles(guild, member, current_count: int) -> tuple:
 class NHMisc(commands.Cog):
     """Miscellaneous small utilities for Red-DiscordBot."""
 
-    CONFIG_IDENTIFIER = 8597423150612235807
+    CONFIG_IDENTIFIER = NHMISC_CONFIG_IDENTIFIER
     QUIESCENT_UNLOAD_VERSION = 1
     RUNTIME_HEALTH_VERSION = 1
 
-    def __init__(self, bot):
+    def __init__(self, bot, support):
         super().__init__()
         self.bot = bot
-        self.config = Config.get_conf(
-            self,
-            identifier=self.CONFIG_IDENTIFIER,
-            force_registration=True,
-        )
+        self._support: OperationalSupport = support
+        self.config = support.log_config
         self.config.register_guild(
-            voice_log_channel=None,
-            alert_channel=None,
-            maintenance_channel=None,
-            moderation_log_channel=None,
             bot_proxy_channel=None,
             bot_proxy_delete_closed_sessions=False,
             bot_proxy_enabled=True,
-            error_channel=None,
-            error_maintainer_id=None,
             vcjumping_visit_count=DEFAULT_VCJUMPING_VISIT_COUNT,
             vcjumping_window_seconds=DEFAULT_VCJUMPING_WINDOW_SECONDS,
             activity_channel=None,
@@ -546,12 +538,7 @@ class NHMisc(commands.Cog):
             sticky_debug_logging_enabled=False,
             forum_autopin_channel_ids=[],
         )
-        self._operational_errors = OperationalErrorReporter(
-            self.bot,
-            self.config,
-            cog_data_path(self) / "operational_errors.sqlite",
-            logger=log,
-        )
+        self._operational_errors = support.operational_errors
         self._bot_proxy_store = BotProxyStore(cog_data_path(self) / "bot_proxy.sqlite")
         self._bot_proxy = None
         self._voice_visits = VoiceChannelVisitTracker()
@@ -637,7 +624,6 @@ class NHMisc(commands.Cog):
         self._achievement_commands_registered = False
 
     async def cog_load(self) -> None:
-        await self._operational_errors.initialize()
         await self._activity_store.initialize()
         await self._sticky_roles.initialize()
         await self._role_analytics_store.initialize()
@@ -658,10 +644,6 @@ class NHMisc(commands.Cog):
             self._recover_interrupted_gate_increments()
         )
 
-    @property
-    def operational_errors(self) -> OperationalErrorReporter:
-        return self._operational_errors
-
     async def report_operational_error(
         self,
         *,
@@ -673,22 +655,15 @@ class NHMisc(commands.Cog):
         thread_id: int | None = None,
         message_id: int | None = None,
     ) -> OperationalFailure | None:
-        try:
-            return await self._operational_errors.report(
-                guild_id=guild_id,
-                source=source,
-                action=action,
-                error=error,
-                channel_id=channel_id,
-                thread_id=thread_id,
-                message_id=message_id,
-            )
-        except Exception:
-            log.exception(
-                "Failed to persist NH operational error for guild %s",
-                guild_id,
-            )
-            return None
+        return await self._support.report_operational_error(
+            guild_id=guild_id,
+            source=source,
+            action=action,
+            error=error,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            message_id=message_id,
+        )
 
     async def cog_command_error(
         self,
@@ -745,7 +720,7 @@ class NHMisc(commands.Cog):
             self._bot_proxy = BotProxyWorkflowManager(
                 config=self.config,
                 store=self._bot_proxy_store,
-                moderation_log=self.send_moderation_log,
+                moderation_log=self._support.send_moderation_log,
                 error_reporter=self.report_operational_error,
                 avatar_loader=AvatarLoader(),
             )
@@ -1258,9 +1233,6 @@ class NHMisc(commands.Cog):
         await self._role_analytics_store.delete_user_everywhere(user_id)
         await self._achievement_store.delete_user_everywhere(user_id)
         await self._gate_increment_store.redact_user_data(user_id)
-        for guild_id, guild_data in (await self.config.all_guilds()).items():
-            if guild_data.get("error_maintainer_id") == user_id:
-                await self.config.guild_from_id(guild_id).error_maintainer_id.clear()
 
     @staticmethod
     async def _defer_achievement_interaction(
@@ -3786,7 +3758,7 @@ class NHMisc(commands.Cog):
                 timeout=300,
             )
         except TimeoutError:
-            await self._send_voice_log(
+            await self._support.send_log_message(
                 channel,
                 "Achievement synchronization confirmation expired",
             )
@@ -3848,7 +3820,7 @@ class NHMisc(commands.Cog):
                     "`!rolesync discord` again."
                 )
                 return
-            maintenance_channel = self._get_log_channel(
+            maintenance_channel = self._support.get_log_channel(
                 ctx.guild,
                 await self.config.guild(ctx.guild).maintenance_channel(),
             )
@@ -3861,7 +3833,7 @@ class NHMisc(commands.Cog):
                     "Configure a private NHMisc maintenance channel first"
                 )
 
-            missing_permissions = self._missing_log_permissions(
+            missing_permissions = self._support.missing_log_permissions(
                 ctx.guild,
                 maintenance_channel,
                 require_attach_files=True,
@@ -3881,7 +3853,7 @@ class NHMisc(commands.Cog):
                 snapshot,
             )
 
-            plan_message = await self._send_voice_log(maintenance_channel, summary)
+            plan_message = await self._support.send_log_message(maintenance_channel, summary)
             if plan_message is None:
                 raise commands.UserFeedbackCheckFailure(
                     "Could not publish the synchronization plan"
@@ -3901,7 +3873,7 @@ class NHMisc(commands.Cog):
 
             fresh_snapshot = await self._achievement_discord_snapshot(ctx.guild)
             if fresh_snapshot != snapshot:
-                await self._send_voice_log(
+                await self._support.send_log_message(
                     maintenance_channel,
                     "Role analytics changed. Run `!rolesync discord` again.",
                 )
@@ -3914,7 +3886,7 @@ class NHMisc(commands.Cog):
                 bootstrapped=fresh_bootstrapped,
             )
             if fresh_bootstrapped != bootstrapped or fresh_summary != summary:
-                await self._send_voice_log(
+                await self._support.send_log_message(
                     maintenance_channel,
                     "Achievement data changed. Run `!rolesync discord` again.",
                 )
@@ -3926,12 +3898,12 @@ class NHMisc(commands.Cog):
                 bootstrapped=bootstrapped,
             )
             if completion is None:
-                await self._send_voice_log(
+                await self._support.send_log_message(
                     maintenance_channel,
                     "Achievement initialization was already completed",
                 )
                 return
-            await self._send_voice_log(maintenance_channel, completion)
+            await self._support.send_log_message(maintenance_channel, completion)
         finally:
             self._achievement_syncing_guilds.discard(guild_id)
 
@@ -4330,108 +4302,6 @@ class NHMisc(commands.Cog):
         )
         await ctx.send(embed=embed)
 
-    @nhmisc.group(name="errors", invoke_without_command=True)
-    async def nhmisc_errors(self, ctx: commands.Context) -> None:
-        """Configure private operational error reporting."""
-        guild_config = self.config.guild(ctx.guild)
-        channel_id = await guild_config.error_channel()
-        maintainer_id = await guild_config.error_maintainer_id()
-        active_failures = await self._operational_errors.active_count(ctx.guild.id)
-        if self._channel_is_public(ctx):
-            channel_label = "Run this command in a channel hidden from @everyone."
-            maintainer_label = channel_label
-            failure_label = channel_label
-        else:
-            channel_label = self._configured_channel_label(ctx.guild, channel_id)
-            maintainer = (
-                ctx.guild.get_member(maintainer_id)
-                if maintainer_id is not None
-                else None
-            )
-            maintainer_label = (
-                maintainer.mention if maintainer is not None else "Not configured"
-            )
-            failure_label = str(active_failures)
-        embed = self._configuration_embed(
-            ctx=ctx,
-            title="Operational errors",
-            current=(
-                f"Channel: {channel_label}",
-                f"Maintainer: {maintainer_label}",
-                f"Active failures: {failure_label}",
-            ),
-        )
-        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-
-    @nhmisc_errors.group(name="channel", invoke_without_command=True)
-    async def nhmisc_errors_channel(
-        self,
-        ctx: commands.Context,
-        channel: discord.TextChannel | None = None,
-    ) -> None:
-        """Show or set the private operational error channel."""
-        if channel is None:
-            await self._show_log_destination(
-                ctx,
-                title="Operational error channel",
-                config_key="error_channel",
-            )
-            return
-        missing_permissions = self._missing_log_permissions(
-            ctx.guild,
-            channel,
-            require_attach_files=True,
-        )
-        if missing_permissions is not None:
-            raise commands.UserFeedbackCheckFailure(missing_permissions)
-        if self._channel_allows_everyone(channel, ctx.guild):
-            raise commands.UserFeedbackCheckFailure(
-                "Configure a channel that is private from @everyone"
-            )
-        await self.config.guild(ctx.guild).error_channel.set(channel.id)
-        await ctx.send(f"Operational error channel set to {channel.mention}.")
-
-    @nhmisc_errors_channel.command(name="clear")
-    async def nhmisc_errors_channel_clear(self, ctx: commands.Context) -> None:
-        """Clear the operational error channel."""
-        await self.config.guild(ctx.guild).error_channel.clear()
-        await ctx.send("Operational error channel cleared.")
-
-    @nhmisc_errors.group(name="maintainer", invoke_without_command=True)
-    async def nhmisc_errors_maintainer(
-        self,
-        ctx: commands.Context,
-        member: discord.Member | None = None,
-    ) -> None:
-        """Show or set the maintainer pinged for operational errors."""
-        setting = self.config.guild(ctx.guild).error_maintainer_id
-        if member is not None:
-            await setting.set(member.id)
-            await ctx.send(
-                f"Operational error maintainer set to {member.mention}.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-        maintainer_id = await setting()
-        if self._channel_is_public(ctx):
-            value = "Run this command in a channel hidden from @everyone."
-        else:
-            maintainer = (
-                ctx.guild.get_member(maintainer_id)
-                if maintainer_id is not None
-                else None
-            )
-            value = maintainer.mention if maintainer is not None else "Not configured"
-        embed = discord.Embed(title="Operational error maintainer")
-        embed.add_field(name="Current configuration", value=value, inline=False)
-        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-
-    @nhmisc_errors_maintainer.command(name="clear")
-    async def nhmisc_errors_maintainer_clear(self, ctx: commands.Context) -> None:
-        """Clear the operational error maintainer."""
-        await self.config.guild(ctx.guild).error_maintainer_id.clear()
-        await ctx.send("Operational error maintainer cleared.")
-
     @nhmisc.group(name="roleanalytics", invoke_without_command=True)
     @commands.has_permissions(manage_messages=True)
     async def nhmisc_roleanalytics(self, ctx: commands.Context) -> None:
@@ -4512,7 +4382,7 @@ class NHMisc(commands.Cog):
                 ctx, title="Voice logging", config_key="voice_log_channel"
             )
             return
-        missing_permissions = self._missing_log_permissions(ctx.guild, channel)
+        missing_permissions = self._support.missing_log_permissions(ctx.guild, channel)
         if missing_permissions is not None:
             raise commands.UserFeedbackCheckFailure(missing_permissions)
         await self.config.guild(ctx.guild).voice_log_channel.set(channel.id)
@@ -4530,7 +4400,7 @@ class NHMisc(commands.Cog):
                 ctx, title="Alert logging", config_key="alert_channel"
             )
             return
-        missing_permissions = self._missing_log_permissions(ctx.guild, channel)
+        missing_permissions = self._support.missing_log_permissions(ctx.guild, channel)
         if missing_permissions is not None:
             raise commands.UserFeedbackCheckFailure(missing_permissions)
         await self.config.guild(ctx.guild).alert_channel.set(channel.id)
@@ -4548,7 +4418,7 @@ class NHMisc(commands.Cog):
                 ctx, title="Maintenance logging", config_key="maintenance_channel"
             )
             return
-        missing_permissions = self._missing_log_permissions(
+        missing_permissions = self._support.missing_log_permissions(
             ctx.guild,
             channel,
             require_attach_files=True,
@@ -4577,7 +4447,7 @@ class NHMisc(commands.Cog):
                 config_key="moderation_log_channel",
             )
             return
-        missing_permissions = self._missing_log_permissions(ctx.guild, channel)
+        missing_permissions = self._support.missing_log_permissions(ctx.guild, channel)
         if missing_permissions is not None:
             raise commands.UserFeedbackCheckFailure(missing_permissions)
         if self._channel_allows_everyone(channel, ctx.guild):
@@ -6067,7 +5937,7 @@ class NHMisc(commands.Cog):
     ) -> None:
         """Set the channel used for automatic daily activity summaries."""
         await self._require_manage_guild(ctx)
-        missing_permissions = self._missing_log_permissions(ctx.guild, channel)
+        missing_permissions = self._support.missing_log_permissions(ctx.guild, channel)
         if missing_permissions is not None:
             raise commands.UserFeedbackCheckFailure(missing_permissions)
 
@@ -6525,7 +6395,7 @@ class NHMisc(commands.Cog):
             return
 
         config = await self.config.guild(role.guild).all()
-        channel = self._get_log_channel(role.guild, config["maintenance_channel"])
+        channel = self._support.get_log_channel(role.guild, config["maintenance_channel"])
         if channel is None:
             log.warning(
                 "Sticky role %s was deleted in guild %s but no maintenance channel is set",
@@ -6812,12 +6682,12 @@ class NHMisc(commands.Cog):
 
         guild = member.guild
         config = await self.config.guild(guild).all()
-        log_channel = self._get_log_channel(guild, config["voice_log_channel"])
+        log_channel = self._support.get_log_channel(guild, config["voice_log_channel"])
         event_timestamp = int(time.time())
 
         if log_channel is not None:
             if before.channel is None and after.channel is not None:
-                await self._send_voice_log(
+                await self._support.send_log_message(
                     log_channel,
                     (
                         f"{member.mention} ({member.id}) has joined a channel "
@@ -6825,7 +6695,7 @@ class NHMisc(commands.Cog):
                     ),
                 )
             elif before.channel is not None and after.channel is None:
-                await self._send_voice_log(
+                await self._support.send_log_message(
                     log_channel,
                     (
                         f"{member.mention} ({member.id}) has left a channel "
@@ -6838,7 +6708,7 @@ class NHMisc(commands.Cog):
                     f"{before.channel.mention} to {after.channel.mention} "
                     f"at <t:{event_timestamp}:F>"
                 )
-                move_log_message = await self._send_voice_log(
+                move_log_message = await self._support.send_log_message(
                     log_channel,
                     move_log_content,
                 )
@@ -6863,11 +6733,11 @@ class NHMisc(commands.Cog):
             window_seconds=config["vcjumping_window_seconds"],
         )
         if is_vcjumping:
-            alert_channel = self._get_log_channel(guild, config["alert_channel"])
+            alert_channel = self._support.get_log_channel(guild, config["alert_channel"])
             if alert_channel is None:
                 return
 
-            await self._send_voice_log(
+            await self._support.send_log_message(
                 alert_channel,
                 (
                     f"{member.mention} is VC jumping "
@@ -6876,137 +6746,26 @@ class NHMisc(commands.Cog):
                 ),
             )
 
-    def _get_log_channel(
-        self, guild: discord.Guild, channel_id: int | None
-    ) -> discord.TextChannel | None:
-        if channel_id is None:
-            return None
-
-        channel = guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
-        if isinstance(channel, discord.TextChannel):
-            return channel
-        return None
-
-    def _missing_log_permissions(
-        self,
-        guild: discord.Guild,
-        channel: discord.TextChannel,
-        *,
-        require_attach_files: bool = False,
-    ) -> str | None:
-        me = guild.me
-        permissions = channel.permissions_for(me)
-        if not permissions.view_channel:
-            return f"I need permission to view {channel.mention}."
-        if not permissions.send_messages:
-            return f"I need permission to send messages in {channel.mention}."
-        if require_attach_files and not permissions.attach_files:
-            return f"I need permission to attach files in {channel.mention}."
-        return None
-
-    async def _require_private_log_channel(
-        self,
-        guild: discord.Guild,
-        config_key: str,
-        label: str,
-    ) -> discord.TextChannel:
-        config_value = getattr(self.config.guild(guild), config_key)
-        channel = self._get_log_channel(
-            guild,
-            await config_value(),
-        )
-        if channel is None:
-            raise commands.UserFeedbackCheckFailure(
-                f"The private {label} channel is not configured"
-            )
-        if channel.permissions_for(guild.default_role).view_channel:
-            raise commands.UserFeedbackCheckFailure(
-                f"The {label} channel must be hidden from @everyone"
-            )
-        if self._missing_log_permissions(guild, channel) is not None:
-            raise commands.UserFeedbackCheckFailure(
-                f"I cannot send messages in the {label} channel"
-            )
-        return channel
-
     async def _require_private_alert_channel(
         self,
         guild: discord.Guild,
     ) -> discord.TextChannel:
-        return await self._require_private_log_channel(
+        return await self._support.require_private_log_channel(
             guild,
             "alert_channel",
             "alert",
-        )
-
-    async def require_private_error_channel(
-        self,
-        guild: discord.Guild,
-    ) -> discord.TextChannel:
-        """Return the configured private operational error channel."""
-        return await self._require_private_log_channel(
-            guild,
-            "error_channel",
-            "operational error",
         )
 
     async def _require_private_moderation_log_channel(
         self,
         guild: discord.Guild,
     ) -> discord.TextChannel:
-        return await self._require_private_log_channel(
+        return await self._support.require_private_log_channel(
             guild,
             "moderation_log_channel",
             "moderator action",
         )
 
-    async def _send_configured_log(
-        self,
-        guild: discord.Guild,
-        config_key: str,
-        content: str,
-        *,
-        ping_user: discord.abc.Snowflake | None = None,
-        require_private: bool = False,
-        log_failure: bool = True,
-    ) -> bool:
-        """Send to a configured guild log destination."""
-        config_value = getattr(self.config.guild(guild), config_key)
-        channel = self._get_log_channel(guild, await config_value())
-        if channel is None:
-            log.warning(
-                "Could not send NHMisc log for guild %s because %s is not configured",
-                guild.id,
-                config_key,
-            )
-            return False
-        if require_private and self._channel_allows_everyone(channel, guild):
-            log.warning(
-                "Could not send NHMisc log for guild %s because %s is public",
-                guild.id,
-                config_key,
-            )
-            return False
-
-        allowed_mentions = (
-            discord.AllowedMentions(
-                everyone=False,
-                users=[ping_user],
-                roles=False,
-                replied_user=False,
-            )
-            if ping_user is not None
-            else None
-        )
-        return (
-            await self._send_voice_log(
-                channel,
-                content,
-                allowed_mentions=allowed_mentions,
-                log_failure=log_failure,
-            )
-            is not None
-        )
 
     async def _send_guild_alert(
         self,
@@ -7016,7 +6775,7 @@ class NHMisc(commands.Cog):
         ping_user: discord.abc.Snowflake | None = None,
     ) -> bool:
         """Send to the configured enforcement alert channel."""
-        return await self._send_configured_log(
+        return await self._support.send_configured_log(
             guild,
             "alert_channel",
             content,
@@ -7031,7 +6790,7 @@ class NHMisc(commands.Cog):
         log_failure: bool = True,
     ) -> bool:
         """Send to the configured maintenance channel without mentions."""
-        return await self._send_configured_log(
+        return await self._support.send_configured_log(
             guild,
             "maintenance_channel",
             content,
@@ -7046,22 +6805,9 @@ class NHMisc(commands.Cog):
         *,
         log_failure: bool = True,
     ) -> bool:
-        """Send to the configured moderator action channel without mentions."""
-        return await self._send_configured_log(
-            guild,
-            "moderation_log_channel",
-            content,
-            require_private=True,
-            log_failure=log_failure,
+        return await self._support.send_moderation_log(
+            guild, content, log_failure=log_failure
         )
-
-    async def send_moderation_log(
-        self,
-        guild: discord.Guild,
-        content: str,
-    ) -> bool:
-        """Publish an NHCogs moderator action without allowing mentions."""
-        return await self._send_moderation_log(guild, content)
 
     def _schedule_audit_log_edit(
         self,
@@ -7179,29 +6925,6 @@ class NHMisc(commands.Cog):
         name = getattr(user, "display_name", None) or str(user)
         return f"{name} ({user.id})"
 
-    async def _send_voice_log(
-        self,
-        channel: discord.TextChannel,
-        content: str,
-        *,
-        allowed_mentions: discord.AllowedMentions | None = None,
-        log_failure: bool = True,
-    ) -> discord.Message | None:
-        if allowed_mentions is None:
-            allowed_mentions = discord.AllowedMentions.none()
-        try:
-            return await channel.send(content, allowed_mentions=allowed_mentions)
-        except discord.HTTPException as error:
-            if log_failure:
-                log.exception("Failed to send voice log message to channel %s", channel.id)
-                await self.report_operational_error(
-                    guild_id=channel.guild.id,
-                    source="NHMisc",
-                    action="send configured log",
-                    error=error,
-                    channel_id=channel.id,
-                )
-        return None
 
     async def _activity_midnight_loop(self) -> None:
         await self.bot.wait_until_ready()
@@ -7240,7 +6963,7 @@ class NHMisc(commands.Cog):
             return
 
         config = await self.config.guild(guild).all()
-        channel = self._get_log_channel(guild, config["activity_channel"])
+        channel = self._support.get_log_channel(guild, config["activity_channel"])
         for summary in summaries:
             if send_reports and channel is not None:
                 await self._send_activity_summary(channel, summary)
