@@ -187,8 +187,11 @@ async def _execute_joinwatch_action(
             moderator=guild.me,
             reason=reason,
         )
-    except Exception:
+    except Exception as error:
         log.exception("Failed to create modlog case in _execute_joinwatch_action")
+        await cog._support.report_operational_error(
+            guild_id=guild.id, source="Honeypot", action="create joinwatch log case", error=error
+        )
     label = _("The member has been kicked") if action == "kick" else _("The member has been banned")
     return (label, None)
 

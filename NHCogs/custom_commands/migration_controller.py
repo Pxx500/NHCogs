@@ -36,17 +36,17 @@ class CustomCommandsMigration(commands.Cog):
     def __init__(
         self,
         bot: Any,
-        nhmisc: Any,
+        support: Any,
         catalog: CustomCommandCatalog,
         state_store: MigrationStateStore,
     ):
         super().__init__()
         self.bot = bot
-        self.nhmisc = nhmisc
+        self.support = support
         self.catalog = catalog
         self.state_store = state_store
         self.planner = LegacyMigrationPlanner()
-        self.controller = CutoverController(bot, nhmisc, catalog, state_store)
+        self.controller = CutoverController(bot, support, catalog, state_store)
         self._apply_lock = asyncio.Lock()
         self._legacy_config = Config.get_conf(
             None,
@@ -93,7 +93,7 @@ class CustomCommandsMigration(commands.Cog):
             return
         if ctx.guild is None:
             return
-        await self.nhmisc.report_operational_error(
+        await self.support.report_operational_error(
             guild_id=ctx.guild.id,
             source="CustomCommands",
             action="legacy migration command",
@@ -223,7 +223,7 @@ class CustomCommandsMigration(commands.Cog):
             latest = await self.state_store.get()
             if latest.phase is not MigrationPhase.COMPLETE:
                 await self.controller.restore_official()
-            await self.nhmisc.report_operational_error(
+            await self.support.report_operational_error(
                 guild_id=ctx.guild.id,
                 source="CustomCommands",
                 action="apply legacy migration",
@@ -238,7 +238,7 @@ class CustomCommandsMigration(commands.Cog):
         try:
             await self.bot.remove_cog(self.qualified_name)
         except Exception as error:
-            await self.nhmisc.report_operational_error(
+            await self.support.report_operational_error(
                 guild_id=ctx.guild.id,
                 source="CustomCommands",
                 action="remove completed migration command",
@@ -287,7 +287,7 @@ class CustomCommandsMigration(commands.Cog):
             raise commands.UserFeedbackCheckFailure(
                 "Run migration in a channel hidden from @everyone"
             )
-        await self.nhmisc.require_private_error_channel(ctx.guild)
+        await self.support.require_private_error_channel(ctx.guild)
 
     @staticmethod
     def _write_artifacts(plan: MigrationPlan) -> Path:
@@ -353,20 +353,20 @@ class CustomCommandsMigration(commands.Cog):
         log.info("Custom Commands migration artifacts written to %s", artifact_directory)
 
 
-async def build_custom_commands_component(bot: Any, nhmisc: Any):
+async def build_custom_commands_component(bot: Any, support: Any):
     try:
         database_path = (
             cog_data_path(raw_name="CustomCommands") / "custom_commands.sqlite"
         )
         catalog = CustomCommandCatalog(database_path)
         await catalog.initialize()
-        activator = ReplacementActivator(bot, nhmisc, catalog)
+        activator = ReplacementActivator(bot, support, catalog)
         return await activator.activate()
     except Exception as error:
         log.exception("Custom Commands replacement startup failed")
         guilds = tuple(bot.guilds)
         if guilds:
-            await nhmisc.report_operational_error(
+            await support.report_operational_error(
                 guild_id=guilds[0].id,
                 source="CustomCommands",
                 action="activate replacement startup",

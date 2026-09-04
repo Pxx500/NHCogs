@@ -13,7 +13,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 
 
 class _OverviewEmbed:
@@ -118,7 +118,7 @@ class RoleNtSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_add_registers_one_role_for_multiple_source_channels(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 configured = _ScalarSetting({})
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
@@ -157,7 +157,7 @@ class RoleNtSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_list_paginates_large_role_nt_configuration(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 configured = _ScalarSetting(
                     {
                         str(role_id): {
@@ -202,7 +202,7 @@ class ImageScanSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_threshold_defaults_in_public_threshold_query(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -234,7 +234,7 @@ class PurgeMaintenanceSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_maintenance_prunes_registry_at_fourteen_days(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await cog._message_registry.initialize()
                 await cog._message_registry.observe(
                     honeypot.MessageRecord(
@@ -261,7 +261,7 @@ class DiagnosticSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_dry_run_defaults_in_owner_config_output(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -286,7 +286,7 @@ class SettingCommandSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_backward_window_defaults_in_owner_query(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -315,7 +315,7 @@ class JoinwatchSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 bot = _Bot()
                 bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 config = {
                     "joinwatch_enabled": "false",
                     "joinwatch_channel": 300,
@@ -443,7 +443,7 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Destinations", rendered)
                 self.assertIn("Sources and scopes", rendered)
                 self.assertIn("Review: Not configured", rendered)
-                self.assertIn("Errors: Not configured", rendered)
+                self.assertNotIn("Errors:", rendered)
                 self.assertIn("Daily stats: Not configured", rendered)
                 self.assertIn("GIF debug logging: false", rendered)
                 self.assertIn("??honeypot channels review [channel]", rendered)
@@ -474,7 +474,7 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
                 configured = dict(honeypot.settings.DEFAULTS)
-                configured["errors_channel"] = channel.id
+                configured["review_channel"] = channel.id
                 cog = object.__new__(honeypot.Honeypot)
                 cog.bot = SimpleNamespace(get_channel=mock.Mock(return_value=None))
                 cog.config = SimpleNamespace(
@@ -493,7 +493,7 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                 rendered = "\n".join(
                     f"{label}\n{value}" for label, value in entries
                 )
-                self.assertIn("Errors: #automod-filter", rendered)
+                self.assertIn("Review: #automod-filter", rendered)
                 self.assertNotIn("<#77>", rendered)
                 self.assertNotIn("(77)", rendered)
 
@@ -543,10 +543,7 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                 settings = {}
                 for category in honeypot.channel_routing.CHANNEL_CATEGORIES:
                     if category.cardinality == "single":
-                        value = deleted_id if category.key in {
-                            "errors",
-                            "gif_debug",
-                        } else 99
+                        value = deleted_id if category.key == "gif_debug" else 99
                         settings[category.config_field] = _ScalarSetting(value)
                     else:
                         values = (
@@ -567,119 +564,10 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
 
                 await honeypot.channel_routing.clear_deleted_channel(cog, channel)
 
-                self.assertIsNone(settings["errors_channel"].value)
                 self.assertIsNone(settings["gif_detector_debug_channel"].value)
                 self.assertEqual(settings["review_channel"].value, 99)
                 self.assertEqual(settings["honeypot_channels"].values, [11, 55])
                 self.assertEqual(settings["gif_detector_channels"].values, [11, 55])
-
-    async def test_operational_alerts_use_only_the_errors_destination(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                guild = object()
-                channel = SimpleNamespace(send=mock.AsyncMock())
-                configured = dict(honeypot.settings.DEFAULTS)
-                configured["errors_channel"] = 77
-                configured["review_channel"] = 88
-                cog = object.__new__(honeypot.Honeypot)
-                cog.bot = SimpleNamespace(get_guild=mock.Mock(return_value=guild))
-                cog.config = SimpleNamespace(
-                    guild_from_id=mock.Mock(
-                        return_value=SimpleNamespace(
-                            all=mock.AsyncMock(return_value=configured)
-                        )
-                    )
-                )
-                cog._get_text_channel_or_thread = mock.Mock(return_value=channel)
-
-                await honeypot.Honeypot._send_operational_alert(cog, 123, "failure")
-
-                cog._get_text_channel_or_thread.assert_called_once_with(guild, 77)
-                channel.send.assert_awaited_once()
-                args, kwargs = channel.send.await_args
-                self.assertEqual(args[0], "failure")
-                self.assertFalse(kwargs["allowed_mentions"].users)
-
-    async def test_operational_alert_mentions_only_the_configured_maintainer(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                guild = object()
-                channel = SimpleNamespace(send=mock.AsyncMock())
-                configured = dict(honeypot.settings.DEFAULTS)
-                configured["errors_channel"] = 77
-                configured["maintainer_id"] = 555
-                cog = object.__new__(honeypot.Honeypot)
-                cog.bot = SimpleNamespace(get_guild=mock.Mock(return_value=guild))
-                cog.config = SimpleNamespace(
-                    guild_from_id=mock.Mock(
-                        return_value=SimpleNamespace(
-                            all=mock.AsyncMock(return_value=configured)
-                        )
-                    )
-                )
-                cog._get_text_channel_or_thread = mock.Mock(return_value=channel)
-
-                with mock.patch.object(
-                    honeypot.discord,
-                    "Object",
-                    side_effect=lambda *, id: SimpleNamespace(id=id),
-                ):
-                    await honeypot.Honeypot._send_operational_alert(
-                        cog, 123, "failure"
-                    )
-
-                args, kwargs = channel.send.await_args
-                self.assertEqual(args[0], "<@555> failure")
-                mentions = kwargs["allowed_mentions"]
-                self.assertFalse(mentions.everyone)
-                self.assertFalse(mentions.roles)
-                self.assertFalse(mentions.replied_user)
-                self.assertEqual([user.id for user in mentions.users], [555])
-
-    async def test_error_maintainer_command_sets_shows_and_clears_member(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                setting = _ScalarSetting(None)
-                cog = object.__new__(honeypot.Honeypot)
-                cog.config = SimpleNamespace(
-                    guild=mock.Mock(
-                        return_value=SimpleNamespace(maintainer_id=setting)
-                    )
-                )
-                member = SimpleNamespace(id=555, mention="<@555>")
-                guild = SimpleNamespace(
-                    get_member=mock.Mock(
-                        side_effect=lambda member_id: (
-                            member if member_id == member.id else None
-                        )
-                    )
-                )
-                ctx = SimpleNamespace(
-                    guild=guild,
-                    clean_prefix="??",
-                    send=mock.AsyncMock(),
-                )
-
-                await honeypot.Honeypot.honeypot_errors_maintainer_set.callback(
-                    cog, ctx, member
-                )
-                self.assertEqual(setting.value, 555)
-
-                ctx.send.reset_mock()
-                await honeypot.Honeypot.honeypot_errors_maintainer_show.callback(
-                    cog, ctx
-                )
-                rendered = ctx.send.await_args.args[0]
-                self.assertIn("Error maintainer: <@555>", rendered)
-                self.assertIn(
-                    "??honeypot errors maintainer set <member>", rendered
-                )
-                self.assertIn("??honeypot errors maintainer clear", rendered)
-
-                await honeypot.Honeypot.honeypot_errors_maintainer_clear.callback(
-                    cog, ctx
-                )
-                self.assertIsNone(setting.value)
 
     async def test_public_group_shows_runtime_syntax_without_reading_config(self):
         with TemporaryDirectory() as directory:
@@ -914,21 +802,6 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                     ) as channel_list,
                     mock.patch.object(
                         honeypot.diagnostics,
-                        "honeypot_errors",
-                        new=mock.AsyncMock(),
-                    ) as errors_list,
-                    mock.patch.object(
-                        honeypot.diagnostics,
-                        "honeypot_errors_maintainer_show",
-                        new=mock.AsyncMock(),
-                    ) as maintainer_show,
-                    mock.patch.object(
-                        honeypot.diagnostics,
-                        "honeypot_errors_maintainer_set",
-                        new=mock.AsyncMock(),
-                    ) as maintainer_set,
-                    mock.patch.object(
-                        honeypot.diagnostics,
                         "honeypot_stats",
                         new=mock.AsyncMock(),
                     ) as stats,
@@ -937,16 +810,11 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                         honeypot.Honeypot.manual_evidence_settings,
                         honeypot.Honeypot.channels_honeypot,
                         honeypot.Honeypot.channels_gif_detector,
-                        honeypot.Honeypot.honeypot_errors_group,
-                        honeypot.Honeypot.honeypot_errors_maintainer_group,
                         honeypot.Honeypot.honeypot_stats_group,
                     )
                     action_mocks = (
                         evidence_status,
                         channel_list,
-                        errors_list,
-                        maintainer_show,
-                        maintainer_set,
                         stats,
                     )
                     for group in groups:
@@ -965,13 +833,6 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 expected_commands = {
-                    "honeypot_errors": "honeypot errors list",
-                    "honeypot_errors_maintainer_show": (
-                        "honeypot errors maintainer show"
-                    ),
-                    "honeypot_errors_maintainer_set": (
-                        "honeypot errors maintainer set"
-                    ),
                     "honeypot_stats": "honeypot stats show",
                 }
                 for attribute, qualified_name in expected_commands.items():
@@ -984,41 +845,13 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
 
                 cog = object.__new__(honeypot.Honeypot)
                 ctx = SimpleNamespace()
-                member = SimpleNamespace(id=123)
-                with (
-                    mock.patch.object(
-                        honeypot.diagnostics,
-                        "honeypot_errors",
-                        new=mock.AsyncMock(),
-                    ) as errors_list,
-                    mock.patch.object(
-                        honeypot.diagnostics,
-                        "honeypot_errors_maintainer_show",
-                        new=mock.AsyncMock(),
-                    ) as maintainer_show,
-                    mock.patch.object(
-                        honeypot.diagnostics,
-                        "honeypot_errors_maintainer_set",
-                        new=mock.AsyncMock(),
-                    ) as maintainer_set,
-                    mock.patch.object(
-                        honeypot.diagnostics,
-                        "honeypot_stats",
-                        new=mock.AsyncMock(),
-                    ) as stats,
-                ):
-                    await honeypot.Honeypot.honeypot_errors.callback(cog, ctx)
-                    await honeypot.Honeypot.honeypot_errors_maintainer_show.callback(
-                        cog, ctx
-                    )
-                    await honeypot.Honeypot.honeypot_errors_maintainer_set.callback(
-                        cog, ctx, member
-                    )
+                with mock.patch.object(
+                    honeypot.diagnostics,
+                    "honeypot_stats",
+                    new=mock.AsyncMock(),
+                ) as stats:
                     await honeypot.Honeypot.honeypot_stats.callback(cog, ctx)
 
-                errors_list.assert_awaited_once_with(cog, ctx)
-                maintainer_show.assert_awaited_once_with(cog, ctx)
-                maintainer_set.assert_awaited_once_with(cog, ctx, member)
                 stats.assert_awaited_once_with(cog, ctx)
 
     async def test_every_applicable_bare_group_sends_an_overview(self):

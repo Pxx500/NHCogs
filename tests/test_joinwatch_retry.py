@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 
 
 class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
@@ -184,7 +184,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                 bot.owner_ids = ()
                 bot.is_mod = mock.AsyncMock(return_value=False)
                 bot.is_admin = mock.AsyncMock(return_value=False)
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
                 cog._record_daily_stat = mock.AsyncMock()
 
@@ -243,7 +243,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
     async def test_successful_joinwatch_ban_records_daily_ban(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 current_config = SimpleNamespace(
                     all=mock.AsyncMock(return_value={"dry_run": False})
                 )
@@ -430,7 +430,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
     async def test_assignment_and_role_retries_are_scheduled_one_minute_later(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._case_store = honeypot.DetectionCaseStore(Path(directory) / "joinwatch.sqlite")
                 await asyncio.to_thread(cog._case_store.initialize)
                 guild = SimpleNamespace(id=100)
@@ -478,7 +478,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
     async def test_fifth_retry_is_the_last_and_a_sixth_is_not_scheduled(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._case_store = honeypot.DetectionCaseStore(Path(directory) / "joinwatch.sqlite")
                 await asyncio.to_thread(cog._case_store.initialize)
                 guild = SimpleNamespace(id=100)

@@ -121,6 +121,8 @@ class TicketControlsTests(unittest.IsolatedAsyncioTestCase):
         view = ticket_views.TicketControls(
             321,
             "opaque-ticket-token",
+            support=mock.Mock(report_operational_error=mock.AsyncMock()),
+            guild_id=10,
             claimed=claimed,
             actor_factory=actor_factory,
             **actions,
@@ -209,6 +211,9 @@ class TicketControlsTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertLogs(ticket_views.log, level="ERROR"):
             await view.children[1].callback(interaction)
+
+        view._support.report_operational_error.assert_awaited_once()
+        self.assertEqual(view._support.report_operational_error.await_args.kwargs["guild_id"], 10)
 
         interaction.followup.send.assert_awaited_once_with(
             ticket_views.presentation.COULD_NOT_COMPLETE_ACTION,

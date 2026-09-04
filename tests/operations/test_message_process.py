@@ -12,7 +12,7 @@ from importlib import import_module
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 
 
 class MessageProcessHandlerSeamTests(unittest.IsolatedAsyncioTestCase):
@@ -77,7 +77,7 @@ class MessageProcessHandlerSeamTests(unittest.IsolatedAsyncioTestCase):
                     handler_module = import_module("NHCogs.honeypot.operations.message_process")
                 except ModuleNotFoundError:
                     self.fail("message_process has no dedicated handler module")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
 
                 registered = cog._detection_operation_handlers.resolve(
                     honeypot.OperationType.MESSAGE_PROCESS
@@ -90,7 +90,7 @@ class MessageProcessHandlerSeamTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 handler_module = import_module("NHCogs.honeypot.operations.message_process")
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case_with_attachment(
                     honeypot, cog, now, with_operation=True
                 )
@@ -126,7 +126,7 @@ class MessageProcessHandlerSeamTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 handler_module = import_module("NHCogs.honeypot.operations.message_process")
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case_with_attachment(
                     honeypot, cog, now, with_operation=False
                 )

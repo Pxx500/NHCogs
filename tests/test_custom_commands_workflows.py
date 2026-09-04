@@ -743,9 +743,10 @@ class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_dashboard_send_failure_archives_thread_without_registering_session(self):
         reporter = SimpleNamespace(report=mock.AsyncMock())
+        support = SimpleNamespace(operational_errors=reporter)
         manager = workflows.WorkflowManager(
             SimpleNamespace(),
-            SimpleNamespace(operational_errors=reporter),
+            support,
             logger=mock.Mock(),
         )
         thread = SimpleNamespace(

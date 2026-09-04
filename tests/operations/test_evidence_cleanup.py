@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from tests.detection_case_fixtures import capture_attachment, publish_primary
-from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 
 
 class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -73,7 +73,7 @@ class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 handler = self._handler(honeypot, cog)
                 appended = self._append_case(honeypot, cog, now)
                 case_root = self._case_root(honeypot, cog, appended)
@@ -112,7 +112,7 @@ class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(name=name), TemporaryDirectory() as directory:
                 with _isolated_honeypot_modules(Path(directory)) as honeypot:
                     now = datetime.now(timezone.utc)
-                    cog = honeypot.Honeypot(_Bot())
+                    cog = honeypot.Honeypot(_Bot(), _operational_support())
                     handler = self._handler(honeypot, cog)
                     appended = self._append_case(honeypot, cog, now)
                     if published:
@@ -167,7 +167,7 @@ class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 handler = self._handler(honeypot, cog)
                 attachments = (
                     honeypot.NewAttachment(
@@ -252,7 +252,7 @@ class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 handler = self._handler(honeypot, cog)
                 definitions = (
                     ("fp.png", "image/png"),
@@ -343,7 +343,7 @@ class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 attachment = honeypot.NewAttachment(
                     0,
                     "proof.png",
@@ -422,7 +422,7 @@ class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 handler = self._handler(honeypot, cog)
                 attachment = honeypot.NewAttachment(
                     0,
@@ -478,7 +478,7 @@ class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 handler = self._handler(honeypot, cog)
                 appended = self._append_case(honeypot, cog, now)
                 cleanup = self._cleanup_operation(
@@ -509,7 +509,7 @@ class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 handler = self._handler(honeypot, cog)
                 appended = self._append_case(honeypot, cog, now)
                 cleanup = self._cleanup_operation(
@@ -547,7 +547,7 @@ class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 attachment = honeypot.NewAttachment(
                     0,
                     "proof.png",
@@ -603,7 +603,7 @@ class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 attachment = honeypot.NewAttachment(
                     0,
                     "proof.png",

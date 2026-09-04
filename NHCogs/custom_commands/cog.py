@@ -126,7 +126,7 @@ class CommandListView(discord.ui.View):
         _item: discord.ui.Item[CommandListView],
     ) -> None:
         if interaction.guild is not None:
-            await self._cog.nhmisc.report_operational_error(
+            await self._cog.support.report_operational_error(
                 guild_id=interaction.guild.id,
                 source="CustomCommands",
                 action="browse custom command list",
@@ -226,7 +226,7 @@ class RawResponseView(discord.ui.View):
         _item: discord.ui.Item[RawResponseView],
     ) -> None:
         if interaction.guild is not None:
-            await self._cog.nhmisc.report_operational_error(
+            await self._cog.support.report_operational_error(
                 guild_id=interaction.guild.id,
                 source="CustomCommands",
                 action="browse raw custom command responses",
@@ -329,7 +329,7 @@ class DeleteConfirmationView(discord.ui.View):
         _item: discord.ui.Item[DeleteConfirmationView],
     ) -> None:
         if interaction.guild is not None:
-            await self._cog.nhmisc.report_operational_error(
+            await self._cog.support.report_operational_error(
                 guild_id=interaction.guild.id,
                 source="CustomCommands",
                 action="delete custom command",
@@ -358,13 +358,13 @@ class CustomCommands(commands.Cog):
     def __init__(
         self,
         bot,
-        nhmisc,
+        support,
         *,
         catalog: CustomCommandCatalog | None = None,
     ):
         super().__init__()
         self.bot = bot
-        self.nhmisc = nhmisc
+        self.support = support
         self._data_root = cog_data_path(raw_name="CustomCommands")
         self.catalog = catalog or CustomCommandCatalog(
             self._data_root / "custom_commands.sqlite"
@@ -377,10 +377,10 @@ class CustomCommands(commands.Cog):
         self.runtime = CustomCommandRuntime(
             bot,
             self.catalog,
-            nhmisc.operational_errors,
+            support.operational_errors,
             logger=log,
         )
-        self.workflows = WorkflowManager(self.catalog, nhmisc, logger=log)
+        self.workflows = WorkflowManager(self.catalog, support, logger=log)
 
     async def cog_load(self) -> None:
         await self.catalog.initialize()
@@ -430,7 +430,7 @@ class CustomCommands(commands.Cog):
             return
         command = getattr(ctx, "command", None)
         action = getattr(command, "qualified_name", None) or "unknown command"
-        await self.nhmisc.report_operational_error(
+        await self.support.report_operational_error(
             guild_id=guild.id,
             source="CustomCommands",
             action=action,
@@ -441,9 +441,9 @@ class CustomCommands(commands.Cog):
 
     async def _log_moderation_action(self, guild, content: str) -> None:
         try:
-            await self.nhmisc.send_moderation_log(guild, content)
+            await self.support.send_moderation_log(guild, content)
         except Exception as error:
-            await self.nhmisc.report_operational_error(
+            await self.support.report_operational_error(
                 guild_id=guild.id,
                 source="CustomCommands",
                 action="publish custom command moderator log",
@@ -464,7 +464,7 @@ class CustomCommands(commands.Cog):
                 exc_info=(type(error), error, error.__traceback__),
             )
             return
-        await self.nhmisc.report_operational_error(
+        await self.support.report_operational_error(
             guild_id=guild.id,
             source="CustomCommands",
             action=action,
@@ -942,7 +942,7 @@ class CustomCommands(commands.Cog):
             await self.runtime.handle_message(message)
         except Exception as error:
             channel = message.channel
-            await self.nhmisc.report_operational_error(
+            await self.support.report_operational_error(
                 guild_id=message.guild.id,
                 source="CustomCommands",
                 action="process custom command message",

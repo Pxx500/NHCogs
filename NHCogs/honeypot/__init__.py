@@ -38,11 +38,12 @@ del AAA3A_utils
 from redbot.core.bot import Red
 from redbot.core.utils import get_end_user_data_statement
 
+from ..operational_support import ensure_operational_support
 from .honeypot import Honeypot
 
 __red_end_user_data_statement__ = get_end_user_data_statement(file=__file__)
 
 
 async def setup(bot: Red) -> None:
-    cog = Honeypot(bot)
+    cog = Honeypot(bot, await ensure_operational_support(bot))
     await bot.add_cog(cog)

@@ -102,6 +102,24 @@ class CachedLogChannel:
 
 
 class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ticket_error_without_guild_is_not_broadcast(self):
+        with TemporaryDirectory() as directory:
+            with isolated_githubtickets_modules(Path(directory)) as module:
+                cog = object.__new__(module.githubtickets.GitHubTickets)
+                cog.support = SimpleNamespace(
+                    report_global_error=mock.AsyncMock(),
+                    report_operational_error=mock.AsyncMock(),
+                )
+                for result in (None, RuntimeError("database unavailable")):
+                    cog.store = SimpleNamespace(get_ticket=mock.AsyncMock())
+                    if isinstance(result, Exception):
+                        cog.store.get_ticket.side_effect = result
+                    else:
+                        cog.store.get_ticket.return_value = result
+                    await cog._report_deadline_error(1, RuntimeError("private ticket detail"))
+                cog.support.report_global_error.assert_not_awaited()
+                cog.support.report_operational_error.assert_not_awaited()
+
     def setUp(self):
         self.temporary_directory = TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
@@ -110,7 +128,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_startup_restores_views_locally_then_starts_deadline_scheduler(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             bot = FakeBot(ready=False)
-            cog = modules.githubtickets.GitHubTickets(bot)
+            cog = modules.githubtickets.GitHubTickets(bot, mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             await cog.cog_load()
             now = datetime.now(timezone.utc)
             ticket = await cog.store.create_ticket(
@@ -193,7 +211,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_application_commands_are_guild_only_and_runtime_authorized(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             bot = FakeBot(ready=False)
-            cog = modules.githubtickets.GitHubTickets(bot)
+            cog = modules.githubtickets.GitHubTickets(bot, mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             self.assertFalse(hasattr(cog._new_ticket_command, "type"))
             self.assertFalse(hasattr(cog._developer_profile_slash_command, "type"))
             await cog.config.guild_from_id(10).set_raw(
@@ -311,7 +329,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
             )
             for command in previous_commands:
                 bot.tree.add_command(command)
-            cog = modules.githubtickets.GitHubTickets(bot)
+            cog = modules.githubtickets.GitHubTickets(bot, mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
 
             await cog.cog_load()
             try:
@@ -334,7 +352,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_raw_message_and_thread_deletions_cleanup_without_fetches(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             bot = FakeBot(ready=True)
-            cog = modules.githubtickets.GitHubTickets(bot)
+            cog = modules.githubtickets.GitHubTickets(bot, mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             await cog.cog_load()
             now = datetime.now(timezone.utc)
 
@@ -395,7 +413,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(thread.delete_calls, 1)
 
             second_id = await active(41, 51)
-            await cog.on_thread_delete(SimpleNamespace(id=51))
+            await cog.on_thread_delete(SimpleNamespace(id=51, guild=SimpleNamespace(id=10)))
             self.assertIsNone(await cog.store.get_ticket(second_id))
             self.assertEqual(channel.message.delete_calls, 1)
             self.assertEqual(bot.fetch_calls, 0)
@@ -424,7 +442,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_automatic_routing_uses_cached_members_and_persisted_history(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             bot = FakeBot(ready=False)
-            cog = modules.githubtickets.GitHubTickets(bot)
+            cog = modules.githubtickets.GitHubTickets(bot, mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             await cog.config.guild_from_id(10).set_raw(
                 "participant_role_ids",
                 value=[99],
@@ -502,7 +520,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_automatic_candidate_count_uses_strict_cached_policy_and_excludes_author(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             bot = FakeBot(ready=False)
-            cog = modules.githubtickets.GitHubTickets(bot)
+            cog = modules.githubtickets.GitHubTickets(bot, mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             await cog.config.guild_from_id(10).set_raw(
                 "participant_role_ids",
                 value=[99],
@@ -560,7 +578,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_member_remove_deletes_only_the_departed_guild_profile(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
-            cog = modules.githubtickets.GitHubTickets(FakeBot(ready=False))
+            cog = modules.githubtickets.GitHubTickets(FakeBot(ready=False), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             delete_profile = mock.AsyncMock(
                 side_effect=[None, RuntimeError("database unavailable")]
             )
@@ -585,7 +603,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_channel_role_and_guild_deletions_cleanup_only_their_scopes(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             bot = FakeBot(ready=False)
-            cog = modules.githubtickets.GitHubTickets(bot)
+            cog = modules.githubtickets.GitHubTickets(bot, mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             guild_config = cog.config.guild_from_id(10)
             await guild_config.set_raw("ticket_channel_id", value=20)
             await guild_config.set_raw("log_channel_id", value=20)
@@ -653,7 +671,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_deleted_log_channel_is_cleared_even_when_ticket_cleanup_fails(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             bot = FakeBot(ready=False)
-            cog = modules.githubtickets.GitHubTickets(bot)
+            cog = modules.githubtickets.GitHubTickets(bot, mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             guild_config = cog.config.guild_from_id(10)
             await guild_config.set_raw("log_channel_id", value=20)
             await cog.cog_load()
@@ -674,7 +692,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_deleted_channel_ticket_cleanup_runs_even_when_config_fails(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             bot = FakeBot(ready=False)
-            cog = modules.githubtickets.GitHubTickets(bot)
+            cog = modules.githubtickets.GitHubTickets(bot, mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             await cog.cog_load()
             now = datetime.now(timezone.utc)
             created = await cog.store.create_ticket(
@@ -710,7 +728,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_mark_finished_writes_the_exact_best_effort_audit_log(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             bot = FakeBot(ready=False)
-            cog = modules.githubtickets.GitHubTickets(bot)
+            cog = modules.githubtickets.GitHubTickets(bot, mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             await cog.cog_load()
             now = datetime.now(timezone.utc)
             created = await cog.store.create_ticket(
@@ -784,7 +802,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_mark_finished_logging_never_changes_the_action_result(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             bot = FakeBot(ready=False)
-            cog = modules.githubtickets.GitHubTickets(bot)
+            cog = modules.githubtickets.GitHubTickets(bot, mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             await cog.cog_load()
             now = datetime.now(timezone.utc)
 
@@ -850,7 +868,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_mark_finished_does_not_write_an_audit_log(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             bot = FakeBot(ready=False)
-            cog = modules.githubtickets.GitHubTickets(bot)
+            cog = modules.githubtickets.GitHubTickets(bot, mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             await cog.cog_load()
             now = datetime.now(timezone.utc)
             created = await cog.store.create_ticket(
@@ -902,7 +920,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_red_privacy_deletion_removes_authored_projection_and_reopens_assignments(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             bot = FakeBot(ready=False)
-            cog = modules.githubtickets.GitHubTickets(bot)
+            cog = modules.githubtickets.GitHubTickets(bot, mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             await cog.cog_load()
             now = datetime.now(timezone.utc)
             channel = CachedChannel()
@@ -989,7 +1007,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
             bot = FakeBot(ready=False)
             channel = CachedChannel()
             bot.channels = {20: channel}
-            cog = modules.githubtickets.GitHubTickets(bot)
+            cog = modules.githubtickets.GitHubTickets(bot, mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             await cog.store.initialize()
             now = datetime.now(timezone.utc)
             created = await cog.store.create_ticket(

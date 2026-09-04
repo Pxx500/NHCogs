@@ -15,6 +15,7 @@ from tests.harness import (
     _Bot,
     _Config,
     _isolated_honeypot_modules,
+    _operational_support,
     active_case,
 )
 
@@ -25,7 +26,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 bot = _Bot()
                 bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 await cog._message_registry.initialize()
                 message = self._message(honeypot, attachment_count=0)
                 message.author.bot = True
@@ -55,7 +56,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
     async def test_registry_observation_failure_does_not_stop_detection(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 message = self._message(honeypot, attachment_count=0)
                 self._configure_public_boundary(
                     cog,
@@ -80,7 +81,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 bot.owner_ids = set()
                 bot.is_mod = mock.AsyncMock(return_value=True)
                 bot.is_admin = mock.AsyncMock(return_value=False)
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog._observe_message = mock.AsyncMock()
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
@@ -113,7 +114,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 bot.owner_ids = set()
                 bot.is_mod = mock.AsyncMock(return_value=False)
                 bot.is_admin = mock.AsyncMock(return_value=False)
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 message = self._message(honeypot, attachment_count=0)
                 message.guild.get_member = lambda user_id: None
                 message.guild.fetch_member = mock.AsyncMock(
@@ -140,7 +141,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 bot.owner_ids = set()
                 bot.is_mod = mock.AsyncMock(return_value=False)
                 bot.is_admin = mock.AsyncMock(return_value=False)
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 message = self._message(honeypot, attachment_count=0)
                 message.guild.me = SimpleNamespace(top_role=10)
                 resolved_member = SimpleNamespace(
@@ -170,7 +171,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
     async def test_whitelist_bypass_records_case_without_deleting_honeypot_message(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(
                     honeypot, attachment_count=0, channel_id=9
@@ -213,7 +214,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
     async def test_admission_preserves_discord_attachment_description_and_spoiler(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1, channel_id=9)
                 message.attachments[0].description = "suspicious payment form"
@@ -253,7 +254,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
     async def test_concurrent_detection_preserves_message_arrival_order(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 first = self._message(
                     honeypot, attachment_count=0, message_id=300
@@ -321,7 +322,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
     async def test_next_message_is_admitted_while_previous_message_finishes(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 first = self._message(honeypot, attachment_count=0, message_id=300)
                 second = self._message(honeypot, attachment_count=0, message_id=301)
@@ -382,7 +383,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
     async def test_firstpost_claim_is_persisted_with_containment(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1)
                 signal = honeypot.DetectionSignal(
@@ -430,7 +431,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                crashed = honeypot.Honeypot(_Bot())
+                crashed = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(crashed._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1)
                 message.guild.get_member = lambda user_id: message.author
@@ -478,7 +479,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     {"message_process", "moderation_action", "review_publish"},
                 )
 
-                restarted = honeypot.Honeypot(_Bot())
+                restarted = honeypot.Honeypot(_Bot(), _operational_support())
                 await restarted._message_registry.initialize()
                 restarted.config = _Config()
                 restarted.config.register_guild(**config)
@@ -524,7 +525,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
 
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0)
                 signal = honeypot.DetectionSignal(
@@ -570,7 +571,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 config = {
                     "enabled": True,
@@ -623,7 +624,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0)
                 self._configure_public_boundary(
@@ -652,7 +653,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
     async def test_duplicate_delivery_does_not_repeat_cached_purge_or_stats(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0)
                 config = {
@@ -687,7 +688,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1)
                 self._configure_public_boundary(
@@ -723,7 +724,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 cog._firstpost_loaded_guilds.add(100)
                 message = self._message(honeypot, attachment_count=4)
@@ -754,7 +755,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
     async def test_firstpost_review_delete_failure_is_visible(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 cog._firstpost_loaded_guilds.add(100)
                 message = self._message(
@@ -791,7 +792,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
     async def test_none_signal_does_not_delete_without_stronger_signal(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 prior = self._message(
                     honeypot, attachment_count=1, message_id=299, channel_id=399
@@ -837,7 +838,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
     async def test_honeypot_none_still_deletes_outside_dry_run(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0, channel_id=999)
                 config = {
@@ -861,7 +862,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
     async def test_redelivery_resumes_durable_moderation_action_once(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1)
                 message.guild.get_member = lambda user_id: message.author
@@ -927,8 +928,8 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
     async def test_concurrent_firstpost_messages_have_one_action_owner(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
-                other = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
+                other = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 await asyncio.to_thread(other._case_store.initialize)
                 cog._firstpost_loaded_guilds.add(100)

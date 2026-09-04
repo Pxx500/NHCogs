@@ -74,7 +74,6 @@ class CogAssemblyContractTests(unittest.TestCase):
         self.assertNotIn("honeypot channel logs", command_names)
         for category in (
             "review",
-            "errors",
             "manual-evidence",
             "joinwatch",
             "bait-role",
@@ -250,9 +249,9 @@ class CogAssemblyContractTests(unittest.TestCase):
         a new split row updates them deliberately.
         """
         expected_counts = {
-            "channel_routing": 23,
+            "channel_routing": 22,
             "detection": 73,
-            "diagnostics": 12,
+            "diagnostics": 7,
             "gif_detector": 9,
             "imagescan": 21,
             "joinwatch": 3,

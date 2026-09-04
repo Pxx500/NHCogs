@@ -61,8 +61,8 @@ Save validates and writes the complete draft in one transaction. Cancel and the
 30-minute timeout make no changes. Completed threads are locked and archived.
 
 Missing arguments, invalid values, cooldowns, and other expected command failures use
-Red's normal command feedback. Unexpected failures are also reported through NHMisc's
-configured error destination and maintainer ping.
+Red's normal command feedback. Unexpected failures are also reported through the shared
+`[p]nhcogs errors` configuration and its maintainer ping.
 
 ## Cooldowns and deletion
 

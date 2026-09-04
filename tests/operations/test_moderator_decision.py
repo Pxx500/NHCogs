@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 
 
 class _GuildConfig:
@@ -101,7 +101,7 @@ class ModeratorDecisionHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = _Config({"dry_run": True})
                 appended = self._append_case(honeypot, cog, now)
                 claimed = self._claim_moderator_action(
@@ -138,7 +138,7 @@ class ModeratorDecisionHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config(
                     {"dry_run": False},
                     current_values={"dry_run": True},
@@ -185,7 +185,7 @@ class ModeratorDecisionHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config(
                     {
                         "automated_kick_fail_warning": True,
@@ -229,7 +229,7 @@ class ModeratorIgnoreTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = _Config({})
                 appended = ModeratorDecisionHandlerTests._append_case(
                     honeypot, cog, now, pending_attachment=True

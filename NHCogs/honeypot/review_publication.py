@@ -1925,7 +1925,7 @@ async def _case_review_moderation_interaction(
             OperationStatus.SUCCEEDED,
         }:
             await _case_review_rerender_safely(cog, case_id)
-            raise ValueError(persisted.last_error or "moderator action failed")
+            raise ValueError("Moderator action failed. Check the maintainer error channel.")
         return True
     except (KeyError, ValueError) as error:
         await _case_review_error(interaction, str(error))

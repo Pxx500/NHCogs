@@ -142,7 +142,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cog_check_guards_every_prefix_command_in_guilds(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
-            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             commands = modules.githubtickets.GitHubTickets.__cog_commands__
 
             for command in commands:
@@ -157,7 +157,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_bare_group_renders_the_accepted_overview_without_mentions(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
-            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             await cog.store.initialize()
             await cog.config.guild_from_id(42).set_raw(
                 "ticket_channel_id", value=100
@@ -219,7 +219,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_public_bare_group_hides_configuration_without_reading_it(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
-            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             ctx = FakeContext(private=False)
             ctx.command = _registered_command_tree(
                 modules.githubtickets.GitHubTickets,
@@ -251,7 +251,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_every_bare_subgroup_shows_its_commands(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             cog_type = modules.githubtickets.GitHubTickets
-            cog = cog_type(SimpleNamespace())
+            cog = cog_type(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             commands = tuple(cog_type.__cog_commands__)
             groups = [
                 command
@@ -301,7 +301,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_resource_commands_store_values_and_use_accepted_confirmations(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
-            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             await cog.store.initialize()
             ctx = FakeContext()
             class FakeTextChannel:
@@ -351,7 +351,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_channel_set_rejects_a_non_text_guild_channel_with_accepted_copy(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
-            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             await cog.store.initialize()
             ctx = FakeContext()
 
@@ -371,7 +371,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_configuration_errors_use_only_the_accepted_copy(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
-            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             await cog.store.initialize()
             ctx = FakeContext()
             role = SimpleNamespace(id=200, mention="@GT:NH Devs")

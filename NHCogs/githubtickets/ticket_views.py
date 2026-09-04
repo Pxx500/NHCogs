@@ -23,6 +23,8 @@ class TicketControls(discord.ui.View):
         ticket_id: int,
         public_token: str,
         *,
+        support,
+        guild_id: int,
         claimed: bool,
         actor_factory: ActorFactory,
         claim: TicketAction,
@@ -31,6 +33,8 @@ class TicketControls(discord.ui.View):
         mark_finished: TicketAction,
     ) -> None:
         super().__init__(timeout=None)
+        self._support = support
+        self._guild_id = guild_id
         self.ticket_id = ticket_id
         self.public_token = public_token
         self._actor_factory = actor_factory
@@ -59,7 +63,12 @@ class TicketControls(discord.ui.View):
                 try:
                     actor = self._actor_factory(interaction)
                     result = await selected_action(self.public_token, actor)
-                except Exception:
+                except Exception as error:
+                    await self._support.report_operational_error(
+                        guild_id=self._guild_id, source="GitHubTickets", action="ticket control", error=error,
+                        channel_id=getattr(interaction, "channel_id", None),
+                        message_id=getattr(getattr(interaction, "message", None), "id", None),
+                    )
                     log.exception("GitHub Tickets control callback failed")
                     await interaction.followup.send(
                         presentation.COULD_NOT_COMPLETE_ACTION,
@@ -72,3 +81,10 @@ class TicketControls(discord.ui.View):
 
             button.callback = callback
             self.add_item(button)
+
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, _item) -> None:
+        await self._support.report_operational_error(
+            guild_id=self._guild_id, source="GitHubTickets", action="ticket control feedback", error=error,
+            channel_id=getattr(interaction, "channel_id", None),
+        )

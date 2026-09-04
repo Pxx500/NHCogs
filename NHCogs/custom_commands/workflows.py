@@ -731,14 +731,14 @@ class WorkflowManager:
     def __init__(
         self,
         catalog: CustomCommandCatalog,
-        nhmisc: Any,
+        support: Any,
         *,
         logger: logging.Logger,
         session_timeout_seconds: float = SESSION_TIMEOUT_SECONDS,
     ):
         self.catalog = catalog
-        self._nhmisc = nhmisc
-        self._operational_errors = nhmisc.operational_errors
+        self._support = support
+        self._operational_errors = support.operational_errors
         self.logger = logger
         self.session_timeout_seconds = session_timeout_seconds
         self._sessions: dict[int, WorkflowSession] = {}
@@ -807,7 +807,7 @@ class WorkflowManager:
 
     async def log_moderation_action(self, guild: Any, content: str) -> None:
         try:
-            await self._nhmisc.send_moderation_log(guild, content)
+            await self._support.send_moderation_log(guild, content)
         except Exception as error:
             await self._report_failure(
                 guild_id=guild.id,

@@ -332,8 +332,11 @@ async def purge_cache_cleanup_loop(cog) -> None:
         await cog._message_registry.prune(
             datetime.now(timezone.utc) - timedelta(days=MESSAGE_REGISTRY_RETENTION_DAYS)
         )
-    except sqlite3.Error:
+    except sqlite3.Error as error:
         log.exception("Message registry retention prune failed")
+        await cog._support.report_global_error(
+            source="Honeypot", action="prune message registry", error=error
+        )
     _prune_purge_cache(cog)
 
 
@@ -684,17 +687,11 @@ async def _settle_detection_operation_success(
     elif context.snapshot is not None and (
         operation.attempts > 1 or outcome.resolve_failure_on_first_attempt
     ):
-        recovered = await asyncio.to_thread(
+        await asyncio.to_thread(
             cog._case_store.resolve_operational_failure,
             operation.operation_id,
             context.now,
         )
-        if recovered and operation.attempts > 1:
-            await cog._send_operational_alert(
-                context.snapshot.case.guild_id,
-                f"✅ Recovered: {operation.operation_type.value} succeeded after "
-                f"{operation.attempts} attempts.",
-            )
     elif outcome.role_was_added and context.snapshot is not None:
         guild = cog.bot.get_guild(context.snapshot.case.guild_id)
         if guild is not None:
@@ -1757,8 +1754,11 @@ async def _execute_action(
             moderator=moderator or guild.me,
             reason=reason,
         )
-    except Exception:
+    except Exception as error:
         log.exception("Failed to create modlog case in _execute_action")
+        await cog._support.report_operational_error(
+            guild_id=guild.id, source="Honeypot", action="create moderation log case", error=error
+        )
         modlog_failed = True
     label = _("The member has been kicked") if action == "kick" else _("The member has been banned")
     return ModerationEffectResult(

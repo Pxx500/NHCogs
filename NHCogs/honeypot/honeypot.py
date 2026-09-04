@@ -152,8 +152,9 @@ class Honeypot(Cog):
             f"Repository: {COG_REPO_URL}"
         )
 
-    def __init__(self, bot: Red) -> None:
+    def __init__(self, bot: Red, support) -> None:
         super().__init__(bot=bot)
+        self._support = support
 
         self.config: Config = Config.get_conf(
             self,
@@ -389,11 +390,14 @@ class Honeypot(Cog):
                 occurred_at,
                 metric,
             )
-        except Exception:
+        except Exception as error:
             log.exception(
                 "Failed to record daily statistic %s for guild %s",
                 metric,
                 guild.id,
+            )
+            await self._support.report_operational_error(
+                guild_id=guild.id, source="Honeypot", action="record daily statistic", error=error
             )
 
     # Detection seam: another cog module or a test reaches these through
@@ -691,8 +695,11 @@ class Honeypot(Cog):
                 moderator=moderator or guild.me,
                 reason=KICK_FAIL_WARNING_REASON,
             )
-        except Exception:
+        except Exception as error:
             log.exception("Failed to create kick-fail warning case for user %s in guild %s", user_id, guild.id)
+            await self._support.report_operational_error(
+                guild_id=guild.id, source="Honeypot", action="record kick-fail warning", error=error
+            )
             return (None, _("I couldn't create a warning case."))
         return (_("Warning applied: suspicious kick avoidance."), None)
 
@@ -973,8 +980,7 @@ class Honeypot(Cog):
             issues.append(daily_issue)
         return tuple(issues)
 
-    @staticmethod
-    def _observe_background_task(task: asyncio.Task, label: str) -> None:
+    def _observe_background_task(self, task: asyncio.Task, label: str) -> None:
         if task.cancelled():
             return
         try:
@@ -982,6 +988,7 @@ class Honeypot(Cog):
         except asyncio.CancelledError:
             return
         if error is not None:
+            self._support.schedule_error(source="Honeypot", action=label, error=error)
             log.error(
                 "%s failed",
                 label,
@@ -1083,32 +1090,10 @@ class Honeypot(Cog):
         await self.bot.wait_until_red_ready()
 
     async def _send_operational_alert(self, guild_id: int, content: str) -> None:
-        try:
-            guild = self.bot.get_guild(guild_id)
-            if guild is None:
-                return
-            raw_config = await self.config.guild_from_id(guild_id).all()
-            guild_settings = GuildSettings.from_mapping(raw_config)
-            channel = self._get_text_channel_or_thread(
-                guild, guild_settings.errors_channel
-            )
-            if channel is None:
-                return
-            maintainer_id = guild_settings.maintainer_id
-            if maintainer_id is None:
-                alert_content = content
-                allowed_mentions = discord.AllowedMentions.none()
-            else:
-                alert_content = f"<@{maintainer_id}> {content}"
-                allowed_mentions = discord.AllowedMentions(
-                    everyone=False,
-                    roles=False,
-                    users=[discord.Object(id=maintainer_id)],
-                    replied_user=False,
-                )
-            await channel.send(alert_content, allowed_mentions=allowed_mentions)
-        except Exception:
-            log.warning("Could not publish Honeypot operational alert", exc_info=True)
+        await self._support.send_technical_alert(guild_id, content)
+
+    async def cog_command_error(self, ctx, error) -> None:
+        await self._support.handle_command_error(ctx, error, source="Honeypot")
 
     async def _record_operational_failure(
         self,
@@ -1132,8 +1117,11 @@ class Honeypot(Cog):
                 case_id=case_id,
                 operation_id=operation_id,
             )
-        except Exception:
+        except Exception as error:
             log.exception("Could not persist Honeypot operational failure")
+            await self._support.report_operational_error(
+                guild_id=guild_id, source="Honeypot", action="record operational failure", error=error
+            )
             return
         slow_retry_started = (
             not terminal and attempts == DETECTION_FAST_RETRY_LIMIT + 1
@@ -1731,12 +1719,6 @@ class Honeypot(Cog):
     ) -> None:
         return await channel_routing.configure_single(self, ctx, "review", target)
 
-    @channels.command(name="errors")
-    async def channels_errors(
-        self, ctx: commands.Context, target: discord.TextChannel | discord.Thread = None
-    ) -> None:
-        return await channel_routing.configure_single(self, ctx, "errors", target)
-
     @channels.command(name="daily-stats")
     async def channels_daily_stats(
         self, ctx: commands.Context, target: discord.TextChannel | discord.Thread = None
@@ -2270,45 +2252,6 @@ class Honeypot(Cog):
     async def config_all(self, ctx: commands.Context) -> None:
         """Show a compact summary of all honeypot settings."""
         return await detection.config_all(self, ctx)
-
-    @honeypot.group(name="errors", invoke_without_command=True)
-    async def honeypot_errors_group(self, ctx: commands.Context) -> None:
-        """Inspect and acknowledge Honeypot operational failures."""
-        return await self._send_group_overview(ctx)
-
-    @honeypot_errors_group.command(name="list")
-    async def honeypot_errors(self, ctx: commands.Context) -> None:
-        """Show unacknowledged Honeypot operational failures."""
-        return await diagnostics.honeypot_errors(self, ctx)
-
-    @honeypot_errors_group.command(name="clear")
-    async def honeypot_errors_clear(self, ctx: commands.Context) -> None:
-        """Acknowledge all currently visible Honeypot operational failures."""
-        return await diagnostics.honeypot_errors_clear(self, ctx)
-
-    @honeypot_errors_group.group(name="maintainer", invoke_without_command=True)
-    async def honeypot_errors_maintainer_group(self, ctx: commands.Context) -> None:
-        """Configure the person pinged for operational failures."""
-        return await self._send_group_overview(ctx)
-
-    @honeypot_errors_maintainer_group.command(name="show")
-    async def honeypot_errors_maintainer_show(self, ctx: commands.Context) -> None:
-        """Show the person pinged for operational failures."""
-        return await diagnostics.honeypot_errors_maintainer_show(self, ctx)
-
-    @honeypot_errors_maintainer_group.command(name="set")
-    async def honeypot_errors_maintainer_set(
-        self,
-        ctx: commands.Context,
-        member: discord.Member,
-    ) -> None:
-        """Set the person pinged for operational failures."""
-        return await diagnostics.honeypot_errors_maintainer_set(self, ctx, member)
-
-    @honeypot_errors_maintainer_group.command(name="clear")
-    async def honeypot_errors_maintainer_clear(self, ctx: commands.Context) -> None:
-        """Stop pinging a maintainer for operational failures."""
-        return await diagnostics.honeypot_errors_maintainer_clear(self, ctx)
 
     # ─── stats ────────────────────────────────────────────────────────
 

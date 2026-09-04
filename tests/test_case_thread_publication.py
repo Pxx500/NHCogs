@@ -11,14 +11,14 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.detection_case_fixtures import capture_attachment
-from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 
 
 class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_case_publication_serializes_overlapping_renders(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 first_started = asyncio.Event()
                 release_first = asyncio.Event()
                 active = 0
@@ -56,7 +56,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_reclaimed_timeline_publication_adopts_same_nonce_message(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 now = datetime.now(timezone.utc)
                 appended = await asyncio.to_thread(
@@ -99,7 +99,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_orphan_compensation_is_retried_durably(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 now = datetime.now(timezone.utc)
                 appended = await asyncio.to_thread(
@@ -267,7 +267,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_long_timeline_message_preserves_fenced_content_source_and_attachment_details(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
                 source_url = "https://discord.com/channels/10/30/40"
@@ -394,7 +394,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_each_timeline_message_receives_one_case_control_panel(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
                 appended = await asyncio.to_thread(
@@ -468,7 +468,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_incremental_timeline_publish_fills_earlier_gaps_in_order(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
                 appended = await asyncio.to_thread(
@@ -518,7 +518,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_incremental_timeline_does_not_edit_older_published_messages(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
                 appended = await asyncio.to_thread(
@@ -586,7 +586,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 bot = _Bot()
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
                 appended = await asyncio.to_thread(
@@ -694,7 +694,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_thread_create_conflict_adopts_the_existing_attached_thread(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
                 appended = await asyncio.to_thread(
@@ -732,7 +732,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_thread_creation_failure_preserves_the_discord_error(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
                 appended = await asyncio.to_thread(
@@ -766,7 +766,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
                 appended = await asyncio.to_thread(
@@ -827,7 +827,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
                 attachments = tuple(
@@ -925,7 +925,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 attachments = tuple(
                     honeypot.NewAttachment(
@@ -1037,7 +1037,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_timeline_rerender_edits_known_message_without_fetching_it(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 appended = await asyncio.to_thread(
                     cog._case_store.append_message,
@@ -1078,7 +1078,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_timeline_rerender_replaces_a_missing_known_message(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 appended = await asyncio.to_thread(
                     cog._case_store.append_message,
@@ -1128,7 +1128,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
                 sizes = (14, 14, 11, 11)
@@ -1202,7 +1202,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
                 attachments = tuple(
@@ -1319,7 +1319,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_review_destination_requires_thread_publication_permissions(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 guild = SimpleNamespace(me=object())
                 permissions = SimpleNamespace(
                     view_channel=True,
@@ -1352,7 +1352,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_honeypot_source_does_not_require_send_messages(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 guild = SimpleNamespace(me=object())
                 permissions = SimpleNamespace(
                     view_channel=True,
@@ -1378,7 +1378,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_joinwatch_thread_requires_send_messages_in_threads(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 guild = SimpleNamespace(me=object())
                 permissions = SimpleNamespace(
                     view_channel=True,
@@ -1414,7 +1414,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 )
                 bot = _Bot()
                 bot.get_channel = lambda channel_id: None
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
 
                 resolved = await cog._fetch_text_channel_or_thread(guild, 123)
 
@@ -1433,7 +1433,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
                 )
                 bot = _Bot()
                 bot.get_channel = lambda channel_id: None
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
 
                 with self.assertRaises(honeypot.discord.Forbidden):
                     await cog._fetch_text_channel_or_thread(guild, 123)
@@ -1441,7 +1441,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_archived_case_thread_is_reopened_before_publication(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                honeypot.Honeypot(_Bot())
+                honeypot.Honeypot(_Bot(), _operational_support())
                 thread = SimpleNamespace(
                     archived=True,
                     locked=True,
@@ -1461,7 +1461,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_terminal_case_thread_is_locked_and_archived(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                honeypot.Honeypot(_Bot())
+                honeypot.Honeypot(_Bot(), _operational_support())
                 thread = SimpleNamespace(edit=mock.AsyncMock())
 
                 await honeypot.review_publication._finalize_detection_case_thread(thread)
@@ -1475,7 +1475,7 @@ class ThreadBackedCasePublicationTests(unittest.IsolatedAsyncioTestCase):
     async def test_terminal_timeline_does_not_duplicate_resolution_from_summary(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._case_store.initialize()
                 now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
                 appended = cog._case_store.append_message(

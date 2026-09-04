@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
-from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 
 
 class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -109,7 +109,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                 guild = object()
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 appended = self._append_case(honeypot, cog, now)
                 message_sequence = appended.message.sequence
                 operation = cog._case_store.ensure_operation(
@@ -216,7 +216,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 handler_module = import_module("NHCogs.honeypot.operations.review_publish")
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended, _operation, _claimed, context = (
                     self._claim_review_publish(honeypot, cog, now)
                 )
@@ -245,7 +245,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 handler_module = import_module("NHCogs.honeypot.operations.review_publish")
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended, _operation, _claimed, context = (
                     self._claim_review_publish(honeypot, cog, now)
                 )
@@ -278,7 +278,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 handler_module = import_module("NHCogs.honeypot.operations.review_publish")
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended, _operation, _claimed, context = (
                     self._claim_review_publish(honeypot, cog, now)
                 )
@@ -307,7 +307,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 handler_module = import_module("NHCogs.honeypot.operations.review_publish")
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended, operation, claimed, context = (
                     self._claim_review_publish(honeypot, cog, now)
                 )
@@ -352,7 +352,7 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 operations = import_module("NHCogs.honeypot.operations")
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended, operation, claimed, _context = (
                     self._claim_review_publish(honeypot, cog, now)
                 )

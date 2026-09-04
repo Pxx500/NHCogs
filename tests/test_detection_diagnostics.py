@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.detection_case_fixtures import capture_attachment
-from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 from tests.test_chatchart import load_nhmisc_module
 
 
@@ -64,7 +64,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._imagescan_store.initialize()
                 sample_file = (
                     cog._imagescan_files_path
@@ -127,31 +127,6 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(rows[0]["active"])
                 self.assertIsNone(rows[1]["file"])
                 self.assertFalse(rows[1]["active"])
-
-    async def test_honeypot_errors_uses_persisted_operation_value(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                occurred_at = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
-                cog._case_store.initialize()
-                cog._case_store.record_operational_failure(
-                    guild_id=10,
-                    source=honeypot.OperationType.ROLE_APPLY,
-                    summary="temporary",
-                    occurred_at=occurred_at,
-                )
-                ctx = SimpleNamespace(
-                    guild=SimpleNamespace(id=10),
-                    send=mock.AsyncMock(),
-                )
-
-                await cog.honeypot_errors(ctx)
-
-                ctx.send.assert_awaited_once_with(
-                    "**Honeypot operational errors:**\n"
-                    f"- <t:{int(occurred_at.timestamp())}:R> "
-                    "`role_apply` (active, x1): temporary"
-                )
 
     @staticmethod
     def _append_case(
@@ -230,7 +205,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         role_id = 41
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -258,7 +233,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_doctor_reports_missing_role_nt_role_and_channel(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -286,7 +261,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         role_id = 42
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -325,7 +300,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                         )
                     )
                 )
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -352,7 +327,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 bot = _Bot()
                 bot.get_cog = mock.Mock(return_value=None)
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -376,7 +351,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_doctor_command_output_matches_golden(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -414,7 +389,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                     send_messages=True,
                 )
                 review_setting = SimpleNamespace(set=mock.AsyncMock())
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(review_channel=review_setting)
                 )
@@ -445,7 +420,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 target.id = 55
                 target.mention = "#thread"
                 target.permissions_for = lambda member: permissions
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -487,7 +462,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 target.id = 55
                 target.mention = "#logs"
                 target.permissions_for = lambda member: permissions
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -545,7 +520,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await cog._init_imagescan_store()
                 source = data_path / "source.png"
                 source.write_bytes(
@@ -578,7 +553,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await cog._init_imagescan_store()
                 source = data_path / "source.png"
                 source.write_bytes(
@@ -653,7 +628,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await cog._init_imagescan_store()
                 payload = base64.b64decode(
                     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
@@ -681,7 +656,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_doctor_hides_healthy_operational_details(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -709,7 +684,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_doctor_reports_active_operational_failures(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._case_store.initialize()
                 cog._case_store.record_operational_failure(
                     guild_id=10,
@@ -740,7 +715,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_doctor_checks_evidence_directory_off_event_loop_thread(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -775,7 +750,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_doctor_cleans_probe_after_evidence_directory_read_failure(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -807,7 +782,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_doctor_paginates_every_visible_channel_permission_failure(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -849,7 +824,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_status_counts_open_cases_from_sqlite(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 self._append_case(honeypot, cog)
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
@@ -872,7 +847,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_review_config_reports_fixed_case_lifetime_not_stale_timeout(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -901,7 +876,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_status_reports_due_stale_and_outstanding_durable_work(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 now = datetime.now(timezone.utc)
                 due = self._append_case(
                     honeypot,
@@ -944,7 +919,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_forbidden_delete_is_visible_in_stats(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, cog)
                 cog._case_store.update_message_delete(
                     appended.case.case_id,
@@ -969,7 +944,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_terminal_case_is_not_current_failed_containment(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, cog)
                 cog._case_store.update_message_delete(
                     appended.case.case_id,
@@ -999,7 +974,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_resolved_case_copies_samples_before_evidence_cleanup(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 attachments = tuple(
                     honeypot.NewAttachment(
                         position,
@@ -1073,7 +1048,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_user_data_deletion_removes_cases_and_case_files(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await cog._message_registry.initialize()
                 target = self._append_case(honeypot, cog, user_id=20, message_id=40)
                 retained = self._append_case(honeypot, cog, user_id=21, message_id=41)
@@ -1109,7 +1084,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 bot = _Bot()
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 await cog._message_registry.initialize()
                 target = self._append_case(honeypot, cog, user_id=20, message_id=40)
                 cog._case_store.activate_projection_endpoint(
@@ -1146,7 +1121,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 bot = _Bot()
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 await cog._message_registry.initialize()
                 target = self._append_case(honeypot, cog, user_id=20, message_id=40)
                 cog._case_store.activate_projection_endpoint(
@@ -1211,7 +1186,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_user_data_deletion_retries_filesystem_before_removing_personal_rows(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await cog._message_registry.initialize()
                 target = self._append_case(honeypot, cog, user_id=20, message_id=40)
                 target_directory = (
@@ -1251,7 +1226,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_guild_data_deletion_removes_only_that_guilds_cases_and_files(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await cog._message_registry.initialize()
                 target = self._append_case(
                     honeypot, cog, guild_id=10, user_id=20, message_id=40

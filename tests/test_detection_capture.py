@@ -14,6 +14,7 @@ from tests.harness import (
     DetectionPipelineTestCase,
     _Bot,
     _isolated_honeypot_modules,
+    _operational_support,
     active_case,
     drain_background_work,
 )
@@ -23,7 +24,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
     async def test_cancelling_coordinator_cancels_inflight_attachment_reads(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1)
                 read_started = asyncio.Event()
@@ -69,7 +70,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
     async def test_capture_failures_count_failed_timeout_and_too_large_results(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=3)
                 message.attachments[0].read = mock.AsyncMock(
@@ -141,8 +142,8 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
     async def test_two_cogs_do_not_apply_an_aggregate_case_byte_limit(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                first_cog = honeypot.Honeypot(_Bot())
-                second_cog = honeypot.Honeypot(_Bot())
+                first_cog = honeypot.Honeypot(_Bot(), _operational_support())
+                second_cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(first_cog._case_store.initialize)
                 await asyncio.to_thread(second_cog._case_store.initialize)
                 first_message = self._message(honeypot, message_id=300, attachment_count=3)
@@ -204,7 +205,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
     async def test_capture_cleans_exact_file_when_actual_bytes_exceed_reservation(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1)
                 message.attachments[0].size = 4
@@ -239,7 +240,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1)
                 self._configure_public_boundary(
@@ -283,7 +284,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 capture_started = asyncio.Event()
                 release_capture = asyncio.Event()
@@ -338,8 +339,8 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                capture_cog = honeypot.Honeypot(_Bot())
-                deletion_cog = honeypot.Honeypot(_Bot())
+                capture_cog = honeypot.Honeypot(_Bot(), _operational_support())
+                deletion_cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(capture_cog._case_store.initialize)
                 await asyncio.to_thread(deletion_cog._case_store.initialize)
                 capture_started = asyncio.Event()
@@ -414,7 +415,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0)
                 payloads = (b"first-image", b"second-image")
@@ -499,7 +500,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
     async def test_text_projection_precedes_capture_and_evidence_refresh_follows_it(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1)
                 capture_started = asyncio.Event()
@@ -551,7 +552,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
     async def test_saturated_capture_queue_does_not_delay_delete_or_retry_deleted_source(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 cog._detection_case_capture_slots = asyncio.Semaphore(0)
                 message = self._message(honeypot, attachment_count=1)
@@ -600,7 +601,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
     async def test_unavailable_attachment_reservation_keeps_message_process_retryable(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1)
                 self._configure_public_boundary(
@@ -644,7 +645,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
     async def test_terminal_case_recovery_stops_retrying_pending_attachment_capture(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 try:
                     handler_module = import_module(
                         "NHCogs.honeypot.operations.message_process"
@@ -722,7 +723,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 self.assertEqual(
                     honeypot.review_publication.DETECTION_CAPTURE_DEADLINE_SECONDS, 20.0
                 )
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 gate = asyncio.Event()
                 fast = SimpleNamespace(
@@ -774,7 +775,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
     async def test_discord_accepted_attachment_is_not_rejected_by_fixed_local_limit(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1)
                 message.attachments[0].size = 25 * 1024 * 1024 + 1
@@ -808,7 +809,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
     async def test_all_discord_accepted_attachments_are_captured_without_case_byte_cap(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=5)
                 reads_started = 0
@@ -863,7 +864,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
     async def test_two_different_cases_start_attachment_capture_in_parallel(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 first_message = self._message(
                     honeypot, attachment_count=1, message_id=300
@@ -933,7 +934,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
     async def test_scan_setup_failure_does_not_prevent_delete_or_publication(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1)
                 self._configure_public_boundary(
@@ -964,7 +965,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=3)
                 self._configure_public_boundary(
@@ -1019,7 +1020,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
     async def test_too_large_capture_is_not_fallback_read_by_scanner(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 message = self._message(honeypot, attachment_count=1)
                 message.attachments[0].read = mock.AsyncMock(
                     side_effect=AssertionError("too-large evidence must not be read")
@@ -1041,7 +1042,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
     async def test_failed_or_timed_out_capture_is_not_fallback_read_by_scanner(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 for status in (
                     honeypot.detection_runtime.CaptureStatus.FAILED,
                     honeypot.detection_runtime.CaptureStatus.TIMEOUT,
@@ -1067,7 +1068,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
     async def test_image_processing_failure_is_recorded_for_moderators(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 message = self._message(honeypot, attachment_count=1)
                 message.attachments[0].read = mock.AsyncMock(return_value=b"broken image")
                 case_id = "case-image-processing-failure"
@@ -1103,7 +1104,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
     async def test_image_trigger_scans_and_persists_remaining_images(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 await cog._init_imagescan_store()
                 message = self._message(honeypot, attachment_count=6)
@@ -1170,7 +1171,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
     async def test_initial_scan_read_failure_is_retried_for_evidence_and_durable_scan(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 await cog._init_imagescan_store()
                 message = self._message(honeypot, attachment_count=2)
@@ -1234,7 +1235,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
     async def test_failed_admission_releases_initial_scan_batch(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 message = self._message(honeypot, attachment_count=1)
                 signal = honeypot.DetectionSignal(
                     "image",
