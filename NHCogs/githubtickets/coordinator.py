@@ -10,7 +10,6 @@ from datetime import datetime, timedelta, timezone
 from . import presentation
 from .models import (
     ActivePullRequestTicketExists,
-    Category,
     GitHubPullRequest,
     NewTicket,
     NextAction,
@@ -144,6 +143,9 @@ class TicketCoordinator:
                 return TicketResult(False, MISSING_TICKET_CHANNEL)
             now = self._clock()
             try:
+                labels = {label.strip().lower() for label in pull_request.labels}
+                categories = await self._store.list_categories(guild_id)
+                selected = tuple(category.category_id for category in categories if category.name in labels)
                 ticket = await self._store.create_ticket_for_pull_request(
                     NewTicket(
                         guild_id=guild_id,
@@ -151,10 +153,10 @@ class TicketCoordinator:
                         author_id=author_id,
                         pr_title=pull_request.title,
                         pr_url=pull_request.url,
-                        category_display="",
-                        routing_mode=RoutingMode.NONE,
+                        category_display=", ".join(sorted(labels - {"discord-ticket"})),
+                        routing_mode=RoutingMode.AUTOMATIC,
                         direct_target_id=None,
-                        category_ids=(),
+                        category_ids=selected,
                         created_at=now,
                         origin=TicketOrigin.GITHUB,
                     ),
@@ -166,7 +168,7 @@ class TicketCoordinator:
                 return TicketResult(False, CREATE_FAILED)
             return await self._project_created_ticket(
                 ticket,
-                routing_mode=RoutingMode.NONE,
+                routing_mode=RoutingMode.AUTOMATIC,
                 settings=settings,
                 now=now,
             )
@@ -193,15 +195,17 @@ class TicketCoordinator:
         settings = await self._get_settings(request.guild_id)
         if settings.ticket_channel_id is None:
             return TicketResult(False, MISSING_TICKET_CHANNEL)
-        effective_request = (
-            request
-            if pull_request is None
-            else replace(
+        effective_request = request
+        if pull_request is not None:
+            labels = {label.strip().lower() for label in pull_request.labels}
+            categories = await self._store.list_categories(request.guild_id)
+            effective_request = replace(
                 request,
                 pr_title=pull_request.title,
                 pr_url=pull_request.url,
+                category_display=", ".join(sorted(labels - {"discord-ticket"})),
+                category_ids=tuple(category.category_id for category in categories if category.name in labels),
             )
-        )
         validation_error = self._validate_request(effective_request)
         if validation_error is not None:
             return TicketResult(False, validation_error)
@@ -214,10 +218,10 @@ class TicketCoordinator:
                 author_id=actor.user_id,
                 pr_title=effective_request.pr_title,
                 pr_url=effective_request.pr_url,
-                category_display=request.category_display,
+                category_display=effective_request.category_display,
                 routing_mode=request.routing_mode,
                 direct_target_id=direct_target_id,
-                category_ids=request.category_ids,
+                category_ids=effective_request.category_ids,
                 created_at=now,
             )
             ticket = (
@@ -273,6 +277,8 @@ class TicketCoordinator:
                 settings,
                 now,
             )
+            if routing_mode is RoutingMode.AUTOMATIC and not ticket.category_ids:
+                next_action, next_action_at = None, None
             activated = await self._store.activate_ticket(
                 ticket.ticket_id,
                 message_id=message_id,
@@ -291,31 +297,10 @@ class TicketCoordinator:
                 await self._defer_cleanup_retry(ticket.ticket_id)
             return TicketResult(False, CREATE_FAILED)
 
-        activated_ticket = await self._store.get_ticket(ticket.ticket_id)
-        if activated_ticket is not None:
-            await self._send_pending_category_prompt(activated_ticket)
         if next_action_at is not None:
             self._wake_deadlines()
         return TicketResult(True)
 
-    async def _send_pending_category_prompt(self, ticket: Ticket) -> bool:
-        if ticket.category_prompt_retry_at is None:
-            return True
-        if ticket.thread_id is None:
-            return False
-        try:
-            await self._projection.prompt_categories(ticket, ticket.thread_id)
-        except Exception:
-            log.exception(
-                "GitHub Tickets category prompt failed for ticket %s",
-                ticket.ticket_id,
-            )
-            retry_at = self._clock() + timedelta(seconds=PROJECTION_RETRY_SECONDS)
-            if await self._store.defer_category_prompt(ticket.ticket_id, retry_at):
-                self._wake_deadlines()
-            return False
-        await self._store.acknowledge_category_prompt(ticket.ticket_id)
-        return True
 
     async def claim(self, ticket_id: int, actor: TicketActor) -> TicketResult:
         async with self._ticket_lock(ticket_id):
@@ -624,83 +609,28 @@ class TicketCoordinator:
                 return TicketResult(False, ACTION_FAILED)
             return TicketResult(True)
 
-    async def add_ticket_categories(
-        self,
-        ticket_id: int,
-        category_ids: tuple[int, ...],
-        actor: TicketActor,
-    ) -> TicketResult:
-        selected_ids = tuple(dict.fromkeys(category_ids))
-        if not selected_ids:
-            return TicketResult(False, MISSING_AUTOMATIC_CATEGORIES)
+    async def sync_pull_request_labels(self, repository_id: int, pr_number: int) -> TicketResult:
+        pull_request = await self._store.get_pull_request(repository_id, pr_number)
+        if pull_request is None or pull_request.current_ticket_id is None:
+            return TicketResult(True)
+        ticket_id = pull_request.current_ticket_id
         async with self._ticket_lock(ticket_id):
             ticket = await self._store.get_ticket(ticket_id)
-            if ticket is None or ticket.state not in (
-                TicketState.OPEN,
-                TicketState.CLAIMED,
-            ):
-                return TicketResult(False, INACTIVE_TICKET)
-            if not actor.can_participate:
-                return TicketResult(False, PERMISSION_DENIED)
-            categories = await self._store.list_categories(ticket.guild_id)
-            selected = set(selected_ids)
-            ordered_categories = tuple(
-                category for category in categories if category.category_id in selected
-            )
-            if len(ordered_categories) != len(selected_ids):
-                return TicketResult(False, presentation.CATEGORY_NO_LONGER_EXISTS)
-            ordered_ids = tuple(category.category_id for category in ordered_categories)
-            settled = self._settled_category_result(ticket, ordered_ids)
-            if settled is not None:
-                return settled
-            return await self._start_ticket_routing(ticket, ordered_categories)
-
-    @staticmethod
-    def _settled_category_result(
-        ticket: Ticket,
-        category_ids: tuple[int, ...],
-    ) -> TicketResult | None:
-        if ticket.routing_mode is RoutingMode.AUTOMATIC:
-            if ticket.category_ids == category_ids:
+            if ticket is None or ticket.state not in (TicketState.OPEN, TicketState.CLAIMED):
                 return TicketResult(True)
-            return TicketResult(False, INACTIVE_TICKET)
-        if (
-            ticket.origin is not TicketOrigin.GITHUB
-            or ticket.routing_mode is not RoutingMode.NONE
-        ):
-            return TicketResult(False, INACTIVE_TICKET)
-        return None
-
-    async def _start_ticket_routing(
-        self,
-        ticket: Ticket,
-        categories: tuple[Category, ...],
-    ) -> TicketResult:
-        settings = await self._get_settings(ticket.guild_id)
-        now = self._clock()
-        _, _, next_action_at = self._creation_schedule(
-            RoutingMode.AUTOMATIC,
-            settings,
-            now,
-        )
-        if next_action_at is None:
-            raise RuntimeError("automatic routing must have a deadline")
-        try:
-            current = await self._store.start_automatic_routing(
-                ticket.ticket_id,
-                category_ids=tuple(category.category_id for category in categories),
-                category_display=", ".join(category.name for category in categories),
-                next_action_at=next_action_at,
-                updated_at=now,
-            )
-        except ValueError:
-            return TicketResult(False, presentation.CATEGORY_NO_LONGER_EXISTS)
-        if current is None:
-            return TicketResult(False, INACTIVE_TICKET)
-        result = await self._edit_after_transition(current)
-        if result.success and current.next_action_at is not None:
+            labels = {label.strip().lower() for label in pull_request.labels}
+            categories = await self._store.list_categories(ticket.guild_id)
+            selected = tuple(category.category_id for category in categories if category.name in labels)
+            display = ", ".join(sorted(labels - {"discord-ticket"}))
+            if selected == ticket.category_ids and display == ticket.category_display:
+                return TicketResult(True)
+            current = await self._store.sync_ticket_labels(ticket_id, selected, display, self._clock())
+            if current is None:
+                return TicketResult(True)
+            result = await self._edit_after_transition(current)
             self._wake_deadlines()
-        return result
+            return result
+
 
     async def keep_draft_ticket(
         self,
@@ -1018,9 +948,6 @@ class TicketCoordinator:
             return TicketResult(False, ACTION_FAILED)
         if not activated:
             return TicketResult(False, ACTION_FAILED)
-        activated_ticket = await self._store.get_ticket(ticket.ticket_id)
-        if activated_ticket is not None:
-            await self._send_pending_category_prompt(activated_ticket)
         if next_action_at is not None:
             self._wake_deadlines()
         return TicketResult(True)
@@ -1050,15 +977,6 @@ class TicketCoordinator:
                 TicketState.FINISHING,
             ):
                 return await self._recover_projection_cleanup_locked(ticket_id)
-            if (
-                ticket is not None
-                and ticket.category_prompt_retry_at is not None
-                and ticket.category_prompt_retry_at <= self._clock()
-            ):
-                await self._send_pending_category_prompt(ticket)
-                ticket = await self._store.get_ticket(ticket_id)
-                if ticket is None:
-                    return TicketResult(False, INACTIVE_TICKET)
             projection_sync = await self._store.get_projection_sync_ticket(ticket_id)
             if projection_sync is not None:
                 result = await self._edit_after_transition(projection_sync)
@@ -1106,11 +1024,15 @@ class TicketCoordinator:
                 if reservation is not None:
                     self._locally_reserved_pings.add(ticket.ticket_id)
         if reservation is None:
-            await self._store.exhaust_due_routing(
+            changed = await self._store.exhaust_due_routing(
                 ticket.ticket_id,
                 next_action,
                 now,
             )
+            if changed:
+                current = await self._store.get_ticket(ticket.ticket_id)
+                if current is not None:
+                    return await self._edit_after_transition(current)
             return TicketResult(True)
         return await self._settle_due_ping(ticket, reservation, settings, now)
 
@@ -1222,6 +1144,8 @@ class TicketCoordinator:
             automatic = False
             response_seconds = settings.direct_response_seconds
         else:
+            if not ticket.category_ids:
+                return None
             candidate = select_reviewer(await self._get_candidates(ticket))
             if candidate is None:
                 return None
@@ -1373,15 +1297,6 @@ class TicketCoordinator:
 
     @staticmethod
     def _validate_request(request: TicketRequest) -> str | None:
-        if (
-            request.routing_mode
-            in (
-                RoutingMode.AUTOMATIC,
-                RoutingMode.DIRECT_AUTOMATIC,
-            )
-            and not request.category_ids
-        ):
-            return MISSING_AUTOMATIC_CATEGORIES
         if (
             request.routing_mode
             in (

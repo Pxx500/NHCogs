@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import unittest
 from contextlib import closing
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -411,6 +412,15 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
             self.pull_request(updated_at=self.now + timedelta(minutes=3)),
         )
         self.assertNotEqual(replacement.ticket_id, ticket.ticket_id)
+
+    async def test_stale_creation_cannot_override_a_newer_closed_pull_request(self):
+        pull_request = self.pull_request()
+        await self.store.observe_pull_request(replace(
+            pull_request, open=False, github_updated_at=pull_request.github_updated_at + timedelta(seconds=10),
+        ))
+        with self.assertRaises(ValueError):
+            await self.store.create_ticket_for_pull_request(self.new_ticket(), pull_request)
+        self.assertEqual(await self.store.list_active_tickets(), ())
 
     async def test_ticket_creation_requires_authority_for_each_origin(self):
         invalid_discord = models.NewTicket(

@@ -44,8 +44,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
 
-SCHEMA_VERSION = 4
-MAX_CATEGORIES = 25
+SCHEMA_VERSION = 5
+MAX_CATEGORIES = 50
 MAX_CATEGORY_NAME_LENGTH = 100
 MAX_DELIVERY_BODY_BYTES = 1_048_576
 MAX_ERROR_SUMMARY_LENGTH = 500
@@ -84,6 +84,7 @@ def _decode_category(row: sqlite3.Row) -> Category:
         guild_id=int(row["guild_id"]),
         name=str(row["name"]),
         created_at=_deserialize_datetime(str(row["created_at"])),
+        classification=str(row["classification"]),
     )
 
 
@@ -173,9 +174,6 @@ def _decode_ticket(connection: sqlite3.Connection, row: sqlite3.Row) -> Ticket:
         category_ids=category_ids,
         public_token=str(row["public_token"]),
         origin=TicketOrigin(str(row["origin"])),
-        category_prompt_retry_at=_deserialize_optional_datetime(
-            row["category_prompt_retry_at"]
-        ),
     )
 
 
@@ -699,11 +697,20 @@ def _use_delivery_cursors(connection: sqlite3.Connection) -> None:
     )
 
 
+def _add_label_catalog(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "ALTER TABLE categories ADD COLUMN classification TEXT NOT NULL "
+        "DEFAULT 'reviewer' CHECK (classification IN ('pending', 'reviewer', 'pr_only'))"
+    )
+    connection.execute("ALTER TABLE categories ADD COLUMN notified INTEGER NOT NULL DEFAULT 0")
+
+
 MIGRATIONS = (
     _create_schema,
     _migrate_to_github_durable_work,
     _add_category_prompt_retry,
     _use_delivery_cursors,
+    _add_label_catalog,
 )
 
 
@@ -736,6 +743,84 @@ class GitHubTicketsStore:
                 normalized,
                 created_at,
             )
+
+    async def discover_labels(self, guild_id: int, names: Iterable[str], now: datetime) -> None:
+        normalized = tuple(dict.fromkeys(_normalize_category_name(name) for name in names))
+        async with self._lock:
+            await asyncio.to_thread(self._discover_labels_sync, guild_id, normalized, now)
+
+    def _discover_labels_sync(self, guild_id: int, names: tuple[str, ...], now: datetime) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.executemany(
+                "INSERT OR IGNORE INTO categories (guild_id, name, created_at, classification) "
+                "VALUES (?, ?, ?, ?)",
+                ((guild_id, name, _serialize_datetime(now),
+                  "pr_only" if name == "discord-ticket" else "pending") for name in names),
+            )
+
+    async def list_labels(self, guild_id: int) -> tuple[Category, ...]:
+        async with self._lock:
+            return await asyncio.to_thread(self._list_labels_sync, guild_id, False)
+
+    async def labels_needing_notification(self, guild_id: int) -> tuple[Category, ...]:
+        async with self._lock:
+            return await asyncio.to_thread(self._list_labels_sync, guild_id, True)
+
+    def _list_labels_sync(self, guild_id: int, unnotified: bool) -> tuple[Category, ...]:
+        condition = " AND classification = 'pending' AND notified = 0" if unnotified else ""
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                f"SELECT * FROM categories WHERE guild_id = ?{condition} ORDER BY name, category_id",
+                (guild_id,),
+            ).fetchall()
+        return tuple(_decode_category(row) for row in rows)
+
+    async def acknowledge_labels(self, guild_id: int, category_ids: tuple[int, ...]) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._acknowledge_labels_sync, guild_id, category_ids)
+
+    def _acknowledge_labels_sync(self, guild_id: int, category_ids: tuple[int, ...]) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.executemany(
+                "UPDATE categories SET notified = 1 WHERE guild_id = ? AND category_id = ?",
+                ((guild_id, category_id) for category_id in category_ids),
+            )
+
+    async def classify_label(self, guild_id: int, name: str, classification: str) -> None:
+        if classification not in ("reviewer", "pr_only"):
+            raise ValueError("invalid label classification")
+        normalized = _normalize_category_name(name)
+        if normalized == "discord-ticket" and classification == "reviewer":
+            raise ValueError("discord-ticket controls ticket creation")
+        async with self._lock:
+            await asyncio.to_thread(self._classify_label_sync, guild_id, normalized, classification)
+
+    def _classify_label_sync(self, guild_id: int, name: str, classification: str) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM categories WHERE guild_id = ? AND name = ?", (guild_id, name),
+            ).fetchone()
+            if row is None:
+                raise InvalidCategoryName(name)
+            if classification == "reviewer" and row["classification"] != "reviewer":
+                count = connection.execute(
+                    "SELECT COUNT(*) FROM categories WHERE guild_id = ? AND classification = 'reviewer'",
+                    (guild_id,),
+                ).fetchone()[0]
+                if count >= MAX_CATEGORIES:
+                    raise CategoryLimitReached(guild_id)
+            connection.execute(
+                "UPDATE categories SET classification = ?, notified = 1 WHERE category_id = ?",
+                (classification, row["category_id"]),
+            )
+            if classification == "pr_only":
+                connection.execute("DELETE FROM profile_categories WHERE category_id = ?", (row["category_id"],))
+                connection.execute(
+                    "UPDATE profiles SET automatic_pings = 0 WHERE guild_id = ? AND NOT EXISTS "
+                    "(SELECT 1 FROM profile_categories pc WHERE pc.guild_id = profiles.guild_id "
+                    "AND pc.user_id = profiles.user_id)", (guild_id,),
+                )
 
     async def list_categories(self, guild_id: int) -> tuple[Category, ...]:
         async with self._lock:
@@ -1085,24 +1170,56 @@ class GitHubTicketsStore:
                 updated_at,
             )
 
-    async def start_automatic_routing(
-        self,
-        ticket_id: int,
-        *,
-        category_ids: tuple[int, ...],
-        category_display: str,
-        next_action_at: datetime,
-        updated_at: datetime,
+    async def sync_ticket_labels(
+        self, ticket_id: int, category_ids: tuple[int, ...], display: str, now: datetime,
     ) -> Ticket | None:
         async with self._lock:
-            return await asyncio.to_thread(
-                self._start_automatic_routing_sync,
-                ticket_id,
-                category_ids,
-                category_display,
-                next_action_at,
-                updated_at,
+            return await asyncio.to_thread(self._sync_ticket_labels_sync, ticket_id, category_ids, display, now)
+
+    def _sync_ticket_labels_sync(
+        self, ticket_id: int, category_ids: tuple[int, ...], display: str, now: datetime,
+    ) -> Ticket | None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM tickets WHERE ticket_id = ?", (ticket_id,)).fetchone()
+            if row is None or row["state"] not in ("open", "claimed"):
+                return None
+            ticket = _decode_ticket(connection, row)
+            selected = self._validate_ticket_category_ids(connection, ticket.guild_id, category_ids)
+            if ticket.category_ids == selected and ticket.category_display == display:
+                return ticket
+            mode = ticket.routing_mode
+            next_action, next_at = ticket.next_action, ticket.next_action_at
+            if ticket.state is TicketState.CLAIMED or mode is RoutingMode.NONE or (
+                mode is RoutingMode.AUTOMATIC and not selected
+            ):
+                next_action, next_at = None, None
+            elif mode is RoutingMode.AUTOMATIC and ticket.current_target_id is None and ticket.pending_target_id is None:
+                next_action, next_at = NextAction.AUTOMATIC_PING, now
+            connection.execute("DELETE FROM ticket_categories WHERE ticket_id = ?", (ticket_id,))
+            connection.executemany(
+                "INSERT INTO ticket_categories (ticket_id, category_id) VALUES (?, ?)",
+                ((ticket_id, category_id) for category_id in selected),
             )
+            timestamp = _serialize_datetime(now)
+            connection.execute(
+                """UPDATE tickets SET category_display = ?, routing_mode = ?,
+                    next_action = ?, next_action_at = ?,
+                    projection_sync_at = ?, updated_at = ?, transition_version = transition_version + 1
+                    WHERE ticket_id = ?""",
+                (display, mode.value, next_action.value if next_action else None,
+                 _serialize_optional_datetime(next_at), timestamp, timestamp, ticket_id),
+            )
+            if mode is RoutingMode.NONE or (mode is RoutingMode.AUTOMATIC and not selected):
+                connection.execute(
+                    """UPDATE tickets SET current_target_id = NULL, pending_target_id = NULL,
+                        pending_ping_automatic = NULL, pending_ping_reserved_at = NULL,
+                        pending_response_deadline = NULL WHERE ticket_id = ?""", (ticket_id,),
+                )
+            return _decode_ticket(connection, connection.execute(
+                "SELECT * FROM tickets WHERE ticket_id = ?", (ticket_id,),
+            ).fetchone())
+
 
     async def record_ticket_message(
         self,
@@ -1190,27 +1307,7 @@ class GitHubTicketsStore:
                 retry_at,
             )
 
-    async def acknowledge_category_prompt(
-        self,
-        ticket_id: int,
-    ) -> bool:
-        async with self._lock:
-            return await asyncio.to_thread(
-                self._acknowledge_category_prompt_sync,
-                ticket_id,
-            )
 
-    async def defer_category_prompt(
-        self,
-        ticket_id: int,
-        retry_at: datetime,
-    ) -> bool:
-        async with self._lock:
-            return await asyncio.to_thread(
-                self._defer_category_prompt_sync,
-                ticket_id,
-                retry_at,
-            )
 
     async def get_ticket_by_message_id(self, message_id: int) -> Ticket | None:
         async with self._lock:
@@ -1589,7 +1686,7 @@ class GitHubTicketsStore:
                     raise CategoryAlreadyExists(name)
                 count = int(
                     connection.execute(
-                        "SELECT COUNT(*) FROM categories WHERE guild_id = ?",
+                        "SELECT COUNT(*) FROM categories WHERE guild_id = ? AND classification = 'reviewer'",
                         (guild_id,),
                     ).fetchone()[0]
                 )
@@ -1617,7 +1714,7 @@ class GitHubTicketsStore:
     def _list_categories_sync(self, guild_id: int) -> tuple[Category, ...]:
         with closing(self._connect()) as connection:
             rows = connection.execute(
-                "SELECT * FROM categories WHERE guild_id = ? ORDER BY name, category_id",
+                "SELECT * FROM categories WHERE guild_id = ? AND classification = 'reviewer' ORDER BY name, category_id",
                 (guild_id,),
             ).fetchall()
         return tuple(_decode_category(row) for row in rows)
@@ -1719,7 +1816,7 @@ class GitHubTicketsStore:
                 valid_category_ids = {
                     int(row["category_id"])
                     for row in connection.execute(
-                        "SELECT category_id FROM categories WHERE guild_id = ?",
+                        "SELECT category_id FROM categories WHERE guild_id = ? AND classification = 'reviewer'",
                         (guild_id,),
                     )
                 }
@@ -2056,7 +2153,7 @@ class GitHubTicketsStore:
         valid_category_ids = {
             int(row["category_id"])
             for row in connection.execute(
-                "SELECT category_id FROM categories WHERE guild_id = ?",
+                "SELECT category_id FROM categories WHERE guild_id = ? AND classification = 'reviewer'",
                 (guild_id,),
             )
         }
@@ -2202,6 +2299,8 @@ class GitHubTicketsStore:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 observed = self._upsert_pull_request(connection, pull_request)
+                if not observed.open or observed.draft:
+                    raise ValueError("pull request is not ready for review")
                 if observed.current_ticket_id is not None:
                     raise ActivePullRequestTicketExists(
                         (pull_request.repository_id, pull_request.pr_number)
@@ -2671,10 +2770,6 @@ class GitHubTicketsStore:
             UPDATE tickets
             SET message_id = ?, thread_id = ?, state = 'open',
                 protection_until = ?, next_action = ?, next_action_at = ?,
-                category_prompt_retry_at = CASE
-                    WHEN origin = 'github' THEN ?
-                    ELSE NULL
-                END,
                 projection_sync_at = NULL, updated_at = ?,
                 transition_version = transition_version + 1
             WHERE ticket_id = ? AND state = 'creating'
@@ -2686,88 +2781,11 @@ class GitHubTicketsStore:
                 next_action.value if next_action is not None else None,
                 _serialize_optional_datetime(next_action_at),
                 _serialize_datetime(updated_at),
-                _serialize_datetime(updated_at),
                 ticket_id,
             ),
         )
         return cursor > 0
 
-    def _start_automatic_routing_sync(
-        self,
-        ticket_id: int,
-        category_ids: tuple[int, ...],
-        category_display: str,
-        next_action_at: datetime,
-        updated_at: datetime,
-    ) -> Ticket | None:
-        with closing(self._connect()) as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                row = connection.execute(
-                    """
-                    SELECT guild_id FROM tickets
-                    WHERE ticket_id = ? AND state IN ('open', 'claimed')
-                        AND routing_mode = 'none'
-                    """,
-                    (ticket_id,),
-                ).fetchone()
-                if row is None:
-                    connection.rollback()
-                    return None
-                selected_category_ids = self._validate_ticket_category_ids(
-                    connection,
-                    int(row["guild_id"]),
-                    category_ids,
-                )
-
-                connection.execute(
-                    "DELETE FROM ticket_categories WHERE ticket_id = ?",
-                    (ticket_id,),
-                )
-                connection.executemany(
-                    """
-                    INSERT INTO ticket_categories (ticket_id, category_id)
-                    VALUES (?, ?)
-                    """,
-                    (
-                        (ticket_id, category_id)
-                        for category_id in selected_category_ids
-                    ),
-                )
-                timestamp = _serialize_datetime(updated_at)
-                connection.execute(
-                    """
-                    UPDATE tickets
-                    SET category_display = ?, routing_mode = 'automatic',
-                        category_prompt_retry_at = NULL,
-                        next_action = CASE state
-                            WHEN 'open' THEN 'automatic_ping'
-                            ELSE NULL
-                        END,
-                        next_action_at = CASE state WHEN 'open' THEN ? ELSE NULL END,
-                        projection_sync_at = ?, updated_at = ?,
-                        transition_version = transition_version + 1
-                    WHERE ticket_id = ? AND state IN ('open', 'claimed')
-                        AND routing_mode = 'none'
-                    """,
-                    (
-                        category_display,
-                        _serialize_datetime(next_action_at),
-                        timestamp,
-                        timestamp,
-                        ticket_id,
-                    ),
-                )
-                updated = connection.execute(
-                    "SELECT * FROM tickets WHERE ticket_id = ?",
-                    (ticket_id,),
-                ).fetchone()
-                routed = _decode_ticket(connection, updated)
-                connection.commit()
-                return routed
-            except Exception:
-                connection.rollback()
-                raise
 
     def _record_ticket_message_sync(
         self,
@@ -2917,37 +2935,7 @@ class GitHubTicketsStore:
         )
         return changed > 0
 
-    def _acknowledge_category_prompt_sync(
-        self,
-        ticket_id: int,
-    ) -> bool:
-        changed = self._execute_update(
-            """
-            UPDATE tickets
-            SET category_prompt_retry_at = NULL
-            WHERE ticket_id = ? AND category_prompt_retry_at IS NOT NULL
-            """,
-            (ticket_id,),
-        )
-        return changed > 0
 
-    def _defer_category_prompt_sync(
-        self,
-        ticket_id: int,
-        retry_at: datetime,
-    ) -> bool:
-        changed = self._execute_update(
-            """
-            UPDATE tickets
-            SET category_prompt_retry_at = ?
-            WHERE ticket_id = ? AND category_prompt_retry_at IS NOT NULL
-            """,
-            (
-                _serialize_datetime(retry_at),
-                ticket_id,
-            ),
-        )
-        return changed > 0
 
     def _get_ticket_by_projection_id_sync(
         self,
@@ -3823,10 +3811,6 @@ class GitHubTicketsStore:
                     SELECT projection_sync_at AS deadline
                     FROM tickets
                     WHERE projection_sync_at IS NOT NULL
-                    UNION ALL
-                    SELECT category_prompt_retry_at AS deadline
-                    FROM tickets
-                    WHERE category_prompt_retry_at IS NOT NULL
                 )
                 """
             ).fetchone()
@@ -3841,19 +3825,14 @@ class GitHubTicketsStore:
                     state = 'open' AND next_action_at <= ?
                 ) OR (
                     projection_sync_at <= ?
-                ) OR (
-                    category_prompt_retry_at <= ?
                 )
                 ORDER BY CASE
-                    WHEN category_prompt_retry_at IS NOT NULL
-                        THEN category_prompt_retry_at
                     WHEN projection_sync_at IS NOT NULL
                         THEN projection_sync_at
                     ELSE next_action_at
                 END, ticket_id
                 """,
                 (
-                    _serialize_datetime(now),
                     _serialize_datetime(now),
                     _serialize_datetime(now),
                 ),

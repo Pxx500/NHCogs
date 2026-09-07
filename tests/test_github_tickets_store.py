@@ -54,6 +54,21 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
         )
         self.now = datetime(2026, 8, 26, 10, 0, tzinfo=timezone.utc)
 
+    async def test_discovered_labels_need_a_durable_reviewer_decision(self):
+        await self.store.initialize()
+        await self.store.discover_labels(42, ("Mixins", "bug", "mixins"), self.now)
+        self.assertEqual(await self.store.list_categories(42), ())
+        labels = await self.store.list_labels(42)
+        self.assertEqual([label.name for label in labels], ["bug", "mixins"])
+        self.assertTrue(all(label.classification == "pending" for label in labels))
+        await self.store.classify_label(42, "mixins", "reviewer")
+        await self.store.classify_label(42, "bug", "pr_only")
+        await self.store.discover_labels(42, ("bug", "mixins", "new"), self.now)
+        reloaded = store_module.GitHubTicketsStore(self.path)
+        await reloaded.initialize()
+        self.assertEqual([label.name for label in await reloaded.list_categories(42)], ["mixins"])
+        self.assertEqual([label.name for label in await reloaded.labels_needing_notification(42)], ["new"])
+
     async def test_list_profiles_includes_all_preferences_only_in_requested_guild(self):
         await self.store.initialize()
         category = await self.store.add_category(42, "python", self.now)
@@ -94,7 +109,7 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
                 for row in connection.execute("PRAGMA table_info(tickets)")
             }
 
-        self.assertEqual(version, 3)
+            self.assertEqual(version, store_module.SCHEMA_VERSION)
         self.assertEqual(foreign_keys, 1)
         self.assertIn("projection_sync_at", ticket_columns)
         self.assertIn("category_prompt_retry_at", ticket_columns)
@@ -118,9 +133,9 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
     async def test_initialize_rejects_newer_schema_version(self):
         self.assertIsNotNone(self.store, "the GitHub Tickets store interface is missing")
         with closing(sqlite3.connect(self.path)) as connection:
-            connection.execute("PRAGMA user_version = 4")
+            connection.execute(f"PRAGMA user_version = {store_module.SCHEMA_VERSION + 1}")
 
-        with self.assertRaisesRegex(ValueError, "newer than supported version 3"):
+        with self.assertRaisesRegex(ValueError, "newer than supported version"):
             await self.store.initialize()
 
     async def test_categories_normalize_validate_and_enforce_guild_limit(self):
@@ -140,11 +155,11 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
         longest = await self.store.add_category(20, f" {'X' * 100} ", self.now)
         self.assertEqual(longest.name, "x" * 100)
 
-        for index in range(24):
+        for index in range(49):
             await self.store.add_category(10, f"category-{index}", self.now)
         with self.assertRaises(models.CategoryLimitReached):
             await self.store.add_category(10, "one-too-many", self.now)
-        self.assertEqual(len(await self.store.list_categories(10)), 25)
+        self.assertEqual(len(await self.store.list_categories(10)), 50)
 
     async def test_empty_profile_is_canonicalized_to_no_row(self):
         await self.store.initialize()
@@ -274,89 +289,46 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(activated)
         return await self.store.get_ticket(ticket.ticket_id)
 
-    async def test_start_automatic_routing_persists_categories_and_schedule(self):
+    async def test_reviewer_limit_does_not_limit_pr_only_labels(self):
         await self.store.initialize()
-        rendering = await self.store.add_category(10, "rendering", self.now)
-        python = await self.store.add_category(10, "python", self.now)
-        ticket = await self._create_open_ticket(
-            routing_mode=models.RoutingMode.NONE,
-        )
-        next_action_at = self.now + timedelta(seconds=10)
-        updated_at = self.now + timedelta(seconds=1)
+        names = tuple(f"label-{i:02}" for i in range(60))
+        await self.store.discover_labels(10, names, self.now)
+        for name in names[:50]:
+            await self.store.classify_label(10, name, "reviewer")
+        with self.assertRaises(models.CategoryLimitReached):
+            await self.store.classify_label(10, names[50], "reviewer")
+        for name in names[50:]:
+            await self.store.classify_label(10, name, "pr_only")
+        self.assertEqual(len(await self.store.list_categories(10)), 50)
+        self.assertEqual(len(await self.store.list_labels(10)), 60)
 
-        routed = await self.store.start_automatic_routing(
-            ticket.ticket_id,
-            category_ids=(
-                rendering.category_id,
-                python.category_id,
-                rendering.category_id,
-            ),
-            category_display="rendering, python",
-            next_action_at=next_action_at,
-            updated_at=updated_at,
-        )
-
-        self.assertIsNotNone(routed)
-        self.assertEqual(
-            routed.category_ids,
-            (python.category_id, rendering.category_id),
-        )
-        self.assertEqual(routed.category_display, "rendering, python")
+    async def test_label_changes_preserve_claim_and_stop_routing_without_reviewer_categories(self):
+        await self.store.initialize()
+        category = await self.store.add_category(10, "mixins", self.now)
+        ticket = await self._create_open_ticket(routing_mode=models.RoutingMode.AUTOMATIC)
+        routed = await self.store.sync_ticket_labels(ticket.ticket_id, (category.category_id,), "mixins, bug", self.now)
         self.assertEqual(routed.routing_mode, models.RoutingMode.AUTOMATIC)
         self.assertEqual(routed.next_action, models.NextAction.AUTOMATIC_PING)
-        self.assertEqual(routed.next_action_at, next_action_at)
-        self.assertEqual(routed.updated_at, updated_at)
-        self.assertEqual(routed.transition_version, ticket.transition_version + 1)
-        self.assertEqual(await self.store.get_ticket(ticket.ticket_id), routed)
+        self.assertTrue(await self.store.claim(ticket.ticket_id, 301, self.now, self.now))
+        updated = await self.store.sync_ticket_labels(ticket.ticket_id, (), "bug", self.now)
+        self.assertEqual(updated.assignee_id, 301)
+        self.assertEqual(updated.state, models.TicketState.CLAIMED)
+        self.assertEqual(updated.routing_mode, models.RoutingMode.AUTOMATIC)
+        self.assertIsNone(updated.next_action)
 
-    async def test_start_automatic_routing_attaches_claimed_categories_without_deadline(
-        self,
-    ):
-        await self.store.initialize()
-        rendering = await self.store.add_category(10, "rendering", self.now)
-        ticket = await self._create_open_ticket(
-            routing_mode=models.RoutingMode.NONE,
-        )
-        self.assertTrue(
-            await self.store.claim(
-                ticket.ticket_id,
-                200,
-                self.now + timedelta(minutes=1),
-                self.now,
-            )
-        )
-        claimed = await self.store.get_ticket(ticket.ticket_id)
-        next_action_at = self.now + timedelta(seconds=10)
 
-        routed = await self.store.start_automatic_routing(
-            claimed.ticket_id,
-            category_ids=(rendering.category_id,),
-            category_display="rendering",
-            next_action_at=next_action_at,
-            updated_at=self.now + timedelta(seconds=1),
-        )
 
-        self.assertIsNotNone(routed)
-        self.assertEqual(routed.state, models.TicketState.CLAIMED)
-        self.assertEqual(routed.assignee_id, 200)
-        self.assertEqual(routed.routing_mode, models.RoutingMode.AUTOMATIC)
-        self.assertIsNone(routed.next_action)
-        self.assertIsNone(routed.next_action_at)
-        self.assertEqual(routed.category_ids, (rendering.category_id,))
-
-    async def test_start_automatic_routing_rejects_invalid_transitions_atomically(self):
+    async def test_label_sync_rejects_invalid_transitions_atomically(self):
         await self.store.initialize()
         rendering = await self.store.add_category(10, "rendering", self.now)
         other_guild = await self.store.add_category(20, "rendering", self.now)
-        next_action_at = self.now + timedelta(seconds=10)
         parameters = {
             "category_ids": (rendering.category_id,),
-            "category_display": "rendering",
-            "next_action_at": next_action_at,
-            "updated_at": self.now + timedelta(seconds=1),
+            "display": "rendering",
+            "now": self.now + timedelta(seconds=1),
         }
 
-        self.assertIsNone(await self.store.start_automatic_routing(999, **parameters))
+        self.assertIsNone(await self.store.sync_ticket_labels(999, **parameters))
 
         creating = await self.store.create_ticket(
             models.NewTicket(
@@ -373,23 +345,9 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertIsNone(
-            await self.store.start_automatic_routing(creating.ticket_id, **parameters)
+            await self.store.sync_ticket_labels(creating.ticket_id, **parameters)
         )
         self.assertEqual(await self.store.get_ticket(creating.ticket_id), creating)
-
-        already_routed = await self._create_open_ticket(
-            routing_mode=models.RoutingMode.AUTOMATIC,
-        )
-        self.assertIsNone(
-            await self.store.start_automatic_routing(
-                already_routed.ticket_id,
-                **parameters,
-            )
-        )
-        self.assertEqual(
-            await self.store.get_ticket(already_routed.ticket_id),
-            already_routed,
-        )
 
         finishing = await self._create_open_ticket(
             routing_mode=models.RoutingMode.NONE,
@@ -397,7 +355,7 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.store.begin_finishing(finishing.ticket_id, self.now))
         finishing = await self.store.get_ticket(finishing.ticket_id)
         self.assertIsNone(
-            await self.store.start_automatic_routing(finishing.ticket_id, **parameters)
+            await self.store.sync_ticket_labels(finishing.ticket_id, **parameters)
         )
         self.assertEqual(await self.store.get_ticket(finishing.ticket_id), finishing)
 
@@ -407,12 +365,11 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
             routing_mode=models.RoutingMode.NONE,
         )
         with self.assertRaisesRegex(ValueError, "must belong to the guild"):
-            await self.store.start_automatic_routing(
+            await self.store.sync_ticket_labels(
                 unchanged.ticket_id,
                 category_ids=(other_guild.category_id,),
-                category_display="foreign",
-                next_action_at=next_action_at,
-                updated_at=self.now + timedelta(seconds=1),
+                display="foreign",
+                now=self.now + timedelta(seconds=1),
             )
         self.assertEqual(await self.store.get_ticket(unchanged.ticket_id), unchanged)
 

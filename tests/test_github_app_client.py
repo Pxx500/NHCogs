@@ -245,6 +245,19 @@ class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request[0:2], ("DELETE", "https://api.github.com/repos/GTNewHorizons/Example/issues/42/assignees"))
         self.assertEqual(request[2]["json"], {"assignees": ["reviewer"]})
 
+    async def test_repository_label_catalog_reads_all_pages(self) -> None:
+        now = datetime(2026, 8, 29, tzinfo=timezone.utc)
+        session = FakeSession(
+            FakeResponse(201, {"token": "installation-token", "expires_at": "2026-08-29T01:00:00Z"}),
+            FakeResponse(200, [{"name": f"label-{i}"} for i in range(100)]),
+            FakeResponse(200, [{"name": "mixins"}]),
+        )
+        client = self.loaded.github_app.GitHubAppClient(self.credentials(), session, clock=lambda: now)
+        labels = await client.list_repository_labels("GTNewHorizons", "GT5-Unofficial")
+        self.assertEqual(len(labels), 101)
+        self.assertEqual(labels[-1], "mixins")
+        self.assertTrue(session.requests[-1][1].endswith("/labels?per_page=100&page=2"))
+
     async def test_permission_failure_with_remaining_quota_is_terminal(self) -> None:
         github_app = self.loaded.github_app
         now = datetime(2026, 8, 29, tzinfo=timezone.utc)

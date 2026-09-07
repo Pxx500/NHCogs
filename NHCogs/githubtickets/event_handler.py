@@ -40,6 +40,7 @@ class GitHubEventHandler:
         member_is_eligible: Callable[[Any], bool],
         refresh_pull_request: RefreshPullRequest | None = None,
         ticket_finished: TicketFinished | None = None,
+        automatic_creation_enabled: Callable[[GitHubPullRequest], Awaitable[bool]] | None = None,
     ) -> None:
         self._store = store
         self._coordinator = coordinator
@@ -48,6 +49,7 @@ class GitHubEventHandler:
         self._member_is_eligible = member_is_eligible
         self._refresh_pull_request = refresh_pull_request
         self._ticket_finished = ticket_finished
+        self._automatic_creation_enabled = automatic_creation_enabled
 
     async def __call__(self, delivery: GitHubDelivery) -> DeliveryDisposition:
         parsed = events.parse_delivery(delivery)
@@ -55,6 +57,7 @@ class GitHubEventHandler:
             return DeliveryDisposition.IGNORED
         if isinstance(parsed, events.GitHubAppLifecycleEvent):
             return DeliveryDisposition.STOPPED
+        await self._store.discover_labels(self._guild_id, parsed.pull_request.labels, delivery.received_at)
         observation = await self._store.observe_pull_request(parsed.pull_request)
         if observation.state is PullRequestObservationState.CONFLICT:
             if self._refresh_pull_request is None:
@@ -71,13 +74,17 @@ class GitHubEventHandler:
                     "GitHub pull request conflict did not settle"
                 )
         if isinstance(parsed, events.PullRequestEvent):
+            allow_creation = (
+                self._automatic_creation_enabled is not None
+                and await self._automatic_creation_enabled(parsed.pull_request)
+            )
             parsed = replace(
                 parsed,
                 action=self._reconciled_action(parsed, observation.pull_request),
                 pull_request=observation.pull_request,
                 assignee_logins=observation.pull_request.assignees,
             )
-            await self._handle_pull_request(parsed)
+            await self._handle_pull_request(parsed, allow_creation=allow_creation)
         else:
             parsed = replace(
                 parsed,
@@ -85,6 +92,10 @@ class GitHubEventHandler:
                 assignee_logins=observation.pull_request.assignees,
             )
             await self._handle_review(parsed)
+        result = await self._coordinator.sync_pull_request_labels(
+            parsed.pull_request.repository_id, parsed.pull_request.pr_number,
+        )
+        self._require_settled(result)
         return DeliveryDisposition.PROCESSED
 
     @staticmethod
@@ -109,7 +120,9 @@ class GitHubEventHandler:
             return "converted_to_draft" if pull_request.draft else "ready_for_review"
         return event.action
 
-    async def _handle_pull_request(self, event: events.PullRequestEvent) -> None:
+    async def _handle_pull_request(
+        self, event: events.PullRequestEvent, *, allow_creation: bool = False,
+    ) -> None:
         pull_request = event.pull_request
         labeled_for_ticket = (
             event.action == "labeled"
@@ -123,21 +136,9 @@ class GitHubEventHandler:
             (labeled_for_ticket or became_ready_with_label)
             and pull_request.open
             and not pull_request.draft
+            and allow_creation
         ):
-            if not pull_request.title.strip():
-                return
-            author, ambiguous = await self._resolve_member(
-                pull_request.github_author_login,
-                require_eligible=True,
-            )
-            if ambiguous:
-                return
-            result = await self._coordinator.create_ticket_from_github(
-                self._guild_id,
-                pull_request,
-                author_id=int(author.id) if author is not None else None,
-            )
-            self._require_settled(result)
+            await self._create_labeled_ticket(event)
         elif event.action == "closed":
             result = await self._coordinator.finish_ticket_from_github(
                 pull_request.repository_id,
@@ -181,6 +182,23 @@ class GitHubEventHandler:
             self._require_settled(result)
         elif event.action == "unassigned":
             await self._handle_unassigned(event)
+
+    async def _create_labeled_ticket(self, event: events.PullRequestEvent) -> None:
+        pull_request = event.pull_request
+        if not pull_request.title.strip():
+            return
+        author, ambiguous = await self._resolve_member(
+            pull_request.github_author_login, require_eligible=True,
+        )
+        if ambiguous:
+            return
+        result = await self._coordinator.create_ticket_from_github(
+            self._guild_id, pull_request,
+            author_id=int(author.id) if author is not None else None,
+        )
+        self._require_settled(result)
+        if pull_request.assignees:
+            await self._handle_pull_request(replace(event, action="assigned"))
 
     async def _handle_review(self, event: events.PullRequestReviewEvent) -> None:
         reviewer_login = event.reviewer_login

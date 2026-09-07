@@ -27,6 +27,7 @@ MODULE_NAMES = (
     "NHCogs.githubtickets.ticket_views",
     "NHCogs.githubtickets.discord_projection",
     "NHCogs.githubtickets.dashboard",
+    "NHCogs.githubtickets.label_views",
     "NHCogs.githubtickets.githubtickets",
 )
 

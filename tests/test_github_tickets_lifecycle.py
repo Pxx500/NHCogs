@@ -224,10 +224,10 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         break
                     await asyncio.sleep(0.01)
 
-                self.assertEqual(len(bot.restored_views), 6)
+                self.assertEqual(len(bot.restored_views), 4)
                 self.assertEqual(
                     [message_id for _view, message_id in bot.restored_views],
-                    [40, None, None, 41, None, None],
+                    [40, None, 41, None],
                 )
                 self.assertTrue(
                     all(view.timeout is None for view, _message_id in bot.restored_views)
@@ -705,64 +705,6 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await cog.cog_unload()
 
-    async def test_automatic_candidate_count_uses_strict_cached_policy_and_excludes_author(self):
-        with isolated_githubtickets_modules(self.data_path) as modules:
-            bot = FakeBot(ready=False)
-            cog = modules.githubtickets.GitHubTickets(bot, mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
-            await cog.config.guild_from_id(10).set_raw(
-                "participant_role_ids",
-                value=[99],
-            )
-            await cog.cog_load()
-            now = datetime.now(timezone.utc)
-            rendering = await cog.store.add_category(10, "rendering", now)
-            mixins = await cog.store.add_category(10, "mixins", now)
-            both_categories = (rendering.category_id, mixins.category_id)
-            profiles = (
-                (30, both_categories, True),
-                (200, both_categories, True),
-                (201, (rendering.category_id,), True),
-                (202, both_categories, False),
-                (203, both_categories, True),
-                (204, both_categories, True),
-            )
-            for user_id, category_ids, automatic_pings in profiles:
-                await cog.store.save_profile(
-                    guild_id=10,
-                    user_id=user_id,
-                    github_username=None,
-                    category_ids=category_ids,
-                    automatic_pings=automatic_pings,
-                    updated_at=now,
-                )
-            participant = SimpleNamespace(id=99)
-            no_permissions = SimpleNamespace(manage_messages=False)
-            bot.guild_map[10] = SimpleNamespace(
-                id=10,
-                members=[
-                    SimpleNamespace(id=30, roles=[participant], guild_permissions=no_permissions),
-                    SimpleNamespace(id=200, roles=[participant], guild_permissions=no_permissions),
-                    SimpleNamespace(id=201, roles=[participant], guild_permissions=no_permissions),
-                    SimpleNamespace(id=202, roles=[participant], guild_permissions=no_permissions),
-                    SimpleNamespace(id=203, roles=[], guild_permissions=no_permissions),
-                    SimpleNamespace(
-                        id=204,
-                        roles=[],
-                        guild_permissions=SimpleNamespace(manage_messages=True),
-                    ),
-                ],
-            )
-            try:
-                count = await cog._count_automatic_candidates(
-                    10,
-                    both_categories,
-                    frozenset({30, 200}),
-                )
-
-                self.assertEqual(count, 1)
-                self.assertEqual(bot.fetch_calls, 0)
-            finally:
-                await cog.cog_unload()
 
     async def test_member_remove_deletes_only_the_departed_guild_profile(self):
         with isolated_githubtickets_modules(self.data_path) as modules:

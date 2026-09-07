@@ -59,6 +59,7 @@ class GitHubIntegrationRuntime:
         max_recovery_pages: int = 10,
         max_redeliveries_per_recovery: int = 100,
         random_source: random.Random | None = None,
+        refresh_catalog: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if (client is None) != (receiver is None):
             raise ValueError("GitHub client and webhook receiver must be configured together")
@@ -75,6 +76,7 @@ class GitHubIntegrationRuntime:
         if max_recovery_pages < 1 or max_redeliveries_per_recovery < 1:
             raise ValueError("recovery limits must be positive")
         self._store = store
+        self._refresh_catalog = refresh_catalog
         self._client = client
         self._receiver = receiver
         self._delivery_handler = delivery_handler
@@ -184,6 +186,11 @@ class GitHubIntegrationRuntime:
         self._recovery_requested.set()
 
     async def _recover_deliveries(self) -> None:
+        if self._refresh_catalog is not None:
+            try:
+                await self._refresh_catalog()
+            except Exception as error:
+                await self._report("refresh GitHub label catalog", error)
         client = self._client
         if client is None:
             raise RuntimeError("GitHub integration is not configured")

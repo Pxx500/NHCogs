@@ -41,6 +41,8 @@ DEFAULTS: dict[str, object] = {
 GITHUB_INTEGRATION_DEFAULTS: dict[str, object] = {
     "guild_id": None,
     "enabled": False,
+    "automatic_ticket_creation": False,
+    "automatic_ticket_creation_since": None,
     "bind_host": None,
     "bind_port": None,
     "recovery_seconds": DEFAULT_GITHUB_RECOVERY_SECONDS,
@@ -172,6 +174,8 @@ class GitHubIntegrationSettings:
     bind_host: str | None
     bind_port: int | None
     recovery_seconds: int
+    automatic_ticket_creation: bool = False
+    automatic_ticket_creation_since: str | None = None
 
     @property
     def receiver_configured(self) -> bool:
@@ -184,6 +188,7 @@ class GitHubIntegrationSettings:
     ) -> GitHubIntegrationSettings:
         values = raw if isinstance(raw, Mapping) else {}
         enabled = values.get("enabled")
+        creation_since = values.get("automatic_ticket_creation_since")
         return cls(
             guild_id=_positive_id(values.get("guild_id")),
             enabled=enabled if isinstance(enabled, bool) else False,
@@ -192,5 +197,11 @@ class GitHubIntegrationSettings:
             recovery_seconds=_positive_int(
                 values.get("recovery_seconds"),
                 DEFAULT_GITHUB_RECOVERY_SECONDS,
+            ),
+            automatic_ticket_creation=values.get("automatic_ticket_creation") is True,
+            automatic_ticket_creation_since=(
+                creation_since
+                if isinstance(creation_since, str)
+                else None
             ),
         )

@@ -185,20 +185,6 @@ FIXED_COPY = (
 )
 
 
-def confirm_categories(candidate_count: int) -> str:
-    if candidate_count == 0:
-        detail = "No one can receive automatic pings for all selected categories"
-    elif candidate_count == 1:
-        detail = "1 person can receive automatic pings for all selected categories"
-    else:
-        detail = (
-            f"{candidate_count} people can receive automatic pings for all selected categories"
-        )
-    return f"{CONFIRM_CATEGORIES}\n{detail}"
-
-
-def add_categories_notification(author_mention: str) -> str:
-    return f"{author_mention} add categories to start automatic routing"
 
 
 def draft_ticket_notification(author_mention: str | None) -> str:
@@ -214,20 +200,29 @@ def ticket_message(
     *,
     title: str,
     url: str,
-    author_mention: str,
+    author_mention: str | None,
     categories: Sequence[str] = (),
     reviewer_mention: str | None = None,
     reviewer_github: str | None = None,
+    status: str | None = None,
 ) -> str:
-    metadata = [f"Author: {author_mention}"]
-    if categories:
-        metadata.append(", ".join(categories))
+    metadata = [f"Author: {author_mention}"] if author_mention else []
     if reviewer_mention is not None:
         reviewer = f"Reviewer: {reviewer_mention}"
         if reviewer_github:
             reviewer = f"{reviewer} | {reviewer_github}"
         metadata.append(reviewer)
-    return f"{_linked_title(title, url)}\n{' | '.join(metadata)}"
+    heading = _linked_title(title, url)
+    if status:
+        heading = f"{status}\n{heading}"
+    if categories:
+        remaining = max(0, DISCORD_MESSAGE_LIMIT - len(heading) - len(" | ".join(metadata)) - 4)
+        labels = ", ".join(categories)
+        if len(labels) > remaining:
+            labels = labels[:max(0, remaining - 1)] + "…"
+        if labels:
+            metadata.insert(1 if author_mention else 0, labels)
+    return f"{heading}\n{' | '.join(metadata)}".rstrip()
 
 
 def finished_ticket_log(

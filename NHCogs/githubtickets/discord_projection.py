@@ -6,9 +6,8 @@ from typing import Any
 
 import discord
 
-from .models import Ticket
+from .models import RoutingMode, Ticket, TicketState
 from .presentation import (
-    add_categories_notification,
     automatic_review_notification,
     direct_review_notification,
     draft_ticket_notification,
@@ -26,12 +25,10 @@ class DiscordTicketProjection:
         bot,
         view_factory: Callable[[Ticket], discord.ui.View],
         *,
-        category_prompt_view_factory: Callable[[Ticket], discord.ui.View],
         draft_prompt_view_factory: Callable[[Ticket], discord.ui.View],
     ) -> None:
         self._bot = bot
         self._view_factory = view_factory
-        self._category_prompt_view_factory = category_prompt_view_factory
         self._draft_prompt_view_factory = draft_prompt_view_factory
         self._sent_messages: dict[int, Any] = {}
 
@@ -102,21 +99,6 @@ class DiscordTicketProjection:
         self._sent_messages.pop(message_id, None)
         return thread.id
 
-    async def prompt_categories(self, ticket: Ticket, thread_id: int) -> None:
-        author_mention = (
-            f"<@{ticket.author_id}>" if ticket.author_id is not None else None
-        )
-        content = (
-            add_categories_notification(author_mention)
-            if author_mention is not None
-            else "Add categories to start automatic routing"
-        )
-        await self._send_thread_prompt(
-            thread_id,
-            content,
-            view=self._category_prompt_view_factory(ticket),
-            user_id=ticket.author_id,
-        )
 
     async def prompt_draft_decision(self, ticket: Ticket) -> None:
         if ticket.thread_id is None:
@@ -300,11 +282,24 @@ class DiscordTicketProjection:
         categories = (ticket.category_display,) if ticket.category_display else ()
         reviewer_id = ticket.assignee_id
         reviewer_mention = f"<@{reviewer_id}>" if reviewer_id is not None else None
+        if ticket.state is TicketState.CLAIMED:
+            status = "🟢 Claimed"
+        elif ticket.current_target_id is not None:
+            status = "🟡 Review requested"
+        elif not ticket.category_ids and ticket.routing_mode is RoutingMode.AUTOMATIC:
+            status = "⚪ No reviewer categories"
+        elif ticket.routing_mode is RoutingMode.NONE:
+            status = "⚪ Automatic pings off"
+        elif ticket.next_action is None and ticket.state is not TicketState.CREATING:
+            status = "🔴 No eligible reviewers"
+        else:
+            status = "🔵 Looking for reviewer"
         return ticket_message(
             title=ticket.pr_title,
             url=ticket.pr_url,
-            author_mention=f"<@{ticket.author_id}>",
+            author_mention=f"<@{ticket.author_id}>" if ticket.author_id is not None else None,
             categories=categories,
             reviewer_mention=reviewer_mention,
             reviewer_github=reviewer_github,
+            status=status,
         )
