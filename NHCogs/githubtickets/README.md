@@ -197,10 +197,29 @@ ticket. When the ping limit is exhausted, the ticket remains open for a manual c
 | Command | Description |
 |---|---|
 | `[p]githubtickets profile clear <user_id>` | Clear one member's stored developer profile |
+| `[p]githubtickets profile pings` | Show all automatic ping report commands |
+| `[p]githubtickets profile pings summary` | Show total profiles and enabled/disabled counts with percentages |
+| `[p]githubtickets profile pings enabled` | List developer profiles with automatic pings enabled |
+| `[p]githubtickets profile pings disabled` | List developer profiles with automatic pings disabled |
 
-This command accepts a positive Discord user ID. Participants clear their own profile from
+The `profile clear` command accepts a positive Discord user ID. Participants clear their own profile from
 the `/developerprofile` dashboard. Leaving the server removes the member's profile and
 profile categories, but does not rewrite or remove their existing ticket history.
+
+The `profile pings` group shows a command overview without running a report. The three
+report commands require Manage Messages and a channel hidden from `@everyone`. Public
+channels are rejected before profiles are read.
+
+Reports include every stored developer profile on the current server, even if the owner
+no longer has a participant role. People without profiles are excluded from percentages.
+An empty server report shows zero counts and `0.0%` for both preferences. These values
+describe the profile's automatic ping preference, not Discord notification settings or
+current eligibility for ticket routing.
+
+Lists are sorted alphabetically by Discord username and show the member mention, Discord
+username, and optional GitHub username. Profiles missing from the member cache remain
+listed with `Discord username unavailable`. Long lists are sent as numbered message pages.
+Reports suppress all mentions, so listing someone does not ping them.
 
 ## Ticket controls and cleanup
 
@@ -224,8 +243,9 @@ finished the ticket. Deleting the ticket message or its thread also removes the 
 bot uses saved Discord IDs for normal updates and does not fetch messages merely to check
 whether they still exist.
 
-All profile dashboards and profile lookups are ephemeral. The ticket channel and optional
-completed-ticket log channel are the normal non-ephemeral surfaces created by this cog.
+Profile dashboards and public profile lookups are ephemeral. Moderator ping reports are
+sent to the private channel where the command was invoked. The ticket channel and optional
+completed-ticket log channel are the other normal non-ephemeral surfaces created by this cog.
 
 
 Technical failures are sent to the shared maintainer destination configured with `!nhcogs errors`. GitHubTickets keeps its ticket state and retry schedules in its own database. User-facing interaction failures contain a short generic message.

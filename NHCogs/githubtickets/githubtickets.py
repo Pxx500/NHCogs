@@ -1118,3 +1118,62 @@ class GitHubTickets(commands.Cog):
             updated_at=datetime.now(timezone.utc),
         )
         await ctx.send(presentation.profile_cleared(parsed_user_id))
+
+    @githubtickets_profile.group(name="pings", invoke_without_command=True)
+    async def githubtickets_profile_pings(self, ctx: commands.Context) -> None:
+        """Inspect developer automatic ping preferences"""
+        await self._send_group_overview(ctx)
+
+    @githubtickets_profile_pings.command(name="summary")
+    async def githubtickets_profile_pings_summary(self, ctx: commands.Context) -> None:
+        """Show counts and percentages for automatic ping preferences"""
+        await self._send_ping_report(ctx)
+
+    @githubtickets_profile_pings.command(name="enabled")
+    async def githubtickets_profile_pings_enabled(self, ctx: commands.Context) -> None:
+        """List developer profiles with automatic pings enabled"""
+        await self._send_ping_report(ctx, automatic_pings=True)
+
+    @githubtickets_profile_pings.command(name="disabled")
+    async def githubtickets_profile_pings_disabled(self, ctx: commands.Context) -> None:
+        """List developer profiles with automatic pings disabled"""
+        await self._send_ping_report(ctx, automatic_pings=False)
+
+    async def _send_ping_report(
+        self, ctx: commands.Context, *, automatic_pings: bool | None = None
+    ) -> None:
+        if not command_overview.channel_is_private(ctx.guild, ctx.channel):
+            raise commands.UserFeedbackCheckFailure(
+                "Run this command in a channel hidden from @everyone"
+            )
+        profiles = await self.store.list_profiles(ctx.guild.id)
+        pages: tuple[str, ...]
+        if automatic_pings is None:
+            pages = (
+                presentation.ping_summary(
+                    total=len(profiles),
+                    enabled=sum(profile.automatic_pings for profile in profiles),
+                ),
+            )
+        else:
+            users = []
+            for profile in profiles:
+                if profile.automatic_pings != automatic_pings:
+                    continue
+                member = ctx.guild.get_member(profile.user_id)
+                name = member.name if member is not None else "Discord username unavailable"
+                labels = [f"<@{profile.user_id}>", name]
+                if profile.github_username:
+                    labels.append(profile.github_username)
+                line = " | ".join(
+                    discord.utils.escape_mentions(discord.utils.escape_markdown(label))
+                    if index else label
+                    for index, label in enumerate(labels)
+                )
+                users.append((name.casefold(), profile.user_id, line))
+            users.sort()
+            pages = presentation.ping_profile_pages(
+                enabled=automatic_pings, users=[line for _, _, line in users]
+            )
+        for page in pages:
+            await ctx.send(page, allowed_mentions=discord.AllowedMentions.none())
