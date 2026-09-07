@@ -46,9 +46,10 @@ class _Client:
     def invalidate_installation_token(self) -> None:
         self.token_invalidations += 1
 
-    async def list_deliveries(self, *, page: int = 1) -> tuple[object, ...]:
+    async def list_deliveries(self, *, cursor: str | None = None):
+        page = int(cursor) if cursor is not None else 1
         self.listed_pages.append(page)
-        return self.pages.get(page, ())
+        return self.pages.get(page, ()), str(page + 1) if page + 1 in self.pages else None
 
     async def redeliver(self, delivery_id: int) -> None:
         self.redelivered.append(delivery_id)
@@ -147,13 +148,14 @@ class _BlockingRecoveryClient(_Client):
         self.first_list_started = asyncio.Event()
         self.release_first_list = asyncio.Event()
 
-    async def list_deliveries(self, *, page: int = 1) -> tuple[object, ...]:
+    async def list_deliveries(self, *, cursor: str | None = None):
+        page = int(cursor) if cursor is not None else 1
         self.listed_pages.append(page)
         if len(self.listed_pages) == 1:
             self.first_list_started.set()
             await self.release_first_list.wait()
-            return ()
-        return self.pages.get(page, ())
+            return (), None
+        return self.pages.get(page, ()), None
 
 
 class _Reporter:
@@ -782,7 +784,7 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(failed.raw_body)
         self.assertEqual(
             await self.store.get_delivery_recovery_checkpoint(),
-            (1, 1),
+            (None, 1),
         )
 
     async def test_transient_redelivery_failure_stops_batch_and_backs_off(self) -> None:
@@ -842,7 +844,7 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             await self.store.get_delivery_recovery_checkpoint(),
-            (1, None),
+            (None, None),
         )
 
     async def test_recovery_checkpoint_continues_older_pages_after_restart(self) -> None:

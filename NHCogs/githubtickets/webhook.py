@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 from collections.abc import Mapping
 from datetime import datetime, timezone
+from typing import Any
 
 from aiohttp import web
 
@@ -14,6 +16,7 @@ from .store import GitHubTicketsStore
 WEBHOOK_PATH = "/githubtickets/webhook"
 _MAX_BODY_BYTES = 1024 * 1024
 _PULL_REQUEST_EVENTS = frozenset({"pull_request", "pull_request_review"})
+log = logging.getLogger(__name__)
 
 
 class GitHubWebhookReceiver:
@@ -21,9 +24,14 @@ class GitHubWebhookReceiver:
         self,
         store: GitHubTicketsStore,
         credentials: GitHubAppCredentials,
+        *,
+        support: Any,
+        guild_id: int,
     ) -> None:
         self._store = store
         self._credentials = credentials
+        self._support = support
+        self._guild_id = guild_id
         self._organization = credentials.organization.casefold()
         self.application = web.Application(client_max_size=_MAX_BODY_BYTES)
         self.application.router.add_post(WEBHOOK_PATH, self._receive)
@@ -85,7 +93,12 @@ class GitHubWebhookReceiver:
             )
         except ValueError:
             raise web.HTTPBadRequest() from None
-        except Exception:
+        except Exception as error:
+            log.exception("Could not persist GitHub webhook delivery")
+            self._support.schedule_error(
+                source="GitHubTickets", action="persist webhook delivery",
+                error=error, guild_id=self._guild_id,
+            )
             raise web.HTTPServiceUnavailable() from None
         return web.Response(status=202)
 

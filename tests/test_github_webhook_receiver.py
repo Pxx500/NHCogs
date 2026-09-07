@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import aiohttp
 from aiohttp.test_utils import TestClient, TestServer
@@ -38,6 +38,7 @@ class GitHubWebhookReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.receiver = self.loaded.webhook.GitHubWebhookReceiver(
             self.store,
             self.credentials,
+            support=Mock(), guild_id=10,
         )
         self.client = TestClient(TestServer(self.receiver.application))
         await self.client.start_server()
@@ -364,13 +365,15 @@ class GitHubWebhookReceiverTests(unittest.IsolatedAsyncioTestCase):
         body = json.dumps(self.payload(), separators=(",", ":")).encode()
         self.store.accept_delivery = AsyncMock(side_effect=OSError("database unavailable"))
 
-        response = await self.client.post(
-            self.loaded.webhook.WEBHOOK_PATH,
-            data=body,
-            headers=self.signed_headers(body),
-        )
+        with self.assertLogs("NHCogs.githubtickets.webhook", level="ERROR") as captured:
+            response = await self.client.post(
+                self.loaded.webhook.WEBHOOK_PATH,
+                data=body,
+                headers=self.signed_headers(body),
+            )
 
         self.assertEqual(response.status, 503)
+        self.assertIn("database unavailable", "\n".join(captured.output))
 
     async def test_body_larger_than_limit_is_rejected(self) -> None:
         body = b"x" * (2 * 1024 * 1024)
@@ -391,6 +394,7 @@ class GitHubWebhookReceiverTests(unittest.IsolatedAsyncioTestCase):
         receiver = self.loaded.webhook.GitHubWebhookReceiver(
             self.store,
             self.credentials,
+            support=Mock(), guild_id=10,
         )
         started_port = await receiver.start("127.0.0.1", port)
         self.assertEqual(started_port, port)
@@ -411,6 +415,7 @@ class GitHubWebhookReceiverTests(unittest.IsolatedAsyncioTestCase):
         receiver = self.loaded.webhook.GitHubWebhookReceiver(
             self.store,
             self.credentials,
+            support=Mock(), guild_id=10,
         )
         with socket.socket() as reserved:
             reserved.bind(("127.0.0.1", 0))

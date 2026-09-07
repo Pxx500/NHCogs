@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MAX_CATEGORIES = 25
 MAX_CATEGORY_NAME_LENGTH = 100
 MAX_DELIVERY_BODY_BYTES = 1_048_576
@@ -689,10 +689,21 @@ def _add_category_prompt_retry(connection: sqlite3.Connection) -> None:
     )
 
 
+def _use_delivery_cursors(connection: sqlite3.Connection) -> None:
+    connection.execute("DROP TABLE github_delivery_recovery")
+    connection.execute(
+        """CREATE TABLE github_delivery_recovery (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            cursor TEXT, last_delivery_id INTEGER, checked_at TEXT NOT NULL
+        )"""
+    )
+
+
 MIGRATIONS = (
     _create_schema,
     _migrate_to_github_durable_work,
     _add_category_prompt_retry,
+    _use_delivery_cursors,
 )
 
 
@@ -979,7 +990,7 @@ class GitHubTicketsStore:
                 error_summary,
             )
 
-    async def get_delivery_recovery_checkpoint(self) -> tuple[int, int | None]:
+    async def get_delivery_recovery_checkpoint(self) -> tuple[str | None, int | None]:
         async with self._lock:
             return await asyncio.to_thread(
                 self._get_delivery_recovery_checkpoint_sync
@@ -988,18 +999,16 @@ class GitHubTicketsStore:
     async def save_delivery_recovery_checkpoint(
         self,
         *,
-        next_page: int,
+        cursor: str | None,
         last_delivery_id: int | None,
         checked_at: datetime,
     ) -> None:
-        if next_page < 1 or (
-            last_delivery_id is not None and last_delivery_id < 1
-        ):
+        if last_delivery_id is not None and last_delivery_id < 1:
             raise ValueError("delivery recovery checkpoint is invalid")
         async with self._lock:
             await asyncio.to_thread(
                 self._save_delivery_recovery_checkpoint_sync,
-                next_page,
+                cursor,
                 last_delivery_id,
                 checked_at,
             )
@@ -2507,18 +2516,18 @@ class GitHubTicketsStore:
         )
         return changed > 0
 
-    def _get_delivery_recovery_checkpoint_sync(self) -> tuple[int, int | None]:
+    def _get_delivery_recovery_checkpoint_sync(self) -> tuple[str | None, int | None]:
         with closing(self._connect()) as connection:
             row = connection.execute(
                 """
-                SELECT next_page, last_delivery_id
+                SELECT cursor, last_delivery_id
                 FROM github_delivery_recovery WHERE singleton = 1
                 """
             ).fetchone()
         if row is None:
-            return 1, None
+            return None, None
         return (
-            int(row["next_page"]),
+            row["cursor"],
             (
                 int(row["last_delivery_id"])
                 if row["last_delivery_id"] is not None
@@ -2528,7 +2537,7 @@ class GitHubTicketsStore:
 
     def _save_delivery_recovery_checkpoint_sync(
         self,
-        next_page: int,
+        cursor: str | None,
         last_delivery_id: int | None,
         checked_at: datetime,
     ) -> None:
@@ -2536,15 +2545,15 @@ class GitHubTicketsStore:
             connection.execute(
                 """
                 INSERT INTO github_delivery_recovery (
-                    singleton, next_page, last_delivery_id, checked_at
+                    singleton, cursor, last_delivery_id, checked_at
                 ) VALUES (1, ?, ?, ?)
                 ON CONFLICT(singleton) DO UPDATE SET
-                    next_page = excluded.next_page,
+                    cursor = excluded.cursor,
                     last_delivery_id = excluded.last_delivery_id,
                     checked_at = excluded.checked_at
                 """,
                 (
-                    next_page,
+                    cursor,
                     last_delivery_id,
                     _serialize_datetime(checked_at),
                 ),

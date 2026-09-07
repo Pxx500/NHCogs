@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import aiohttp
 import jwt
@@ -191,10 +192,13 @@ class GitHubAppClient:
         if login.casefold() in {candidate.casefold() for candidate in _assignee_logins(payload)}:
             raise GitHubRequestError("remove assignee")
 
-    async def list_deliveries(self, *, page: int = 1) -> tuple[GitHubDeliverySummary, ...]:
-        payload = await self._app_request(
+    async def list_deliveries(
+        self, *, cursor: str | None = None,
+    ) -> tuple[tuple[GitHubDeliverySummary, ...], str | None]:
+        query = urlencode({"per_page": 100, **({"cursor": cursor} if cursor else {})})
+        headers, payload = await self._app_request(
             "GET",
-            f"/app/hook/deliveries?per_page=100&page={page}",
+            f"/app/hook/deliveries?{query}",
             operation="list deliveries",
             read_json=True,
         )
@@ -213,7 +217,12 @@ class GitHubAppClient:
                     action=action if isinstance(action, str) else None,
                 )
             )
-        return tuple(deliveries)
+        next_cursor = None
+        for link in headers.get("link", "").split(","):
+            if 'rel="next"' in link:
+                url = link.split(">", 1)[0].strip().lstrip("<")
+                next_cursor = parse_qs(urlsplit(url).query).get("cursor", [None])[0]
+        return tuple(deliveries), next_cursor
 
     async def redeliver(self, delivery_id: int) -> None:
         await self._app_request(
@@ -234,7 +243,7 @@ class GitHubAppClient:
         *,
         operation: str,
         read_json: bool,
-    ) -> object:
+    ) -> tuple[Mapping[str, str], object]:
         status, headers, payload = await self._send(
             method,
             path,
@@ -244,7 +253,7 @@ class GitHubAppClient:
         )
         if not _HTTP_SUCCESS_MIN <= status < _HTTP_REDIRECT_MIN:
             raise _response_error(operation, status, headers, self._clock())
-        return payload
+        return headers, payload
 
     async def _request_json(
         self,
@@ -398,7 +407,8 @@ def _response_error(
     retry_after = headers.get("retry-after")
     rate_limit_reset = headers.get("x-ratelimit-reset")
     rate_limited = status == _HTTP_TOO_MANY_REQUESTS or (
-        status == _HTTP_FORBIDDEN and (retry_after is not None or rate_limit_reset is not None)
+        status == _HTTP_FORBIDDEN
+        and (retry_after is not None or headers.get("x-ratelimit-remaining") == "0")
     )
     retry_at = _retry_at(retry_after, rate_limit_reset, now) if rate_limited else None
     return GitHubRequestError(

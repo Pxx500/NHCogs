@@ -323,7 +323,7 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(await migrated.list_exclusions(1)), 1)
         self.assertEqual(len(await migrated.list_pings(1)), 1)
         with closing(store_module.connect(legacy_path)) as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], store_module.SCHEMA_VERSION)
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
 
     async def test_pull_request_binding_reserves_one_active_ticket_and_keeps_identity_immutable(
@@ -630,10 +630,10 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_recovery_checkpoint_is_durable_and_globally_owned(self):
         self.assertEqual(
             await self.store.get_delivery_recovery_checkpoint(),
-            (1, None),
+            (None, None),
         )
         await self.store.save_delivery_recovery_checkpoint(
-            next_page=4,
+            cursor="opaque-next-cursor",
             last_delivery_id=321,
             checked_at=self.now,
         )
@@ -650,12 +650,12 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
         await reloaded.initialize()
         self.assertEqual(
             await reloaded.get_delivery_recovery_checkpoint(),
-            (4, 321),
+            ("opaque-next-cursor", 321),
         )
         self.assertTrue(await reloaded.delete_guild_state(10))
         self.assertEqual(
             await reloaded.get_delivery_recovery_checkpoint(),
-            (4, 321),
+            ("opaque-next-cursor", 321),
         )
 
     async def test_delivery_retention_bounds_failed_bodies_and_keeps_identity_for_seven_days(
