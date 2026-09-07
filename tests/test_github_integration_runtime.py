@@ -160,7 +160,7 @@ class _Reporter:
     def __init__(self) -> None:
         self.reports: list[dict[str, object]] = []
 
-    async def report(self, **kwargs) -> None:
+    async def report_operational_error(self, **kwargs) -> None:
         self.reports.append(kwargs)
 
 

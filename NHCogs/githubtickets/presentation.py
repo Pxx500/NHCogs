@@ -319,6 +319,33 @@ def message_chunks(
     return tuple(chunks)
 
 
+def ping_summary(*, total: int, enabled: int) -> str:
+    disabled = total - enabled
+    enabled_percent = enabled / total * 100 if total else 0.0
+    disabled_percent = disabled / total * 100 if total else 0.0
+    return (
+        "Automatic ping preferences\n"
+        f"Total developer profiles: {total}\n"
+        f"Enabled: {enabled} ({enabled_percent:.1f}%)\n"
+        f"Disabled: {disabled} ({disabled_percent:.1f}%)"
+    )
+
+
+def ping_profile_pages(*, enabled: bool, users: Sequence[str]) -> tuple[str, ...]:
+    status = "enabled" if enabled else "disabled"
+    heading = f"Automatic pings {status}: {len(users)}"
+    # Leave room for the heading and page counter around each message chunk.
+    page_counter_space = 50
+    chunks = message_chunks(
+        "\n".join(users) if users else NO_USERS_FOUND,
+        limit=DISCORD_MESSAGE_LIMIT - len(heading) - page_counter_space,
+    )
+    return tuple(
+        f"{heading}\n{chunk.rstrip()}\nPage {index} of {len(chunks)}"
+        for index, chunk in enumerate(chunks, start=1)
+    )
+
+
 def category_page(
     *,
     category: str,

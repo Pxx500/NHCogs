@@ -17,7 +17,7 @@ class _Reporter:
     def __init__(self) -> None:
         self.reports: list[dict[str, object]] = []
 
-    async def report(self, **kwargs) -> None:
+    async def report_operational_error(self, **kwargs) -> None:
         self.reports.append(kwargs)
 
 
@@ -57,7 +57,7 @@ class _Bot:
         return self.guild if guild_id == 10 else None
 
     def get_cog(self, name: str) -> _Reporter | None:
-        return self.reporter if name == "OperationalErrors" else None
+        return self.reporter if name == "OperationalSupport" else None
 
 
 class _Store:

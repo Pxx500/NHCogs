@@ -780,6 +780,11 @@ class GitHubTicketsStore:
         async with self._lock:
             return await asyncio.to_thread(self._get_profile_sync, guild_id, user_id)
 
+    async def list_profiles(self, guild_id: int) -> tuple[Profile, ...]:
+        """Return all stored profiles in a guild, ordered by user ID."""
+        async with self._lock:
+            return await asyncio.to_thread(self._list_profiles_sync, guild_id)
+
     async def list_profiles_by_github_username(
         self,
         guild_id: int,
@@ -1778,6 +1783,14 @@ class GitHubTicketsStore:
                 ORDER BY user_id
                 """,
                 (guild_id, github_username),
+            ).fetchall()
+            return tuple(_decode_profile(connection, row) for row in rows)
+
+    def _list_profiles_sync(self, guild_id: int) -> tuple[Profile, ...]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT * FROM profiles WHERE guild_id = ? ORDER BY user_id",
+                (guild_id,),
             ).fetchall()
             return tuple(_decode_profile(connection, row) for row in rows)
 

@@ -7,7 +7,6 @@ import discord
 if TYPE_CHECKING:
     from .nhmisc import NHMisc
 
-
 class GateIncrementReviewView(discord.ui.View):
     def __init__(
         self,
@@ -16,6 +15,7 @@ class GateIncrementReviewView(discord.ui.View):
         opener_id: int,
         candidates: tuple[Any, ...],
         *,
+        custom_achievements: tuple[Any, ...] = (),
         ephemeral: bool,
     ) -> None:
         super().__init__(timeout=300)
@@ -25,6 +25,8 @@ class GateIncrementReviewView(discord.ui.View):
         self.ephemeral = ephemeral
         self.message: discord.Message | None = None
         self.candidates = candidates
+        self.custom_achievements = custom_achievements
+        self.selected_custom_achievement_keys: set[str] = set()
         self.selected_user_ids = {
             candidate.user_id
             for candidate in candidates
@@ -32,6 +34,7 @@ class GateIncrementReviewView(discord.ui.View):
         }
         self.solo_gater_enabled = False
         self._configure_select()
+        self._configure_achievement_select()
         self._configure_solo_toggle()
 
     @property
@@ -56,6 +59,12 @@ class GateIncrementReviewView(discord.ui.View):
             self.solo_gater_enabled = False
         self._configure_select()
         self._configure_solo_toggle()
+
+    def replace_custom_achievements(self, achievements: tuple[Any, ...]) -> None:
+        self.custom_achievements = achievements
+        live_keys = {achievement.key for achievement in achievements}
+        self.selected_custom_achievement_keys.intersection_update(live_keys)
+        self._configure_achievement_select()
 
     def render_embed(self, *, notice: str | None = None) -> discord.Embed:
         selectable_count = sum(
@@ -105,6 +114,14 @@ class GateIncrementReviewView(discord.ui.View):
                 lines.extend(("", "Solo Gater: already assigned"))
             elif self.solo_gater_enabled:
                 lines.extend(("", "Solo Gater: will be assigned"))
+        if self.selected_custom_achievement_keys:
+            lines.extend(
+                (
+                    "",
+                    "Achievements: "
+                    f"{len(self.selected_custom_achievement_keys)} selected",
+                )
+            )
         if notice:
             lines.extend(("", notice))
         return discord.Embed(
@@ -160,10 +177,28 @@ class GateIncrementReviewView(discord.ui.View):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
+    @discord.ui.select(
+        placeholder="Choose additional achievements",
+        min_values=0,
+        max_values=1,
+        row=1,
+    )
+    async def achievement_select(
+        self,
+        interaction: discord.Interaction,
+        select: discord.ui.Select,
+    ) -> None:
+        self.selected_custom_achievement_keys = set(select.values)
+        await interaction.response.edit_message(
+            embed=self.render_embed(),
+            view=self,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     @discord.ui.button(
         label="Confirm increment",
         style=discord.ButtonStyle.green,
-        row=1,
+        row=2,
     )
     async def confirm(
         self,
@@ -175,7 +210,7 @@ class GateIncrementReviewView(discord.ui.View):
     @discord.ui.button(
         label="Refresh",
         style=discord.ButtonStyle.secondary,
-        row=1,
+        row=2,
     )
     async def refresh(
         self,
@@ -187,7 +222,7 @@ class GateIncrementReviewView(discord.ui.View):
     @discord.ui.button(
         label="☐ Solo Gater",
         style=discord.ButtonStyle.secondary,
-        row=2,
+        row=3,
     )
     async def solo_gater(
         self,
@@ -205,7 +240,7 @@ class GateIncrementReviewView(discord.ui.View):
     @discord.ui.button(
         label="Cancel",
         style=discord.ButtonStyle.danger,
-        row=1,
+        row=2,
     )
     async def cancel(
         self,
@@ -289,6 +324,29 @@ class GateIncrementReviewView(discord.ui.View):
             if self.solo_gater_enabled
             else discord.ButtonStyle.secondary
         )
+
+    def _configure_achievement_select(self) -> None:
+        options = [
+            discord.SelectOption(
+                label=achievement.display_name[:100],
+                value=achievement.key,
+                default=achievement.key in self.selected_custom_achievement_keys,
+            )
+            for achievement in self.custom_achievements
+        ]
+        if options:
+            self.achievement_select.options = options
+            self.achievement_select.max_values = len(options)
+            self.achievement_select.disabled = False
+            return
+        self.achievement_select.options = [
+            discord.SelectOption(
+                label="No additional achievements available",
+                value="none",
+            )
+        ]
+        self.achievement_select.max_values = 1
+        self.achievement_select.disabled = True
 
     def _disable_controls(self) -> None:
         for child in self.children:

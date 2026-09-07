@@ -5,6 +5,7 @@ import unittest
 from unittest import mock
 
 from tests.test_chatchart import load_nhmisc_module
+from tests.test_forum_autopin import make_support
 
 nhmisc = load_nhmisc_module()
 
@@ -102,6 +103,7 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         )
         self.cog = object.__new__(nhmisc.NHMisc)
         self.cog.bot = types.SimpleNamespace(is_admin=mock.AsyncMock(return_value=False))
+        self.cog._support = make_support(self.cog.bot, FakeConfig({}), module=nhmisc)
 
     async def test_runtime_health_reports_a_stopped_required_task(self):
         pending_task = asyncio.create_task(asyncio.Event().wait())
@@ -133,8 +135,8 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
                     ),
                     send=mock.AsyncMock(),
                 )
-                self.cog.config = FakeConfig({config_key: 42})
-                self.cog._get_log_channel = mock.Mock(return_value=channel)
+                self.cog._support.log_config = self.cog.config = FakeConfig({config_key: 42})
+                self.cog._support.get_log_channel = mock.Mock(return_value=channel)
 
                 delivered = await getattr(self.cog, sender_name)(
                     self.guild,
@@ -155,7 +157,7 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
                 attach_files=False,
             ),
         )
-        self.cog.config = FakeConfig({"maintenance_channel": None})
+        self.cog._support.log_config = self.cog.config = FakeConfig({"maintenance_channel": None})
 
         with self.assertRaisesRegex(
             nhmisc.commands.UserFeedbackCheckFailure,
@@ -205,7 +207,7 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
                 42: types.SimpleNamespace(mention="<#42>"),
             }
         )
-        self.cog.config = FakeConfig(
+        self.cog._support.log_config = self.cog.config = FakeConfig(
             {
                 "alert_channel": 42,
                 "voice_log_channel": 41,
@@ -245,7 +247,7 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         for command_name, config_key, title in cases:
             with self.subTest(command_name=command_name):
                 self.ctx.send.reset_mock()
-                self.cog.config = FakeConfig({config_key: 42})
+                self.cog._support.log_config = self.cog.config = FakeConfig({config_key: 42})
 
                 command = getattr(nhmisc.NHMisc, f"nhmisc_log_{command_name}")
                 await command.callback(self.cog, self.ctx, None)
@@ -270,7 +272,7 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
                 attach_files=True,
             ),
         )
-        self.cog.config = FakeConfig({"alert_channel": None})
+        self.cog._support.log_config = self.cog.config = FakeConfig({"alert_channel": None})
 
         await nhmisc.NHMisc.nhmisc_log_alert.callback(self.cog, self.ctx, channel)
 
@@ -293,7 +295,7 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
             ("moderation", "moderation_log_channel"),
         ):
             with self.subTest(command_name=command_name):
-                self.cog.config = FakeConfig({config_key: None})
+                self.cog._support.log_config = self.cog.config = FakeConfig({config_key: None})
                 command = getattr(nhmisc.NHMisc, f"nhmisc_log_{command_name}")
 
                 with self.assertRaisesRegex(
@@ -312,7 +314,7 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
             commands=(command_metadata("nhmisc log alert", "[channel]"),)
         )
         self.channels[42] = types.SimpleNamespace(mention="<#42>")
-        self.cog.config = FakeConfig(
+        self.cog._support.log_config = self.cog.config = FakeConfig(
             {
                 "voice_log_channel": None,
                 "alert_channel": 42,
@@ -331,7 +333,7 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_activity_group_shows_channel_retention_and_useful_commands(self):
         self.channels[73] = types.SimpleNamespace(mention="<#73>")
-        self.cog.config = FakeConfig(
+        self.cog._support.log_config = self.cog.config = FakeConfig(
             {
                 "activity_channel": 73,
                 "activity_detail_retention_days": 30,
@@ -353,7 +355,7 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_activity_group_keeps_configuration_private_from_non_staff(self):
         self.ctx.author.guild_permissions.manage_messages = False
-        self.cog.config = FakeConfig(
+        self.cog._support.log_config = self.cog.config = FakeConfig(
             {
                 "activity_channel": 73,
                 "activity_detail_retention_days": 30,
@@ -367,7 +369,7 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         self.ctx.send.assert_not_awaited()
 
     async def test_vcjumping_group_shows_both_detection_settings(self):
-        self.cog.config = FakeConfig(
+        self.cog._support.log_config = self.cog.config = FakeConfig(
             {
                 "vcjumping_visit_count": 5,
                 "vcjumping_window_seconds": 12,
@@ -466,7 +468,7 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
     async def test_sticky_debuglogging_group_uses_maintenance_channel(self):
         self.ctx.author.guild_permissions.manage_guild = True
         self.channels[321] = types.SimpleNamespace(mention="<#321>")
-        self.cog.config = FakeConfig(
+        self.cog._support.log_config = self.cog.config = FakeConfig(
             {
                 "sticky_debug_logging_enabled": True,
                 "maintenance_channel": 321,
@@ -495,18 +497,18 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
             send=mock.AsyncMock(),
         )
         self.channels[321] = channel
-        self.cog.config = FakeConfig(
+        self.cog._support.log_config = self.cog.config = FakeConfig(
             {
                 "sticky_debug_logging_enabled": True,
                 "alert_channel": 999,
                 "maintenance_channel": 321,
             }
         )
-        self.cog._get_log_channel = mock.Mock(return_value=channel)
+        self.cog._support.get_log_channel = mock.Mock(return_value=channel)
 
         await self.cog._send_sticky_debug_log(self.guild, "Sticky role restored")
 
-        self.cog._get_log_channel.assert_called_once_with(self.guild, 321)
+        self.cog._support.get_log_channel.assert_called_once_with(self.guild, 321)
         channel.send.assert_awaited_once()
         self.assertEqual(channel.send.await_args.args, ("Sticky role restored",))
 
@@ -515,13 +517,13 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
             permissions_for=lambda _target: types.SimpleNamespace(view_channel=True),
             send=mock.AsyncMock(),
         )
-        self.cog.config = FakeConfig(
+        self.cog._support.log_config = self.cog.config = FakeConfig(
             {
                 "sticky_debug_logging_enabled": True,
                 "maintenance_channel": 321,
             }
         )
-        self.cog._get_log_channel = mock.Mock(return_value=channel)
+        self.cog._support.get_log_channel = mock.Mock(return_value=channel)
 
         await self.cog._send_sticky_debug_log(self.guild, "private sticky data")
 
@@ -535,7 +537,7 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
             send=mock.AsyncMock(),
         )
         self.channels[321] = channel
-        self.cog.config = FakeConfig(
+        self.cog._support.log_config = self.cog.config = FakeConfig(
             {
                 "sticky_debug_logging_enabled": False,
                 "alert_channel": 999,
@@ -548,7 +550,7 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         self.cog._achievement_store = types.SimpleNamespace(
             list_definitions=mock.AsyncMock(return_value=())
         )
-        self.cog._get_log_channel = mock.Mock(return_value=channel)
+        self.cog._support.get_log_channel = mock.Mock(return_value=channel)
         self.cog._prompt_sticky_role_db_action = mock.AsyncMock()
         role = types.SimpleNamespace(
             id=456,
@@ -558,7 +560,7 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
 
         await self.cog.on_guild_role_delete(role)
 
-        self.cog._get_log_channel.assert_called_once_with(self.guild, 321)
+        self.cog._support.get_log_channel.assert_called_once_with(self.guild, 321)
         self.cog._prompt_sticky_role_db_action.assert_awaited_once()
         self.assertIs(
             self.cog._prompt_sticky_role_db_action.await_args.kwargs["channel"],
@@ -569,14 +571,14 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         channel = types.SimpleNamespace(
             permissions_for=lambda _target: types.SimpleNamespace(view_channel=True),
         )
-        self.cog.config = FakeConfig({"maintenance_channel": 321})
+        self.cog._support.log_config = self.cog.config = FakeConfig({"maintenance_channel": 321})
         self.cog._sticky_roles = types.SimpleNamespace(
             get_role_state=mock.AsyncMock(return_value=(True, 2))
         )
         self.cog._achievement_store = types.SimpleNamespace(
             list_definitions=mock.AsyncMock(return_value=())
         )
-        self.cog._get_log_channel = mock.Mock(return_value=channel)
+        self.cog._support.get_log_channel = mock.Mock(return_value=channel)
         self.cog._prompt_sticky_role_db_action = mock.AsyncMock()
         role = types.SimpleNamespace(id=456, name="Sticky", guild=self.guild)
 

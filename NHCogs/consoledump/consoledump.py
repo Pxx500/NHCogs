@@ -29,8 +29,9 @@ CONSOLE_DUMP_USAGE = (
 class ConsoleDump(commands.Cog):
     """Capture sanitized Python logs for private moderator exports."""
 
-    def __init__(self, bot: Red) -> None:
+    def __init__(self, bot: Red, support) -> None:
         self.bot = bot
+        self.support = support
         self._console_log_buffer = ReadOnlyLogBuffer()
 
     async def cog_load(self) -> None:
@@ -42,6 +43,9 @@ class ConsoleDump(commands.Cog):
         root_logger = logging.getLogger()
         if self._console_log_buffer in root_logger.handlers:
             root_logger.removeHandler(self._console_log_buffer)
+
+    async def cog_command_error(self, ctx, error) -> None:
+        await self.support.handle_command_error(ctx, error, source="ConsoleDump")
 
     @commands.command(name="consoledump")
     @commands.guild_only()

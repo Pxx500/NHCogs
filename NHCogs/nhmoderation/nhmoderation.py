@@ -18,10 +18,7 @@ from ..command_overview import (
     overview_embeds,
     send_group_overview,
 )
-from ..operational_errors import (
-    mark_operational_error_recovered,
-    report_operational_error,
-)
+from ..operational_errors import OperationalErrorReporter, OperationalFailure
 from ..ranked_donut_chart import render_ranked_donut_chart
 from .command_inputs import parse_banchart_arguments
 from .history import NHModerationHistory
@@ -36,6 +33,7 @@ from .synchronization import (
 
 log = logging.getLogger("red.NHModeration")
 AUDIT_BATCH_SIZE = 100
+FILTER_CONFIG_EMBED_TITLE = "Message filter"
 
 
 class NHModeration(commands.Cog):
@@ -43,16 +41,22 @@ class NHModeration(commands.Cog):
 
     CONFIG_IDENTIFIER = 205192943327321000143939875896557571751
 
-    def __init__(self, bot: Red) -> None:
+    def __init__(self, bot: Red, support) -> None:
         self.bot = bot
+        self._support = support
         self.config = Config.get_conf(
             self,
             identifier=self.CONFIG_IDENTIFIER,
             force_registration=True,
         )
-        self.config.register_guild(message_filter_phrases=[])
+        self.config.register_guild(
+            message_filter_phrases=[],
+        )
         database_path = cog_data_path(self) / "moderation.sqlite"
         self.history = NHModerationHistory(database_path)
+        self._operational_errors = OperationalErrorReporter(
+            bot, support.config, database_path, logger=log
+        )
         self._synchronizer: ModerationSynchronizer | None = None
         self._scheduler_task: asyncio.Task[None] | None = None
         self._startup_task: asyncio.Task[None] | None = None
@@ -63,6 +67,7 @@ class NHModeration(commands.Cog):
 
     async def cog_load(self) -> None:
         await self.history.initialize()
+        await self._operational_errors.initialize()
         guild_configs = await self.config.all_guilds()
         self._message_filter_phrases = {
             int(guild_id): tuple(settings.get("message_filter_phrases", ()))
@@ -109,19 +114,36 @@ class NHModeration(commands.Cog):
     @commands.Cog.listener()
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         await self.history.delete_guild_data(guild.id)
+        await self._operational_errors.delete_guild(guild.id)
         async with self._message_filter_lock:
             self._message_filter_phrases.pop(guild.id, None)
             await self.config.guild(guild).clear()
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        if message.guild is None or not message.content:
+        await self._filter_message(message)
+
+    @commands.Cog.listener()
+    async def on_message_edit(
+        self,
+        before: discord.Message,
+        after: discord.Message,
+    ) -> None:
+        del before
+        await self._filter_message(after)
+
+    async def _filter_message(self, message: discord.Message) -> None:
+        if message.guild is None:
+            return
+        bot_user_id = getattr(getattr(self.bot, "user", None), "id", None)
+        if bot_user_id is not None and message.author.id == bot_user_id and any(
+            embed.title == FILTER_CONFIG_EMBED_TITLE for embed in message.embeds
+        ):
             return
         phrases = self._message_filter_phrases.get(message.guild.id, ())
         if not phrases:
             return
-        content = message.content.casefold()
-        if not any(phrase in content for phrase in phrases):
+        if not self._message_matches_phrases(message, phrases):
             return
         try:
             await message.delete()
@@ -141,6 +163,24 @@ class NHModeration(commands.Cog):
             "delete filtered message",
         )
 
+    @staticmethod
+    def _message_matches_phrases(
+        message: discord.Message,
+        phrases: tuple[str, ...],
+    ) -> bool:
+        texts = [message.content]
+        for embed in message.embeds:
+            texts.extend((embed.title, embed.description))
+            texts.extend(field.name for field in embed.fields)
+            texts.extend(field.value for field in embed.fields)
+            texts.extend((embed.author.name, embed.footer.text))
+        return any(
+            phrase in text.casefold()
+            for text in texts
+            if text
+            for phrase in phrases
+        )
+
     async def report_operational_error(
         self,
         *,
@@ -149,22 +189,28 @@ class NHModeration(commands.Cog):
         error: BaseException,
         channel_id: int | None = None,
         message_id: int | None = None,
-    ):
+    ) -> OperationalFailure | None:
         log.error(
             "NHModeration operational error during %s for guild %s",
             action,
             guild_id,
             exc_info=(type(error), error, error.__traceback__),
         )
-        return await report_operational_error(
-            self.bot,
-            guild_id=guild_id,
-            source="NHModeration",
-            action=action,
-            error=error,
-            channel_id=channel_id,
-            message_id=message_id,
-        )
+        try:
+            return await self._operational_errors.report(
+                guild_id=guild_id,
+                source="NHModeration",
+                action=action,
+                error=error,
+                channel_id=channel_id,
+                message_id=message_id,
+            )
+        except Exception:
+            log.exception(
+                "Failed to persist NHModeration operational error for guild %s",
+                guild_id,
+            )
+            return None
 
     async def cog_command_error(
         self, ctx: commands.Context, error: commands.CommandError
@@ -234,12 +280,17 @@ class NHModeration(commands.Cog):
     async def _mark_operational_recovered(
         self, guild: discord.Guild, action: str
     ) -> None:
-        await mark_operational_error_recovered(
-            self.bot,
-            guild_id=guild.id,
-            source="NHModeration",
-            action=action,
-        )
+        try:
+            await self._operational_errors.mark_action_recovered(
+                guild_id=guild.id,
+                source="NHModeration",
+                action=action,
+            )
+        except Exception:
+            log.exception(
+                "Failed to mark NHModeration action recovered for guild %s",
+                guild.id,
+            )
 
     async def _fetch_audit_entries(
         self,
@@ -604,9 +655,10 @@ class NHModeration(commands.Cog):
                 value=phrases,
             )
             self._message_filter_phrases[ctx.guild.id] = tuple(phrases)
-        await ctx.send(
+        await self._send_filter_output(
+            ctx,
             f"Phrase added: `{normalized}`",
-            allowed_mentions=discord.AllowedMentions.none(),
+            [],
         )
         await self._mark_operational_recovered(ctx.guild, "nhmod filter add")
 
@@ -627,9 +679,10 @@ class NHModeration(commands.Cog):
                 value=phrases,
             )
             self._message_filter_phrases[ctx.guild.id] = tuple(phrases)
-        await ctx.send(
+        await self._send_filter_output(
+            ctx,
             f"Phrase removed: `{normalized}`",
-            allowed_mentions=discord.AllowedMentions.none(),
+            [],
         )
         await self._mark_operational_recovered(ctx.guild, "nhmod filter remove")
 
@@ -661,7 +714,15 @@ class NHModeration(commands.Cog):
                     )
                 )
             ]
-        for embed in overview_embeds("Message filter", description, fields):
+        await self._send_filter_output(ctx, description, fields)
+
+    @staticmethod
+    async def _send_filter_output(
+        ctx: commands.Context,
+        description: str,
+        fields: list[tuple[str, str]],
+    ) -> None:
+        for embed in overview_embeds(FILTER_CONFIG_EMBED_TITLE, description, fields):
             await ctx.send(
                 embed=embed,
                 allowed_mentions=discord.AllowedMentions.none(),

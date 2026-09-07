@@ -14,6 +14,7 @@ from tests.harness import (
     CaseExpiryTestCase,
     _Bot,
     _isolated_honeypot_modules,
+    _operational_support,
     drain_background_work,
 )
 
@@ -22,7 +23,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
     async def test_bulk_tp_interaction_ignores_captured_pdf_evidence(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._case_store.initialize()
                 appended = cog._case_store.append_message(
                     honeypot.NewMessage(
@@ -109,7 +110,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog._case_store.initialize()
                 cog.config = self._config({"dry_run": True})
                 honeypot.DetectionModerationConfirmationView.add_item = (
@@ -209,7 +210,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                     )
                 )
                 honeypot.discord.ui.Button = lambda **kwargs: SimpleNamespace(**kwargs)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 action_started = asyncio.Event()
                 release_action = asyncio.Event()
                 order = []
@@ -262,7 +263,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
     async def test_classification_returns_before_final_operations_finish(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._case_store.initialize()
                 now = datetime.now(timezone.utc)
                 appended = cog._case_store.append_message(
@@ -390,7 +391,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                     )
                 )
                 honeypot.discord.ui.Button = lambda **kwargs: SimpleNamespace(**kwargs)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 view = honeypot.DetectionBulkConfirmationView(
                     cog,
                     "case-1",
@@ -437,7 +438,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                     )
                 )
                 honeypot.discord.ui.Button = lambda **kwargs: SimpleNamespace(**kwargs)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 action_started = asyncio.Event()
                 release_action = asyncio.Event()
                 order = []
@@ -503,7 +504,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                 )
 
                 view = honeypot.DetectionCaseView(
-                    honeypot.Honeypot(_Bot()),
+                    honeypot.Honeypot(_Bot(), _operational_support()),
                     "case-1",
                     has_image_feedback=True,
                     feedback_items=(matched,),
@@ -523,7 +524,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                 )
 
                 after_ban = honeypot.DetectionCaseView(
-                    honeypot.Honeypot(_Bot()),
+                    honeypot.Honeypot(_Bot(), _operational_support()),
                     "case-1",
                     has_image_feedback=True,
                     feedback_items=(matched,),
@@ -535,7 +536,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                 )
 
                 after_classification = honeypot.DetectionCaseView(
-                    honeypot.Honeypot(_Bot()),
+                    honeypot.Honeypot(_Bot(), _operational_support()),
                     "case-1",
                     has_image_feedback=False,
                 )
@@ -574,7 +575,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                 honeypot.discord.ui.Button = lambda **kwargs: SimpleNamespace(**kwargs)
 
                 view = honeypot.DetectionCaseView(
-                    honeypot.Honeypot(_Bot()),
+                    honeypot.Honeypot(_Bot(), _operational_support()),
                     "case-1",
                     has_image_feedback=True,
                     message_sequence=2,
@@ -596,7 +597,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
 
                 honeypot.DetectionCaseView.add_item = add_item
                 honeypot.discord.ui.Button = lambda **kwargs: SimpleNamespace(**kwargs)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._case_review_bulk_interaction = mock.AsyncMock()
                 matched = SimpleNamespace(detector_matched=True, decision=None)
                 unmatched = SimpleNamespace(detector_matched=False, decision=None)
@@ -633,7 +634,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
     async def test_case_summary_represents_each_source_message_channel(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._case_store.initialize()
                 now = datetime(2026, 7, 24, 8, tzinfo=timezone.utc)
                 first = cog._case_store.append_message(
@@ -728,7 +729,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
     async def test_identical_reasons_survive_across_source_messages(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._case_store.initialize()
                 now = datetime(2026, 7, 24, 8, tzinfo=timezone.utc)
                 signal = lambda: honeypot.DetectionSignal(
@@ -773,7 +774,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
     async def test_completed_moderation_with_pending_image_is_awaiting_classification(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._case_store.initialize()
                 now = datetime(2026, 7, 24, 8, tzinfo=timezone.utc)
                 appended = cog._case_store.append_message(
@@ -843,7 +844,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                 honeypot.discord.ui.Button = lambda **kwargs: SimpleNamespace(**kwargs)
 
                 view = honeypot.DetectionCaseView(
-                    honeypot.Honeypot(_Bot()),
+                    honeypot.Honeypot(_Bot(), _operational_support()),
                     "case-1",
                     has_image_feedback=True,
                     allow_individual=False,
@@ -856,7 +857,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
                 bot = _Bot()
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 now = datetime.now(timezone.utc)
                 attachments = tuple(
@@ -932,7 +933,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._case_store.initialize()
                 now = datetime.now(timezone.utc)
                 appended = cog._case_store.append_message(
@@ -1084,7 +1085,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
     async def test_manage_messages_can_use_case_ban_control(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(
                     honeypot, cog, datetime.now(timezone.utc)
                 )
@@ -1119,7 +1120,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
     async def test_moderate_members_can_ignore_and_classify_case_evidence(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                honeypot.Honeypot(_Bot())
+                honeypot.Honeypot(_Bot(), _operational_support())
                 interaction = SimpleNamespace(
                     user=SimpleNamespace(
                         guild_permissions=SimpleNamespace(

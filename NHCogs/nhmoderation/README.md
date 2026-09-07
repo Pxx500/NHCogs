@@ -63,7 +63,9 @@ The `nhmod` root, all maintenance commands, and BanChart require Manage Messages
 
 ## Message phrase filter
 
-The filter applies to guild message content. Matching is a case-insensitive plain substring check. It also matches a phrase inside a larger word. The first match deletes the whole message without posting a public response. Messages from moderators, bots, and webhooks use the same rules.
+The filter applies to guild message content and text inside embeds. It checks embed titles, descriptions, field names, field values, author names, and footer text. Matching is a case-insensitive plain substring check. It also matches a phrase inside a larger word. The first match deletes the whole message without posting a public response. Messages from moderators, bots, and webhooks use the same rules.
+
+New messages and cached message edits are checked. This covers embeds that Discord adds or updates after the original message without fetching the message from the Discord API.
 
 Phrases are configured per guild and normalized before storage. The listener reads a memory cache that is restored when the cog loads and updated by the filter commands. Deletion is not recorded as a moderation action and does not affect BanChart.
 
@@ -77,12 +79,16 @@ Weekly reconciliation runs every Sunday at `04:20 UTC`. It re-reads a 14-day aud
 
 ## Operational errors
 
-Unexpected command, event, migration, synchronization, repair, scheduler, database, and rendering failures are written to the Python logger and sent through the process-wide OperationalErrors reporter. NHModeration does not own separate error channel or maintainer commands.
+Unexpected command, event, migration, synchronization, repair, scheduler, database, and
+rendering failures use the shared `[p]nhcogs errors` configuration. See the [shared
+command catalog](../README.md) for setup and privacy rules.
 
-Expected input and permission errors return a short useful response. Public output never includes raw exceptions, audit IDs, case numbers, source keys, reasons, or database identifiers.
+Expected input and permission errors return a short useful response and aren't reported as
+operational errors. Public output never includes raw exceptions, audit IDs, case numbers,
+source keys, reasons, or database identifiers.
 
 ## Stored data and deletion
 
-NHModeration stores immutable source observations and rebuildable canonical actions. Stored fields may include guild, target, technical executor, credited moderator, and channel IDs, action type, timestamps, reasons, expiry, source identity, migration identity, attribution, and synchronization cursors. Configured message filter phrases are stored per guild in Red Config.
+NHModeration stores immutable source observations and rebuildable canonical actions. Stored fields may include guild, target, technical executor, credited moderator, and channel IDs, action type, timestamps, reasons, expiry, source identity, migration identity, attribution, synchronization cursors, and operational failures. Configured message filter phrases are stored per guild in Red Config.
 
-Red user-data deletion anonymizes matching identities and reasons, then rebuilds affected actions. Guild removal deletes the guild's history, synchronization state, and migration state.
+Red user-data deletion anonymizes matching identities and reasons, then rebuilds affected actions. Guild removal deletes the guild's history, synchronization state, migration state, failures, and configuration.

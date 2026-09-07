@@ -27,7 +27,6 @@ from redbot.core import commands, modlog
 from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import box
 
-from ..operational_errors import mark_operational_error_recovered
 from . import detection_runtime, imagescan, review_publication
 from .case_review import case_feedback_items
 from .detection_cases import (
@@ -333,8 +332,11 @@ async def purge_cache_cleanup_loop(cog) -> None:
         await cog._message_registry.prune(
             datetime.now(timezone.utc) - timedelta(days=MESSAGE_REGISTRY_RETENTION_DAYS)
         )
-    except sqlite3.Error:
+    except sqlite3.Error as error:
         log.exception("Message registry retention prune failed")
+        await cog._support.report_global_error(
+            source="Honeypot", action="prune message registry", error=error
+        )
     _prune_purge_cache(cog)
 
 
@@ -636,7 +638,6 @@ async def _settle_detection_operation_failure(
             operation_id=operation.operation_id,
             attempts=operation.attempts,
             terminal=retry_at is None,
-            error=error,
         )
     if operation.operation_type == OperationType.ROLE_APPLY:
         await review_publication._case_review_rerender_safely(cog, operation.case_id)
@@ -686,12 +687,10 @@ async def _settle_detection_operation_success(
     elif context.snapshot is not None and (
         operation.attempts > 1 or outcome.resolve_failure_on_first_attempt
     ):
-        await mark_operational_error_recovered(
-            cog.bot,
-            guild_id=context.snapshot.case.guild_id,
-            source="Honeypot",
-            action=operation.operation_type.value,
-            correlation_key=operation.operation_id,
+        await asyncio.to_thread(
+            cog._case_store.resolve_operational_failure,
+            operation.operation_id,
+            context.now,
         )
     elif outcome.role_was_added and context.snapshot is not None:
         guild = cog.bot.get_guild(context.snapshot.case.guild_id)
@@ -1412,7 +1411,6 @@ async def _delete_cached_message_ref(cog, guild: discord.Guild, user_id: int, re
             guild.id,
             "cached_message_deletion",
             f"{type(exc).__name__}: {exc}",
-            error=exc,
         )
         log.debug(
             "Failed to delete cached message %s for user %s in channel %s: %r",
@@ -1500,7 +1498,6 @@ async def _post_ban_message_sweep(cog, guild_id: int, user_id: int) -> None:
             guild_id,
             "post_ban_cached_purge",
             f"{type(error).__name__}: {error}",
-            error=error,
         )
         log.exception(
             "Post-ban cached message purge failed for user %s in guild %s",
@@ -1628,7 +1625,6 @@ async def _spam_suspicion_reasons(
                 message.guild.id,
                 "message_registry_spam_lookup",
                 f"{type(error).__name__}: {error}",
-                error=error,
             )
         except Exception:
             log.exception("Failed to record message registry spam lookup error")
@@ -1758,8 +1754,11 @@ async def _execute_action(
             moderator=moderator or guild.me,
             reason=reason,
         )
-    except Exception:
+    except Exception as error:
         log.exception("Failed to create modlog case in _execute_action")
+        await cog._support.report_operational_error(
+            guild_id=guild.id, source="Honeypot", action="create moderation log case", error=error
+        )
         modlog_failed = True
     label = _("The member has been kicked") if action == "kick" else _("The member has been banned")
     return ModerationEffectResult(
@@ -1784,7 +1783,6 @@ async def on_message(cog, message: discord.Message) -> None:
                 message.guild.id,
                 "message_registry_observation",
                 f"{type(error).__name__}: {error}",
-                error=error,
             )
         except Exception:
             log.exception("Failed to record message registry observation error")

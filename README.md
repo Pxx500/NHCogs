@@ -6,8 +6,6 @@ Red-DiscordBot V3 cogs maintained for the NewHorizons Discord server.
 
 The combined `NHCogs` extension loads the maintained cogs:
 
-- [`OperationalErrors`](NHCogs/operationalerrors/README.md) provides one private
-  process-wide error channel and maintainer.
 - [`Honeypot`](NHCogs/honeypot/README.md) detects and reviews suspicious activity,
   captures moderation evidence, and supports automated containment.
 - [`NHMisc`](NHCogs/nhmisc/README.md) provides voice logging, sticky roles, activity
@@ -16,6 +14,9 @@ The combined `NHCogs` extension loads the maintained cogs:
   Red-compatible placeholders, and thread-based moderator editing.
 - [`GitHubTickets`](NHCogs/githubtickets/README.md) publishes pull request review tickets,
   manages developer expertise profiles, and routes reviewer requests.
+
+The combined extension also provides shared technical error reporting. See the
+[NHCogs command catalog](NHCogs/README.md) for its configuration commands.
 
 ## Installation
 

@@ -14,14 +14,16 @@ from typing import TypeVar
 from uuid import uuid4
 
 import discord
-from redbot.core import Config, commands
+from redbot.core import commands
 from redbot.core.data_manager import cog_data_path
 
-from ..operational_errors import report_operational_error
+from ..operational_errors import OperationalFailure
+from ..operational_support import NHMISC_CONFIG_IDENTIFIER, OperationalSupport
 from ..ranked_donut_chart import OTHER_COLOR, SERIES_COLORS, render_ranked_donut_chart
 from .achievement_definitions import (
     SOLO_GATER_DEFINITION,
     SOLO_GATER_KEY,
+    STARGATE_COMPLETED_KEY,
 )
 from .achievement_store import (
     AchievementDefinition,
@@ -55,6 +57,8 @@ from .bot_proxy_store import BotProxyStore
 from .discord_links import MESSAGE_LINK_PATTERN
 from .forum_autopin import ForumAutopinService
 from .gate_increment_store import (
+    AchievementDefinitionConflict,
+    GateIncrementAchievementPlan,
     GateIncrementMemberPlan,
     GateIncrementSnapshot,
     GateIncrementStore,
@@ -124,6 +128,7 @@ def _parse_sticky_db_decision(content: str) -> tuple[str, int | None, str]:
     return command.lower(), role_id, argument.strip()
 
 DEFAULT_CHATCHART_USER_COUNT = 10
+DISCORD_MESSAGE_CONTENT_LIMIT = 2_000
 MAX_CHATCHART_USER_COUNT = 20
 CHATCHART_SERIES_COLORS = SERIES_COLORS
 CHATCHART_OTHER_COLOR = OTHER_COLOR
@@ -366,6 +371,92 @@ def _build_gate_increment_member_plans(
     return tuple(plans)
 
 
+def _gate_increment_custom_achievement_definitions(
+    definitions,
+) -> tuple[AchievementDefinition, ...]:
+    eligible = tuple(
+        definition
+        for definition in definitions
+        if definition.grantable
+        and definition.key not in {STARGATE_COMPLETED_KEY, SOLO_GATER_KEY}
+    )
+    if len(eligible) > 25:
+        raise commands.UserFeedbackCheckFailure(
+            "Gate increment supports at most 25 custom achievements"
+        )
+    return eligible
+
+
+def _gate_increment_custom_award_labels(
+    snapshot: GateIncrementSnapshot,
+    member,
+) -> tuple[str, ...]:
+    definitions_by_key = {
+        achievement.key: achievement
+        for achievement in snapshot.custom_achievements
+    }
+    labels = []
+    for key in member.custom_achievement_keys:
+        achievement = definitions_by_key.get(key)
+        if achievement is None:
+            continue
+        labels.append(
+            f"<@&{achievement.role_id}>"
+            if achievement.role_id is not None
+            else achievement.display_name
+        )
+    return tuple(labels)
+
+
+def _validate_gate_increment_output_limits(
+    source_message,
+    moderator_id: int,
+    plans: tuple[GateIncrementMemberPlan, ...],
+    achievements: tuple[GateIncrementAchievementPlan, ...],
+    owned_keys_by_user: dict[int, set[str]] | None = None,
+) -> None:
+    owned_keys_by_user = owned_keys_by_user or {}
+    public_lines = []
+    log_lines = []
+    for plan in plans:
+        achievement_labels = tuple(
+            f"<@&{achievement.role_id}>"
+            if achievement.role_id is not None
+            else achievement.display_name
+            for achievement in achievements
+            if achievement.key not in owned_keys_by_user.get(plan.user_id, set())
+        )
+        awards = [f"<@&{plan.target_role_id}>"]
+        log_awards = []
+        if plan.grant_solo:
+            awards.append(f"<@&{SINGLEPLAYER_GATE_COMPLETED_ROLE_ID}>")
+            log_awards.append("Solo Gater")
+        awards.extend(achievement_labels)
+        log_awards.extend(achievement_labels)
+        public_lines.append(f"<@{plan.user_id}> " + " ".join(awards))
+        gate_number = GATE_TIER_ROLE_IDS.index(plan.target_role_id) + 1
+        log_line = f"<@{plan.user_id}> Gate {gate_number}"
+        if log_awards:
+            log_line += " + " + " + ".join(log_awards)
+        log_lines.append(log_line)
+    public_content = "🎉 **Congratulations!**\n" + "\n".join(public_lines)
+    source_url = (
+        "https://discord.com/channels/"
+        f"{source_message.guild.id}/{source_message.channel.id}/{source_message.id}"
+    )
+    log_content = (
+        "Gate incremented\n"
+        f"Moderator: <@{moderator_id}>\n"
+        f"Members: {', '.join(log_lines)}\n"
+        f"Source: {source_url}"
+    )
+    if max(len(public_content), len(log_content)) > DISCORD_MESSAGE_CONTENT_LIMIT:
+        raise commands.UserFeedbackCheckFailure(
+            "The selected Gate increment is too large for one Discord message. "
+            "Select fewer users or achievements"
+        )
+
+
 def _validate_gate_increment_configuration(guild) -> tuple:
     bot_member = guild.me
     permissions = getattr(bot_member, "guild_permissions", None)
@@ -426,23 +517,16 @@ def _plan_gate_revoke_roles(guild, member, current_count: int) -> tuple:
 class NHMisc(commands.Cog):
     """Miscellaneous small utilities for Red-DiscordBot."""
 
-    CONFIG_IDENTIFIER = 8597423150612235807
+    CONFIG_IDENTIFIER = NHMISC_CONFIG_IDENTIFIER
     QUIESCENT_UNLOAD_VERSION = 1
     RUNTIME_HEALTH_VERSION = 1
 
-    def __init__(self, bot):
+    def __init__(self, bot, support):
         super().__init__()
         self.bot = bot
-        self.config = Config.get_conf(
-            self,
-            identifier=self.CONFIG_IDENTIFIER,
-            force_registration=True,
-        )
+        self._support: OperationalSupport = support
+        self.config = support.log_config
         self.config.register_guild(
-            voice_log_channel=None,
-            alert_channel=None,
-            maintenance_channel=None,
-            moderation_log_channel=None,
             bot_proxy_channel=None,
             bot_proxy_delete_closed_sessions=False,
             bot_proxy_enabled=True,
@@ -454,6 +538,7 @@ class NHMisc(commands.Cog):
             sticky_debug_logging_enabled=False,
             forum_autopin_channel_ids=[],
         )
+        self._operational_errors = support.operational_errors
         self._bot_proxy_store = BotProxyStore(cog_data_path(self) / "bot_proxy.sqlite")
         self._bot_proxy = None
         self._voice_visits = VoiceChannelVisitTracker()
@@ -569,9 +654,8 @@ class NHMisc(commands.Cog):
         channel_id: int | None = None,
         thread_id: int | None = None,
         message_id: int | None = None,
-    ):
-        return await report_operational_error(
-            self.bot,
+    ) -> OperationalFailure | None:
+        return await self._support.report_operational_error(
             guild_id=guild_id,
             source=source,
             action=action,
@@ -636,7 +720,7 @@ class NHMisc(commands.Cog):
             self._bot_proxy = BotProxyWorkflowManager(
                 config=self.config,
                 store=self._bot_proxy_store,
-                moderation_log=self.send_moderation_log,
+                moderation_log=self._support.send_moderation_log,
                 error_reporter=self.report_operational_error,
                 avatar_loader=AvatarLoader(),
             )
@@ -3674,7 +3758,7 @@ class NHMisc(commands.Cog):
                 timeout=300,
             )
         except TimeoutError:
-            await self._send_voice_log(
+            await self._support.send_log_message(
                 channel,
                 "Achievement synchronization confirmation expired",
             )
@@ -3736,7 +3820,7 @@ class NHMisc(commands.Cog):
                     "`!rolesync discord` again."
                 )
                 return
-            maintenance_channel = self._get_log_channel(
+            maintenance_channel = self._support.get_log_channel(
                 ctx.guild,
                 await self.config.guild(ctx.guild).maintenance_channel(),
             )
@@ -3749,7 +3833,7 @@ class NHMisc(commands.Cog):
                     "Configure a private NHMisc maintenance channel first"
                 )
 
-            missing_permissions = self._missing_log_permissions(
+            missing_permissions = self._support.missing_log_permissions(
                 ctx.guild,
                 maintenance_channel,
                 require_attach_files=True,
@@ -3769,7 +3853,7 @@ class NHMisc(commands.Cog):
                 snapshot,
             )
 
-            plan_message = await self._send_voice_log(maintenance_channel, summary)
+            plan_message = await self._support.send_log_message(maintenance_channel, summary)
             if plan_message is None:
                 raise commands.UserFeedbackCheckFailure(
                     "Could not publish the synchronization plan"
@@ -3789,7 +3873,7 @@ class NHMisc(commands.Cog):
 
             fresh_snapshot = await self._achievement_discord_snapshot(ctx.guild)
             if fresh_snapshot != snapshot:
-                await self._send_voice_log(
+                await self._support.send_log_message(
                     maintenance_channel,
                     "Role analytics changed. Run `!rolesync discord` again.",
                 )
@@ -3802,7 +3886,7 @@ class NHMisc(commands.Cog):
                 bootstrapped=fresh_bootstrapped,
             )
             if fresh_bootstrapped != bootstrapped or fresh_summary != summary:
-                await self._send_voice_log(
+                await self._support.send_log_message(
                     maintenance_channel,
                     "Achievement data changed. Run `!rolesync discord` again.",
                 )
@@ -3814,12 +3898,12 @@ class NHMisc(commands.Cog):
                 bootstrapped=bootstrapped,
             )
             if completion is None:
-                await self._send_voice_log(
+                await self._support.send_log_message(
                     maintenance_channel,
                     "Achievement initialization was already completed",
                 )
                 return
-            await self._send_voice_log(maintenance_channel, completion)
+            await self._support.send_log_message(maintenance_channel, completion)
         finally:
             self._achievement_syncing_guilds.discard(guild_id)
 
@@ -4203,6 +4287,7 @@ class NHMisc(commands.Cog):
                 ctx,
                 preferred_order=(
                     "log",
+                    "errors",
                     "vcjumping",
                     "forumautopin",
                     "stickyroles",
@@ -4297,7 +4382,7 @@ class NHMisc(commands.Cog):
                 ctx, title="Voice logging", config_key="voice_log_channel"
             )
             return
-        missing_permissions = self._missing_log_permissions(ctx.guild, channel)
+        missing_permissions = self._support.missing_log_permissions(ctx.guild, channel)
         if missing_permissions is not None:
             raise commands.UserFeedbackCheckFailure(missing_permissions)
         await self.config.guild(ctx.guild).voice_log_channel.set(channel.id)
@@ -4315,7 +4400,7 @@ class NHMisc(commands.Cog):
                 ctx, title="Alert logging", config_key="alert_channel"
             )
             return
-        missing_permissions = self._missing_log_permissions(ctx.guild, channel)
+        missing_permissions = self._support.missing_log_permissions(ctx.guild, channel)
         if missing_permissions is not None:
             raise commands.UserFeedbackCheckFailure(missing_permissions)
         await self.config.guild(ctx.guild).alert_channel.set(channel.id)
@@ -4333,7 +4418,7 @@ class NHMisc(commands.Cog):
                 ctx, title="Maintenance logging", config_key="maintenance_channel"
             )
             return
-        missing_permissions = self._missing_log_permissions(
+        missing_permissions = self._support.missing_log_permissions(
             ctx.guild,
             channel,
             require_attach_files=True,
@@ -4362,7 +4447,7 @@ class NHMisc(commands.Cog):
                 config_key="moderation_log_channel",
             )
             return
-        missing_permissions = self._missing_log_permissions(ctx.guild, channel)
+        missing_permissions = self._support.missing_log_permissions(ctx.guild, channel)
         if missing_permissions is not None:
             raise commands.UserFeedbackCheckFailure(missing_permissions)
         if self._channel_allows_everyone(channel, ctx.guild):
@@ -4635,6 +4720,9 @@ class NHMisc(commands.Cog):
         _validate_gate_increment_configuration(source_message.guild)
         candidates = await self._fetch_gate_increment_candidates(source_message)
         self._validate_gate_increment_candidate_count(candidates)
+        definitions = _gate_increment_custom_achievement_definitions(
+            await self._achievement_store.list_definitions(source_message.guild.id)
+        )
         from .gate_increment_views import GateIncrementReviewView
 
         return GateIncrementReviewView(
@@ -4642,6 +4730,7 @@ class NHMisc(commands.Cog):
             source_message,
             opener_id,
             candidates,
+            custom_achievements=definitions,
             ephemeral=ephemeral,
         )
 
@@ -4698,7 +4787,12 @@ class NHMisc(commands.Cog):
         snapshot: GateIncrementSnapshot,
     ) -> GateIncrementSnapshot:
         operation = snapshot.operation
-        if operation.completed_count and operation.result_message_id is None:
+        if operation.completed_count:
+            await self._publish_gate_increment_moderation_log(
+                source_message,
+                operation.moderator_id or self.bot.user.id,
+                snapshot,
+            )
             await self._publish_gate_increment_result(source_message, snapshot)
             refreshed = await self._gate_increment_store.get_operation(operation.key)
             if refreshed is not None:
@@ -4722,6 +4816,11 @@ class NHMisc(commands.Cog):
                     self._format_gate_increment_operation(snapshot),
                 )
                 return
+            await self._publish_gate_increment_moderation_log(
+                source_message,
+                snapshot.operation.moderator_id or interaction.user.id,
+                snapshot,
+            )
             published = await self._publish_gate_increment_result(
                 source_message,
                 snapshot,
@@ -4757,6 +4856,9 @@ class NHMisc(commands.Cog):
             _validate_gate_increment_configuration(source_message.guild)
             candidates = await self._fetch_gate_increment_candidates(source_message)
             self._validate_gate_increment_candidate_count(candidates)
+            definitions = _gate_increment_custom_achievement_definitions(
+                await self._achievement_store.list_definitions(source_message.guild.id)
+            )
         except commands.UserFeedbackCheckFailure as error:
             await interaction.edit_original_response(
                 content=None,
@@ -4775,6 +4877,7 @@ class NHMisc(commands.Cog):
             return
         view.source_message = source_message
         view.replace_candidates(candidates)
+        view.replace_custom_achievements(definitions)
         await interaction.edit_original_response(
             content=None,
             embed=view.render_embed(),
@@ -4792,6 +4895,36 @@ class NHMisc(commands.Cog):
                 source_message
             )
             self._validate_gate_increment_candidate_count(live_candidates)
+            live_achievements = _gate_increment_custom_achievement_definitions(
+                await self._achievement_store.list_definitions(
+                    source_message.guild.id
+                )
+            )
+            profiles = await asyncio.gather(
+                *(
+                    self._achievement_store.get_profile(
+                        source_message.guild.id,
+                        candidate.user_id,
+                    )
+                    for candidate in live_candidates
+                    if candidate.user_id in view.selected_user_ids
+                    and view.selected_custom_achievement_keys
+                )
+            )
+            selected_user_ids = tuple(
+                candidate.user_id
+                for candidate in live_candidates
+                if candidate.user_id in view.selected_user_ids
+                and view.selected_custom_achievement_keys
+            )
+            owned_keys_by_user = {
+                user_id: set(profile.boolean_keys)
+                for user_id, profile in zip(
+                    selected_user_ids,
+                    profiles,
+                    strict=True,
+                )
+            }
             await self._require_private_moderation_log_channel(source_message.guild)
         except commands.UserFeedbackCheckFailure as error:
             await interaction.edit_original_response(
@@ -4809,10 +4942,14 @@ class NHMisc(commands.Cog):
                 public_defer=False,
             )
             return None
-        return source_message, live_candidates
+        return (
+            source_message,
+            live_candidates,
+            live_achievements,
+            owned_keys_by_user,
+        )
 
-    async def _confirm_gate_increment_review(self, interaction, view) -> None:
-        await interaction.response.defer()
+    async def _prepare_gate_increment_claim(self, interaction, view):
         if not await self._achievement_store.is_bootstrapped(
             view.source_message.guild.id
         ):
@@ -4824,22 +4961,32 @@ class NHMisc(commands.Cog):
                 view=view,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-            return
+            return None
         if not view.selected_user_ids:
             await interaction.edit_original_response(
                 embed=view.render_embed(notice="Select at least one user"),
                 view=view,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-            return
+            return None
         prepared = await self._prepare_gate_increment_confirmation(interaction, view)
         if prepared is None:
-            return
-        source_message, live_candidates = prepared
+            return None
+        (
+            source_message,
+            live_candidates,
+            live_achievements,
+            owned_keys_by_user,
+        ) = prepared
 
-        if self._gate_increment_review_is_stale(view, live_candidates):
+        if self._gate_increment_review_is_stale(
+            view, live_candidates
+        ) or self._gate_increment_achievement_selection_is_stale(
+            view, live_achievements
+        ):
             view.source_message = source_message
             view.replace_candidates(live_candidates)
+            view.replace_custom_achievements(live_achievements)
             await interaction.edit_original_response(
                 content=None,
                 embed=view.render_embed(
@@ -4851,7 +4998,7 @@ class NHMisc(commands.Cog):
                 view=view,
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-            return
+            return None
 
         selected_candidates = tuple(
             candidate
@@ -4865,12 +5012,46 @@ class NHMisc(commands.Cog):
                 view.solo_gater_enabled and len(selected_candidates) == 1
             ),
         )
+        selected_achievements = tuple(
+            GateIncrementAchievementPlan(
+                definition.key,
+                definition.display_name,
+                definition.role_id,
+            )
+            for definition in live_achievements
+            if definition.key in view.selected_custom_achievement_keys
+        )
+        try:
+            _validate_gate_increment_output_limits(
+                source_message,
+                interaction.user.id,
+                plans,
+                selected_achievements,
+                owned_keys_by_user,
+            )
+        except commands.UserFeedbackCheckFailure as error:
+            await interaction.edit_original_response(
+                content=None,
+                embed=view.render_embed(notice=str(error)),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return None
+        return source_message, plans, selected_achievements
+
+    async def _confirm_gate_increment_review(self, interaction, view) -> None:
+        await interaction.response.defer()
+        prepared = await self._prepare_gate_increment_claim(interaction, view)
+        if prepared is None:
+            return
+        source_message, plans, selected_achievements = prepared
         key = self._gate_increment_key(source_message)
         try:
             claim = await self._gate_increment_store.claim(
                 key,
                 interaction.user.id,
                 plans,
+                selected_achievements,
             )
         except GateProgressConflict:
             await interaction.edit_original_response(
@@ -4879,6 +5060,19 @@ class NHMisc(commands.Cog):
                     notice=(
                         "A selected user's Gate progress changed. Refresh and "
                         "review the plan again"
+                    )
+                ),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        except AchievementDefinitionConflict:
+            await interaction.edit_original_response(
+                content=None,
+                embed=view.render_embed(
+                    notice=(
+                        "A selected achievement changed. Refresh and review "
+                        "the plan again"
                     )
                 ),
                 view=view,
@@ -4903,31 +5097,11 @@ class NHMisc(commands.Cog):
             for member_plan in snapshot.members
             if member_plan.state is MemberState.COMPLETED
         )
-        moderation_log_delivered = True
-        if completed_members:
-            increments = ", ".join(
-                f"<@{member_plan.user_id}> Gate "
-                f"{GATE_TIER_ROLE_IDS.index(member_plan.target_role_id) + 1}"
-                + (" + Solo Gater" if member_plan.grant_solo else "")
-                for member_plan in completed_members
-                if member_plan.target_role_id in GATE_TIER_ROLE_IDS
-            )
-            source_url = (
-                "https://discord.com/channels/"
-                f"{source_message.guild.id}/{source_message.channel.id}/"
-                f"{source_message.id}"
-            )
-            try:
-                moderation_log_delivered = await self._send_moderation_log(
-                    source_message.guild,
-                    "Gate incremented\n"
-                    f"Moderator: <@{interaction.user.id}>\n"
-                    f"Members: {increments}\n"
-                    f"Source: {source_url}",
-                    log_failure=False,
-                )
-            except Exception:
-                moderation_log_delivered = False
+        moderation_log_delivered = await self._publish_gate_increment_moderation_log(
+            source_message,
+            interaction.user.id,
+            snapshot,
+        )
         skipped_members = len(snapshot.members) - len(completed_members)
         if skipped_members:
             try:
@@ -4957,6 +5131,59 @@ class NHMisc(commands.Cog):
                 and moderation_log_delivered
             ),
         )
+
+    async def _publish_gate_increment_moderation_log(
+        self,
+        source_message,
+        moderator_id: int,
+        snapshot: GateIncrementSnapshot,
+    ) -> bool:
+        completed_members = tuple(
+            member
+            for member in snapshot.members
+            if member.state is MemberState.COMPLETED
+            and not member.moderation_logged
+        )
+        if not completed_members:
+            return True
+        increment_lines = []
+        for member_plan in completed_members:
+            if member_plan.target_role_id not in GATE_TIER_ROLE_IDS:
+                continue
+            awards = []
+            if member_plan.solo_awarded:
+                awards.append("Solo Gater")
+            awards.extend(_gate_increment_custom_award_labels(snapshot, member_plan))
+            increment = (
+                f"<@{member_plan.user_id}> Gate "
+                f"{GATE_TIER_ROLE_IDS.index(member_plan.target_role_id) + 1}"
+            )
+            if awards:
+                increment += " + " + " + ".join(awards)
+            increment_lines.append(increment)
+        source_url = (
+            "https://discord.com/channels/"
+            f"{source_message.guild.id}/{source_message.channel.id}/"
+            f"{source_message.id}"
+        )
+        try:
+            delivered = await self._send_moderation_log(
+                source_message.guild,
+                "Gate incremented\n"
+                f"Moderator: <@{moderator_id}>\n"
+                f"Members: {', '.join(increment_lines)}\n"
+                f"Source: {source_url}",
+                log_failure=False,
+            )
+        except Exception:
+            return False
+        if not delivered:
+            return False
+        await self._gate_increment_store.mark_moderation_logged(
+            snapshot.operation.key,
+            tuple(member.position for member in completed_members),
+        )
+        return True
 
     async def _fetch_gate_increment_candidates(
         self, source_message: discord.Message
@@ -5055,6 +5282,31 @@ class NHMisc(commands.Cog):
             if candidate.user_id in view.selected_user_ids
         )
 
+    @staticmethod
+    def _gate_increment_achievement_selection_is_stale(
+        view, live_achievements
+    ) -> bool:
+        selected_keys = view.selected_custom_achievement_keys
+        preview_by_key = {
+            achievement.key: achievement
+            for achievement in view.custom_achievements
+            if achievement.key in selected_keys
+        }
+        live_by_key = {
+            achievement.key: achievement
+            for achievement in live_achievements
+            if achievement.key in selected_keys
+        }
+        if preview_by_key.keys() != live_by_key.keys():
+            return True
+        return any(
+            (
+                preview_by_key[key].display_name != live_by_key[key].display_name
+                or preview_by_key[key].role_id != live_by_key[key].role_id
+            )
+            for key in selected_keys
+        )
+
     async def _execute_gate_increment_operation(
         self,
         source_message: discord.Message,
@@ -5081,6 +5333,7 @@ class NHMisc(commands.Cog):
                     key,
                     member_plan,
                     moderator_id,
+                    snapshot.custom_achievements,
                 )
             return await self._gate_increment_store.finalize_operation(key)
         except Exception:
@@ -5093,6 +5346,7 @@ class NHMisc(commands.Cog):
         key: SourceMessageKey,
         member_plan,
         moderator_id: int,
+        custom_achievements: tuple[GateIncrementAchievementPlan, ...] = (),
     ) -> None:
         await self._gate_increment_store.mark_member_in_progress(
             key, member_plan.position
@@ -5112,7 +5366,19 @@ class NHMisc(commands.Cog):
                 member_plan,
                 transition.current_role_ids,
             )
-            if recovery is RecoveryAction.COMPLETE:
+            custom_keys = set(member_plan.custom_achievement_keys)
+            extra_role_ids = tuple(
+                achievement.role_id
+                for achievement in custom_achievements
+                if achievement.key in custom_keys and achievement.role_id is not None
+            )
+            required_role_ids = set(extra_role_ids)
+            if member_plan.solo_awarded:
+                required_role_ids.add(SINGLEPLAYER_GATE_COMPLETED_ROLE_ID)
+            current_role_ids = {role.id for role in member.roles}
+            if recovery is RecoveryAction.COMPLETE and required_role_ids.issubset(
+                current_role_ids
+            ):
                 completed = True
             elif recovery is RecoveryAction.CONFLICT:
                 conflict_code = "roles_changed"
@@ -5123,7 +5389,8 @@ class NHMisc(commands.Cog):
                     member_plan.target_role_id,
                     key,
                     moderator_id,
-                    grant_solo=member_plan.grant_solo,
+                    grant_solo=member_plan.solo_awarded,
+                    extra_role_ids=extra_role_ids,
                 )
                 completed = failure_code is None
         except discord.NotFound:
@@ -5155,6 +5422,7 @@ class NHMisc(commands.Cog):
         moderator_id: int,
         *,
         grant_solo: bool = False,
+        extra_role_ids: tuple[int, ...] = (),
     ) -> str | None:
         if member.top_role.position >= guild.me.top_role.position:
             return "hierarchy"
@@ -5164,6 +5432,9 @@ class NHMisc(commands.Cog):
         )
         if grant_solo and SINGLEPLAYER_GATE_COMPLETED_ROLE_ID not in desired_role_ids:
             desired_role_ids = (*desired_role_ids, SINGLEPLAYER_GATE_COMPLETED_ROLE_ID)
+        for role_id in extra_role_ids:
+            if role_id not in desired_role_ids:
+                desired_role_ids = (*desired_role_ids, role_id)
         desired_roles = [
             guild.get_role(role_id)
             for role_id in desired_role_ids
@@ -5185,7 +5456,10 @@ class NHMisc(commands.Cog):
         source_message: discord.Message,
         snapshot: GateIncrementSnapshot,
     ) -> bool:
-        if snapshot.operation.result_message_id is not None:
+        if (
+            snapshot.operation.published_completed_count
+            >= snapshot.operation.completed_count
+        ):
             return True
         publication_token = uuid4().hex
         if not await self._gate_increment_store.acquire_publication_lease(
@@ -5193,33 +5467,102 @@ class NHMisc(commands.Cog):
             publication_token,
         ):
             return True
-        lines = [
-            f"<@{member.user_id}> <@&{member.target_role_id}>"
-            + (
-                f" <@&{SINGLEPLAYER_GATE_COMPLETED_ROLE_ID}>"
-                if member.grant_solo
-                else ""
+        refreshed = await self._gate_increment_store.get_operation(
+            snapshot.operation.key
+        )
+        if refreshed is None:
+            await self._gate_increment_store.release_publication_lease(
+                snapshot.operation.key,
+                publication_token,
             )
-            for member in snapshot.members
-            if member.state is MemberState.COMPLETED
-            and member.user_id is not None
-            and member.target_role_id is not None
-        ]
+            raise RuntimeError("Gate increment operation disappeared")
+        snapshot = refreshed
+        lines = []
+        recipient_ids = []
+        for member in snapshot.members:
+            if (
+                member.state is not MemberState.COMPLETED
+                or member.user_id is None
+                or member.target_role_id is None
+            ):
+                continue
+            awards = [f"<@&{member.target_role_id}>"]
+            if member.solo_awarded:
+                awards.append(f"<@&{SINGLEPLAYER_GATE_COMPLETED_ROLE_ID}>")
+            awards.extend(_gate_increment_custom_award_labels(snapshot, member))
+            lines.append(f"<@{member.user_id}> " + " ".join(awards))
+            recipient_ids.append(member.user_id)
         if not lines:
             await self._gate_increment_store.release_publication_lease(
                 snapshot.operation.key,
                 publication_token,
             )
             return True
+        content = "🎉 **Congratulations!**\n" + "\n".join(lines)
+        if len(content) > DISCORD_MESSAGE_CONTENT_LIMIT:
+            await self._gate_increment_store.release_publication_lease(
+                snapshot.operation.key,
+                publication_token,
+            )
+            log.error(
+                "Gate increment result exceeds Discord limit for message %s",
+                source_message.id,
+            )
+            return False
+        allowed_mentions = discord.AllowedMentions(
+            users=[discord.Object(id=user_id) for user_id in recipient_ids],
+            roles=False,
+            everyone=False,
+            replied_user=False,
+        )
+        return await self._deliver_gate_increment_result(
+            source_message,
+            snapshot,
+            publication_token,
+            content,
+            allowed_mentions,
+        )
+
+    async def _deliver_gate_increment_result(
+        self,
+        source_message,
+        snapshot: GateIncrementSnapshot,
+        publication_token: str,
+        content: str,
+        allowed_mentions,
+    ) -> bool:
+        if snapshot.operation.result_message_id is not None:
+            try:
+                result_message = source_message.channel.get_partial_message(
+                    snapshot.operation.result_message_id
+                )
+                await result_message.edit(
+                    content=content,
+                    allowed_mentions=allowed_mentions,
+                )
+            except discord.HTTPException:
+                await self._gate_increment_store.release_publication_lease(
+                    snapshot.operation.key,
+                    publication_token,
+                )
+                log.exception(
+                    "Failed to update Gate increment result for message %s",
+                    source_message.id,
+                )
+                return False
+            await self._gate_increment_store.record_result_message(
+                snapshot.operation.key,
+                publication_token,
+                snapshot.operation.result_channel_id or source_message.channel.id,
+                snapshot.operation.result_message_id,
+                snapshot.operation.completed_count,
+            )
+            return True
         try:
             result_message = await source_message.reply(
-                "🎉 **Congratulations!**\n" + "\n".join(lines),
-                allowed_mentions=discord.AllowedMentions(
-                    users=True,
-                    roles=False,
-                    everyone=False,
-                    replied_user=False,
-                ),
+                content,
+                allowed_mentions=allowed_mentions,
+                nonce=f"gate-{snapshot.operation.operation_id}",
             )
         except discord.HTTPException:
             await self._gate_increment_store.release_publication_lease(
@@ -5236,6 +5579,7 @@ class NHMisc(commands.Cog):
             publication_token,
             result_message.channel.id,
             result_message.id,
+            snapshot.operation.completed_count,
         )
         return True
 
@@ -5332,6 +5676,11 @@ class NHMisc(commands.Cog):
                 recovered = await self._execute_gate_increment_operation(
                     source_message,
                     snapshot.operation.moderator_id or self.bot.user.id,
+                )
+                await self._publish_gate_increment_moderation_log(
+                    source_message,
+                    recovered.operation.moderator_id or self.bot.user.id,
+                    recovered,
                 )
                 await self._publish_gate_increment_result(
                     source_message,
@@ -5588,7 +5937,7 @@ class NHMisc(commands.Cog):
     ) -> None:
         """Set the channel used for automatic daily activity summaries."""
         await self._require_manage_guild(ctx)
-        missing_permissions = self._missing_log_permissions(ctx.guild, channel)
+        missing_permissions = self._support.missing_log_permissions(ctx.guild, channel)
         if missing_permissions is not None:
             raise commands.UserFeedbackCheckFailure(missing_permissions)
 
@@ -6046,7 +6395,7 @@ class NHMisc(commands.Cog):
             return
 
         config = await self.config.guild(role.guild).all()
-        channel = self._get_log_channel(role.guild, config["maintenance_channel"])
+        channel = self._support.get_log_channel(role.guild, config["maintenance_channel"])
         if channel is None:
             log.warning(
                 "Sticky role %s was deleted in guild %s but no maintenance channel is set",
@@ -6333,12 +6682,12 @@ class NHMisc(commands.Cog):
 
         guild = member.guild
         config = await self.config.guild(guild).all()
-        log_channel = self._get_log_channel(guild, config["voice_log_channel"])
+        log_channel = self._support.get_log_channel(guild, config["voice_log_channel"])
         event_timestamp = int(time.time())
 
         if log_channel is not None:
             if before.channel is None and after.channel is not None:
-                await self._send_voice_log(
+                await self._support.send_log_message(
                     log_channel,
                     (
                         f"{member.mention} ({member.id}) has joined a channel "
@@ -6346,7 +6695,7 @@ class NHMisc(commands.Cog):
                     ),
                 )
             elif before.channel is not None and after.channel is None:
-                await self._send_voice_log(
+                await self._support.send_log_message(
                     log_channel,
                     (
                         f"{member.mention} ({member.id}) has left a channel "
@@ -6359,7 +6708,7 @@ class NHMisc(commands.Cog):
                     f"{before.channel.mention} to {after.channel.mention} "
                     f"at <t:{event_timestamp}:F>"
                 )
-                move_log_message = await self._send_voice_log(
+                move_log_message = await self._support.send_log_message(
                     log_channel,
                     move_log_content,
                 )
@@ -6384,11 +6733,11 @@ class NHMisc(commands.Cog):
             window_seconds=config["vcjumping_window_seconds"],
         )
         if is_vcjumping:
-            alert_channel = self._get_log_channel(guild, config["alert_channel"])
+            alert_channel = self._support.get_log_channel(guild, config["alert_channel"])
             if alert_channel is None:
                 return
 
-            await self._send_voice_log(
+            await self._support.send_log_message(
                 alert_channel,
                 (
                     f"{member.mention} is VC jumping "
@@ -6397,64 +6746,11 @@ class NHMisc(commands.Cog):
                 ),
             )
 
-    def _get_log_channel(
-        self, guild: discord.Guild, channel_id: int | None
-    ) -> discord.TextChannel | None:
-        if channel_id is None:
-            return None
-
-        channel = guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
-        if isinstance(channel, discord.TextChannel):
-            return channel
-        return None
-
-    def _missing_log_permissions(
-        self,
-        guild: discord.Guild,
-        channel: discord.TextChannel,
-        *,
-        require_attach_files: bool = False,
-    ) -> str | None:
-        me = guild.me
-        permissions = channel.permissions_for(me)
-        if not permissions.view_channel:
-            return f"I need permission to view {channel.mention}."
-        if not permissions.send_messages:
-            return f"I need permission to send messages in {channel.mention}."
-        if require_attach_files and not permissions.attach_files:
-            return f"I need permission to attach files in {channel.mention}."
-        return None
-
-    async def _require_private_log_channel(
-        self,
-        guild: discord.Guild,
-        config_key: str,
-        label: str,
-    ) -> discord.TextChannel:
-        config_value = getattr(self.config.guild(guild), config_key)
-        channel = self._get_log_channel(
-            guild,
-            await config_value(),
-        )
-        if channel is None:
-            raise commands.UserFeedbackCheckFailure(
-                f"The private {label} channel is not configured"
-            )
-        if channel.permissions_for(guild.default_role).view_channel:
-            raise commands.UserFeedbackCheckFailure(
-                f"The {label} channel must be hidden from @everyone"
-            )
-        if self._missing_log_permissions(guild, channel) is not None:
-            raise commands.UserFeedbackCheckFailure(
-                f"I cannot send messages in the {label} channel"
-            )
-        return channel
-
     async def _require_private_alert_channel(
         self,
         guild: discord.Guild,
     ) -> discord.TextChannel:
-        return await self._require_private_log_channel(
+        return await self._support.require_private_log_channel(
             guild,
             "alert_channel",
             "alert",
@@ -6464,59 +6760,12 @@ class NHMisc(commands.Cog):
         self,
         guild: discord.Guild,
     ) -> discord.TextChannel:
-        return await self._require_private_log_channel(
+        return await self._support.require_private_log_channel(
             guild,
             "moderation_log_channel",
             "moderator action",
         )
 
-    async def _send_configured_log(
-        self,
-        guild: discord.Guild,
-        config_key: str,
-        content: str,
-        *,
-        ping_user: discord.abc.Snowflake | None = None,
-        require_private: bool = False,
-        log_failure: bool = True,
-    ) -> bool:
-        """Send to a configured guild log destination."""
-        config_value = getattr(self.config.guild(guild), config_key)
-        channel = self._get_log_channel(guild, await config_value())
-        if channel is None:
-            log.warning(
-                "Could not send NHMisc log for guild %s because %s is not configured",
-                guild.id,
-                config_key,
-            )
-            return False
-        if require_private and self._channel_allows_everyone(channel, guild):
-            log.warning(
-                "Could not send NHMisc log for guild %s because %s is public",
-                guild.id,
-                config_key,
-            )
-            return False
-
-        allowed_mentions = (
-            discord.AllowedMentions(
-                everyone=False,
-                users=[ping_user],
-                roles=False,
-                replied_user=False,
-            )
-            if ping_user is not None
-            else None
-        )
-        return (
-            await self._send_voice_log(
-                channel,
-                content,
-                allowed_mentions=allowed_mentions,
-                log_failure=log_failure,
-            )
-            is not None
-        )
 
     async def _send_guild_alert(
         self,
@@ -6526,7 +6775,7 @@ class NHMisc(commands.Cog):
         ping_user: discord.abc.Snowflake | None = None,
     ) -> bool:
         """Send to the configured enforcement alert channel."""
-        return await self._send_configured_log(
+        return await self._support.send_configured_log(
             guild,
             "alert_channel",
             content,
@@ -6541,7 +6790,7 @@ class NHMisc(commands.Cog):
         log_failure: bool = True,
     ) -> bool:
         """Send to the configured maintenance channel without mentions."""
-        return await self._send_configured_log(
+        return await self._support.send_configured_log(
             guild,
             "maintenance_channel",
             content,
@@ -6556,22 +6805,9 @@ class NHMisc(commands.Cog):
         *,
         log_failure: bool = True,
     ) -> bool:
-        """Send to the configured moderator action channel without mentions."""
-        return await self._send_configured_log(
-            guild,
-            "moderation_log_channel",
-            content,
-            require_private=True,
-            log_failure=log_failure,
+        return await self._support.send_moderation_log(
+            guild, content, log_failure=log_failure
         )
-
-    async def send_moderation_log(
-        self,
-        guild: discord.Guild,
-        content: str,
-    ) -> bool:
-        """Publish an NHCogs moderator action without allowing mentions."""
-        return await self._send_moderation_log(guild, content)
 
     def _schedule_audit_log_edit(
         self,
@@ -6689,29 +6925,6 @@ class NHMisc(commands.Cog):
         name = getattr(user, "display_name", None) or str(user)
         return f"{name} ({user.id})"
 
-    async def _send_voice_log(
-        self,
-        channel: discord.TextChannel,
-        content: str,
-        *,
-        allowed_mentions: discord.AllowedMentions | None = None,
-        log_failure: bool = True,
-    ) -> discord.Message | None:
-        if allowed_mentions is None:
-            allowed_mentions = discord.AllowedMentions.none()
-        try:
-            return await channel.send(content, allowed_mentions=allowed_mentions)
-        except discord.HTTPException as error:
-            if log_failure:
-                log.exception("Failed to send voice log message to channel %s", channel.id)
-                await self.report_operational_error(
-                    guild_id=channel.guild.id,
-                    source="NHMisc",
-                    action="send configured log",
-                    error=error,
-                    channel_id=channel.id,
-                )
-        return None
 
     async def _activity_midnight_loop(self) -> None:
         await self.bot.wait_until_ready()
@@ -6750,7 +6963,7 @@ class NHMisc(commands.Cog):
             return
 
         config = await self.config.guild(guild).all()
-        channel = self._get_log_channel(guild, config["activity_channel"])
+        channel = self._support.get_log_channel(guild, config["activity_channel"])
         for summary in summaries:
             if send_reports and channel is not None:
                 await self._send_activity_summary(channel, summary)

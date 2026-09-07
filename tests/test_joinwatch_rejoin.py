@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 
 
 class _Store:
@@ -122,7 +122,7 @@ def _make_runtime(honeypot, *, random_delay: bool):
     bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
     bot.is_mod = mock.AsyncMock(return_value=False)
     bot.is_admin = mock.AsyncMock(return_value=False)
-    cog = honeypot.Honeypot(bot)
+    cog = honeypot.Honeypot(bot, _operational_support())
     cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
     cog._record_daily_stat = mock.AsyncMock()
     return SimpleNamespace(

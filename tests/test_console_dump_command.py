@@ -12,7 +12,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 
 
 @contextmanager
@@ -71,7 +71,7 @@ class ConsoleDumpCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_arguments_show_complete_usage_in_one_response(self):
         with TemporaryDirectory() as directory:
             with _isolated_console_dump_modules(Path(directory)) as console_dump:
-                cog = console_dump.ConsoleDump(_Bot())
+                cog = console_dump.ConsoleDump(_Bot(), _operational_support())
                 cog._console_log_buffer = SimpleNamespace(snapshot=mock.Mock())
                 ctx = self._context(console_dump)
 
@@ -96,7 +96,7 @@ class ConsoleDumpCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         with TemporaryDirectory() as directory:
             with _isolated_console_dump_modules(Path(directory)) as console_dump:
-                cog = console_dump.ConsoleDump(_Bot())
+                cog = console_dump.ConsoleDump(_Bot(), _operational_support())
                 cog._console_log_buffer = SimpleNamespace(snapshot=mock.Mock())
                 for scope, hours, level in invalid_arguments:
                     with self.subTest(scope=scope, hours=hours, level=level):
@@ -113,7 +113,7 @@ class ConsoleDumpCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         with TemporaryDirectory() as directory:
             with _isolated_console_dump_modules(Path(directory)) as console_dump:
-                cog = console_dump.ConsoleDump(_Bot())
+                cog = console_dump.ConsoleDump(_Bot(), _operational_support())
                 cog._console_log_buffer = SimpleNamespace(snapshot=mock.Mock())
                 for options, expected in cases:
                     with self.subTest(options=options):
@@ -125,7 +125,7 @@ class ConsoleDumpCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_valid_command_sends_one_sanitized_file_using_guild_limit(self):
         with TemporaryDirectory() as directory:
             with _isolated_console_dump_modules(Path(directory)) as console_dump:
-                cog = console_dump.ConsoleDump(_Bot())
+                cog = console_dump.ConsoleDump(_Bot(), _operational_support())
                 created_at = datetime.now(timezone.utc)
                 cog._console_log_buffer.emit(
                     logging.LogRecord(
@@ -177,7 +177,7 @@ class ConsoleDumpCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_cog_owns_root_log_handler_for_its_lifetime(self):
         with TemporaryDirectory() as directory:
             with _isolated_console_dump_modules(Path(directory)) as console_dump:
-                cog = console_dump.ConsoleDump(_Bot())
+                cog = console_dump.ConsoleDump(_Bot(), _operational_support())
                 root_logger = logging.getLogger()
 
                 await cog.cog_load()

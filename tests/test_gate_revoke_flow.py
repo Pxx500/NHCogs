@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 from types import ModuleType, SimpleNamespace
 from unittest import mock
 
+from tests.test_forum_autopin import make_support
 from tests.test_gate_proof_flow import _load_achievement_views
 from tests.test_gatecount import nhmisc
 
@@ -242,7 +243,8 @@ class GateRevokeEntryPointTests(unittest.IsolatedAsyncioTestCase):
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog.config = SimpleNamespace(guild=mock.Mock(return_value=config))
-        cog._get_log_channel = mock.Mock(return_value=channel)
+        cog._support = make_support(SimpleNamespace(), cog.config, module=nhmisc)
+        cog._support.get_log_channel = mock.Mock(return_value=channel)
 
         with self.assertRaisesRegex(
             nhmisc.commands.UserFeedbackCheckFailure,

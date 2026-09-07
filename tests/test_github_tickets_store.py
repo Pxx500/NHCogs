@@ -54,6 +54,28 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
         )
         self.now = datetime(2026, 8, 26, 10, 0, tzinfo=timezone.utc)
 
+    async def test_list_profiles_includes_all_preferences_only_in_requested_guild(self):
+        await self.store.initialize()
+        category = await self.store.add_category(42, "python", self.now)
+        expected = []
+        for guild_id, user_id, enabled in ((42, 20, True), (42, 10, False), (43, 30, False)):
+            profile = await self.store.save_profile(
+                guild_id=guild_id,
+                user_id=user_id,
+                github_username=f"developer{user_id}",
+                category_ids=(category.category_id,) if enabled else (),
+                automatic_pings=enabled,
+                updated_at=self.now,
+            )
+            if guild_id == 42:
+                expected.append(profile)
+
+        self.assertEqual(
+            await self.store.list_profiles(42),
+            tuple(sorted(expected, key=lambda profile: profile.user_id)),
+        )
+        self.assertEqual(await self.store.list_profiles(99), ())
+
     async def test_initialize_creates_versioned_schema_with_foreign_keys(self):
         self.assertIsNotNone(self.store, "the GitHub Tickets store interface is missing")
         await self.store.initialize()

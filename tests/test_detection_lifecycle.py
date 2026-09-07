@@ -6,7 +6,7 @@ import asyncio
 import logging
 import sys
 import unittest
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, get_ident
@@ -15,9 +15,11 @@ from unittest import mock
 
 from tests.harness import (
     _MISSING,
+    EXPECTED_GUILD_DEFAULTS,
     _async_noop,
     _Bot,
     _isolated_honeypot_modules,
+    _operational_support,
 )
 
 
@@ -61,7 +63,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_load_prunes_unknown_guild_config_keys(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config._guilds[42] = {
                     "enabled": False,
                     "honeypot_channels": [123],
@@ -88,7 +90,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_user_privacy_deletion_attempts_cases_after_registry_failure(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._message_registry.forget_user = mock.AsyncMock(
                     side_effect=RuntimeError("registry unavailable")
                 )
@@ -114,7 +116,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_guild_privacy_deletion_attempts_cases_after_registry_failure(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._message_registry.forget_guild = mock.AsyncMock(
                     side_effect=RuntimeError("registry unavailable")
                 )
@@ -137,7 +139,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_gateway_delete_and_pin_events_synchronize_message_registry(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._message_registry = SimpleNamespace(
                     forget=mock.AsyncMock(),
                     forget_many=mock.AsyncMock(),
@@ -228,6 +230,20 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                             expected,
                         )
                         self.assertEqual(getattr(honeypot, tuple_name), expected)
+
+    async def test_empty_guild_settings_use_registered_defaults(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                settings_type = getattr(honeypot, "GuildSettings", None)
+                self.assertIsNotNone(settings_type)
+
+                guild_settings = settings_type.from_mapping({})
+
+                observed = {
+                    field.name: getattr(guild_settings, field.name)
+                    for field in fields(guild_settings)
+                }
+                self.assertEqual(observed, EXPECTED_GUILD_DEFAULTS)
 
     async def test_guild_settings_ignore_unknown_keys_and_keep_known_values(self):
         with TemporaryDirectory() as directory:
@@ -339,7 +355,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(set(guild_settings.scam_keywords), {"alpha", "beta"})
                 self.assertEqual(
                     guild_settings.attachment_patterns,
-                    honeypot.settings.DEFAULTS["attachment_patterns"],
+                    EXPECTED_GUILD_DEFAULTS["attachment_patterns"],
                 )
                 self.assertIn("attachment_patterns", "\n".join(captured.output))
 
@@ -446,6 +462,29 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(FrozenInstanceError):
                     guild_settings.enabled = True
 
+    async def test_guild_settings_defaults_exactly_match_registered_config(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
+
+                self.assertEqual(dict(honeypot.settings.DEFAULTS), EXPECTED_GUILD_DEFAULTS)
+                self.assertEqual(cog.config.defaults, EXPECTED_GUILD_DEFAULTS)
+
+    async def test_guild_settings_never_raise_for_non_mapping_config(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                with self.assertLogs("red.Honeypot", level=logging.WARNING):
+                    try:
+                        guild_settings = honeypot.GuildSettings.from_mapping(None)
+                    except Exception as exc:
+                        self.fail(f"from_mapping raised for config input: {exc!r}")
+
+                observed = {
+                    field.name: getattr(guild_settings, field.name)
+                    for field in fields(guild_settings)
+                }
+                self.assertEqual(observed, EXPECTED_GUILD_DEFAULTS)
+
     async def test_isolation_removes_new_nested_honeypot_module(self):
         module_name = "NHCogs.honeypot.operations.source_delete"
         sys.modules.pop(module_name, None)
@@ -535,7 +574,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 bot = _Bot()
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
 
                 class StaleConfig:
                     def __init__(self):
@@ -612,7 +651,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 initialize_started = Event()
                 allow_initialize_finish = Event()
                 restore_called = Event()
@@ -700,7 +739,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_unload_cancels_case_loops_and_case_restore(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 restore_started = asyncio.Event()
                 restore_cleanup_finished = asyncio.Event()
 
@@ -751,7 +790,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_unload_awaits_cancelled_background_loops(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 loop_started = asyncio.Event()
                 cleanup_started = asyncio.Event()
                 cleanup_release = asyncio.Event()
@@ -799,7 +838,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_case_restore_is_logged_and_cleared_on_unload(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 restore_failed = Event()
 
                 class Store:
@@ -852,7 +891,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 bot = _Bot(ready=False)
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
 
                 waiters = [
                     asyncio.create_task(cog.detection_case_loop.wait_before_start()),

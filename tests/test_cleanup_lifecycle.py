@@ -19,9 +19,9 @@ def load_lifecycle_module():
     class Cleanup:
         qualified_name = "Cleanup"
 
-        def __init__(self, bot, nhmisc, honeypot):
+        def __init__(self, bot, support, honeypot):
             self.bot = bot
-            self.nhmisc = nhmisc
+            self.support = support
             self.honeypot = honeypot
 
     cog.Cleanup = Cleanup

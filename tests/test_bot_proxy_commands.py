@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import sys
 import types
 import unittest
 from unittest import mock
 
+from tests.test_bot_proxy_avatar import bot_proxy_avatar
+from tests.test_bot_proxy_workflow_manager import manager_module
 from tests.test_chatchart import load_nhmisc_module
+from tests.test_forum_autopin import make_support
 
 nhmisc = load_nhmisc_module()
 
@@ -47,6 +51,33 @@ class _Config:
 
 
 class BotProxyCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_toggle_assembles_the_real_manager_with_shared_reporting(self):
+        guild = types.SimpleNamespace(id=10, default_role=object())
+        ctx = types.SimpleNamespace(
+            guild=guild,
+            channel=types.SimpleNamespace(
+                permissions_for=lambda _role: types.SimpleNamespace(view_channel=False)
+            ),
+            send=mock.AsyncMock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog.config = _Config()
+        cog._support = make_support(types.SimpleNamespace(), cog.config, module=nhmisc)
+        cog._bot_proxy_store = types.SimpleNamespace()
+        cog._bot_proxy = None
+        with mock.patch.dict(
+            sys.modules,
+            {
+                f"{nhmisc.__package__}.bot_proxy_manager": manager_module,
+                f"{nhmisc.__package__}.bot_proxy_avatar": bot_proxy_avatar,
+            },
+        ):
+            await nhmisc.NHMisc.botproxy_toggle.callback(cog, ctx, False)
+            await nhmisc.NHMisc.botproxy_toggle.callback(cog, ctx, None)
+
+        self.assertFalse(cog.config.values["bot_proxy_enabled"])
+        self.assertIn("disabled", ctx.send.await_args.args[0])
+
     async def test_toggle_setting_shows_state_and_disables_through_manager(
         self,
     ) -> None:

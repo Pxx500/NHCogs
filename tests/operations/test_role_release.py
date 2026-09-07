@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
-from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 
 
 class _GuildConfig:
@@ -104,7 +104,7 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 appended = self._append_case(honeypot, cog, now)
                 operation = cog._case_store.ensure_operation(
                     appended.case.case_id,
@@ -166,7 +166,7 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
                 member.guild = guild
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config()
                 appended = self._append_case(honeypot, cog, now)
                 self._record_ownership(
@@ -233,7 +233,7 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
                     )
                     bot = _Bot()
                     bot.get_guild = lambda guild_id, guild=guild: guild
-                    cog = honeypot.Honeypot(bot)
+                    cog = honeypot.Honeypot(bot, _operational_support())
                     cog.config = _Config()
                     appended = self._append_case(honeypot, cog, now)
                     self._record_ownership(
@@ -277,7 +277,7 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config()
                 appended = self._append_case(honeypot, cog, now)
                 self._record_ownership(
@@ -328,7 +328,7 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config()
                 appended = self._append_case(honeypot, cog, now)
                 self._record_ownership(
@@ -405,7 +405,7 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
                 member.guild = guild
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config()
                 appended = self._append_case(honeypot, cog, now)
                 self._record_ownership(
@@ -443,7 +443,7 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = _Config()
                 appended = self._append_case(honeypot, cog, now)
                 operation = cog._case_store.ensure_operation(
@@ -476,7 +476,7 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
                 guild = SimpleNamespace(id=10)
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config()
                 appended = self._append_case(honeypot, cog, now)
                 operation = cog._case_store.ensure_operation(
@@ -517,7 +517,7 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
                 member.guild = guild
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config()
                 appended = self._append_case(honeypot, cog, now)
                 self._record_ownership(
@@ -580,7 +580,7 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
                 member.guild = guild
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config()
                 first = self._append_case(honeypot, cog, now)
                 self._record_ownership(
@@ -712,7 +712,7 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
                 member.guild = guild
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config()
                 appended = self._append_case(honeypot, cog, now)
                 self._record_ownership(
@@ -755,7 +755,7 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
                 member.guild = guild
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config()
                 appended = self._append_case(honeypot, cog, now)
                 self._record_ownership(

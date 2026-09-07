@@ -26,8 +26,12 @@ class DeadlineScheduler:
         deadlines: DeadlineSource,
         on_due: Callable[[int], Awaitable[None]],
         *,
+        support,
+        report_ticket_error: Callable[[int, Exception], Awaitable[None]],
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
+        self._support = support
+        self._report_ticket_error = report_ticket_error
         self._deadlines = deadlines
         self._on_due = on_due
         self._clock = clock
@@ -62,8 +66,9 @@ class DeadlineScheduler:
                 await self._run_iteration()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
                 log.exception("GitHub Tickets deadline scheduler iteration failed")
+                await self._support.report_global_error(source="GitHubTickets", action="deadline scheduler iteration", error=error)
                 await asyncio.sleep(ERROR_RETRY_SECONDS)
 
     async def _run_iteration(self) -> None:
@@ -88,15 +93,15 @@ class DeadlineScheduler:
                 await self._on_due(ticket_id)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
                 callback_failed = True
+                await self._report_ticket_error(ticket_id, error)
                 log.exception("GitHub Tickets deadline callback failed for ticket %s", ticket_id)
 
         if callback_failed:
             await asyncio.sleep(ERROR_RETRY_SECONDS)
 
-    @staticmethod
-    def _observe_task(task: asyncio.Task[None]) -> None:
+    def _observe_task(self, task: asyncio.Task[None]) -> None:
         if task.cancelled():
             return
         try:
@@ -104,6 +109,7 @@ class DeadlineScheduler:
         except asyncio.CancelledError:
             return
         if error is not None:
+            self._support.schedule_error(source="GitHubTickets", action="deadline scheduler task", error=error)
             log.error(
                 "GitHub Tickets deadline scheduler failed",
                 exc_info=(type(error), error, error.__traceback__),

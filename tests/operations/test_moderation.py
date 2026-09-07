@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 
 
 class _GuildConfig:
@@ -127,7 +127,7 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = _Config({"dry_run": True})
                 appended = self._append_case(
                     honeypot, cog, now, honeypot.ActionIntent.BAN
@@ -149,7 +149,7 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = _Config({"dry_run": True})
                 appended = self._append_case(
                     honeypot, cog, now, honeypot.ActionIntent.KICK
@@ -170,7 +170,7 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = _Config({"dry_run": True})
                 appended = self._append_case(
                     honeypot, cog, now, honeypot.ActionIntent.BAN
@@ -198,7 +198,7 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = _Config({"dry_run": True})
                 appended = self._append_case(
                     honeypot, cog, now, honeypot.ActionIntent.REVIEW
@@ -221,7 +221,7 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = _Config({"dry_run": False})
                 appended = self._append_case(
                     honeypot, cog, now, honeypot.ActionIntent.BAN
@@ -252,7 +252,7 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config({"dry_run": False})
                 appended = self._append_case(
                     honeypot,
@@ -296,7 +296,7 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config({"dry_run": False})
                 appended = self._append_case(
                     honeypot,
@@ -337,7 +337,7 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
                 guild = SimpleNamespace(get_member=lambda user_id: None)
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config({"dry_run": False})
                 cog._get_user_or_object = mock.AsyncMock(return_value=None)
                 appended = self._append_case(
@@ -381,7 +381,7 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config(
                     {"dry_run": False},
                     current_values={"dry_run": True},
@@ -429,7 +429,7 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config(
                     {
                         "automated_kick_fail_warning": True,
@@ -486,7 +486,7 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config({"dry_run": False})
                 appended = self._append_case(
                     honeypot,
@@ -537,7 +537,7 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config({"dry_run": False})
                 appended = self._append_case(
                     honeypot, cog, now, honeypot.ActionIntent.KICK
@@ -592,7 +592,7 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config({"dry_run": False})
                 appended = self._append_case(
                     honeypot,
@@ -648,7 +648,7 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config({"dry_run": False})
                 cog._schedule_post_ban_sweep = mock.Mock()
                 appended = self._append_case(
@@ -716,7 +716,7 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config({"dry_run": False})
                 appended = self._append_case(
                     honeypot, cog, now, honeypot.ActionIntent.KICK
@@ -742,7 +742,7 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = _Config({"dry_run": True})
                 appended = self._append_case(
                     honeypot, cog, now, honeypot.ActionIntent.BAN
@@ -789,7 +789,7 @@ class ModerationActionHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = _Config({"dry_run": False})
                 appended = self._append_case(
                     honeypot, cog, now, honeypot.ActionIntent.KICK

@@ -9,6 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_NAME = "NHCogs"
@@ -176,9 +177,11 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
         self.wake_deadlines = wake_deadlines
 
+        self.support = mock.Mock(report_operational_error=mock.AsyncMock())
         self.coordinator = coordinator_module.TicketCoordinator(
             self.store,
             self.projection,
+            support=self.support,
             get_settings=self.get_settings,
             get_candidates=self.get_candidates,
             wake_deadlines=self.wake_deadlines,
@@ -191,6 +194,24 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             is_participant=participant,
             can_manage_messages=staff,
         )
+
+    async def test_projection_failure_reports_once_and_keeps_retry(self):
+        support = self.support
+        ticket = await self.create_active()
+        failure = RuntimeError("Discord publication failed")
+        self.projection.errors["edit_ticket"] = failure
+
+        result = await self.coordinator.sync_projection(ticket.ticket_id)
+
+        self.assertFalse(result.success)
+        support.report_operational_error.assert_awaited_once()
+        report = support.report_operational_error.await_args.kwargs
+        self.assertEqual(report["guild_id"], ticket.guild_id)
+        self.assertEqual(report["source"], "GitHubTickets")
+        self.assertIs(report["error"], failure)
+        current = await self.store.get_ticket(ticket.ticket_id)
+        self.assertIsNotNone(current)
+        self.assertIsNotNone(await self.store.nearest_deadline())
 
     def request(self, routing_mode=None, direct_target_id=None):
         return coordinator_module.TicketRequest(
@@ -1122,6 +1143,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         restarted = coordinator_module.TicketCoordinator(
             reopened,
             self.projection,
+            support=mock.Mock(report_operational_error=mock.AsyncMock()),
             get_settings=self.get_settings,
             get_candidates=self.get_candidates,
             wake_deadlines=self.wake_deadlines,
@@ -1162,6 +1184,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         restarted = coordinator_module.TicketCoordinator(
             reopened,
             self.projection,
+            support=mock.Mock(report_operational_error=mock.AsyncMock()),
             get_settings=self.get_settings,
             get_candidates=self.get_candidates,
             wake_deadlines=self.wake_deadlines,
@@ -1343,6 +1366,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         restarted = coordinator_module.TicketCoordinator(
             self.store,
             self.projection,
+            support=mock.Mock(report_operational_error=mock.AsyncMock()),
             get_settings=self.get_settings,
             get_candidates=self.get_candidates,
             wake_deadlines=self.wake_deadlines,
@@ -1675,6 +1699,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         restarted = coordinator_module.TicketCoordinator(
             self.store,
             self.projection,
+            support=mock.Mock(report_operational_error=mock.AsyncMock()),
             get_settings=self.get_settings,
             get_candidates=self.get_candidates,
             wake_deadlines=self.wake_deadlines,
@@ -1704,6 +1729,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         restarted = coordinator_module.TicketCoordinator(
             self.store,
             self.projection,
+            support=mock.Mock(report_operational_error=mock.AsyncMock()),
             get_settings=self.get_settings,
             get_candidates=self.get_candidates,
             wake_deadlines=self.wake_deadlines,

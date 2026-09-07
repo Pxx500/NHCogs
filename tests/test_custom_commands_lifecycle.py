@@ -24,9 +24,9 @@ def load_lifecycle_module():
     class CustomCommands:
         qualified_name = "CustomCommands"
 
-        def __init__(self, bot, nhmisc, *, catalog):
+        def __init__(self, bot, support, *, catalog):
             self.bot = bot
-            self.nhmisc = nhmisc
+            self.support = support
             self.catalog = catalog
 
     cog.CustomCommands = CustomCommands

@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 from tests.test_settings_commands import _OverviewAllowedMentions, _OverviewEmbed
 
 DISCORD_EPOCH_MILLISECONDS = 1_420_070_400_000
@@ -171,7 +171,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 message = SimpleNamespace(
                     embeds=[],
                     attachments=[],
@@ -206,7 +206,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 message = SimpleNamespace(
                     embeds=[SimpleNamespace(type="gifv")],
                     attachments=[],
@@ -239,7 +239,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
                     gif_detector_channels=[10],
@@ -289,7 +289,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
                     gif_detector_channels=[10],
@@ -349,7 +349,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
                     gif_detector_channels=[10],
@@ -420,7 +420,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
                     gif_detector_channels=[10],
@@ -493,7 +493,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
                     gif_detector_channels=[10],
@@ -587,7 +587,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
                     gif_detector_channels=[10],
@@ -629,7 +629,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
                     gif_detector_channels=[10],
@@ -679,7 +679,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
                     gif_detector_channels=[10],
@@ -732,7 +732,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
                     gif_detector_channels=[10],
@@ -762,7 +762,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
                     gif_detector_channels=[10],
@@ -806,7 +806,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 configured = honeypot.GuildSettings.from_mapping({})
                 cog._gif_detector_hits[(1, 90)] = deque([0.0])
                 cog._gif_detector_hits[(2, 91)] = deque([0.0])
@@ -827,7 +827,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
                     gif_detector_animation_enabled=False,
@@ -922,7 +922,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._record_operational_failure = mock.AsyncMock()
                 guild = SimpleNamespace(
                     id=1,
@@ -955,7 +955,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._record_operational_failure = mock.AsyncMock()
                 user = SimpleNamespace(id=20)
                 member = SimpleNamespace(
@@ -1018,7 +1018,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._record_operational_failure = mock.AsyncMock()
                 user = SimpleNamespace(id=20)
                 member = SimpleNamespace(
@@ -1071,7 +1071,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
                     gif_detector_animation_enabled=False,
@@ -1149,7 +1149,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
                     gif_detector_debug_enabled=True,
@@ -1213,7 +1213,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
                     gif_detector_animation_enabled=True,
@@ -1309,7 +1309,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 events = []
                 clock = 100.0
 
@@ -1527,7 +1527,7 @@ class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
                     gif_detector_animation_enabled=False,
@@ -1569,7 +1569,7 @@ class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_doctor_reports_missing_send_and_manage_message_permissions(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     action="none",
                     fallback_action="none",
@@ -1685,7 +1685,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_historical_raw_gif_update_is_ignored_before_fetching(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 channel = SimpleNamespace(fetch_message=mock.AsyncMock())
                 channel.fetch_message.return_value = SimpleNamespace(
                     guild=SimpleNamespace(id=1),
@@ -1714,7 +1714,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 message_id = _snowflake_for(datetime.now(timezone.utc))
                 message = SimpleNamespace(
                     id=message_id,
@@ -1755,7 +1755,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 message_id = _snowflake_for(datetime.now(timezone.utc))
                 message = SimpleNamespace(
                     id=message_id,
@@ -1797,7 +1797,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 message_id = _snowflake_for(datetime.now(timezone.utc))
                 message = SimpleNamespace(
                     id=message_id,
@@ -1848,7 +1848,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
                     gif_detector_animation_enabled=False,
@@ -1896,7 +1896,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
                     gif_detector_animation_enabled=False,
@@ -1956,7 +1956,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_negative_uncached_raw_update_does_not_fetch_source_message(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.bot.get_channel = mock.Mock()
                 payload = SimpleNamespace(
                     guild_id=1,
@@ -1981,7 +1981,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_cog_unload_cancels_and_awaits_gif_tasks(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 started = asyncio.Event()
                 cleaned = asyncio.Event()
 
@@ -2013,7 +2013,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 started = asyncio.Event()
 
                 async def wait_until_cancelled(seconds):
@@ -2050,7 +2050,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
                     gif_detector_animation_enabled=True,
@@ -2139,7 +2139,7 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config.defaults.update(
                     gif_detector_enabled=True,
                     gif_detector_channels=[10],

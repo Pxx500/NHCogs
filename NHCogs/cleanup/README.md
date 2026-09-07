@@ -25,6 +25,12 @@ omit `message_id`.
 Pinned messages are skipped unless `delete_pinned` is true. Range cleanup is
 rejected before deletion when it contains more than 1000 matching messages.
 
+## Operational errors
+
+Unexpected cleanup failures use the shared `[p]nhcogs errors` configuration. See the
+[shared command catalog](../README.md) for setup and privacy rules. Expected input,
+permission, and empty-result outcomes use normal command feedback.
+
 ## Data and Discord access
 
 Cleanup uses only messages observed through Discord Gateway events during the
