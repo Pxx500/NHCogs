@@ -324,7 +324,7 @@ class TicketCoordinator:
     ) -> TicketResult:
         ticket_id = await self._bound_ticket_id(repository_id, pr_number)
         if ticket_id is None:
-            return TicketResult(False, INACTIVE_TICKET)
+            return TicketResult(True)
         async with self._ticket_lock(ticket_id):
             return await self._claim_ticket_from_github_locked(
                 ticket_id,

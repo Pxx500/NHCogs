@@ -356,6 +356,17 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             [("send_ticket", ticket.ticket_id, None), ("create_thread", ticket.ticket_id, 300)],
         )
 
+    async def test_github_claim_without_ticket_is_settled_noop(self):
+        for write_required in (False, True):
+            with self.subTest(review_requests_assignment=write_required):
+                result = await self.coordinator.claim_ticket_from_github(
+                    100, 7, user_id=200, github_login="reviewer",
+                    github_write_required=write_required,
+                )
+                self.assertTrue(result.success)
+        self.assertEqual(await self.store.list_active_tickets(), ())
+        self.assertEqual(self.projection.calls, [])
+
     async def test_github_claim_and_unassign_do_not_echo_assignee_writes(self):
         ticket_id = await self.create_github_active()
 
