@@ -94,6 +94,7 @@ class Category:
     guild_id: int
     name: str
     created_at: datetime
+    classification: str = "reviewer"
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,7 +164,6 @@ class Ticket:
     public_token: str = ""
     pending_ping_reserved_at: datetime | None = None
     origin: TicketOrigin = TicketOrigin.DISCORD
-    category_prompt_retry_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

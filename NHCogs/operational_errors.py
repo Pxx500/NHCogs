@@ -275,15 +275,15 @@ class OperationalErrorReporter:
         )
 
     async def send_alert(
-        self, guild_id: int, content: str, *, file: discord.File | None = None
-    ) -> None:
+        self, guild_id: int, content: str, *, file: discord.File | None = None, view=None
+    ):
         """Publish technical failure details only to the shared private destination."""
         guild = self._bot.get_guild(guild_id)
         if guild is None:
             self._logger.error(
                 "Cannot publish NH operational error because guild %s is unavailable", guild_id
             )
-            return
+            return None
         guild_config = self._config.guild_from_id(guild_id)
         channel_id = await guild_config.error_channel()
         maintainer_id = await guild_config.error_maintainer_id()
@@ -292,12 +292,12 @@ class OperationalErrorReporter:
             self._logger.error(
                 "Cannot publish NH operational error because its channel is not configured"
             )
-            return
+            return None
         if channel.permissions_for(guild.default_role).view_channel:
             self._logger.error(
                 "Cannot publish NH operational error because channel %s is public", channel.id
             )
-            return
+            return None
         maintainer = guild.get_member(maintainer_id) if maintainer_id is not None else None
         if maintainer_id is not None:
             mention = maintainer.mention if maintainer is not None else f"<@{maintainer_id}>"
@@ -311,7 +311,10 @@ class OperationalErrorReporter:
             roles=False,
             replied_user=False,
         )
-        await channel.send(content, file=file, allowed_mentions=allowed_mentions)
+        kwargs = {"file": file, "allowed_mentions": allowed_mentions}
+        if view is not None:
+            kwargs["view"] = view
+        return await channel.send(content, **kwargs)
 
     @staticmethod
     def _format_context(failure: OperationalFailure) -> str | None:

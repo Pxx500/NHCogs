@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from tests.githubtickets_loader import isolated_githubtickets_modules
 
@@ -65,6 +66,10 @@ class _Store:
         self.observed: list[object] = []
         self.observation_state = None
         self.profiles: dict[str, tuple[object, ...]] = {}
+        self.discovered = []
+
+    async def discover_labels(self, guild_id, names, now):
+        self.discovered.extend(names)
 
     async def observe_pull_request(self, pull_request, *, authoritative: bool = False):
         self.observed.append(pull_request)
@@ -93,6 +98,9 @@ class _Coordinator:
         self.claim_success = True
         self.unassign_success = True
         self.finished_ticket = None
+
+    async def sync_pull_request_labels(self, repository_id, pr_number):
+        return SimpleNamespace(success=True)
 
     async def create_ticket_from_github(
         self,
@@ -188,6 +196,7 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
             bot=self.bot,
             guild_id=10,
             member_is_eligible=_member_is_eligible,
+            automatic_creation_enabled=AsyncMock(return_value=True),
         )
 
     async def asyncTearDown(self) -> None:
@@ -297,6 +306,50 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.observed, [])
         self.assertEqual(self.coordinator.calls, [])
 
+    async def test_label_creation_claims_first_existing_eligible_assignee(self) -> None:
+        self.guild.members[2] = _Member(2, role_ids=(99,))
+        self.store.profiles["reviewer"] = (SimpleNamespace(user_id=2),)
+        disposition = await self.handler(self.delivery(
+            event="pull_request", action="labeled",
+            payload=self.payload(action="labeled", assignees=("unknown", "reviewer")),
+        ))
+        self.assertEqual(disposition, self.modules.runtime.DeliveryDisposition.PROCESSED)
+        self.assertEqual([call[0] for call in self.coordinator.calls], ["create", "claim"])
+        self.assertEqual(self.coordinator.calls[1], ("claim", 100, 7, 2, "reviewer", False))
+
+    async def test_creation_disabled_still_observes_labels(self) -> None:
+        self.handler = self.event_handler.GitHubEventHandler(
+            self.store, self.coordinator, bot=self.bot, guild_id=10,
+            member_is_eligible=_member_is_eligible,
+        )
+        disposition = await self.handler(self.delivery(
+            event="pull_request", action="labeled",
+            payload=self.payload(action="labeled", labels=("discord-ticket", "mixins")),
+        ))
+        self.assertEqual(disposition, self.modules.runtime.DeliveryDisposition.PROCESSED)
+        self.assertEqual(self.coordinator.calls, [])
+        self.assertIn("mixins", self.store.discovered)
+
+    async def test_recovered_old_label_does_not_use_newer_snapshot_to_bypass_creation_cutoff(self):
+        store = self.modules.store.GitHubTicketsStore(Path(self.directory.name) / "cutoff.sqlite")
+        await store.initialize()
+        recent = self.delivery(event="pull_request", action="synchronize", payload=self.payload(
+            action="synchronize", updated_at="2026-08-29T12:00:00Z",
+        ))
+        await store.observe_pull_request(self.modules.events.parse_delivery(recent).pull_request)
+
+        async def enabled(pull_request):
+            return pull_request.github_updated_at >= datetime(2026, 8, 29, 11, tzinfo=timezone.utc)
+
+        handler = self.event_handler.GitHubEventHandler(
+            store, self.coordinator, bot=self.bot, guild_id=10,
+            member_is_eligible=_member_is_eligible, automatic_creation_enabled=enabled,
+        )
+        await handler(self.delivery(event="pull_request", action="labeled", payload=self.payload(
+            action="labeled", updated_at="2026-08-29T10:20:30Z",
+        )))
+        self.assertEqual(self.coordinator.calls, [])
+
     async def test_whitespace_title_does_not_block_closed_lifecycle(self) -> None:
         store = self.modules.store.GitHubTicketsStore(
             Path(self.directory.name) / "whitespace-title.sqlite"
@@ -309,6 +362,7 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
             bot=self.bot,
             guild_id=10,
             member_is_eligible=_member_is_eligible,
+            automatic_creation_enabled=AsyncMock(return_value=True),
         )
         payload = self.payload(action="closed", state="closed")
         payload["pull_request"]["title"] = "   "
@@ -339,6 +393,7 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
             bot=self.bot,
             guild_id=10,
             member_is_eligible=_member_is_eligible,
+            automatic_creation_enabled=AsyncMock(return_value=True),
         )
         payload = self.payload(action="labeled")
         payload["pull_request"]["title"] = "   "
@@ -410,6 +465,7 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
                     bot=self.bot,
                     guild_id=10,
                     member_is_eligible=_member_is_eligible,
+                    automatic_creation_enabled=AsyncMock(return_value=True),
                     refresh_pull_request=refresh_pull_request,
                 )
                 stale_payload = self.payload(
@@ -471,6 +527,7 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
             bot=self.bot,
             guild_id=10,
             member_is_eligible=_member_is_eligible,
+            automatic_creation_enabled=AsyncMock(return_value=True),
             refresh_pull_request=refresh_pull_request,
         )
         await handler(
@@ -519,6 +576,7 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
             bot=self.bot,
             guild_id=10,
             member_is_eligible=_member_is_eligible,
+            automatic_creation_enabled=AsyncMock(return_value=True),
             refresh_pull_request=refresh_pull_request,
         )
         newer_open = self.modules.events.parse_delivery(
@@ -592,6 +650,7 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
             bot=self.bot,
             guild_id=10,
             member_is_eligible=_member_is_eligible,
+            automatic_creation_enabled=AsyncMock(return_value=True),
             refresh_pull_request=refresh_pull_request,
         )
 
@@ -690,6 +749,7 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
                     bot=self.bot,
                     guild_id=10,
                     member_is_eligible=_member_is_eligible,
+                    automatic_creation_enabled=AsyncMock(return_value=True),
                     refresh_pull_request=refresh_pull_request,
                 )
 
@@ -802,6 +862,7 @@ class GitHubEventHandlerTests(unittest.IsolatedAsyncioTestCase):
             bot=self.bot,
             guild_id=10,
             member_is_eligible=_member_is_eligible,
+            automatic_creation_enabled=AsyncMock(return_value=True),
             ticket_finished=failed_log,
         )
 

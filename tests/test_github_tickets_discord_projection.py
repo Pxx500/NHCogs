@@ -83,7 +83,6 @@ def make_projection(bot, view_factory=lambda _ticket: object()):
     return adapter_module.DiscordTicketProjection(
         bot,
         view_factory,
-        category_prompt_view_factory=lambda _ticket: object(),
         draft_prompt_view_factory=lambda _ticket: object(),
     )
 
@@ -301,6 +300,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             content,
             presentation.ticket_message(
+                status="🔵 Looking for reviewer",
                 title=current.pr_title,
                 url=current.pr_url,
                 author_mention="<@30>",
@@ -341,6 +341,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             channel.message.edit_calls[0]["content"],
             presentation.ticket_message(
+                    status="🟢 Claimed",
                     title=current.pr_title,
                     url=current.pr_url,
                     author_mention="<@30>",
@@ -373,6 +374,7 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             channel.message.edit_calls[0]["content"],
             presentation.ticket_message(
+                status="🟡 Review requested",
                 title=current.pr_title,
                 url=current.pr_url,
                 author_mention="<@30>",
@@ -380,66 +382,44 @@ class DiscordTicketProjectionTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-    async def test_github_prompts_use_cached_thread_once_with_exact_views(self):
+    async def test_unmapped_author_and_no_reviewer_labels_render_without_invalid_mention(self):
+        channel = FakeChannel()
+        adapter = make_projection(FakeBot({channel.id: channel}))
+        await adapter.send_ticket(ticket(author_id=None, category_ids=(), category_display="bug"))
+        content, kwargs = channel.send_calls[0]
+        self.assertTrue(content.startswith("⚪ No reviewer categories\n"))
+        self.assertNotIn("<@None>", content)
+        self.assertNotIn("Author:", content)
+        self.assertIn("bug", content)
+        self.assertFalse(kwargs["allowed_mentions"].users)
+
+    async def test_draft_prompt_uses_cached_thread_once_with_exact_view(self):
         thread = FakeThread(66)
         bot = FakeBot({thread.id: thread})
-        category_view = object()
         draft_view = object()
-        category_tickets = []
         draft_tickets = []
         adapter = adapter_module.DiscordTicketProjection(
             bot,
             lambda _ticket: object(),
-            category_prompt_view_factory=lambda current: (
-                category_tickets.append(current.ticket_id) or category_view
-            ),
             draft_prompt_view_factory=lambda current: (
                 draft_tickets.append(current.ticket_id) or draft_view
             ),
         )
         current = ticket(thread_id=66, author_id=30)
 
-        await adapter.prompt_categories(current, 66)
         await adapter.prompt_draft_decision(current)
 
-        self.assertEqual(category_tickets, [current.ticket_id])
         self.assertEqual(draft_tickets, [current.ticket_id])
-        self.assertEqual(len(thread.send_calls), 2)
-        category_content, category_kwargs = thread.send_calls[0]
-        draft_content, draft_kwargs = thread.send_calls[1]
-        self.assertEqual(
-            category_content,
-            presentation.add_categories_notification("<@30>"),
-        )
+        self.assertEqual(len(thread.send_calls), 1)
+        draft_content, draft_kwargs = thread.send_calls[0]
         self.assertEqual(
             draft_content,
             presentation.draft_ticket_notification("<@30>"),
         )
-        self.assertIs(category_kwargs["view"], category_view)
         self.assertIs(draft_kwargs["view"], draft_view)
-        self.assertEqual(category_kwargs["allowed_mentions"].users[0].id, 30)
         self.assertEqual(draft_kwargs["allowed_mentions"].users[0].id, 30)
         self.assertEqual(bot.fetch_calls, 0)
 
-    async def test_unmapped_github_category_prompt_is_neutral_and_non_pinging(self):
-        thread = FakeThread(66)
-        bot = FakeBot({thread.id: thread})
-        category_view = object()
-        adapter = adapter_module.DiscordTicketProjection(
-            bot,
-            lambda _ticket: object(),
-            category_prompt_view_factory=lambda _ticket: category_view,
-            draft_prompt_view_factory=lambda _ticket: object(),
-        )
-
-        await adapter.prompt_categories(ticket(author_id=None), 66)
-
-        self.assertEqual(len(thread.send_calls), 1)
-        content, kwargs = thread.send_calls[0]
-        self.assertEqual(content, "Add categories to start automatic routing")
-        self.assertIs(kwargs["view"], category_view)
-        self.assertFalse(kwargs["allowed_mentions"].users)
-        self.assertEqual(bot.fetch_calls, 0)
 
     async def test_ping_uses_exact_copy_and_allows_only_the_new_target_mention(self):
         thread = FakeThread(66)

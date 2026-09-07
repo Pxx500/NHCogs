@@ -139,6 +139,7 @@ class GitHubAppClient:
             f"/repos/{owner}/{repository}/pulls/{number}",
             operation="read pull request",
         )
+        payload = _mapping(payload)
         user = _mapping(payload["user"])
         repository_payload = _mapping(_mapping(payload["base"])["repo"])
         return PullRequestSnapshot(
@@ -173,7 +174,7 @@ class GitHubAppClient:
             operation="add assignee",
             json={"assignees": [login]},
         )
-        if login.casefold() not in {candidate.casefold() for candidate in _assignee_logins(payload)}:
+        if login.casefold() not in {candidate.casefold() for candidate in _assignee_logins(_mapping(payload))}:
             raise GitHubAssigneeUnavailable(login)
 
     async def remove_assignee(
@@ -189,8 +190,23 @@ class GitHubAppClient:
             operation="remove assignee",
             json={"assignees": [login]},
         )
-        if login.casefold() in {candidate.casefold() for candidate in _assignee_logins(payload)}:
+        if login.casefold() in {candidate.casefold() for candidate in _assignee_logins(_mapping(payload))}:
             raise GitHubRequestError("remove assignee")
+
+    async def list_repository_labels(self, owner: str, repository: str) -> tuple[str, ...]:
+        labels: list[str] = []
+        page_size = 100
+        page = 1
+        while True:
+            payload = await self._request_json(
+                "GET", f"/repos/{owner}/{repository}/labels?per_page={page_size}&page={page}",
+                operation="read repository labels",
+            )
+            batch = _sequence(payload)
+            labels.extend(str(_mapping(label)["name"]) for label in batch)
+            if len(batch) < page_size:
+                return tuple(labels)
+            page += 1
 
     async def list_deliveries(
         self, *, cursor: str | None = None,
@@ -262,7 +278,7 @@ class GitHubAppClient:
         *,
         operation: str,
         json: Mapping[str, object] | None = None,
-    ) -> Mapping[str, object]:
+    ) -> object:
         for attempt in range(2):
             token = await self._installation_token()
             status, headers, payload = await self._send(
@@ -278,7 +294,7 @@ class GitHubAppClient:
                 continue
             if not _HTTP_SUCCESS_MIN <= status < _HTTP_REDIRECT_MIN:
                 raise _response_error(operation, status, headers, self._clock())
-            return _mapping(payload)
+            return payload
         raise GitHubRequestError(operation)
 
     async def _installation_token(self) -> str:

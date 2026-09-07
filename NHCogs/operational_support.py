@@ -87,9 +87,9 @@ class OperationalSupport(commands.Cog):
         self._report_tasks.add(task)
         task.add_done_callback(self._report_tasks.discard)
 
-    async def send_technical_alert(self, guild_id: int, content: str) -> None:
+    async def send_technical_alert(self, guild_id: int, content: str, *, view=None):
         try:
-            await self.operational_errors.send_alert(guild_id, content)
+            return await self.operational_errors.send_alert(guild_id, content, view=view)
         except Exception:
             log.exception("Could not publish operational alert for guild %s", guild_id)
 

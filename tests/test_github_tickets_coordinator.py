@@ -97,12 +97,6 @@ class FakeProjection:
         self.next_thread_id += 1
         return thread_id
 
-    async def prompt_categories(self, ticket, thread_id):
-        self.calls.append(("prompt_categories", ticket.ticket_id, thread_id, ticket.author_id))
-        if self.prompt_hook is not None:
-            await self.prompt_hook(ticket)
-        if error := self.errors.get("prompt_categories"):
-            raise error
 
     async def prompt_draft_decision(self, ticket):
         self.calls.append(("prompt_draft_decision", ticket.ticket_id, ticket.thread_id))
@@ -306,142 +300,9 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.wake_count, 1)
 
-    async def test_github_creation_prompts_for_categories_without_author_mention(self):
-        prompt_states = []
 
-        async def capture_prompt_state(ticket):
-            current = await self.store.get_ticket(ticket.ticket_id)
-            prompt_states.append(current.state)
 
-        self.projection.prompt_hook = capture_prompt_state
-        result = await self.coordinator.create_ticket_from_github(
-            10,
-            self.pull_request(),
-            author_id=None,
-        )
 
-        self.assertTrue(result.success)
-        ticket = (await self.store.list_active_tickets())[0]
-        self.assertIsNone(ticket.author_id)
-        self.assertEqual(ticket.origin, models.TicketOrigin.GITHUB)
-        self.assertEqual(ticket.pr_title, "Automate ticket creation")
-        self.assertEqual(ticket.routing_mode, models.RoutingMode.NONE)
-        self.assertEqual(ticket.category_ids, ())
-        self.assertIsNone(ticket.next_action)
-        binding = await self.store.get_pull_request(100, 7)
-        self.assertEqual(binding.current_ticket_id, ticket.ticket_id)
-        self.assertEqual(prompt_states, [models.TicketState.OPEN])
-        self.assertEqual(
-            self.projection.calls,
-            [
-                ("send_ticket", ticket.ticket_id, None),
-                ("create_thread", ticket.ticket_id, 300),
-                ("prompt_categories", ticket.ticket_id, 400, None),
-            ],
-        )
-
-    async def test_github_creation_prompts_mapped_author_for_categories_once(self):
-        result = await self.coordinator.create_ticket_from_github(
-            10,
-            self.pull_request(),
-            author_id=100,
-        )
-
-        self.assertTrue(result.success)
-        ticket = (await self.store.list_active_tickets())[0]
-        self.assertEqual(ticket.routing_mode, models.RoutingMode.NONE)
-        self.assertEqual(ticket.category_ids, ())
-        self.assertIsNone(ticket.next_action)
-        self.assertEqual(
-            self.projection.calls,
-            [
-                ("send_ticket", ticket.ticket_id, None),
-                ("create_thread", ticket.ticket_id, 300),
-                ("prompt_categories", ticket.ticket_id, 400, 100),
-            ],
-        )
-
-    async def test_github_category_prompt_failure_keeps_ticket_and_retries_prompt(self):
-        pull_request = self.pull_request()
-        self.projection.errors["prompt_categories"] = RuntimeError(
-            "controlled prompt failure"
-        )
-
-        created = await self.coordinator.create_ticket_from_github(
-            10,
-            pull_request,
-            author_id=None,
-        )
-
-        self.assertTrue(created.success)
-        ticket = await self.store.get_ticket(1)
-        self.assertEqual(ticket.state, models.TicketState.OPEN)
-        self.assertEqual(
-            ticket.category_prompt_retry_at,
-            self.now + timedelta(seconds=5),
-        )
-        self.assertEqual(
-            await self.store.nearest_deadline(),
-            self.now + timedelta(seconds=5),
-        )
-        self.assertEqual(
-            await self.store.due_ticket_ids(self.now + timedelta(seconds=4)),
-            (),
-        )
-        self.assertEqual(
-            await self.store.due_ticket_ids(self.now + timedelta(seconds=5)),
-            (1,),
-        )
-        self.assertEqual((await self.store.get_pull_request(100, 7)).current_ticket_id, 1)
-        self.assertEqual(
-            self.projection.calls,
-            [
-                ("send_ticket", 1, None),
-                ("create_thread", 1, 300),
-                ("prompt_categories", 1, 400, None),
-            ],
-        )
-        self.assertEqual(self.wake_count, 1)
-
-        self.projection.errors.pop("prompt_categories")
-        self.projection.calls.clear()
-        self.now += timedelta(seconds=5)
-        retried = await self.coordinator.process_due(1)
-
-        self.assertTrue(retried.success)
-        ticket = await self.store.get_ticket(1)
-        self.assertIsNone(ticket.category_prompt_retry_at)
-        self.assertEqual(
-            self.projection.calls,
-            [
-                ("prompt_categories", 1, 400, None),
-            ],
-        )
-
-    async def test_failed_category_prompt_does_not_block_due_projection_sync(self):
-        self.projection.errors["prompt_categories"] = RuntimeError(
-            "controlled prompt failure"
-        )
-        ticket_id = await self.create_github_active()
-        self.projection.errors["edit_ticket"] = RuntimeError("controlled edit failure")
-
-        claimed = await self.coordinator.claim(ticket_id, self.actor(200))
-
-        self.assertFalse(claimed.success)
-        self.projection.errors.pop("edit_ticket")
-        self.projection.calls.clear()
-        self.now += timedelta(seconds=5)
-
-        recovered = await self.coordinator.process_due(ticket_id)
-
-        self.assertTrue(recovered.success)
-        self.assertEqual(
-            self.projection.calls,
-            [
-                ("prompt_categories", ticket_id, 400, None),
-                ("edit_ticket", ticket_id, models.TicketState.CLAIMED, None),
-            ],
-        )
 
     async def test_github_activation_failure_deletes_prompt_thread_and_ticket(self):
         async def lose_activation(*_args, **_kwargs):
@@ -467,73 +328,11 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_github_categories_start_strict_automatic_routing_once(self):
-        ticket_id = await self.create_github_active(author_id=100)
-        self.projection.calls.clear()
-        self.wake_count = 0
 
-        rejected = await self.coordinator.add_ticket_categories(
-            ticket_id,
-            (self.category.category_id,),
-            self.actor(200, participant=False),
-        )
-        accepted = await self.coordinator.add_ticket_categories(
-            ticket_id,
-            (self.category.category_id,),
-            self.actor(200),
-        )
-        repeated = await self.coordinator.add_ticket_categories(
-            ticket_id,
-            (self.category.category_id,),
-            self.actor(300, participant=False, staff=True),
-        )
 
-        self.assertFalse(rejected.success)
-        self.assertEqual(rejected.response, "You cannot use this action")
-        self.assertTrue(accepted.success)
-        self.assertTrue(repeated.success)
-        ticket = await self.store.get_ticket(ticket_id)
-        self.assertEqual(ticket.routing_mode, models.RoutingMode.AUTOMATIC)
-        self.assertEqual(ticket.category_ids, (self.category.category_id,))
-        self.assertEqual(ticket.category_display, "rendering")
-        self.assertEqual(ticket.next_action, models.NextAction.AUTOMATIC_PING)
-        self.assertEqual(ticket.next_action_at, self.now + timedelta(seconds=120))
-        self.assertEqual(
-            self.projection.calls,
-            [("edit_ticket", ticket_id, models.TicketState.OPEN, None)],
-        )
-        self.assertEqual(self.wake_count, 1)
-
-    async def test_github_categories_preserve_existing_claim(self):
-        ticket_id = await self.create_github_active(author_id=100)
-        claimed = await self.coordinator.claim(ticket_id, self.actor(500))
-        self.projection.calls.clear()
-        self.wake_count = 0
-
-        categorized = await self.coordinator.add_ticket_categories(
-            ticket_id,
-            (self.category.category_id,),
-            self.actor(200),
-        )
-
-        self.assertTrue(claimed.success)
-        self.assertTrue(categorized.success)
-        ticket = await self.store.get_ticket(ticket_id)
-        self.assertEqual(ticket.state, models.TicketState.CLAIMED)
-        self.assertEqual(ticket.assignee_id, 500)
-        self.assertEqual(ticket.routing_mode, models.RoutingMode.AUTOMATIC)
-        self.assertEqual(ticket.category_ids, (self.category.category_id,))
-        self.assertIsNone(ticket.next_action)
-        self.assertIsNone(ticket.next_action_at)
-        self.assertEqual(
-            self.projection.calls,
-            [("edit_ticket", ticket_id, models.TicketState.CLAIMED, None)],
-        )
-        self.assertEqual(self.wake_count, 0)
-
-    async def test_manual_github_creation_preserves_author_categories_and_routing(self):
+    async def test_manual_github_creation_mirrors_labels_and_preserves_author_and_routing(self):
         request = self.request(models.RoutingMode.DIRECT_AUTOMATIC, direct_target_id=500)
-        pull_request = self.pull_request()
+        pull_request = replace(self.pull_request(), labels=("discord-ticket", "rendering"))
 
         result = await self.coordinator.create_ticket_for_pull_request(
             request,
@@ -736,11 +535,6 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             stale_before=self.now - timedelta(minutes=5),
         )
         await self.store.complete_outbox(add_intent.outbox_id, completed_at=self.now)
-        categorized = await self.coordinator.add_ticket_categories(
-            ticket_id,
-            (self.category.category_id,),
-            self.actor(200),
-        )
         await self.store.delete_profile(10, 222)
         unassigned = await self.coordinator.unassign(
             ticket_id,
@@ -754,7 +548,6 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(claimed.success)
         self.assertEqual(add_intent.operation, models.GitHubOutboxOperation.ADD_ASSIGNEE)
         self.assertEqual(add_intent.github_login, "reviewer")
-        self.assertTrue(categorized.success)
         self.assertTrue(unassigned.success)
         self.assertEqual(
             remove_intent.operation,
@@ -1468,41 +1261,6 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_creating_github_recovery_sends_category_prompt(self):
-        pull_request = self.pull_request()
-        ticket = await self.store.create_ticket_for_pull_request(
-            models.NewTicket(
-                guild_id=10,
-                channel_id=20,
-                author_id=100,
-                pr_title=pull_request.title,
-                pr_url=pull_request.url,
-                category_display="",
-                routing_mode=models.RoutingMode.NONE,
-                direct_target_id=None,
-                category_ids=(),
-                created_at=self.now,
-                origin=models.TicketOrigin.GITHUB,
-            ),
-            pull_request,
-        )
-
-        result = await self.coordinator.recover_projection_cleanup(ticket.ticket_id)
-
-        self.assertTrue(result.success)
-        recovered = await self.store.get_ticket(ticket.ticket_id)
-        self.assertEqual(recovered.state, models.TicketState.OPEN)
-        self.assertIsNone(recovered.category_prompt_retry_at)
-        self.assertEqual(
-            self.projection.calls,
-            [
-                ("find_ticket_message", ticket.public_token),
-                ("send_ticket", ticket.ticket_id, None),
-                ("find_ticket_thread", 300),
-                ("create_thread", ticket.ticket_id, 300),
-                ("prompt_categories", ticket.ticket_id, 400, 100),
-            ],
-        )
 
     async def test_creating_recovery_reconciles_existing_thread_before_creation(self):
         ticket = await self.store.create_ticket(
@@ -1835,6 +1593,22 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(deferred.next_action_at, latest_protection)
         self.assertFalse(any(call[0] == "ping_reviewer" for call in self.projection.calls))
 
+    async def test_manual_ticket_uses_github_labels_and_preserves_no_ping(self):
+        pull_request = replace(self.pull_request(), labels=("discord-ticket", "bug"))
+        request = self.request(routing_mode=models.RoutingMode.NONE)
+
+        result = await self.coordinator.create_ticket_for_pull_request(
+            request, self.actor(100), pull_request,
+        )
+
+        self.assertTrue(result.success)
+        binding = await self.store.get_pull_request(100, 7)
+        ticket = await self.store.get_ticket(binding.current_ticket_id)
+        self.assertEqual(ticket.category_ids, ())
+        self.assertEqual(ticket.category_display, "bug")
+        self.assertEqual(ticket.routing_mode, models.RoutingMode.NONE)
+        self.assertIsNone(ticket.next_action)
+
     async def test_exhausted_budget_or_candidate_pool_leaves_ticket_open_passively(self):
         for max_pings, candidates in ((0, (self.candidate(),)), (3, ())):
             with self.subTest(max_pings=max_pings, has_candidates=bool(candidates)):
@@ -1851,6 +1625,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(passive.state, models.TicketState.OPEN)
                 self.assertIsNone(passive.next_action)
                 self.assertFalse(any(call[0] == "ping_reviewer" for call in self.projection.calls))
+                self.assertTrue(any(call[0] == "edit_ticket" for call in self.projection.calls))
 
     async def test_not_found_from_ping_and_finish_is_successful_absence(self):
         ping_ticket = await self.create_active(

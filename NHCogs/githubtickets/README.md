@@ -21,6 +21,9 @@ GitHub Tickets is loaded as part of the combined `NHCogs` extension.
 
 Run `[p]slash sync` again after an update that changes the application commands.
 
+When replacing the old Discord category system, follow the one-time
+[deployment reset](DEPLOYMENT.md) before enabling automatic creation.
+
 ## Permissions and initial setup
 
 Every `[p]githubtickets` configuration command is guild-only and requires Manage Messages.
@@ -45,8 +48,6 @@ channel and categories are optional.
 [p]githubtickets role add @GTNH-Contributors
 [p]githubtickets channel set #github-tickets
 [p]githubtickets logchannel set #github-ticket-logs
-[p]githubtickets category add rendering
-[p]githubtickets category add mixins
 ```
 
 ## Application commands
@@ -55,15 +56,14 @@ channel and categories are optional.
 
 `/newticket`
 
-Opens an ephemeral form for a canonical GitHub pull request link, optional categories, ping
+Opens an ephemeral form for a canonical GitHub pull request link, ping
 behavior, and an optional direct reviewer. The title is read from GitHub and cannot be entered
 separately. The integration validates the organization, repository access, open state, draft
 state, and active ticket binding before creating the ticket. The `discord-ticket` label is not
-required for manual creation. Automatic routing requires at least one category. Direct routing
-requires a selected reviewer. When automatic routing uses multiple categories, a second
-ephemeral page shows how many eligible reviewers have every selected category. Categories can
-be removed there before creating the ticket. For Direct then automatic, the count excludes the
-direct reviewer because that person cannot be selected again during automatic fallback.
+required for manual creation. Categories come from the pull request's GitHub labels, not the
+form. Automatic routing requires at least one approved reviewer category and a reviewer who
+has all of them. Without those categories, the ticket stays open for manual claims without an
+automatic ping. Direct routing requires a selected reviewer.
 
 The available ping behaviors are:
 
@@ -82,6 +82,8 @@ Opens an ephemeral dashboard where a participant can enter their optional GitHub
 select categories, allow or disable automatic pings, browse profiles by category, find
 Discord members by an exact GitHub username, or clear their profile after confirmation.
 The link must use `https://github.com/<login>`. Saving an empty profile removes its stored row.
+Up to 50 approved reviewer categories are available. Above 25, the profile form and category
+browser show a second category selector on the same page.
 
 ### View another developer profile
 
@@ -104,6 +106,9 @@ network diagnostics.
 | `[p]githubtickets github` | Show the GitHub integration state and available commands |
 | `[p]githubtickets github enable` | Enable the integration when credentials and receiver settings are ready |
 | `[p]githubtickets github disable` | Disable the receiver and GitHub workers while preserving Discord ticket data |
+| `[p]githubtickets github creation` | Show automatic ticket creation state and commands |
+| `[p]githubtickets github creation enable` | Allow future qualifying events to create tickets |
+| `[p]githubtickets github creation disable` | Stop creating tickets without stopping synchronization |
 | `[p]githubtickets github receiver` | Show receiver state and commands |
 | `[p]githubtickets github receiver set <host> <port>` | Set the local receiver bind address and restart an enabled integration |
 | `[p]githubtickets github receiver clear` | Clear receiver settings and disable the integration |
@@ -118,11 +123,15 @@ accepting a delivery. It returns before Discord or GitHub processing, then worke
 delivery asynchronously. Recovery runs after startup and every 15 minutes by default. GitHub
 App delivery history is used to request redelivery for locally missing deliveries.
 
-Adding the `discord-ticket` label to a ready pull request creates one Discord ticket. A draft
-waits until it becomes ready for review. The ticket starts without categories or automatic
-routing. When the pull request author has one eligible Discord profile, the bot pings that
-author once in the ticket thread with an Add Categories control. Any participant or moderator
-can use the control. Confirming categories starts the normal all-category routing flow.
+Automatic ticket creation is off by default, independently of the integration switch. Enable
+the integration first, classify the labels, then run `[p]githubtickets github creation enable`
+in a private moderator channel. While creation is off, webhooks, label discovery and existing
+ticket synchronization still run. Enabling creation does not replay old creation events.
+
+When creation is on, adding `discord-ticket` to a ready pull request creates one Discord
+ticket. A labeled draft waits until it becomes ready for review. The ticket mirrors GitHub
+labels, using only approved reviewer categories for automatic matching. Label changes update
+existing tickets without clearing claims. A manually selected No ping remains unchanged.
 
 Discord claims add the mapped GitHub login as a pull request assignee. Discord unassign removes
 that assignee. GitHub assignment and qualifying submitted reviews can claim the Discord ticket.
@@ -212,23 +221,23 @@ member is the ticket's direct target.
 
 | Command | Description |
 |---|---|
-| `[p]githubtickets category add <name>` | Add a category |
-| `[p]githubtickets category rename <old_name> <new_name>` | Rename a category |
-| `[p]githubtickets category remove <name>` | Remove a category |
+| `[p]githubtickets category review` | Open controls for classifying discovered labels |
+| `[p]githubtickets category sync` | Refresh labels from GTNewHorizons/GT5-Unofficial |
 
-Category names are trimmed, converted to lowercase, limited to 100 characters, and unique
-per server. A server can have at most 25 categories. Renaming a category preserves its ID,
-profile assignments, and active routing links. Removing a category removes it from stored
-profiles and active routing state. Existing ticket text is not rewritten.
+The bot samples labels from GTNewHorizons/GT5-Unofficial on the recovery interval and discovers
+additional names from pull request events. Names are trimmed and lowercased. The same name in
+different repositories maps to the same Discord category.
 
-Quote the old name when it contains spaces:
+New names await a moderator decision. A grouped alert in the shared maintainer destination
+opens Review labels. Choose Reviewer category to make a label selectable in developer
+profiles, or PR label only to display it on tickets without affecting reviewer matching.
+The panel also allows changing earlier decisions. Already-notified names do not cause repeat
+alerts. Failed notification delivery leaves them pending for the next pass.
 
-```text
-[p]githubtickets category rename "old name" corrected name
-```
-
-Categories are optional for manual and direct tickets. A ticket without categories cannot
-use automatic routing.
+At most 50 labels can be reviewer categories. Other labels are not subject to this limit.
+The control label `discord-ticket` is always PR-only and is omitted from ticket category text.
+Demoting a reviewer category removes it from profiles. Profiles with no remaining categories
+have automatic pings disabled. Both category commands require a private moderator channel.
 
 ## Ping limit and timing
 
@@ -303,6 +312,10 @@ Unassign.
 
 A pinged target is only being asked to review. The main ticket shows Reviewer only after
 that person or another participant successfully claims the ticket.
+
+Ticket messages start with a readable state: 🟢 Claimed, 🟡 Review requested,
+⚪ No reviewer categories, ⚪ Automatic pings off, 🔴 No eligible reviewers, or
+🔵 Looking for reviewer.
 
 - A participant, a member with Manage Messages, or the selected direct reviewer can claim
   or decline an open ticket

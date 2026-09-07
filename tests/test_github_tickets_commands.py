@@ -14,9 +14,6 @@ COMMAND_SIGNATURES = {
     "githubtickets logchannel set": "<channel>",
     "githubtickets role add": "<role>",
     "githubtickets role remove": "<role>",
-    "githubtickets category add": "<name>",
-    "githubtickets category rename": "<old_name> <new_name>",
-    "githubtickets category remove": "<name>",
     "githubtickets maxpings": "<count>",
     "githubtickets timing protection": "<duration>",
     "githubtickets timing volunteer": "<duration>",
@@ -117,9 +114,8 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 "githubtickets role add",
                 "githubtickets role remove",
                 "githubtickets category",
-                "githubtickets category add",
-                "githubtickets category rename",
-                "githubtickets category remove",
+                "githubtickets category review",
+                "githubtickets category sync",
                 "githubtickets maxpings",
                 "githubtickets timing",
                 "githubtickets timing protection",
@@ -134,6 +130,9 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 "githubtickets github",
                 "githubtickets github enable",
                 "githubtickets github disable",
+                "githubtickets github creation",
+                "githubtickets github creation enable",
+                "githubtickets github creation disable",
                 "githubtickets github receiver",
                 "githubtickets github receiver set",
                 "githubtickets github receiver clear",
@@ -324,6 +323,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
 
         github_groups = {
             "githubtickets github",
+            "githubtickets github creation",
             "githubtickets github receiver",
             "githubtickets github recovery",
         }
@@ -449,25 +449,17 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             await cog.githubtickets_channel_set(ctx, channel)
             await cog.githubtickets_logchannel_set(ctx, channel)
             await cog.githubtickets_role_add(ctx, role)
-            await cog.githubtickets_category_add(ctx, name="Rendring")
-            await cog.githubtickets_category_rename(
-                ctx,
-                "Rendring",
-                new_name="Rendering",
-            )
             await cog.githubtickets_maxpings(ctx, count=5)
             await cog.githubtickets_timing_donotdisturb(ctx, duration="8h")
             await cog.githubtickets_logchannel_clear(ctx)
 
             config = await cog.config.guild_from_id(42).all()
-            categories = await cog.store.list_categories(42)
 
         self.assertEqual(config["ticket_channel_id"], 100)
         self.assertIsNone(config["log_channel_id"])
         self.assertEqual(config["participant_role_ids"], [200])
         self.assertEqual(config["max_pings"], 5)
         self.assertEqual(config["dnd_response_seconds"], 8 * 60 * 60)
-        self.assertEqual(tuple(category.name for category in categories), ("rendering",))
         messages = [call.args[0] for call in ctx.send.await_args_list]
         self.assertEqual(
             messages,
@@ -475,8 +467,6 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 "Ticket channel set to #github-tickets",
                 "Log channel set to #github-tickets",
                 "Participant role added: @GT:NH Devs",
-                "Category added: rendring",
-                "Category renamed from rendring to rendering",
                 "Maximum pings set to 5",
                 "Do Not Disturb response time set to 8 hours",
                 "Log channel cleared",
@@ -514,27 +504,6 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             await cog.store.add_category(42, "python", now)
 
             await cog.githubtickets_role_remove(ctx, role)
-            await cog.githubtickets_category_add(ctx, name=" ")
-            await cog.githubtickets_category_rename(
-                ctx,
-                "missing",
-                new_name="scala",
-            )
-            await cog.githubtickets_category_rename(
-                ctx,
-                "rendering",
-                new_name="python",
-            )
-            await cog.githubtickets_category_rename(
-                ctx,
-                "rendering",
-                new_name=" ",
-            )
-            await cog.githubtickets_category_rename(
-                ctx,
-                "rendering",
-                new_name="x" * 101,
-            )
             await cog.githubtickets_maxpings(ctx, count=-1)
             await cog.githubtickets_timing_direct(ctx, duration="later")
 
@@ -542,15 +511,61 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             [call.args[0] for call in ctx.send.await_args_list],
             [
                 "Participant role is not configured",
-                "Category name cannot be empty",
-                "Category not found",
-                "Category already exists",
-                "Category name cannot be empty",
-                "Category name cannot exceed 100 characters",
                 "Maximum pings cannot be negative",
                 "Invalid duration",
             ],
         )
+
+    async def test_label_sync_retries_notification_and_classifies_through_controls(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            support = mock.Mock(send_technical_alert=mock.AsyncMock(side_effect=[None, object()]))
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), support)
+            await cog.store.initialize()
+            await cog.config.set_raw("guild_id", value=42)
+            cog._github_client = mock.Mock(list_repository_labels=mock.AsyncMock(
+                return_value=("mixins", "discord-ticket"),
+            ))
+            ctx = FakeContext()
+            await cog.githubtickets_category_sync(ctx)
+            self.assertEqual(len(await cog.store.labels_needing_notification(42)), 1)
+            await cog.githubtickets_category_sync(ctx)
+            await cog.githubtickets_category_sync(ctx)
+            self.assertEqual(support.send_technical_alert.await_count, 2)
+            self.assertEqual(await cog.store.labels_needing_notification(42), ())
+
+            launcher = support.send_technical_alert.await_args.kwargs["view"]
+            interaction = SimpleNamespace(
+                guild_id=42,
+                user=SimpleNamespace(id=1, roles=[], guild_permissions=SimpleNamespace(manage_messages=True)),
+                response=SimpleNamespace(defer=mock.AsyncMock(), send_message=mock.AsyncMock()),
+                followup=SimpleNamespace(send=mock.AsyncMock()),
+                edit_original_response=mock.AsyncMock(),
+            )
+            await launcher.children[0].callback(interaction)
+            panel = interaction.followup.send.await_args.kwargs["view"]
+            label = next(label for label in await cog.store.list_labels(42) if label.name == "mixins")
+            panel.children[0].values = [str(label.category_id)]
+            await panel.children[1].callback(interaction)
+            self.assertEqual([category.name for category in await cog.store.list_categories(42)], ["mixins"])
+            interaction.edit_original_response.assert_awaited_once()
+
+    async def test_creation_switch_is_private_and_does_not_toggle_integration(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock())
+            public = FakeContext(private=False)
+            with self.assertRaises(modules.githubtickets.commands.UserFeedbackCheckFailure):
+                await cog.githubtickets_github_creation_enable(public)
+            self.assertFalse(await cog.config.get_raw("automatic_ticket_creation"))
+            private = FakeContext()
+            await cog.githubtickets_github_creation_enable(private)
+            self.assertTrue(await cog.config.get_raw("automatic_ticket_creation"))
+            since = await cog.config.get_raw("automatic_ticket_creation_since")
+            self.assertIsNotNone(since)
+            await cog.githubtickets_github_creation_enable(private)
+            self.assertEqual(await cog.config.get_raw("automatic_ticket_creation_since"), since)
+            await cog.githubtickets_github_creation_disable(private)
+            self.assertFalse(await cog.config.get_raw("automatic_ticket_creation"))
+            self.assertFalse(await cog.config.get_raw("enabled"))
 
     async def test_github_configuration_commands_control_the_runtime(self):
         with isolated_githubtickets_modules(self.data_path) as modules:

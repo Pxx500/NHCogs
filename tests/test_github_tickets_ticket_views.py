@@ -260,78 +260,7 @@ class GitHubLifecycleControlsTests(unittest.IsolatedAsyncioTestCase):
             can_manage_messages=staff,
         )
 
-    async def test_category_prompt_opens_selection_and_confirms_public_action(self):
-        categories = (
-            types.SimpleNamespace(category_id=1, name="rendering"),
-            types.SimpleNamespace(category_id=2, name="mixins"),
-        )
-        actor = self.actor()
-        category_calls = []
-        action_calls = []
 
-        async def get_categories(guild_id):
-            category_calls.append(guild_id)
-            return categories
-
-        async def add_categories(public_token, category_ids, selected_actor):
-            action_calls.append((public_token, category_ids, selected_actor))
-            return types.SimpleNamespace(success=True, response=None)
-
-        prompt = ticket_views.GitHubCategoryPrompt(
-            10,
-            "opaque-ticket-token",
-            actor_factory=lambda _interaction: actor,
-            get_categories=get_categories,
-            add_categories=add_categories,
-        )
-        open_interaction = FakeInteraction()
-
-        await prompt.children[0].callback(open_interaction)
-
-        self.assertEqual(
-            (
-                prompt.children[0].label,
-                prompt.children[0].custom_id,
-            ),
-            (
-                ticket_views.presentation.ADD_CATEGORIES,
-                "githubtickets:opaque-ticket-token:add_categories",
-            ),
-        )
-        selection = open_interaction.response.message_kwargs[0]["view"]
-        selection.categories.values = ["2"]
-        confirm_interaction = FakeInteraction()
-
-        await selection.children[1].callback(confirm_interaction)
-
-        self.assertEqual(category_calls, [10, 10])
-        self.assertEqual(
-            action_calls,
-            [("opaque-ticket-token", (2,), actor)],
-        )
-        confirm_interaction.edit_original_response.assert_awaited_once_with(
-            content=ticket_views.presentation.CATEGORIES_ADDED,
-            view=None,
-        )
-
-    async def test_category_prompt_rejects_non_participant_before_catalog_lookup(self):
-        get_categories = mock.AsyncMock()
-        prompt = ticket_views.GitHubCategoryPrompt(
-            10,
-            "opaque-ticket-token",
-            actor_factory=lambda _interaction: self.actor(participant=False),
-            get_categories=get_categories,
-            add_categories=mock.AsyncMock(),
-        )
-        interaction = FakeInteraction()
-
-        await prompt.children[0].callback(interaction)
-
-        self.assertEqual(
-            interaction.response.messages,
-            [(ticket_views.presentation.CANNOT_USE_ACTION, True)],
-        )
-        get_categories.assert_not_awaited()
 
     async def test_draft_keep_retains_only_remove_and_remove_defers_cleanup(self):
         actor = self.actor(participant=False, staff=True)

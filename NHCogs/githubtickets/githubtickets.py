@@ -25,10 +25,8 @@ from .dashboard import (
 from .discord_projection import DiscordTicketProjection
 from .event_handler import GitHubEventHandler
 from .github_app import GitHubAppClient, pull_request_from_snapshot
+from .label_views import LabelReviewLauncher
 from .models import (
-    CategoryAlreadyExists,
-    CategoryLimitReached,
-    InvalidCategoryName,
     PresenceTier,
     Ticket,
     TicketState,
@@ -36,8 +34,8 @@ from .models import (
 from .routing import CandidateFacts
 from .runtime import GitHubIntegrationRuntime
 from .scheduler import DeadlineScheduler
-from .store import MAX_CATEGORY_NAME_LENGTH, GitHubTicketsStore
-from .ticket_views import DraftTicketControls, GitHubCategoryPrompt, TicketControls
+from .store import GitHubTicketsStore
+from .ticket_views import DraftTicketControls, TicketControls
 from .webhook import GitHubWebhookReceiver
 
 log = logging.getLogger(__name__)
@@ -65,7 +63,6 @@ class GitHubTickets(commands.Cog):
         self.projection = DiscordTicketProjection(
             bot,
             self._ticket_view,
-            category_prompt_view_factory=self._github_category_prompt_view,
             draft_prompt_view_factory=self._draft_ticket_view,
         )
         self.coordinator = TicketCoordinator(
@@ -201,7 +198,6 @@ class GitHubTickets(commands.Cog):
                 continue
             self._restoring_ticket_id = ticket.ticket_id
             self.bot.add_view(self._ticket_view(ticket), message_id=ticket.message_id)
-            self.bot.add_view(self._github_category_prompt_view(ticket))
             self.bot.add_view(self._draft_ticket_view(ticket))
             self._restored_view_message_ids.add(ticket.message_id)
         self._restoring_ticket_id = None
@@ -232,6 +228,7 @@ class GitHubTickets(commands.Cog):
             ):
                 raise RuntimeError("GitHub integration receiver is not configured")
             guild_id = integration_settings.guild_id
+            self.bot.add_view(self._label_launcher(guild_id))
             bind_host = integration_settings.bind_host
             bind_port = integration_settings.bind_port
             if bind_host is None or bind_port is None:
@@ -264,6 +261,7 @@ class GitHubTickets(commands.Cog):
                 ).can_participate,
                 refresh_pull_request=refresh_pull_request,
                 ticket_finished=self._log_github_finished_ticket,
+                automatic_creation_enabled=self._can_create_automatic_ticket,
             )
             runtime = GitHubIntegrationRuntime(
                 self.store,
@@ -277,6 +275,7 @@ class GitHubTickets(commands.Cog):
                 recovery_interval=timedelta(
                     seconds=integration_settings.recovery_seconds
                 ),
+                refresh_catalog=self._refresh_label_catalog,
             )
             try:
                 await runtime.start(bind_host, bind_port)
@@ -299,6 +298,56 @@ class GitHubTickets(commands.Cog):
                 error=error,
             )
             return False
+
+    async def _can_create_automatic_ticket(self, pull_request) -> bool:
+        config = await self.config.all()
+        if config.get("automatic_ticket_creation") is not True:
+            return False
+        since = config.get("automatic_ticket_creation_since")
+        if not isinstance(since, str):
+            return False
+        return pull_request.github_updated_at >= datetime.fromisoformat(since)
+
+    def _label_launcher(self, guild_id: int) -> LabelReviewLauncher:
+        return LabelReviewLauncher(self.store, guild_id, self._classify_label,
+                                   self._actor_from_interaction, self.support)
+
+    async def _refresh_label_catalog(self) -> None:
+        client = self._github_client
+        if client is None:
+            return
+        config = settings.GitHubIntegrationSettings.from_mapping(await self.config.all())
+        if config.guild_id is None:
+            return
+        names = await client.list_repository_labels("GTNewHorizons", "GT5-Unofficial")
+        await self.store.discover_labels(config.guild_id, names, datetime.now(timezone.utc))
+        await self._notify_new_labels(config.guild_id)
+        await self._sync_label_tickets(config.guild_id)
+
+    async def _notify_new_labels(self, guild_id: int) -> None:
+        pending = await self.store.labels_needing_notification(guild_id)
+        if not pending:
+            return
+        message = await self.support.send_technical_alert(
+            guild_id, f"New GitHub labels awaiting classification: {len(pending)}",
+            view=self._label_launcher(guild_id),
+        )
+        if message is not None:
+            await self.store.acknowledge_labels(guild_id, tuple(label.category_id for label in pending))
+
+    async def _classify_label(self, guild_id: int, name: str, classification: str) -> None:
+        await self.store.classify_label(guild_id, name, classification)
+        await self._sync_label_tickets(guild_id)
+
+    async def _sync_label_tickets(self, guild_id: int) -> None:
+        for ticket in await self.store.list_active_tickets():
+            if ticket.guild_id != guild_id:
+                continue
+            pull_request = await self.store.get_pull_request_for_ticket(ticket.ticket_id)
+            if pull_request is not None:
+                result = await self.coordinator.sync_pull_request_labels(pull_request.repository_id, pull_request.pr_number)
+                if not result.success:
+                    raise RuntimeError("could not synchronize ticket labels")
 
     async def _stop_github_integration(self) -> None:
         runtime = self._github_runtime
@@ -433,7 +482,6 @@ class GitHubTickets(commands.Cog):
             ),
             expected_organization=self._github_organization,
             actor_factory=self._actor_from_interaction,
-            count_automatic_candidates=self._count_automatic_candidates,
         )
 
     @discord.app_commands.guild_only()
@@ -591,14 +639,6 @@ class GitHubTickets(commands.Cog):
             mark_finished=self._finish_ticket,
         )
 
-    def _github_category_prompt_view(self, ticket: Ticket) -> GitHubCategoryPrompt:
-        return GitHubCategoryPrompt(
-            ticket.guild_id,
-            ticket.public_token,
-            actor_factory=self._actor_from_interaction,
-            get_categories=self.store.list_categories,
-            add_categories=self._add_ticket_categories,
-        )
 
     def _draft_ticket_view(self, ticket: Ticket) -> DraftTicketControls:
         return DraftTicketControls(
@@ -623,20 +663,6 @@ class GitHubTickets(commands.Cog):
     async def _unassign_ticket(self, public_token: str, actor: TicketActor):
         return await self._ticket_action(self.coordinator.unassign, public_token, actor)
 
-    async def _add_ticket_categories(
-        self,
-        public_token: str,
-        category_ids: tuple[int, ...],
-        actor: TicketActor,
-    ):
-        ticket = await self.store.get_ticket_by_public_token(public_token)
-        if ticket is None:
-            return TicketResult(False, presentation.TICKET_NOT_ACTIVE)
-        return await self.coordinator.add_ticket_categories(
-            ticket.ticket_id,
-            category_ids,
-            actor,
-        )
 
     async def _keep_draft_ticket(self, public_token: str, actor: TicketActor):
         return await self._ticket_action(
@@ -747,19 +773,6 @@ class GitHubTickets(commands.Cog):
             and self._actor_for_member(guild_id, member).can_participate
         )
 
-    async def _count_automatic_candidates(
-        self,
-        guild_id: int,
-        category_ids: tuple[int, ...],
-        excluded_user_ids: frozenset[int],
-    ) -> int:
-        return len(
-            await self._automatic_candidate_ids(
-                guild_id,
-                category_ids,
-                excluded_user_ids,
-            )
-        )
 
     async def _get_candidates(self, ticket: Ticket) -> tuple[CandidateFacts, ...]:
         guild = self.bot.get_guild(ticket.guild_id)
@@ -987,7 +1000,7 @@ class GitHubTickets(commands.Cog):
         }
         configuration_sender = (
             self._send_github_configuration_overview
-            if ctx.command.name in {"github", "receiver", "recovery"}
+            if ctx.command.name in {"github", "receiver", "recovery", "creation"}
             else self._send_configuration_overview
         )
         await command_overview.send_group_overview(
@@ -1055,6 +1068,7 @@ class GitHubTickets(commands.Cog):
             running=self._github_runtime is not None,
             recovery_seconds=integration_settings.recovery_seconds,
         )
+        content += f"\nAutomatic ticket creation: {'On' if integration_settings.automatic_ticket_creation else 'Off'}"
         await ctx.send(
             content,
             allowed_mentions=discord.AllowedMentions.none(),
@@ -1064,6 +1078,27 @@ class GitHubTickets(commands.Cog):
     async def githubtickets_github(self, ctx: commands.Context) -> None:
         """Configure the GitHub integration"""
         await self._send_group_overview(ctx)
+
+    @githubtickets_github.group(name="creation", invoke_without_command=True)
+    async def githubtickets_github_creation(self, ctx: commands.Context) -> None:
+        """Configure automatic ticket creation without stopping webhook processing"""
+        await self._send_group_overview(ctx)
+
+    @githubtickets_github_creation.command(name="enable")
+    async def githubtickets_github_creation_enable(self, ctx: commands.Context) -> None:
+        """Create tickets for future qualifying GitHub events"""
+        if not command_overview.channel_is_private(ctx.guild, ctx.channel):
+            raise commands.UserFeedbackCheckFailure("Run this command in a private moderator channel")
+        if await self.config.get_raw("automatic_ticket_creation", default=False) is not True:
+            await self.config.set_raw("automatic_ticket_creation_since", value=datetime.now(timezone.utc).replace(microsecond=0).isoformat())
+            await self.config.set_raw("automatic_ticket_creation", value=True)
+
+    @githubtickets_github_creation.command(name="disable")
+    async def githubtickets_github_creation_disable(self, ctx: commands.Context) -> None:
+        """Stop automatic ticket creation while keeping synchronization active"""
+        if not command_overview.channel_is_private(ctx.guild, ctx.channel):
+            raise commands.UserFeedbackCheckFailure("Run this command in a private moderator channel")
+        await self.config.set_raw("automatic_ticket_creation", value=False)
 
     @githubtickets_github.command(name="enable")
     async def githubtickets_github_enable(self, ctx: commands.Context) -> None:
@@ -1294,96 +1329,22 @@ class GitHubTickets(commands.Cog):
         """Configure categories"""
         await self._send_group_overview(ctx)
 
-    @githubtickets_category.command(name="add")
-    async def githubtickets_category_add(
-        self,
-        ctx: commands.Context,
-        *,
-        name: str,
-    ) -> None:
-        """Add a category"""
-        normalized = name.strip().lower()
-        if not normalized:
-            await ctx.send(presentation.CATEGORY_NAME_EMPTY)
-            return
-        if len(normalized) > MAX_CATEGORY_NAME_LENGTH:
-            await ctx.send(presentation.CATEGORY_NAME_TOO_LONG)
-            return
-        try:
-            category = await self.store.add_category(
-                ctx.guild.id,
-                normalized,
-                datetime.now(timezone.utc),
-            )
-        except InvalidCategoryName:
-            await ctx.send(presentation.CATEGORY_NAME_EMPTY)
-            return
-        except CategoryAlreadyExists:
-            await ctx.send(presentation.CATEGORY_ALREADY_EXISTS)
-            return
-        except CategoryLimitReached:
-            await ctx.send(presentation.CATEGORY_LIMIT_REACHED)
-            return
-        await ctx.send(presentation.category_added(category.name))
+    @githubtickets_category.command(name="review")
+    async def githubtickets_category_review(self, ctx: commands.Context) -> None:
+        """Review and change how discovered GitHub labels are used"""
+        if not command_overview.channel_is_private(ctx.guild, ctx.channel):
+            raise commands.UserFeedbackCheckFailure("Run this command in a private moderator channel")
+        await ctx.send("Manage GitHub labels", view=self._label_launcher(ctx.guild.id),
+                       allowed_mentions=discord.AllowedMentions.none())
 
-    @githubtickets_category.command(name="rename")
-    async def githubtickets_category_rename(
-        self,
-        ctx: commands.Context,
-        old_name: str,
-        *,
-        new_name: str,
-    ) -> None:
-        """Rename a category"""
-        normalized_old_name = old_name.strip().lower()
-        normalized_new_name = new_name.strip().lower()
-        if not normalized_new_name:
-            await ctx.send(presentation.CATEGORY_NAME_EMPTY)
-            return
-        if len(normalized_new_name) > MAX_CATEGORY_NAME_LENGTH:
-            await ctx.send(presentation.CATEGORY_NAME_TOO_LONG)
-            return
-        try:
-            category = await self.store.rename_category(
-                ctx.guild.id,
-                normalized_old_name,
-                normalized_new_name,
-            )
-        except InvalidCategoryName:
-            await ctx.send(presentation.CATEGORY_NAME_EMPTY)
-            return
-        except CategoryAlreadyExists:
-            await ctx.send(presentation.CATEGORY_ALREADY_EXISTS)
-            return
-        if category is None:
-            await ctx.send(presentation.CATEGORY_NOT_FOUND)
-            return
-        await ctx.send(
-            presentation.category_renamed(normalized_old_name, category.name)
-        )
-
-    @githubtickets_category.command(name="remove")
-    async def githubtickets_category_remove(
-        self,
-        ctx: commands.Context,
-        *,
-        name: str,
-    ) -> None:
-        """Remove a category"""
-        normalized = name.strip().lower()
-        category = next(
-            (
-                category
-                for category in await self.store.list_categories(ctx.guild.id)
-                if category.name == normalized
-            ),
-            None,
-        )
-        if category is None:
-            await ctx.send(presentation.CATEGORY_NOT_FOUND)
-            return
-        await self.store.delete_category(category.category_id)
-        await ctx.send(presentation.category_removed(category.name))
+    @githubtickets_category.command(name="sync")
+    async def githubtickets_category_sync(self, ctx: commands.Context) -> None:
+        """Refresh the label catalog from GT5-Unofficial"""
+        if not command_overview.channel_is_private(ctx.guild, ctx.channel):
+            raise commands.UserFeedbackCheckFailure("Run this command in a private moderator channel")
+        if self._github_client is None:
+            raise commands.UserFeedbackCheckFailure("Enable the GitHub integration first")
+        await self._refresh_label_catalog()
 
     @githubtickets.command(name="maxpings")
     async def githubtickets_maxpings(
