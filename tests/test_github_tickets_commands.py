@@ -129,6 +129,10 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 "githubtickets timing direct",
                 "githubtickets profile",
                 "githubtickets profile clear",
+                "githubtickets profile pings",
+                "githubtickets profile pings summary",
+                "githubtickets profile pings enabled",
+                "githubtickets profile pings disabled",
             },
         )
         self.assertEqual(
@@ -298,6 +302,106 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(embed.title, "Log channel")
 
         self.assertEqual(configuration_sender.await_count, len(groups))
+
+    async def test_ping_summary_counts_all_stored_profiles_and_handles_empty_guild(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock())
+            await cog.store.initialize()
+            now = datetime.now(timezone.utc)
+            category = await cog.store.add_category(42, "python", now)
+            for user_id, enabled in ((10, True), (20, False), (30, False)):
+                await cog.store.save_profile(
+                    guild_id=42, user_id=user_id, github_username=f"dev{user_id}",
+                    category_ids=(category.category_id,) if enabled else (),
+                    automatic_pings=enabled, updated_at=now,
+                )
+            ctx = FakeContext()
+            await cog.githubtickets_profile_pings_summary(ctx)
+            content = ctx.send.await_args.args[0]
+            self.assertIn("Total developer profiles: 3", content)
+            self.assertIn("Enabled: 1 (33.3%)", content)
+            self.assertIn("Disabled: 2 (66.7%)", content)
+            mentions = ctx.send.await_args.kwargs["allowed_mentions"]
+            self.assertFalse(mentions.users)
+            self.assertFalse(mentions.roles)
+            self.assertFalse(mentions.everyone)
+
+            empty_ctx = FakeContext(guild_id=99)
+            await cog.githubtickets_profile_pings_summary(empty_ctx)
+            empty_content = empty_ctx.send.await_args.args[0]
+            self.assertIn("Total developer profiles: 0", empty_content)
+            self.assertIn("Enabled: 0 (0.0%)", empty_content)
+            self.assertIn("Disabled: 0 (0.0%)", empty_content)
+
+    async def test_ping_lists_filter_sort_paginate_and_keep_uncached_profiles(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock())
+            await cog.store.initialize()
+            now = datetime.now(timezone.utc)
+            category = await cog.store.add_category(42, "python", now)
+            members = {
+                user_id: SimpleNamespace(name=f"developer{100 - user_id:03}-long-discord-name")
+                for user_id in range(1, 61)
+            }
+            for user_id in range(1, 62):
+                enabled = user_id != 1
+                await cog.store.save_profile(
+                    guild_id=42, user_id=user_id,
+                    github_username=f"github{user_id}" if enabled else None,
+                    category_ids=(category.category_id,),
+                    automatic_pings=enabled, updated_at=now,
+                )
+            ctx = FakeContext()
+            ctx.guild.get_member = members.get
+            with (
+                mock.patch.object(modules.githubtickets.discord.utils, "escape_markdown", str, create=True),
+                mock.patch.object(modules.githubtickets.discord.utils, "escape_mentions", str, create=True),
+            ):
+                await cog.githubtickets_profile_pings_enabled(ctx)
+                pages = [call.args[0] for call in ctx.send.await_args_list]
+                self.assertGreater(len(pages), 1)
+                self.assertTrue(all(len(page) <= 2000 for page in pages))
+                content = "\n".join(pages)
+                self.assertIn("Automatic pings enabled: 60", content)
+                self.assertNotIn("<@1>", content)
+                self.assertIn("<@61> | Discord username unavailable | github61", content)
+                self.assertLess(content.index("<@60>"), content.index("<@2>"))
+                for user_id in range(2, 62):
+                    self.assertEqual(content.count(f"<@{user_id}>"), 1)
+                for call in ctx.send.await_args_list:
+                    mentions = call.kwargs["allowed_mentions"]
+                    self.assertFalse(mentions.users)
+                    self.assertFalse(mentions.roles)
+                    self.assertFalse(mentions.everyone)
+
+                ctx.send.reset_mock()
+                await cog.githubtickets_profile_pings_disabled(ctx)
+                ctx.send.assert_awaited_once()
+                content = ctx.send.await_args.args[0]
+                self.assertIn("Automatic pings disabled: 1", content)
+                self.assertIn("<@1> | developer099", content)
+                self.assertNotIn("github1", content)
+                self.assertNotIn("<@2>", content)
+
+                empty_ctx = FakeContext(guild_id=99)
+                empty_ctx.guild.get_member = members.get
+                await cog.githubtickets_profile_pings_disabled(empty_ctx)
+                self.assertIn("No users found", empty_ctx.send.await_args.args[0])
+
+    async def test_ping_reports_reject_public_channels_before_reading_profiles(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock())
+            cog.store = mock.Mock(list_profiles=mock.AsyncMock())
+            for name in ("summary", "enabled", "disabled"):
+                with self.subTest(command=name):
+                    ctx = FakeContext(private=False)
+                    with self.assertRaisesRegex(
+                        modules.githubtickets.commands.UserFeedbackCheckFailure,
+                        "channel hidden from @everyone",
+                    ):
+                        await getattr(cog, f"githubtickets_profile_pings_{name}")(ctx)
+                    cog.store.list_profiles.assert_not_awaited()
+                    ctx.send.assert_not_awaited()
 
     async def test_resource_commands_store_values_and_use_accepted_confirmations(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
