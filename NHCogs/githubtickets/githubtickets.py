@@ -238,7 +238,9 @@ class GitHubTickets(commands.Cog):
                 raise RuntimeError("GitHub integration receiver is not configured")
             session = aiohttp.ClientSession()
             client = GitHubAppClient(credentials, session)
-            receiver = GitHubWebhookReceiver(self.store, credentials)
+            receiver = GitHubWebhookReceiver(
+                self.store, credentials, support=self.support, guild_id=guild_id,
+            )
 
             async def refresh_pull_request(pull_request):
                 owner, separator, repository = pull_request.repository_full_name.partition("/")

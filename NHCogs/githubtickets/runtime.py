@@ -24,7 +24,6 @@ from .models import (
 from .store import DELIVERY_IDENTITY_RETENTION, GitHubTicketsStore
 from .webhook import GitHubWebhookReceiver
 
-_DELIVERIES_PER_PAGE = 100
 _HTTP_SUCCESS_MIN = 200
 _HTTP_REDIRECT_MIN = 300
 _ResultT = TypeVar("_ResultT")
@@ -190,19 +189,18 @@ class GitHubIntegrationRuntime:
             raise RuntimeError("GitHub integration is not configured")
         redeliveries = 0
         identity_cutoff = self._clock() - DELIVERY_IDENTITY_RETENTION
-        start_page, resume_after_delivery_id = await self._await_store(
+        cursor, resume_after_delivery_id = await self._await_store(
             self._store.get_delivery_recovery_checkpoint()
         )
-        for page in range(start_page, start_page + self._max_recovery_pages):
+        for _ in range(self._max_recovery_pages):
             try:
-                deliveries = await client.list_deliveries(page=page)
+                deliveries, next_cursor = await client.list_deliveries(cursor=cursor)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
                 await self._report("list GitHub webhook deliveries", error)
                 self._apply_recovery_failure(error)
                 return
-            listed_count = len(deliveries)
             if resume_after_delivery_id is not None:
                 resume_index = next(
                     (
@@ -227,20 +225,21 @@ class GitHubIntegrationRuntime:
             redeliveries += attempted
             if stopped:
                 await self._save_recovery_checkpoint(
-                    next_page=page,
+                    cursor=cursor,
                     last_delivery_id=last_checked_delivery_id,
                 )
                 return
-            if listed_count < _DELIVERIES_PER_PAGE:
+            if next_cursor is None:
                 await self._save_recovery_checkpoint(
-                    next_page=1,
+                    cursor=None,
                     last_delivery_id=None,
                 )
                 return
             await self._save_recovery_checkpoint(
-                next_page=page + 1,
-                last_delivery_id=last_checked_delivery_id,
+                cursor=next_cursor,
+                last_delivery_id=None,
             )
+            cursor = next_cursor
 
     async def _recover_delivery_page(
         self,
@@ -609,13 +608,13 @@ class GitHubIntegrationRuntime:
     async def _save_recovery_checkpoint(
         self,
         *,
-        next_page: int,
+        cursor: str | None,
         last_delivery_id: int | None,
     ) -> None:
         try:
             await self._await_store(
                 self._store.save_delivery_recovery_checkpoint(
-                    next_page=next_page,
+                    cursor=cursor,
                     last_delivery_id=last_delivery_id,
                     checked_at=self._clock(),
                 )

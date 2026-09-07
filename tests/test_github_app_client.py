@@ -245,6 +245,19 @@ class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request[0:2], ("DELETE", "https://api.github.com/repos/GTNewHorizons/Example/issues/42/assignees"))
         self.assertEqual(request[2]["json"], {"assignees": ["reviewer"]})
 
+    async def test_permission_failure_with_remaining_quota_is_terminal(self) -> None:
+        github_app = self.loaded.github_app
+        now = datetime(2026, 8, 29, tzinfo=timezone.utc)
+        session = FakeSession(FakeResponse(403, {}, headers={
+            "X-RateLimit-Remaining": "4999",
+            "X-RateLimit-Reset": str(int(now.timestamp()) + 3600),
+        }))
+        client = github_app.GitHubAppClient(self.credentials(), session, clock=lambda: now)
+        with self.assertRaises(github_app.GitHubRequestError) as raised:
+            await client.list_deliveries()
+        self.assertFalse(raised.exception.retryable)
+        self.assertFalse(raised.exception.rate_limited)
+
     async def test_app_delivery_operations_use_app_jwt(self) -> None:
         github_app = self.loaded.github_app
         session = FakeSession(
@@ -261,13 +274,15 @@ class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
                         "action": "closed",
                     }
                 ],
+                headers={"Link": '<https://api.github.com/app/hook/deliveries?cursor=older%2Bbatch&per_page=100>; rel="next"'},
             ),
             FakeResponse(202, {}),
         )
         now = datetime(2026, 8, 29, tzinfo=timezone.utc)
         client = github_app.GitHubAppClient(self.credentials(), session, clock=lambda: now)
 
-        deliveries = await client.list_deliveries(page=2)
+        deliveries, next_cursor = await client.list_deliveries(cursor="next-delivery")
+        self.assertEqual(next_cursor, "older+batch")
         await client.redeliver(765)
 
         self.assertEqual(
@@ -287,7 +302,7 @@ class GitHubAppClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [request[0:2] for request in session.requests],
             [
-                ("GET", "https://api.github.com/app/hook/deliveries?per_page=100&page=2"),
+                ("GET", "https://api.github.com/app/hook/deliveries?per_page=100&cursor=next-delivery"),
                 ("POST", "https://api.github.com/app/hook/deliveries/765/attempts"),
             ],
         )
