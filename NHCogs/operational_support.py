@@ -93,6 +93,12 @@ class OperationalSupport(commands.Cog):
         except Exception:
             log.exception("Could not publish operational alert for guild %s", guild_id)
 
+    async def recover_operational_error(self, *, guild_id: int, source: str, action: str) -> None:
+        try:
+            await self.operational_errors.mark_action_recovered(guild_id=guild_id, source=source, action=action)
+        except Exception:
+            log.exception("Could not mark %s during %s recovered", source, action)
+
     async def handle_command_error(self, ctx, error, *, source: str) -> None:
         expected = tuple(
             kind for name in (

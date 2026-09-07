@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
+import logging
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from tests.githubtickets_loader import isolated_githubtickets_modules
 
@@ -161,9 +166,13 @@ class _BlockingRecoveryClient(_Client):
 class _Reporter:
     def __init__(self) -> None:
         self.reports: list[dict[str, object]] = []
+        self.recovered: list[dict[str, object]] = []
 
     async def report_operational_error(self, **kwargs) -> None:
         self.reports.append(kwargs)
+
+    async def recover_operational_error(self, **kwargs) -> None:
+        self.recovered.append(kwargs)
 
 
 class _Bot:
@@ -621,7 +630,222 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     await runtime.close()
 
-    async def test_recovery_redelivers_failed_summaries_and_local_failures(self) -> None:
+    async def test_delivery_success_recovers_only_its_own_persisted_failure(self):
+        OperationalErrorReporter = importlib.import_module("NHCogs.operational_errors").OperationalErrorReporter
+        bot = SimpleNamespace(get_guild=lambda _: None, get_cog=lambda _: support)
+        errors = OperationalErrorReporter(bot, None, Path(self.directory.name) / "errors.sqlite", logger=logging.getLogger("verification"))
+        await errors.initialize()
+        support = SimpleNamespace(report_operational_error=errors.report,
+                                  recover_operational_error=errors.mark_action_recovered)
+        repaired = False
+
+        async def handle(delivery):
+            if not repaired or delivery.delivery_guid == "still-broken":
+                raise OSError("temporary failure")
+            return self.modules.runtime.DeliveryDisposition.PROCESSED
+
+        await self._accept_delivery("repaired")
+        await self._accept_delivery("still-broken")
+        self.runtime = self.modules.runtime.GitHubIntegrationRuntime(
+            self.store, client=_Client(), receiver=_Receiver(), delivery_handler=handle,
+            bot=bot, guild_id=10, clock=lambda: self.now, poll_interval=0.001,
+        )
+        await self.runtime.start("127.0.0.1", 8080)
+
+        async def both_failed():
+            return await errors.active_count(10) == 2
+
+        await _wait_until(both_failed)
+        repaired = True
+        self.now += timedelta(hours=1)
+
+        async def processed():
+            return (
+                (await self.store.get_delivery("repaired")).state is self.modules.models.GitHubDeliveryState.PROCESSED
+                and await errors.active_count(10) == 1
+            )
+
+        await _wait_until(processed)
+        await self.runtime.close()
+        self.assertEqual(await errors.active_count(10), 1)
+
+    async def test_successful_outbox_retry_marks_its_error_recovered(self):
+        await self._create_add_outbox_intent()
+        reporter = _Reporter()
+        client = _Client()
+        original_add = client.add_assignee
+        attempts = 0
+
+        async def add(*args):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise self.modules.github_app.GitHubRequestError("add assignee", 503, retryable=True)
+            await original_add(*args)
+
+        client.add_assignee = add
+        self.runtime = self.modules.runtime.GitHubIntegrationRuntime(
+            self.store, client=client, receiver=_Receiver(), delivery_handler=lambda _: None,
+            bot=_Bot(reporter), guild_id=10, clock=lambda: self.now, poll_interval=0.001,
+        )
+        await self.runtime.start("127.0.0.1", 8080)
+
+        async def retrying():
+            return (await self.store.get_outbox_item(1)).state is self.modules.models.GitHubOutboxState.RETRY
+
+        await _wait_until(retrying)
+        self.now += timedelta(hours=1)
+
+        async def succeeded():
+            return (
+                (await self.store.get_outbox_item(1)).state is self.modules.models.GitHubOutboxState.SUCCEEDED
+                and any(item["action"] == "apply GitHub outbox item 1" for item in reporter.recovered)
+            )
+
+        await _wait_until(succeeded)
+        await self.runtime.close()
+        self.assertEqual(len(reporter.reports), 1)
+        self.assertIn({"guild_id": 10, "source": "GitHubTickets", "action": "apply GitHub outbox item 1"}, reporter.recovered)
+
+    async def test_permanent_payload_and_identity_errors_fail_without_retry(self):
+        await self._create_add_outbox_intent()
+        original = await self.store.get_pull_request(100, 7)
+        for kind in ("payload", "identity"):
+            with self.subTest(kind=kind):
+                await self._accept_delivery(kind)
+
+                async def handle(delivery, selected_kind=kind):
+                    if selected_kind == "payload":
+                        self.modules.events.parse_delivery(delivery)
+                    else:
+                        await self.store.observe_pull_request(replace(original, github_pr_id=999))
+
+                self.runtime = self.modules.runtime.GitHubIntegrationRuntime(
+                    self.store, client=_Client(), receiver=_Receiver(), delivery_handler=handle,
+                    bot=_Bot(), guild_id=10, clock=lambda: self.now, poll_interval=0.001,
+                )
+                await self.runtime.start("127.0.0.1", 8080)
+
+                async def handled(selected_kind=kind):
+                    row = await self.store.get_delivery(selected_kind)
+                    return row.state in {self.modules.models.GitHubDeliveryState.RETRY, self.modules.models.GitHubDeliveryState.FAILED}
+
+                try:
+                    await _wait_until(handled)
+                    row = await self.store.get_delivery(kind)
+                    self.assertEqual(row.state, self.modules.models.GitHubDeliveryState.FAILED)
+                    self.assertEqual(row.attempts, 1)
+                    self.assertIsNone(row.raw_body)
+                finally:
+                    await self.runtime.close()
+
+    async def test_missing_guid_redelivery_is_deduplicated_and_durable_across_restart(self):
+        summary = self.modules.github_app.GitHubDeliverySummary
+        client = _Client({1: (
+            summary(1, "missing", self.now, False, 503, "pull_request", "labeled"),
+            summary(2, "missing", self.now, True, 503, "pull_request", "labeled"),
+        )})
+
+        def runtime():
+            return self.modules.runtime.GitHubIntegrationRuntime(
+                self.store, client=client, receiver=_Receiver(), delivery_handler=lambda _: None,
+                bot=_Bot(), guild_id=10, clock=lambda: self.now,
+            )
+
+        self.runtime = runtime()
+        await self.runtime.run_recovery()
+        self.assertEqual(client.redelivered, [1])
+        await self.runtime.close()
+        self.store = self.modules.store.GitHubTicketsStore(Path(self.directory.name) / "githubtickets.sqlite")
+        await self.store.initialize()
+        self.runtime = runtime()
+        await self.runtime.run_recovery()
+        self.assertEqual(client.redelivered, [1])
+        self.now += timedelta(hours=1)
+        await self.runtime.run_recovery()
+        self.assertEqual(client.redelivered, [1, 1])
+        await self._accept_delivery("missing")
+        await self.runtime.run_recovery()
+        self.assertEqual(client.redelivered, [1, 1])
+
+    async def test_missing_delivery_requests_stop_after_budget_and_report_once(self):
+        summary = self.modules.github_app.GitHubDeliverySummary
+        client = _Client({1: (summary(1, "missing", self.now, False, 503, "pull_request", "labeled"),)})
+        reporter = _Reporter()
+        self.runtime = self.modules.runtime.GitHubIntegrationRuntime(
+            self.store, client=client, receiver=_Receiver(), delivery_handler=lambda _: None,
+            bot=_Bot(reporter), guild_id=10, clock=lambda: self.now,
+        )
+        for _ in range(8):
+            await self.runtime.run_recovery()
+            self.now += timedelta(hours=1)
+        self.assertEqual(len(client.redelivered), 5)
+        self.assertEqual(len(reporter.reports), 1)
+        self.assertIn("not received", str(reporter.reports[0]["error"]))
+        await self._accept_delivery("missing")
+        self.assertEqual((await self.store.get_delivery("missing")).state, self.modules.models.GitHubDeliveryState.PENDING)
+
+    async def test_redelivery_rate_limit_deadline_survives_restart(self):
+        summary = self.modules.github_app.GitHubDeliverySummary
+        retry_at = self.now + timedelta(hours=4)
+        client = _FailingRedeliveryClient({1: (summary(1, "limited", self.now, False, 503, "pull_request", "labeled"),)},
+            {1: self.modules.github_app.GitHubRequestError("redeliver", 429, retryable=True, rate_limited=True, retry_at=retry_at)})
+
+        def runtime():
+            return self.modules.runtime.GitHubIntegrationRuntime(
+                self.store, client=client, receiver=_Receiver(), delivery_handler=lambda _: None,
+                bot=_Bot(), guild_id=10, clock=lambda: self.now,
+            )
+
+        self.runtime = runtime()
+        await self.runtime.run_recovery()
+        await self.runtime.close()
+        self.store = self.modules.store.GitHubTicketsStore(Path(self.directory.name) / "githubtickets.sqlite")
+        await self.store.initialize()
+        self.runtime = runtime()
+        self.now += timedelta(hours=2)
+        client.errors.clear()
+        await self.runtime.run_recovery()
+        self.assertEqual(client.redelivery_attempts, [1])
+        self.now = retry_at
+        await self.runtime.run_recovery()
+        self.assertEqual(client.redelivered, [1])
+
+    async def test_successful_redelivery_retry_recovers_its_request_error(self):
+        summary = self.modules.github_app.GitHubDeliverySummary
+        client = _FailingRedeliveryClient({1: (summary(1, "missing", self.now, False, 503, "pull_request", "labeled"),)},
+            {1: self.modules.github_app.GitHubRequestError("redeliver", 503, retryable=True)})
+        reporter = _Reporter()
+        self.runtime = self.modules.runtime.GitHubIntegrationRuntime(
+            self.store, client=client, receiver=_Receiver(), delivery_handler=lambda _: None,
+            bot=_Bot(reporter), guild_id=10, clock=lambda: self.now,
+        )
+        await self.runtime.run_recovery()
+        self.assertEqual(len(reporter.reports), 1)
+        action = reporter.reports[0]["action"]
+        client.errors.clear()
+        self.now += timedelta(hours=1)
+        await self.runtime.run_recovery()
+        self.assertEqual(client.redelivered, [1])
+        self.assertIn({"guild_id": 10, "source": "GitHubTickets", "action": action}, reporter.recovered)
+
+    async def test_recovery_never_restarts_terminal_local_failure(self):
+        await self._accept_delivery("terminal")
+        await self.store.claim_next_delivery(now=self.now, stale_before=self.now-timedelta(minutes=5))
+        await self.store.fail_delivery("terminal", completed_at=self.now, error_summary="invalid input")
+        summary = self.modules.github_app.GitHubDeliverySummary
+        client = _Client({1: (summary(1, "terminal", self.now, False, 200, "pull_request", "labeled"),)})
+        self.runtime = self.modules.runtime.GitHubIntegrationRuntime(
+            self.store, client=client, receiver=_Receiver(), delivery_handler=lambda _: None,
+            bot=_Bot(), guild_id=10, clock=lambda: self.now,
+        )
+        await self.runtime.run_recovery()
+        self.now += timedelta(hours=1)
+        await self.runtime.run_recovery()
+        self.assertEqual(client.redelivered, [])
+        self.assertIsNone((await self.store.get_delivery("terminal")).raw_body)
+
+    async def test_recovery_only_redelivers_missing_guids(self) -> None:
         local_states = {
             "local-failed": "failed",
             "local-retry": "retry",
@@ -680,15 +904,15 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         await self.runtime.run_recovery()
 
-        self.assertEqual(client.redelivered, [1, 5])
+        self.assertEqual(client.redelivered, [5])
         awaiting = await self.store.get_delivery("local-failed")
         self.assertIsNotNone(awaiting)
         assert awaiting is not None
         self.assertEqual(
             awaiting.state,
-            self.modules.models.GitHubDeliveryState.AWAITING_REDELIVERY,
+            self.modules.models.GitHubDeliveryState.FAILED,
         )
-        self.assertIsNotNone(awaiting.raw_body)
+        self.assertIsNone(awaiting.raw_body)
         local_retry = await self.store.get_delivery("local-retry")
         self.assertIsNotNone(local_retry)
         assert local_retry is not None
@@ -739,18 +963,6 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_terminal_redelivery_failure_stops_batch_and_advances_checkpoint(
         self,
     ) -> None:
-        await self._accept_delivery("terminal-local")
-        claimed = await self.store.claim_next_delivery(
-            now=self.now,
-            stale_before=self.now - timedelta(minutes=5),
-        )
-        self.assertTrue(
-            await self.store.fail_delivery(
-                claimed.delivery_guid,
-                completed_at=self.now,
-                error_summary="local terminal failure",
-            )
-        )
         summary = self.modules.github_app.GitHubDeliverySummary
         client = _FailingRedeliveryClient(
             {
@@ -779,27 +991,13 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.run_recovery()
 
         self.assertEqual(client.redelivery_attempts, [1])
-        failed = await self.store.get_delivery("terminal-local")
-        self.assertEqual(failed.state, self.modules.models.GitHubDeliveryState.FAILED)
-        self.assertIsNotNone(failed.raw_body)
+        self.assertIsNone(await self.store.get_delivery("terminal-local"))
         self.assertEqual(
             await self.store.get_delivery_recovery_checkpoint(),
             (None, 1),
         )
 
     async def test_transient_redelivery_failure_stops_batch_and_backs_off(self) -> None:
-        await self._accept_delivery("transient-local")
-        claimed = await self.store.claim_next_delivery(
-            now=self.now,
-            stale_before=self.now - timedelta(minutes=5),
-        )
-        self.assertTrue(
-            await self.store.fail_delivery(
-                claimed.delivery_guid,
-                completed_at=self.now,
-                error_summary="local transient failure",
-            )
-        )
         summary = self.modules.github_app.GitHubDeliverySummary
         client = _FailingRedeliveryClient(
             {
@@ -831,17 +1029,7 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.run_recovery()
 
         self.assertEqual(client.redelivery_attempts, [1])
-        failed = await self.store.get_delivery("transient-local")
-        self.assertEqual(failed.state, self.modules.models.GitHubDeliveryState.FAILED)
-        self.assertIsNotNone(failed.raw_body)
-        self.assertGreaterEqual(
-            failed.next_attempt_at,
-            self.now + timedelta(seconds=15),
-        )
-        self.assertLessEqual(
-            failed.next_attempt_at,
-            self.now + timedelta(seconds=45),
-        )
+        self.assertIsNone(await self.store.get_delivery("transient-local"))
         self.assertEqual(
             await self.store.get_delivery_recovery_checkpoint(),
             (None, None),
@@ -1241,7 +1429,7 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             stored = await self.store.get_outbox_item(claimed.outbox_id)
             return (
                 len(client.mutations) == 1
-                and stored.state is self.modules.models.GitHubOutboxState.SUCCEEDED
+                and stored is None
             )
 
         await _wait_until(mutation_completed)
@@ -1249,6 +1437,81 @@ class GitHubIntegrationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             client.mutations,
             [("add", "NewHorizons", "NHCogs", 7, "reviewer")],
         )
+
+    async def test_privacy_deletion_cancels_an_add_already_claimed_by_worker(self):
+        await self._create_add_outbox_intent()
+        claimed = asyncio.Event()
+        release = asyncio.Event()
+        next_poll = asyncio.Event()
+        original_claim = self.store.claim_next_outbox
+
+        async def controlled_claim(**kwargs):
+            if claimed.is_set():
+                next_poll.set()
+            item = await original_claim(**kwargs)
+            if item is not None and not claimed.is_set():
+                claimed.set()
+                await release.wait()
+            return item
+
+        client = _Client()
+        self.runtime = self.modules.runtime.GitHubIntegrationRuntime(
+            self.store, client=client, receiver=_Receiver(),
+            delivery_handler=lambda _: None, bot=_Bot(), guild_id=10,
+            clock=lambda: self.now, poll_interval=0.001,
+        )
+        with patch.object(self.store, "claim_next_outbox", controlled_claim):
+            await self.runtime.start("127.0.0.1", 8080)
+            try:
+                await asyncio.wait_for(claimed.wait(), 1)
+                await self.store.redact_user(60, protection_until_by_guild={10: self.now}, updated_at=self.now)
+            finally:
+                release.set()
+            await asyncio.wait_for(next_poll.wait(), 1)
+        self.assertEqual(client.mutations, [])
+        self.assertIsNone(await self.store.get_outbox_item(1))
+
+    async def test_privacy_deletion_keeps_remove_until_execution_then_erases_login(self):
+        await self._create_add_and_remove_outbox_intents()
+        await self.store.redact_user(60, protection_until_by_guild={10: self.now}, updated_at=self.now)
+        client = _Client()
+        self.runtime = self.modules.runtime.GitHubIntegrationRuntime(
+            self.store, client=client, receiver=_Receiver(), delivery_handler=lambda _: None,
+            bot=_Bot(), guild_id=10, clock=lambda: self.now + timedelta(minutes=1), poll_interval=0.001,
+        )
+        await self.runtime.start("127.0.0.1", 8080)
+
+        async def settled():
+            item = await self.store.get_outbox_item(2)
+            return item is None or item.state is self.modules.models.GitHubOutboxState.SUCCEEDED
+
+        await _wait_until(settled)
+        self.assertEqual(client.mutations, [("remove", "NewHorizons", "NHCogs", 7, "reviewer")])
+        self.assertIsNone(await self.store.get_outbox_item(2))
+
+    async def test_privacy_deletion_waits_for_inflight_github_write(self):
+        await self._create_add_outbox_intent()
+        client = _SerializingClient()
+        self.runtime = self.modules.runtime.GitHubIntegrationRuntime(
+            self.store, client=client, receiver=_Receiver(), delivery_handler=lambda _: None,
+            bot=_Bot(), guild_id=10, clock=lambda: self.now, poll_interval=0.001,
+        )
+        await self.runtime.start("127.0.0.1", 8080)
+        await asyncio.wait_for(client.add_started.wait(), 1)
+        privacy_started = asyncio.Event()
+
+        async def delete():
+            privacy_started.set()
+            await self.store.redact_user(60, protection_until_by_guild={10: self.now}, updated_at=self.now)
+
+        deletion = asyncio.create_task(delete())
+        await privacy_started.wait()
+        try:
+            self.assertFalse(deletion.done())
+        finally:
+            client.release_add.set()
+            await deletion
+        self.assertIsNone(await self.store.get_outbox_item(1))
 
     async def test_unavailable_assignee_is_reported_and_terminally_fails_outbox(
         self,

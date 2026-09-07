@@ -5,6 +5,16 @@ from datetime import datetime
 from enum import Enum
 
 
+class RedeliveryStatus(str, Enum):
+    RESERVED = "reserved"
+    WAIT = "wait"
+    EXHAUSTED = "exhausted"
+
+
+class GitHubIdentityConflict(ValueError):
+    """A delivery contradicts the immutable identity of a stored pull request."""
+
+
 class RoutingMode(str, Enum):
     NONE = "none"
     AUTOMATIC = "automatic"

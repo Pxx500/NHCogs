@@ -39,6 +39,7 @@ PRAGMA foreign_keys = ON;
 BEGIN IMMEDIATE;
 DELETE FROM github_outbox;
 DELETE FROM github_deliveries;
+DELETE FROM github_redelivery_requests;
 DELETE FROM github_delivery_recovery;
 DELETE FROM github_pull_requests;
 DELETE FROM tickets;
