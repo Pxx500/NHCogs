@@ -692,7 +692,6 @@ async def _scan_case_message_images(
             "image_scan_setup",
             bounded,
             case_id=case_id,
-            error=error,
         )
         return
     reused_scans = ()

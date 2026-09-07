@@ -65,9 +65,10 @@ Sets the alert channel used by higher-priority alerts, such as voice-channel jum
 [p]nhmisc log maintenance #bot-maintenance
 ```
 
-Sets the private channel used for operational messages, including achievement syncs and
-backups, sticky-role maintenance, and forum-autopin failures. The bot needs View Channel,
-Send Messages, and Attach Files in this channel.
+Sets the private channel used for maintenance notices, including achievement syncs and
+backups and sticky-role maintenance. The bot needs View Channel, Send Messages, and
+Attach Files in this channel. Technical failures use the shared `[p]nhcogs errors`
+configuration.
 
 ```ini
 [p]nhmisc log moderation #moderator-actions
@@ -193,9 +194,13 @@ Apps → Increment Gate roles
 
 Use the completion message's Apps menu to review a one-tier Gate increment for its
 author and explicitly mentioned members. The review supports up to 25 eligible users
-and lets the moderator remove accidental mentions before confirming. When exactly one
-user remains selected, the moderator can grant `Solo Gater` in the same role update.
-Gate 6 users remain visible but cannot be selected.
+and lets the moderator remove accidental mentions before confirming. Additional custom
+achievements can be selected for every chosen user and start unselected. When exactly
+one user remains selected, the moderator can grant `Solo Gater` in the same role update.
+The public congratulations message includes the Gate and every new achievement in one
+result. The selector supports up to 25 custom achievements. A selection that would not
+fit in one Discord message is rejected before any roles or awards change. Gate 6 users
+remain visible but cannot be selected.
 
 The action requires Manage Messages and uses a durable one-use source lock. A second
 message cannot reserve the same member's next Gate while an earlier increment is still
@@ -326,8 +331,8 @@ is unavailable in channels visible to `@everyone`. Attach missing proofs with
 
 Gate increments, proof attachments and revokes, achievement grants and revokes,
 achievement definition changes, and role binding changes are recorded in the configured
-moderator action channel. Partial results are sent to the maintenance channel.
-Unexpected failures use the process-wide OperationalErrors reporter.
+moderator action channel. Technical failures use the shared `[p]nhcogs errors`
+configuration.
 
 ## Tier Distribution
 
@@ -682,6 +687,12 @@ permissions described above.
 `[p]selfchart` is available to regular guild users because it only returns the caller's
 own activity.
 
+## Operational errors
+
+Technical failures from the NHCogs cogs use the shared `[p]nhcogs errors` configuration.
+See the [shared command catalog](../README.md) for the setup commands and privacy rules.
+Expected command, permission, and validation outcomes use normal command feedback.
+
 ## Stored Data
 
 The cog stores Discord user IDs with passively collected message-count aggregates for
@@ -714,3 +725,8 @@ definition and all associated award records.
 
 The cleanup commands do not add an NHMisc database. They delegate to Honeypot,
 which owns its 14-day Gateway-observed message registry and its privacy deletion.
+
+Operational error records store the guild, source, action, bounded error summary,
+exception type, first and last occurrence times, occurrence count, failure fingerprint,
+recovery state, and optional channel, thread, and message IDs. Tracebacks are attached to
+the private Discord alert and are not stored in SQLite.

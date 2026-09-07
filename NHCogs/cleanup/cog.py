@@ -23,9 +23,9 @@ FALSE_VALUES = frozenset({"0", "no", "n", "false", "f", "off", "disable", "disab
 class Cleanup(commands.Cog):
     """Delete recently observed messages without fetching channel history."""
 
-    def __init__(self, bot, nhmisc, honeypot) -> None:
+    def __init__(self, bot, support, honeypot) -> None:
         self.bot = bot
-        self.nhmisc = nhmisc
+        self.support = support
         self.honeypot = honeypot
 
     @commands.group(
@@ -211,7 +211,7 @@ class Cleanup(commands.Cog):
             raise commands.UserFeedbackCheckFailure(str(error)) from error
         except Exception as error:
             log.exception("Managed cleanup failed")
-            await self.nhmisc.report_operational_error(
+            await self.support.report_operational_error(
                 guild_id=ctx.guild.id,
                 source="Cleanup",
                 action=action,

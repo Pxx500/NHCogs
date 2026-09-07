@@ -83,11 +83,13 @@ class TicketCoordinator:
         store: GitHubTicketsStore,
         projection: TicketProjection,
         *,
+        support,
         get_settings: SettingsGetter,
         get_candidates: CandidatesGetter,
         wake_deadlines: Callable[[], None],
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
+        self._support = support
         self._store = store
         self._projection = projection
         self._get_settings = get_settings
@@ -101,6 +103,12 @@ class TicketCoordinator:
             tuple[PingReservation, datetime],
         ] = {}
         self._locally_reserved_pings: set[int] = set()
+
+    async def _report_failure(self, ticket: Ticket, action: str, error: Exception) -> None:
+        await self._support.report_operational_error(
+            guild_id=ticket.guild_id, source="GitHubTickets", action=action, error=error,
+            channel_id=ticket.channel_id, thread_id=ticket.thread_id, message_id=ticket.message_id,
+        )
 
     async def create_ticket(
         self,
@@ -220,7 +228,10 @@ class TicketCoordinator:
                     pull_request,
                 )
             )
-        except Exception:
+        except Exception as error:
+            await self._support.report_operational_error(
+                guild_id=request.guild_id, source="GitHubTickets", action="reserve ticket", error=error,
+            )
             return TicketResult(False, CREATE_FAILED)
         return await self._project_created_ticket(
             ticket,
@@ -273,7 +284,8 @@ class TicketCoordinator:
             )
             if not activated:
                 raise RuntimeError("ticket activation lost its creating state")
-        except Exception:
+        except Exception as error:
+            await self._report_failure(ticket, "publish ticket", error)
             await self._cleanup_failed_creation(ticket, message_id, thread_id)
             if await self._store.get_ticket(ticket.ticket_id) is not None:
                 await self._defer_cleanup_retry(ticket.ticket_id)
@@ -861,7 +873,8 @@ class TicketCoordinator:
                     ticket,
                     thread_absent=thread_absent,
                 )
-            except Exception:
+            except Exception as error:
+                await self._report_failure(ticket, "recover ticket cleanup", error)
                 result = TicketResult(False, ACTION_FAILED)
             else:
                 self._locks.pop(ticket_id, None)
@@ -1000,7 +1013,8 @@ class TicketCoordinator:
                 next_action_at=next_action_at,
                 updated_at=now,
             )
-        except Exception:
+        except Exception as error:
+            await self._report_failure(ticket, "recover ticket creation", error)
             return TicketResult(False, ACTION_FAILED)
         if not activated:
             return TicketResult(False, ACTION_FAILED)
@@ -1181,7 +1195,8 @@ class TicketCoordinator:
         except ProjectionNotFound:
             await self._delete_remaining_projection(ticket, thread_absent=True)
             return TicketResult(True)
-        except Exception:
+        except Exception as error:
+            await self._report_failure(ticket, "ping reviewer", error)
             log.exception("GitHub Tickets reviewer ping failed for ticket %s", ticket.ticket_id)
             retry_at = now + timedelta(
                 seconds=max(settings.protection_seconds, PING_RETRY_FLOOR_SECONDS)
@@ -1302,7 +1317,8 @@ class TicketCoordinator:
             )
         except ProjectionNotFound:
             await self._delete_remaining_projection(ticket, message_absent=True)
-        except Exception:
+        except Exception as error:
+            await self._report_failure(ticket, "synchronize ticket message", error)
             retry_at = self._clock() + timedelta(seconds=PROJECTION_RETRY_SECONDS)
             if await self._store.defer_projection_sync(
                 ticket.ticket_id,
@@ -1403,14 +1419,16 @@ class TicketCoordinator:
                 await self._projection.delete_thread(thread_id)
             except ProjectionNotFound:
                 pass
-            except Exception:
+            except Exception as error:
+                await self._report_failure(ticket, "clean up failed ticket publication", error)
                 return
         if isinstance(message_id, int):
             try:
                 await self._projection.delete_message(ticket.channel_id, message_id)
             except ProjectionNotFound:
                 pass
-            except Exception:
+            except Exception as error:
+                await self._report_failure(ticket, "clean up failed ticket publication", error)
                 return
         await self._store.delete_ticket(ticket.ticket_id)
 

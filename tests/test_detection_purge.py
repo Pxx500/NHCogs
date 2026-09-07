@@ -10,14 +10,20 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.harness import DetectionPipelineTestCase, _Bot, _isolated_honeypot_modules, active_case
+from tests.harness import (
+    DetectionPipelineTestCase,
+    _Bot,
+    _isolated_honeypot_modules,
+    _operational_support,
+    active_case,
+)
 
 
 class DetectionPurgeTests(DetectionPipelineTestCase):
     async def test_registry_prune_failure_does_not_stop_other_cache_retention(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._message_registry.prune = mock.AsyncMock(
                     side_effect=sqlite3.OperationalError("database is locked")
                 )
@@ -37,7 +43,7 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
 
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 prior = self._message(
                     honeypot, attachment_count=0, message_id=299
@@ -105,7 +111,7 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 forbidden = honeypot.discord.Forbidden("manage messages denied")
                 message = self._message(honeypot, delete_error=forbidden)
@@ -123,8 +129,6 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
                 cog._publish_detection_case = mock.AsyncMock()
-                cog._record_operational_failure = mock.AsyncMock()
-                honeypot.detection.mark_operational_error_recovered = mock.AsyncMock()
 
                 await cog.on_message(message)
 
@@ -154,15 +158,10 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                     source_delete.retry_at - source_delete.updated_at,
                     timedelta(seconds=10),
                 )
-                failure = next(
-                    call
-                    for call in cog._record_operational_failure.await_args_list
-                    if call.args[1] is honeypot.OperationType.SOURCE_DELETE
+                failures = await asyncio.to_thread(
+                    cog._case_store.list_operational_failures, message.guild.id
                 )
-                self.assertEqual(
-                    failure.kwargs["operation_id"],
-                    source_delete.operation_id,
-                )
+                self.assertEqual([item.source for item in failures], ["source_delete"])
                 scan_args = cog._scan_all_case_message_images.await_args.args
                 self.assertEqual(scan_args[0], message)
                 self.assertEqual((scan_args[2], scan_args[3]), (snapshot.case.case_id, 1))
@@ -192,29 +191,17 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                 await cog._run_detection_reconciliation(now=source_delete.retry_at)
 
                 retried_message.delete.assert_awaited_once()
-                matching_recoveries = [
-                    call
-                    for call in honeypot.detection.mark_operational_error_recovered.await_args_list
-                    if call.kwargs.get("correlation_key")
-                    == source_delete.operation_id
-                ]
-                self.assertEqual(
-                    matching_recoveries,
-                    [
-                        mock.call(
-                            cog.bot,
-                            guild_id=message.guild.id,
-                            source="Honeypot",
-                            action="source_delete",
-                            correlation_key=source_delete.operation_id,
-                        )
-                    ],
+                failures = await asyncio.to_thread(
+                    cog._case_store.list_operational_failures,
+                    message.guild.id,
+                    include_resolved=True,
                 )
+                self.assertIsNotNone(failures[0].resolved_at)
 
     async def test_spam_only_delete_does_not_increment_forward_purge_stats(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0)
                 config = {
@@ -245,7 +232,7 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
     async def test_image_only_delete_does_not_increment_forward_purge_stats(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=6)
                 config = {
@@ -285,7 +272,7 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 case_cached_purge = cog._purge_detection_case_cached_messages
                 is_forward_purge_active = cog._is_forward_purge_active
@@ -346,7 +333,7 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
     async def test_cached_purge_not_found_is_persisted_as_already_gone(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 prior = self._message(
                     honeypot, attachment_count=0, message_id=299, channel_id=399
@@ -419,7 +406,7 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
     async def test_cached_purge_missing_channel_is_terminal_and_moderator_visible(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0)
                 appended = await asyncio.to_thread(
@@ -466,7 +453,7 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
     async def test_cached_purge_unsupported_channel_is_terminal_and_moderator_visible(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0)
                 appended = await asyncio.to_thread(
@@ -513,7 +500,7 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
     async def test_cached_purge_forbidden_requires_staff_attention(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 prior = self._message(
                     honeypot, attachment_count=0, message_id=299, channel_id=399
@@ -583,7 +570,7 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
     async def test_cached_purge_exhausted_transient_retries_require_attention(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 prior = self._message(
                     honeypot, attachment_count=0, message_id=299, channel_id=399

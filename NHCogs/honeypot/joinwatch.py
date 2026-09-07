@@ -187,8 +187,11 @@ async def _execute_joinwatch_action(
             moderator=guild.me,
             reason=reason,
         )
-    except Exception:
+    except Exception as error:
         log.exception("Failed to create modlog case in _execute_joinwatch_action")
+        await cog._support.report_operational_error(
+            guild_id=guild.id, source="Honeypot", action="create joinwatch log case", error=error
+        )
     label = _("The member has been kicked") if action == "kick" else _("The member has been banned")
     return (label, None)
 
@@ -550,7 +553,6 @@ async def _apply_joinwatch_selected_work(
                 guild.id,
                 "joinwatch_timer_processing",
                 f"Could not process joinwatch timers: {exc}",
-                error=exc,
             )
 
 
@@ -575,7 +577,6 @@ async def joinwatch_auto_role_loop(cog) -> None:
                 guild.id,
                 "joinwatch_timer_processing",
                 f"Could not process joinwatch timers: {exc}",
-                error=exc,
             )
             continue
         await _apply_joinwatch_selected_work(
@@ -712,7 +713,6 @@ async def on_member_join(cog, member: discord.Member) -> None:
                             "joinwatch_role_assignment",
                             f"Could not apply auto-role to user {member.id}: {exc}",
                             terminal=True,
-                            error=exc,
                         )
                         status = _(
                             "I couldn't apply the configured joinwatch auto-role."
@@ -847,5 +847,4 @@ async def on_member_update(cog, before: discord.Member, after: discord.Member) -
                     "bait_role_alert",
                     f"Could not publish bait-role alert for user {after.id}: {exc}",
                     terminal=True,
-                    error=exc,
                 )

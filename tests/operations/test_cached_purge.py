@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
-from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 
 
 class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -93,7 +93,7 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild if guild_id == 10 else None
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 appended = self._append_case(honeypot, cog, now)
                 operation = cog._case_store.ensure_operation(
                     appended.case.case_id,
@@ -186,7 +186,7 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
                     )
                     bot = _Bot()
                     bot.get_guild = lambda guild_id: guild
-                    cog = honeypot.Honeypot(bot)
+                    cog = honeypot.Honeypot(bot, _operational_support())
                     now = datetime.now(timezone.utc)
                     _appended, _operation, _claimed, context = self._claim_context(
                         honeypot, cog, now
@@ -239,7 +239,7 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
                     )
                     bot = _Bot()
                     bot.get_guild = lambda guild_id: guild
-                    cog = honeypot.Honeypot(bot)
+                    cog = honeypot.Honeypot(bot, _operational_support())
                     now = datetime.now(timezone.utc)
                     _appended, _operation, _claimed, context = self._claim_context(
                         honeypot, cog, now
@@ -287,7 +287,7 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
                     handler_module = import_module("NHCogs.honeypot.operations.cached_purge")
                     bot = _Bot()
                     bot.get_guild = lambda guild_id: guild
-                    cog = honeypot.Honeypot(bot)
+                    cog = honeypot.Honeypot(bot, _operational_support())
                     now = datetime.now(timezone.utc)
                     _appended, _operation, _claimed, context = self._claim_context(
                         honeypot,

@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.harness import CaseExpiryTestCase, _Bot, _isolated_honeypot_modules
+from tests.harness import CaseExpiryTestCase, _Bot, _isolated_honeypot_modules, _operational_support
 
 
 class CaseRoleTests(CaseExpiryTestCase):
@@ -17,7 +17,7 @@ class CaseRoleTests(CaseExpiryTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, cog, now)
                 role = SimpleNamespace(id=77)
                 member = SimpleNamespace(
@@ -56,7 +56,7 @@ class CaseRoleTests(CaseExpiryTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, cog, now)
                 role = SimpleNamespace(id=77)
                 member = SimpleNamespace(
@@ -118,7 +118,7 @@ class CaseRoleTests(CaseExpiryTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, cog, now)
                 role = SimpleNamespace(id=77)
                 fetch_member = mock.AsyncMock(
@@ -163,7 +163,7 @@ class CaseRoleTests(CaseExpiryTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, cog, now)
                 operation = cog._case_store.ensure_operation(
                     appended.case.case_id,
@@ -214,7 +214,7 @@ class CaseRoleTests(CaseExpiryTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, cog, now)
                 role = SimpleNamespace(id=77)
                 member = SimpleNamespace(
@@ -259,7 +259,7 @@ class CaseRoleTests(CaseExpiryTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, cog, now)
                 role = SimpleNamespace(id=77)
                 member = SimpleNamespace(id=appended.case.user_id, roles=[])
@@ -316,7 +316,7 @@ class CaseRoleTests(CaseExpiryTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 first = self._append_case(honeypot, cog, now)
                 role = SimpleNamespace(id=77)
                 member = SimpleNamespace(id=first.case.user_id, roles=[])
@@ -397,7 +397,7 @@ class CaseRoleTests(CaseExpiryTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 first = self._append_case(honeypot, cog, now)
                 role = SimpleNamespace(id=77)
                 member = SimpleNamespace(id=first.case.user_id, roles=[])
@@ -513,7 +513,7 @@ class CaseRoleTests(CaseExpiryTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = self._config({})
                 appended = self._append_case(honeypot, cog, now)
                 ownership = cog._case_store.ensure_operation(
@@ -591,7 +591,7 @@ class CaseRoleTests(CaseExpiryTestCase):
                 member.guild = guild
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = self._config({"mute_role": 55})
                 cog._is_joinwatch_active_role = mock.AsyncMock(return_value=False)
                 appended = self._append_case(honeypot, cog, datetime.now(timezone.utc))
@@ -639,7 +639,7 @@ class CaseRoleTests(CaseExpiryTestCase):
                 member.guild = guild
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = self._config({"mute_role": 55})
                 appended = self._append_case(honeypot, cog, datetime.now(timezone.utc))
                 operation = cog._case_store.ensure_operation(
@@ -684,7 +684,7 @@ class CaseRoleTests(CaseExpiryTestCase):
                 member.guild = guild
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = self._config({"mute_role": 55})
                 cog._is_joinwatch_active_role = mock.AsyncMock(return_value=False)
                 appended = self._append_case(honeypot, cog, datetime.now(timezone.utc))
@@ -724,7 +724,7 @@ class CaseRoleTests(CaseExpiryTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 appended = self._append_case(honeypot, cog, datetime.now(timezone.utc))
                 operation = cog._case_store.ensure_operation(
                     appended.case.case_id,
@@ -773,7 +773,7 @@ class CaseRoleTests(CaseExpiryTestCase):
                 member.guild = guild
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = self._config({"mute_role": 55})
                 cog._is_joinwatch_active_role = mock.AsyncMock(return_value=False)
                 now = datetime.now(timezone.utc)
@@ -833,7 +833,7 @@ class CaseRoleTests(CaseExpiryTestCase):
     async def test_stale_operation_token_cannot_start_role_effect(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, cog, datetime.now(timezone.utc))
                 operation = cog._case_store.ensure_operation(
                     appended.case.case_id,
@@ -860,7 +860,7 @@ class CaseRoleTests(CaseExpiryTestCase):
     async def test_stale_worker_cannot_record_role_ownership_after_reclaim(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, cog, datetime.now(timezone.utc))
                 operation = cog._case_store.ensure_operation(
                     appended.case.case_id,

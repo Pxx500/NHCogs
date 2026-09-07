@@ -100,7 +100,13 @@ async def _check_participant(
 async def _send_interaction_failure(
     interaction: discord.Interaction,
     error: Exception,
+    support,
 ) -> None:
+    await support.report_operational_error(
+        guild_id=interaction.guild_id, source="GitHubTickets", action="dashboard interaction", error=error,
+        channel_id=getattr(interaction, "channel_id", None),
+        message_id=getattr(getattr(interaction, "message", None), "id", None),
+    )
     log.error(
         "GitHub Tickets dashboard interaction failed",
         exc_info=(type(error), error, error.__traceback__),
@@ -120,8 +126,12 @@ async def _send_interaction_failure(
                 presentation.COULD_NOT_COMPLETE_ACTION,
                 **kwargs,
             )
-    except Exception:
+    except Exception as feedback_error:
         log.exception("Failed to send GitHub Tickets interaction error feedback")
+        await support.report_operational_error(
+            guild_id=interaction.guild_id, source="GitHubTickets", action="dashboard error feedback", error=feedback_error,
+            channel_id=getattr(interaction, "channel_id", None),
+        )
 
 
 class _DashboardView(discord.ui.View):
@@ -131,7 +141,7 @@ class _DashboardView(discord.ui.View):
         error: Exception,
         _item: discord.ui.Item,
     ) -> None:
-        await _send_interaction_failure(interaction, error)
+        await _send_interaction_failure(interaction, error, self._support)
 
 
 class _DashboardModal(discord.ui.Modal):
@@ -140,7 +150,7 @@ class _DashboardModal(discord.ui.Modal):
         interaction: discord.Interaction,
         error: Exception,
     ) -> None:
-        await _send_interaction_failure(interaction, error)
+        await _send_interaction_failure(interaction, error, self._support)
 
 
 def _category_options(categories: Sequence[Category]) -> list[discord.SelectOption]:
@@ -223,6 +233,7 @@ class EditProfileModal(_DashboardModal):
     def __init__(
         self,
         store: GitHubTicketsStore,
+        support,
         *,
         guild_id: int,
         categories: Sequence[Category],
@@ -231,6 +242,7 @@ class EditProfileModal(_DashboardModal):
         clock: Callable[[], datetime],
     ) -> None:
         super().__init__(title=presentation.EDIT_PROFILE)
+        self._support = support
         self._store = store
         self._guild_id = guild_id
         self._actor_factory = actor_factory
@@ -331,6 +343,7 @@ class NewTicketModal(_DashboardModal):
     def __init__(
         self,
         store: GitHubTicketsStore,
+        support,
         *,
         guild_id: int,
         categories: Sequence[Category],
@@ -342,6 +355,7 @@ class NewTicketModal(_DashboardModal):
         draft: TicketRequest | None = None,
     ) -> None:
         super().__init__(title=presentation.NEW_TICKET)
+        self._support = support
         self._store = store
         self._guild_id = guild_id
         self._create_ticket = create_ticket
@@ -526,6 +540,7 @@ class NewTicketModal(_DashboardModal):
                 presentation.confirm_categories(candidate_count),
                 view=ConfirmCategoriesView(
                     self._store,
+                    self._support,
                     guild_id=self._guild_id,
                     categories=tuple(
                         current_categories[category_id] for category_id in category_ids
@@ -591,6 +606,7 @@ class ConfirmCategoriesView(_DashboardView):
     def __init__(
         self,
         store: GitHubTicketsStore,
+        support,
         *,
         guild_id: int,
         categories: Sequence[Category],
@@ -604,6 +620,7 @@ class ConfirmCategoriesView(_DashboardView):
         automatic_candidate_exclusions: frozenset[int],
     ) -> None:
         super().__init__()
+        self._support = support
         self._store = store
         self._guild_id = guild_id
         self._categories = tuple(categories)
@@ -714,6 +731,7 @@ class ConfirmCategoriesView(_DashboardView):
         await interaction.response.send_modal(
             NewTicketModal(
                 self._store,
+                self._support,
                 guild_id=self._guild_id,
                 categories=categories,
                 create_ticket=self._create_ticket,
@@ -756,6 +774,7 @@ class ConfirmCategoriesView(_DashboardView):
 async def send_new_ticket_modal(
     interaction: discord.Interaction,
     store: GitHubTicketsStore,
+    support,
     *,
     guild_id: int,
     create_ticket: CreateTicket,
@@ -777,6 +796,7 @@ async def send_new_ticket_modal(
     await interaction.response.send_modal(
         NewTicketModal(
             store,
+            support,
             guild_id=guild_id,
             categories=categories,
             create_ticket=create_ticket,
@@ -792,12 +812,14 @@ class ClearProfileConfirmation(_DashboardView):
     def __init__(
         self,
         store: GitHubTicketsStore,
+        support,
         *,
         guild_id: int,
         actor_factory: ActorFactory,
         clock: Callable[[], datetime],
     ) -> None:
         super().__init__()
+        self._support = support
         self._store = store
         self._guild_id = guild_id
         self._actor_factory = actor_factory
@@ -832,6 +854,7 @@ class CategoryBrowser(_DashboardView):
     def __init__(
         self,
         store: GitHubTicketsStore,
+        support,
         *,
         guild_id: int,
         categories: Sequence[Category],
@@ -841,6 +864,7 @@ class CategoryBrowser(_DashboardView):
         member_actor_factory: MemberActorFactory,
     ) -> None:
         super().__init__()
+        self._support = support
         self._store = store
         self._guild_id = guild_id
         self._categories = {category.category_id: category for category in categories[:25]}
@@ -957,6 +981,7 @@ class GitHubUsernameLookupModal(_DashboardModal):
     def __init__(
         self,
         store: GitHubTicketsStore,
+        support,
         *,
         guild_id: int,
         actor_factory: ActorFactory,
@@ -964,6 +989,7 @@ class GitHubUsernameLookupModal(_DashboardModal):
         member_actor_factory: MemberActorFactory,
     ) -> None:
         super().__init__(title=presentation.FIND_BY_GITHUB_USERNAME)
+        self._support = support
         self._store = store
         self._guild_id = guild_id
         self._actor_factory = actor_factory
@@ -1007,6 +1033,7 @@ class GitHubTicketsDashboard(_DashboardView):
     def __init__(
         self,
         store: GitHubTicketsStore,
+        support,
         *,
         guild_id: int,
         actor_factory: ActorFactory,
@@ -1015,6 +1042,7 @@ class GitHubTicketsDashboard(_DashboardView):
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         super().__init__()
+        self._support = support
         self._store = store
         self._guild_id = guild_id
         self._actor_factory = actor_factory
@@ -1057,6 +1085,7 @@ class GitHubTicketsDashboard(_DashboardView):
         await interaction.response.send_modal(
             EditProfileModal(
                 self._store,
+                self._support,
                 guild_id=self._guild_id,
                 categories=categories,
                 profile=profile,
@@ -1078,6 +1107,7 @@ class GitHubTicketsDashboard(_DashboardView):
             content=presentation.BROWSE_CATEGORIES,
             view=CategoryBrowser(
                 self._store,
+                self._support,
                 guild_id=self._guild_id,
                 categories=categories,
                 back_view=self,
@@ -1095,6 +1125,7 @@ class GitHubTicketsDashboard(_DashboardView):
         await interaction.response.send_modal(
             GitHubUsernameLookupModal(
                 self._store,
+                self._support,
                 guild_id=self._guild_id,
                 actor_factory=self._actor_factory,
                 member_lookup=self._member_lookup,
@@ -1107,6 +1138,7 @@ class GitHubTicketsDashboard(_DashboardView):
             presentation.ARE_YOU_SURE,
             view=ClearProfileConfirmation(
                 self._store,
+                self._support,
                 guild_id=self._guild_id,
                 actor_factory=self._actor_factory,
                 clock=self._clock,

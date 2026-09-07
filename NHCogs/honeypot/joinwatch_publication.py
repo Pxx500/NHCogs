@@ -118,7 +118,6 @@ async def _record_update_failure(
         guild.id,
         "joinwatch_alert_update",
         f"Could not update joinwatch alert {message_id}: {error}",
-        error=error,
     )
 
 
@@ -262,7 +261,6 @@ async def publish_joinwatch_incident(
             "joinwatch_alert_publish",
             f"Could not publish joinwatch alert for user {member_id}: {exc}",
             terminal=True,
-            error=exc,
         )
 
 
@@ -304,5 +302,4 @@ async def publish_legacy_timer_result(
             guild.id,
             "joinwatch_timer_alert",
             f"Could not publish timer result for user {member_id}: {exc}",
-            error=exc,
         )

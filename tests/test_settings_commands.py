@@ -13,7 +13,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.harness import _Bot, _isolated_honeypot_modules
+from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 
 
 class _OverviewEmbed:
@@ -118,7 +118,7 @@ class RoleNtSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_add_registers_one_role_for_multiple_source_channels(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 configured = _ScalarSetting({})
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
@@ -157,7 +157,7 @@ class RoleNtSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_list_paginates_large_role_nt_configuration(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 configured = _ScalarSetting(
                     {
                         str(role_id): {
@@ -202,7 +202,7 @@ class ImageScanSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_threshold_defaults_in_public_threshold_query(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -234,7 +234,7 @@ class PurgeMaintenanceSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_maintenance_prunes_registry_at_fourteen_days(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await cog._message_registry.initialize()
                 await cog._message_registry.observe(
                     honeypot.MessageRecord(
@@ -261,7 +261,7 @@ class DiagnosticSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_dry_run_defaults_in_owner_config_output(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -286,7 +286,7 @@ class SettingCommandSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_backward_window_defaults_in_owner_query(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
                         all=mock.AsyncMock(
@@ -315,7 +315,7 @@ class JoinwatchSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 bot = _Bot()
                 bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 config = {
                     "joinwatch_enabled": "false",
                     "joinwatch_channel": 300,
@@ -443,6 +443,7 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Destinations", rendered)
                 self.assertIn("Sources and scopes", rendered)
                 self.assertIn("Review: Not configured", rendered)
+                self.assertNotIn("Errors:", rendered)
                 self.assertIn("Daily stats: Not configured", rendered)
                 self.assertIn("GIF debug logging: false", rendered)
                 self.assertIn("??honeypot channels review [channel]", rendered)

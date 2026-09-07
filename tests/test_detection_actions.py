@@ -10,7 +10,13 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.detection_case_fixtures import publish_primary
-from tests.harness import DetectionPipelineTestCase, _Bot, _isolated_honeypot_modules, active_case
+from tests.harness import (
+    DetectionPipelineTestCase,
+    _Bot,
+    _isolated_honeypot_modules,
+    _operational_support,
+    active_case,
+)
 
 
 def _effect_result(honeypot, label, failed_message=None):
@@ -31,7 +37,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 bot.owner_ids = set()
                 bot.is_mod = mock.AsyncMock(return_value=False)
                 bot.is_admin = mock.AsyncMock(return_value=False)
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 await cog._message_registry.initialize()
                 config = {
@@ -75,7 +81,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 bot.owner_ids = set()
                 bot.is_mod = mock.AsyncMock(return_value=False)
                 bot.is_admin = mock.AsyncMock(return_value=False)
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 await cog._message_registry.initialize()
                 config = {
@@ -125,7 +131,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0)
                 role = SimpleNamespace(id=55)
@@ -167,7 +173,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
     async def test_message_is_contained_while_old_moderator_effect_is_in_flight(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 first = self._message(
                     honeypot, attachment_count=0, message_id=299
@@ -225,7 +231,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
     async def test_multiple_signals_execute_only_one_ban(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 cog._firstpost_loaded_guilds.add(100)
                 message = self._message(honeypot, attachment_count=4)
@@ -264,7 +270,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
     async def test_automatic_ban_case_projection_catches_up_after_early_publication(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(
                     honeypot,
@@ -424,7 +430,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = SimpleNamespace(
                     guild_from_id=lambda guild_id: SimpleNamespace(
                         all=mock.AsyncMock(return_value={"dry_run": False})
@@ -516,7 +522,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
                 bot.fetch_user = mock.AsyncMock(return_value=target)
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0)
                 message.guild = guild
@@ -560,7 +566,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 )
                 bot = _Bot()
                 bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot)
+                cog = honeypot.Honeypot(bot, _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0)
                 message.guild = guild
@@ -594,7 +600,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
         for action in ("ban", "kick"):
             with self.subTest(action=action), TemporaryDirectory() as directory:
                 with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                    cog = honeypot.Honeypot(_Bot())
+                    cog = honeypot.Honeypot(_Bot(), _operational_support())
                     await asyncio.to_thread(cog._case_store.initialize)
                     message = self._message(honeypot, attachment_count=0)
                     message.guild.get_member = lambda user_id: message.author
@@ -678,7 +684,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 config = SimpleNamespace(
                     guild_from_id=lambda guild_id: SimpleNamespace(all=config_values)
                 )
-                first = honeypot.Honeypot(bot)
+                first = honeypot.Honeypot(bot, _operational_support())
                 first.config = config
                 first._execute_action = execute
                 first._case_store.initialize()
@@ -713,7 +719,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 with self.assertRaisesRegex(RuntimeError, "crash after Discord effect"):
                     await first._execute_detection_case_operation(claimed, now)
 
-                restarted = honeypot.Honeypot(bot)
+                restarted = honeypot.Honeypot(bot, _operational_support())
                 restarted.config = config
                 restarted._execute_action = execute
                 reclaimed = restarted._case_store.claim_due_operations(
@@ -739,7 +745,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
     async def test_moderation_starts_after_containment_without_waiting_for_capture(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1)
                 message.guild.get_member = lambda user_id: message.author
@@ -811,7 +817,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
     async def test_blocked_review_role_starts_after_containment_before_capture_finishes(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1)
                 role = SimpleNamespace(id=55)
@@ -891,7 +897,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
     async def test_moderation_retry_does_not_treat_missing_source_as_success(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0)
                 message.guild.get_member = lambda user_id: message.author
@@ -968,7 +974,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
     async def test_honeypot_image_match_uses_suspicious_action(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 await cog._init_imagescan_store()
                 message = self._message(

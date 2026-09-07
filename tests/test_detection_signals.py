@@ -11,14 +11,19 @@ from threading import get_ident
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.harness import _Bot, _isolated_honeypot_modules, drain_background_work
+from tests.harness import (
+    _Bot,
+    _isolated_honeypot_modules,
+    _operational_support,
+    drain_background_work,
+)
 
 
 class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_detection_stats_cover_detector_hits_intents_and_catches(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._increment_stat = mock.AsyncMock()
                 cog._record_daily_stat = mock.AsyncMock()
                 guild = SimpleNamespace(id=10)
@@ -65,7 +70,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_detection_daily_stat_precedes_fallible_lifetime_counter(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._increment_stat = mock.AsyncMock(
                     side_effect=RuntimeError("config unavailable")
                 )
@@ -94,7 +99,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_whitelist_bypass_only_increments_whitelisted_stat(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 cog._increment_stat = mock.AsyncMock()
                 now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
@@ -150,7 +155,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_active_forward_purge_collects_decisive_containment_signal(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 message = SimpleNamespace(
                     id=42,
                     guild=SimpleNamespace(id=1),
@@ -177,7 +182,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_forward_purge_retains_cheap_context_and_skips_image_and_effects(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 message = self._message(attachments=[object()] * 4)
                 message.delete = mock.AsyncMock()
                 cog._is_forward_purge_active = mock.Mock(return_value=True)
@@ -212,7 +217,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_spam_and_firstpost_signals_are_both_collected_in_priority_order(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 message = self._message(attachments=[object()] * 4)
                 cog._is_forward_purge_active = mock.Mock(return_value=False)
                 cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
@@ -237,7 +242,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_spam_action_defaults_to_review(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 message = self._message()
                 cog._is_forward_purge_active = mock.Mock(return_value=False)
                 cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
@@ -254,7 +259,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_dry_run_preserves_spam_action_intent(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 message = self._message()
                 cog._is_forward_purge_active = mock.Mock(return_value=False)
                 cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
@@ -275,7 +280,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_collector_does_not_filter_protected_members(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 message = self._message()
                 cog._is_forward_purge_active = mock.Mock(return_value=False)
                 cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
@@ -294,7 +299,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_three_attachments_do_not_produce_a_firstpost_signal(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 message = self._message(attachments=[object()] * 3)
                 cog._is_forward_purge_active = mock.Mock(return_value=False)
                 cog._firstpost_loaded_guilds.add(message.guild.id)
@@ -311,7 +316,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_collect_only_firstpost_does_not_reserve_before_case_append(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 message = self._message(attachments=[object()] * 4)
                 cog._is_forward_purge_active = mock.Mock(return_value=False)
                 cog._firstpost_loaded_guilds.add(message.guild.id)
@@ -328,7 +333,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_honeypot_channel_collects_signal_and_other_channel_does_not(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._is_forward_purge_active = mock.Mock(return_value=False)
                 cog._suspicion_reasons = mock.AsyncMock(return_value=["young account"])
                 config = {"honeypot_channels": [9], "action": "ban"}
@@ -349,7 +354,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_legacy_honeypot_channel_field_does_not_enable_detection(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._is_forward_purge_active = mock.Mock(return_value=False)
                 cog._suspicion_reasons = mock.AsyncMock(
                     return_value=["young account"]
@@ -367,7 +372,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_explicitly_empty_detection_lists_do_not_restore_defaults(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 settings = honeypot.GuildSettings.from_mapping(
                     {
                         "scam_keywords": [],
@@ -411,7 +416,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_whitelist_bypass_still_collects_non_actionable_honeypot_signal(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog._is_forward_purge_active = mock.Mock(return_value=False)
                 role = SimpleNamespace(id=7)
 
@@ -433,7 +438,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_forward_purge_is_preserved_for_whitelist_bypass_honeypot(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 role = SimpleNamespace(id=7)
                 message = self._message(channel_id=9, roles=[role])
                 cog._is_forward_purge_active = mock.Mock(return_value=True)
@@ -461,7 +466,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_image_signal_stops_after_first_match_and_returns_serializable_match(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await cog._init_imagescan_store()
                 started = 0
                 four_started = asyncio.Event()
@@ -586,7 +591,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_four_negative_initial_images_do_not_scan_later_attachments(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 attachments = [
                     SimpleNamespace(
                         filename=f"image-{index}.png",
@@ -636,7 +641,7 @@ class DetectionSignalCollectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_decisive_non_image_signal_skips_initial_image_reads(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 attachment = SimpleNamespace(
                     filename="image.png",
                     content_type="image/png",

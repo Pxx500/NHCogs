@@ -20,4 +20,6 @@ def __getattr__(name: str):
 
 
 async def setup(bot) -> None:
-    await bot.add_cog(__getattr__("NHModeration")(bot))
+    from ..operational_support import ensure_operational_support
+
+    await bot.add_cog(__getattr__("NHModeration")(bot, await ensure_operational_support(bot)))

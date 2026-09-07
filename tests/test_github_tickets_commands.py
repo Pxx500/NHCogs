@@ -140,6 +140,10 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 "githubtickets github recovery",
                 "githubtickets github recovery interval",
                 "githubtickets github recovery run",
+                "githubtickets profile pings",
+                "githubtickets profile pings summary",
+                "githubtickets profile pings enabled",
+                "githubtickets profile pings disabled",
             },
         )
         self.assertEqual(
@@ -153,7 +157,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cog_check_guards_every_prefix_command_in_guilds(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
-            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             commands = modules.githubtickets.GitHubTickets.__cog_commands__
 
             for command in commands:
@@ -168,7 +172,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_bare_group_renders_the_accepted_overview_without_mentions(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
-            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             await cog.store.initialize()
             await cog.config.guild_from_id(42).set_raw(
                 "ticket_channel_id", value=100
@@ -230,7 +234,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_public_bare_group_hides_configuration_without_reading_it(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
-            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             ctx = FakeContext(private=False)
             ctx.command = _registered_command_tree(
                 modules.githubtickets.GitHubTickets,
@@ -267,7 +271,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_every_bare_subgroup_shows_its_commands(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             cog_type = modules.githubtickets.GitHubTickets
-            cog = cog_type(SimpleNamespace())
+            cog = cog_type(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             commands = tuple(cog_type.__cog_commands__)
             groups = [
                 command
@@ -329,9 +333,109 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(github_configuration_sender.await_count, len(github_groups))
 
+    async def test_ping_summary_counts_all_stored_profiles_and_handles_empty_guild(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock())
+            await cog.store.initialize()
+            now = datetime.now(timezone.utc)
+            category = await cog.store.add_category(42, "python", now)
+            for user_id, enabled in ((10, True), (20, False), (30, False)):
+                await cog.store.save_profile(
+                    guild_id=42, user_id=user_id, github_username=f"dev{user_id}",
+                    category_ids=(category.category_id,) if enabled else (),
+                    automatic_pings=enabled, updated_at=now,
+                )
+            ctx = FakeContext()
+            await cog.githubtickets_profile_pings_summary(ctx)
+            content = ctx.send.await_args.args[0]
+            self.assertIn("Total developer profiles: 3", content)
+            self.assertIn("Enabled: 1 (33.3%)", content)
+            self.assertIn("Disabled: 2 (66.7%)", content)
+            mentions = ctx.send.await_args.kwargs["allowed_mentions"]
+            self.assertFalse(mentions.users)
+            self.assertFalse(mentions.roles)
+            self.assertFalse(mentions.everyone)
+
+            empty_ctx = FakeContext(guild_id=99)
+            await cog.githubtickets_profile_pings_summary(empty_ctx)
+            empty_content = empty_ctx.send.await_args.args[0]
+            self.assertIn("Total developer profiles: 0", empty_content)
+            self.assertIn("Enabled: 0 (0.0%)", empty_content)
+            self.assertIn("Disabled: 0 (0.0%)", empty_content)
+
+    async def test_ping_lists_filter_sort_paginate_and_keep_uncached_profiles(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock())
+            await cog.store.initialize()
+            now = datetime.now(timezone.utc)
+            category = await cog.store.add_category(42, "python", now)
+            members = {
+                user_id: SimpleNamespace(name=f"developer{100 - user_id:03}-long-discord-name")
+                for user_id in range(1, 61)
+            }
+            for user_id in range(1, 62):
+                enabled = user_id != 1
+                await cog.store.save_profile(
+                    guild_id=42, user_id=user_id,
+                    github_username=f"github{user_id}" if enabled else None,
+                    category_ids=(category.category_id,),
+                    automatic_pings=enabled, updated_at=now,
+                )
+            ctx = FakeContext()
+            ctx.guild.get_member = members.get
+            with (
+                mock.patch.object(modules.githubtickets.discord.utils, "escape_markdown", str, create=True),
+                mock.patch.object(modules.githubtickets.discord.utils, "escape_mentions", str, create=True),
+            ):
+                await cog.githubtickets_profile_pings_enabled(ctx)
+                pages = [call.args[0] for call in ctx.send.await_args_list]
+                self.assertGreater(len(pages), 1)
+                self.assertTrue(all(len(page) <= 2000 for page in pages))
+                content = "\n".join(pages)
+                self.assertIn("Automatic pings enabled: 60", content)
+                self.assertNotIn("<@1>", content)
+                self.assertIn("<@61> | Discord username unavailable | github61", content)
+                self.assertLess(content.index("<@60>"), content.index("<@2>"))
+                for user_id in range(2, 62):
+                    self.assertEqual(content.count(f"<@{user_id}>"), 1)
+                for call in ctx.send.await_args_list:
+                    mentions = call.kwargs["allowed_mentions"]
+                    self.assertFalse(mentions.users)
+                    self.assertFalse(mentions.roles)
+                    self.assertFalse(mentions.everyone)
+
+                ctx.send.reset_mock()
+                await cog.githubtickets_profile_pings_disabled(ctx)
+                ctx.send.assert_awaited_once()
+                content = ctx.send.await_args.args[0]
+                self.assertIn("Automatic pings disabled: 1", content)
+                self.assertIn("<@1> | developer099", content)
+                self.assertNotIn("github1", content)
+                self.assertNotIn("<@2>", content)
+
+                empty_ctx = FakeContext(guild_id=99)
+                empty_ctx.guild.get_member = members.get
+                await cog.githubtickets_profile_pings_disabled(empty_ctx)
+                self.assertIn("No users found", empty_ctx.send.await_args.args[0])
+
+    async def test_ping_reports_reject_public_channels_before_reading_profiles(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock())
+            cog.store = mock.Mock(list_profiles=mock.AsyncMock())
+            for name in ("summary", "enabled", "disabled"):
+                with self.subTest(command=name):
+                    ctx = FakeContext(private=False)
+                    with self.assertRaisesRegex(
+                        modules.githubtickets.commands.UserFeedbackCheckFailure,
+                        "channel hidden from @everyone",
+                    ):
+                        await getattr(cog, f"githubtickets_profile_pings_{name}")(ctx)
+                    cog.store.list_profiles.assert_not_awaited()
+                    ctx.send.assert_not_awaited()
+
     async def test_resource_commands_store_values_and_use_accepted_confirmations(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
-            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             await cog.store.initialize()
             ctx = FakeContext()
             class FakeTextChannel:
@@ -381,7 +485,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_channel_set_rejects_a_non_text_guild_channel_with_accepted_copy(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
-            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             await cog.store.initialize()
             ctx = FakeContext()
 
@@ -401,7 +505,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_configuration_errors_use_only_the_accepted_copy(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
-            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
             await cog.store.initialize()
             ctx = FakeContext()
             role = SimpleNamespace(id=200, mention="@GT:NH Devs")
@@ -450,7 +554,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_github_configuration_commands_control_the_runtime(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
-            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock()))
             ctx = FakeContext()
             restart = mock.AsyncMock(return_value=True)
             cog._restart_github_integration = restart
@@ -502,7 +606,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_clearing_the_receiver_disables_and_stops_the_integration(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
-            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock()))
             ctx = FakeContext()
             await cog.config.set_raw("enabled", value=True)
             await cog.config.set_raw("bind_host", value="127.0.0.1")
@@ -521,7 +625,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_github_credentials_are_not_reported_as_missing(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
-            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock()))
             ctx = FakeContext()
             await cog.config.set_raw("bind_host", value="127.0.0.1")
             await cog.config.set_raw("bind_port", value=8080)
@@ -551,7 +655,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_enabled_integration_reports_missing_runtime_credentials(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
-            cog = modules.githubtickets.GitHubTickets(SimpleNamespace())
+            cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock()))
             await cog.config.set_raw("guild_id", value=42)
             await cog.config.set_raw("enabled", value=True)
             await cog.config.set_raw("bind_host", value="127.0.0.1")

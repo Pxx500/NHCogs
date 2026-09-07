@@ -197,6 +197,9 @@ class FakeConfigValue:
     async def set(self, value):
         self._store[self._key] = value
 
+    async def clear(self):
+        self._store[self._key] = None
+
 
 class FakeGuildConfig:
     def __init__(self, store):
@@ -209,14 +212,44 @@ class FakeGuildConfig:
 class FakeConfigRoot:
     def __init__(self):
         self.stores = {}
+        self.defaults = {"forum_autopin_channel_ids": [], "alert_channel": None}
+
+    def register_guild(self, **defaults):
+        self.defaults.update(defaults)
 
     def store_for(self, guild):
         return self.stores.setdefault(
-            guild.id, {"forum_autopin_channel_ids": [], "alert_channel": None}
+            guild.id, self.defaults.copy()
         )
 
     def guild(self, guild):
         return FakeGuildConfig(self.store_for(guild))
+
+    def guild_from_id(self, guild_id):
+        return self.guild(types.SimpleNamespace(id=guild_id))
+
+    async def all_guilds(self):
+        return self.stores
+
+
+def make_support(
+    bot, config, data_path=Path("unused-operational-test-data"), *, module=nhmisc, error_config=None
+):
+    namespace = module.OperationalSupport.__init__.__globals__
+    error_config = error_config if error_config is not None else FakeConfigRoot()
+    with (
+        mock.patch.object(
+            namespace["Config"], "get_conf",
+            side_effect=lambda *_args, **kwargs: (
+                config if kwargs.get("cog_name") == "NHMisc" else error_config
+            ),
+        ),
+        mock.patch.dict(namespace, {"cog_data_path": lambda **_kwargs: data_path}),
+        mock.patch.object(
+            config, "register_guild", getattr(config, "register_guild", mock.Mock()), create=True
+        ),
+    ):
+        return module.OperationalSupport(bot)
 
 
 class AlertRecorder:
@@ -289,6 +322,7 @@ class ForumAutopinCommandTests(unittest.IsolatedAsyncioTestCase):
         cog = object.__new__(nhmisc.NHMisc)
         cog.bot = types.SimpleNamespace(guilds=[], get_channel=lambda _id: None)
         cog.config = FakeConfigRoot()
+        cog._support = make_support(cog.bot, cog.config)
         cog._forum_autopin = forum_autopin.ForumAutopinService(
             cog.config, alert_sender=AlertRecorder()
         )
