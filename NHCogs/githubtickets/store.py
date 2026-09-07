@@ -4,7 +4,7 @@ import asyncio
 import json
 import secrets
 import sqlite3
-from contextlib import closing
+from contextlib import asynccontextmanager, closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -20,6 +20,7 @@ from .models import (
     ExclusionReason,
     GitHubDelivery,
     GitHubDeliveryState,
+    GitHubIdentityConflict,
     GitHubOutboxItem,
     GitHubOutboxOperation,
     GitHubOutboxState,
@@ -32,6 +33,7 @@ from .models import (
     Profile,
     PullRequestObservation,
     PullRequestObservationState,
+    RedeliveryStatus,
     RoutingMode,
     Ticket,
     TicketExclusion,
@@ -41,13 +43,14 @@ from .models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import AsyncIterator, Iterable, Mapping
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 MAX_CATEGORIES = 50
 MAX_CATEGORY_NAME_LENGTH = 100
 MAX_DELIVERY_BODY_BYTES = 1_048_576
+MAX_REDELIVERY_ATTEMPTS = 5
 MAX_ERROR_SUMMARY_LENGTH = 500
 DELIVERY_RAW_BODY_RETENTION = timedelta(days=3)
 DELIVERY_IDENTITY_RETENTION = timedelta(days=7)
@@ -705,12 +708,25 @@ def _add_label_catalog(connection: sqlite3.Connection) -> None:
     connection.execute("ALTER TABLE categories ADD COLUMN notified INTEGER NOT NULL DEFAULT 0")
 
 
+def _add_redelivery_requests(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """CREATE TABLE github_redelivery_requests (
+            delivery_guid TEXT PRIMARY KEY,
+            requested_at TEXT NOT NULL,
+            next_attempt_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL,
+            exhausted_at TEXT
+        )"""
+    )
+
+
 MIGRATIONS = (
     _create_schema,
     _migrate_to_github_durable_work,
     _add_category_prompt_retry,
     _use_delivery_cursors,
     _add_label_catalog,
+    _add_redelivery_requests,
 )
 
 
@@ -724,6 +740,16 @@ class GitHubTicketsStore:
         self._path = Path(path)
         self._connection_factory = connection_factory
         self._lock = asyncio.Lock()
+        self._outbox_execution_lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def outbox_execution(self, outbox_id: int) -> AsyncIterator[GitHubOutboxItem | None]:
+        """Keep privacy deletion ordered with an external outbox mutation."""
+        async with self._outbox_execution_lock:
+            item = await self.get_outbox_item(outbox_id)
+            if item is not None and item.state is not GitHubOutboxState.PROCESSING:
+                item = None
+            yield item
 
     async def initialize(self) -> None:
         async with self._lock:
@@ -761,6 +787,7 @@ class GitHubTicketsStore:
     async def list_labels(self, guild_id: int) -> tuple[Category, ...]:
         async with self._lock:
             return await asyncio.to_thread(self._list_labels_sync, guild_id, False)
+
 
     async def labels_needing_notification(self, guild_id: int) -> tuple[Category, ...]:
         async with self._lock:
@@ -1037,42 +1064,51 @@ class GitHubTicketsStore:
         async with self._lock:
             return await asyncio.to_thread(self._get_delivery_sync, delivery_guid)
 
-    async def prepare_delivery_redelivery(
-        self,
-        delivery_guid: str,
-        *,
-        github_delivery_id: int,
-        now: datetime,
-        next_attempt_at: datetime,
-    ) -> bool:
-        if github_delivery_id < 1:
-            raise ValueError("GitHub delivery ID must be positive")
-        async with self._lock:
-            return await asyncio.to_thread(
-                self._prepare_delivery_redelivery_sync,
-                delivery_guid,
-                github_delivery_id,
-                now,
-                next_attempt_at,
-            )
 
-    async def restore_delivery_redelivery(
-        self,
-        delivery_guid: str,
-        *,
-        raw_body: bytes | None,
-        next_attempt_at: datetime | None,
-        error_summary: str,
-    ) -> bool:
-        if raw_body is not None and len(raw_body) > MAX_DELIVERY_BODY_BYTES:
-            raise ValueError("delivery raw body exceeds the retention limit")
+    async def reserve_redelivery(
+        self, delivery_guid: str, *, now: datetime, next_attempt_at: datetime,
+    ) -> RedeliveryStatus:
         async with self._lock:
-            return await asyncio.to_thread(
-                self._restore_delivery_redelivery_sync,
-                delivery_guid,
-                raw_body,
-                next_attempt_at,
-                error_summary,
+            return await asyncio.to_thread(self._reserve_redelivery_sync, delivery_guid, now, next_attempt_at)
+
+    def _reserve_redelivery_sync(self, delivery_guid: str, now: datetime, next_attempt_at: datetime) -> RedeliveryStatus:
+        timestamp = _serialize_datetime(now)
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute(
+                "SELECT 1 FROM github_deliveries WHERE delivery_guid = ?", (delivery_guid,),
+            ).fetchone():
+                return RedeliveryStatus.WAIT
+            row = connection.execute(
+                "SELECT * FROM github_redelivery_requests WHERE delivery_guid = ?", (delivery_guid,),
+            ).fetchone()
+            if row is not None and row["next_attempt_at"] > timestamp:
+                return RedeliveryStatus.WAIT
+            if row is not None and row["attempts"] >= MAX_REDELIVERY_ATTEMPTS:
+                if row["exhausted_at"] is not None:
+                    return RedeliveryStatus.WAIT
+                connection.execute(
+                    "UPDATE github_redelivery_requests SET exhausted_at = ? WHERE delivery_guid = ?",
+                    (timestamp, delivery_guid),
+                )
+                return RedeliveryStatus.EXHAUSTED
+            connection.execute(
+                """INSERT INTO github_redelivery_requests
+                    (delivery_guid, requested_at, next_attempt_at, attempts) VALUES (?, ?, ?, 1)
+                    ON CONFLICT(delivery_guid) DO UPDATE SET requested_at = excluded.requested_at,
+                    next_attempt_at = excluded.next_attempt_at, attempts = attempts + 1""",
+                (delivery_guid, timestamp, _serialize_datetime(next_attempt_at)),
+            )
+            return RedeliveryStatus.RESERVED
+
+    async def defer_redelivery(self, delivery_guid: str, next_attempt_at: datetime) -> None:
+        timestamp = _serialize_datetime(next_attempt_at)
+        async with self._lock:
+            await asyncio.to_thread(
+                self._execute_update,
+                """UPDATE github_redelivery_requests SET next_attempt_at = ?
+                    WHERE delivery_guid = ? AND next_attempt_at < ?""",
+                (timestamp, delivery_guid, timestamp),
             )
 
     async def get_delivery_recovery_checkpoint(self) -> tuple[str | None, int | None]:
@@ -1632,7 +1668,7 @@ class GitHubTicketsStore:
         updated_at: datetime,
     ) -> tuple[Ticket, ...]:
         deadlines = dict(protection_until_by_guild)
-        async with self._lock:
+        async with self._outbox_execution_lock, self._lock:
             return await asyncio.to_thread(
                 self._redact_user_sync,
                 user_id,
@@ -2222,7 +2258,7 @@ class GitHubTicketsStore:
             int(existing["github_pr_id"]) != pull_request.github_pr_id
             or int(existing["github_author_id"]) != pull_request.github_author_id
         ):
-            raise ValueError("immutable GitHub identity does not match stored identity")
+            raise GitHubIdentityConflict("immutable GitHub identity does not match stored identity")
         timestamp = _serialize_datetime(pull_request.github_updated_at)
         if existing is None:
             connection.execute(
@@ -2350,7 +2386,7 @@ class GitHubTicketsStore:
                         existing.github_pr_id != pull_request.github_pr_id
                         or existing.github_author_id != pull_request.github_author_id
                     ):
-                        raise ValueError("immutable GitHub identity does not match stored identity")
+                        raise GitHubIdentityConflict("immutable GitHub identity does not match stored identity")
                     if existing.github_updated_at > pull_request.github_updated_at:
                         connection.commit()
                         return PullRequestObservation(
@@ -2435,52 +2471,9 @@ class GitHubTicketsStore:
                     "SELECT * FROM github_deliveries WHERE delivery_guid = ?",
                     (normalized_guid,),
                 ).fetchone()
-                if existing is not None and not (
-                    str(existing["state"])
-                    == GitHubDeliveryState.AWAITING_REDELIVERY.value
-                    and str(existing["event"]) == normalized_event
-                    and (
-                        str(existing["action"])
-                        if existing["action"] is not None
-                        else None
-                    )
-                    == normalized_action
-                    and int(existing["installation_id"]) == installation_id
-                    and (
-                        int(existing["repository_id"])
-                        if existing["repository_id"] is not None
-                        else None
-                    )
-                    == repository_id
-                    and (
-                        int(existing["pr_number"])
-                        if existing["pr_number"] is not None
-                        else None
-                    )
-                    == pr_number
-                ):
+                if existing is not None:
                     connection.rollback()
                     return False
-                if existing is not None:
-                    connection.execute(
-                        """
-                        UPDATE github_deliveries
-                        SET github_delivery_id = COALESCE(?, github_delivery_id),
-                            received_at = ?, state = 'pending', attempts = 0,
-                            next_attempt_at = ?, processing_started_at = NULL,
-                            completed_at = NULL, error_summary = NULL, raw_body = ?
-                        WHERE delivery_guid = ? AND state = 'awaiting_redelivery'
-                        """,
-                        (
-                            github_delivery_id,
-                            timestamp,
-                            timestamp,
-                            raw_body,
-                            normalized_guid,
-                        ),
-                    )
-                    connection.commit()
-                    return True
                 connection.execute(
                     """
                     INSERT INTO github_deliveries (
@@ -2501,6 +2494,9 @@ class GitHubTicketsStore:
                         timestamp,
                         raw_body,
                     ),
+                )
+                connection.execute(
+                    "DELETE FROM github_redelivery_requests WHERE delivery_guid = ?", (normalized_guid,),
                 )
                 connection.commit()
                 return True
@@ -2566,54 +2562,6 @@ class GitHubTicketsStore:
             ).fetchone()
         return _decode_delivery(row) if row is not None else None
 
-    def _prepare_delivery_redelivery_sync(
-        self,
-        delivery_guid: str,
-        github_delivery_id: int,
-        now: datetime,
-        next_attempt_at: datetime,
-    ) -> bool:
-        changed = self._execute_update(
-            """
-            UPDATE github_deliveries
-            SET github_delivery_id = COALESCE(github_delivery_id, ?),
-                state = 'awaiting_redelivery', next_attempt_at = ?,
-                processing_started_at = NULL, completed_at = NULL
-            WHERE delivery_guid = ?
-                AND state IN ('failed', 'awaiting_redelivery')
-                AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-            """,
-            (
-                github_delivery_id,
-                _serialize_datetime(next_attempt_at),
-                delivery_guid,
-                _serialize_datetime(now),
-            ),
-        )
-        return changed > 0
-
-    def _restore_delivery_redelivery_sync(
-        self,
-        delivery_guid: str,
-        raw_body: bytes | None,
-        next_attempt_at: datetime | None,
-        error_summary: str,
-    ) -> bool:
-        changed = self._execute_update(
-            """
-            UPDATE github_deliveries
-            SET state = 'failed', raw_body = ?, next_attempt_at = ?,
-                error_summary = ?
-            WHERE delivery_guid = ? AND state = 'awaiting_redelivery'
-            """,
-            (
-                raw_body,
-                _serialize_optional_datetime(next_attempt_at),
-                error_summary.strip()[:MAX_ERROR_SUMMARY_LENGTH],
-                delivery_guid,
-            ),
-        )
-        return changed > 0
 
     def _get_delivery_recovery_checkpoint_sync(self) -> tuple[str | None, int | None]:
         with closing(self._connect()) as connection:
@@ -2710,7 +2658,7 @@ class GitHubTicketsStore:
         changed = self._execute_update(
             """
             UPDATE github_deliveries
-            SET state = 'failed', next_attempt_at = NULL,
+            SET state = 'failed', next_attempt_at = NULL, raw_body = NULL,
                 processing_started_at = NULL, completed_at = ?, error_summary = ?
             WHERE delivery_guid = ? AND state = 'processing'
             """,
@@ -2728,6 +2676,9 @@ class GitHubTicketsStore:
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                connection.execute(
+                    "DELETE FROM github_redelivery_requests WHERE requested_at < ?", (identity_cutoff,),
+                )
                 cleared = connection.execute(
                     """
                     UPDATE github_deliveries SET raw_body = NULL
@@ -3421,16 +3372,7 @@ class GitHubTicketsStore:
         return _decode_outbox(row) if row is not None else None
 
     def _complete_outbox_sync(self, outbox_id: int, completed_at: datetime) -> bool:
-        changed = self._execute_update(
-            """
-            UPDATE github_outbox
-            SET state = 'succeeded', next_attempt_at = NULL,
-                processing_started_at = NULL, error_summary = NULL, updated_at = ?
-            WHERE outbox_id = ? AND state = 'processing'
-            """,
-            (_serialize_datetime(completed_at), outbox_id),
-        )
-        return changed > 0
+        return self._settle_outbox_sync(outbox_id, "succeeded", completed_at, None)
 
     def _defer_outbox_sync(
         self,
@@ -3461,20 +3403,24 @@ class GitHubTicketsStore:
         failed_at: datetime,
         error_summary: str,
     ) -> bool:
-        changed = self._execute_update(
-            """
-            UPDATE github_outbox
-            SET state = 'failed', next_attempt_at = NULL,
-                processing_started_at = NULL, error_summary = ?, updated_at = ?
-            WHERE outbox_id = ? AND state = 'processing'
-            """,
-            (
-                error_summary.strip()[:MAX_ERROR_SUMMARY_LENGTH],
-                _serialize_datetime(failed_at),
-                outbox_id,
-            ),
-        )
-        return changed > 0
+        return self._settle_outbox_sync(outbox_id, "failed", failed_at, error_summary)
+
+    def _settle_outbox_sync(
+        self, outbox_id: int, state: str, now: datetime, error_summary: str | None,
+    ) -> bool:
+        with closing(self._connect()) as connection, connection:
+            changed = connection.execute(
+                """UPDATE github_outbox SET state = ?, next_attempt_at = NULL,
+                    processing_started_at = NULL, error_summary = ?, updated_at = ?
+                    WHERE outbox_id = ? AND state = 'processing'""",
+                (state, error_summary.strip()[:MAX_ERROR_SUMMARY_LENGTH] if error_summary else None,
+                 _serialize_datetime(now), outbox_id),
+            ).rowcount
+            connection.execute(
+                """DELETE FROM github_outbox WHERE outbox_id = ? AND actor_user_id IS NULL
+                    AND state IN ('succeeded', 'failed')""", (outbox_id,),
+            )
+            return changed > 0
 
     def _list_exclusions_sync(self, ticket_id: int) -> tuple[TicketExclusion, ...]:
         with closing(self._connect()) as connection:
@@ -4098,7 +4044,9 @@ class GitHubTicketsStore:
                 connection.execute(
                     """
                     DELETE FROM github_outbox
-                    WHERE actor_user_id = ? AND state IN ('succeeded', 'failed')
+                    WHERE actor_user_id = ? AND (
+                        operation = 'add_assignee' OR state IN ('succeeded', 'failed')
+                    )
                     """,
                     (user_id,),
                 )

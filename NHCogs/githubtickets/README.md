@@ -123,6 +123,14 @@ accepting a delivery. It returns before Discord or GitHub processing, then worke
 delivery asynchronously. Recovery runs after startup and every 15 minutes by default. GitHub
 App delivery history is used to request redelivery for locally missing deliveries.
 
+Requests for the same missing delivery are tracked across restarts. The bot makes at most
+five requests, at least one hour apart, and alerts the maintainer if the webhook still has
+not arrived. A late valid delivery is still accepted. Locally terminal failures are not
+automatically redelivered, and their stored payload is erased. Invalid payloads and
+conflicting immutable PR identities fail without retry. Other transient processing failures
+retain the bounded retry policy. Successful retries close their corresponding diagnostic
+records without suppressing the original error alerts or posting success messages.
+
 Automatic ticket creation is off by default, independently of the integration switch. Enable
 the integration first, classify the labels, then run `[p]githubtickets github creation enable`
 in a private moderator channel. While creation is off, webhooks, label discovery and existing
@@ -289,6 +297,11 @@ ticket. When the ping limit is exhausted, the ticket remains open for a manual c
 The `profile clear` command accepts a positive Discord user ID. Participants clear their own profile from
 the `/developerprofile` dashboard. Leaving the server removes the member's profile and
 profile categories, but does not rewrite or remove their existing ticket history.
+
+Red's user-data deletion cancels queued GitHub assignments, including work already claimed
+by the worker but not executing. An in-flight GitHub write settles before deletion completes.
+Previously requested unassignment can still finish, after which its identifying queue row
+is erased. Clearing a developer profile is separate from Red's user-data deletion workflow.
 
 The `profile pings` group shows a command overview without running a report. The three
 report commands require Manage Messages and a channel hidden from `@everyone`. Public

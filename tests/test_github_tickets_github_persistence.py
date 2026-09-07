@@ -717,16 +717,10 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
             completed_at=self.now,
             error_summary="retry through GitHub",
         )
-        await self.store.prepare_delivery_redelivery(
-            awaiting.delivery_guid,
-            github_delivery_id=1235,
-            now=self.now,
-            next_attempt_at=self.now + timedelta(minutes=1),
-        )
 
         self.assertEqual(
             await self.store.prune_deliveries(self.now + timedelta(days=4)),
-            (2, 0),
+            (0, 0),
         )
         retained = await self.store.get_delivery("failed-delivery")
         self.assertIsNone(retained.raw_body)
@@ -734,7 +728,7 @@ class GitHubTicketsGitHubPersistenceTests(unittest.IsolatedAsyncioTestCase):
         awaiting_retained = await self.store.get_delivery("awaiting-redelivery")
         self.assertEqual(
             awaiting_retained.state,
-            models.GitHubDeliveryState.AWAITING_REDELIVERY,
+            models.GitHubDeliveryState.FAILED,
         )
         self.assertIsNone(awaiting_retained.raw_body)
         self.assertEqual(

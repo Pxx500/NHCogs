@@ -444,7 +444,7 @@ class GitHubTicketsStoreCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unchanged.state, models.TicketState.CLAIMED)
         self.assertEqual(unchanged.assignee_id, user_id)
 
-    async def test_user_and_guild_cleanup_preserve_nonterminal_github_intents(self):
+    async def test_user_cleanup_cancels_pending_and_claimed_github_adds(self):
         user_id = 500
         pull_request = models.GitHubPullRequest(
             repository_id=100,
@@ -563,60 +563,13 @@ class GitHubTicketsStoreCleanupTests(unittest.IsolatedAsyncioTestCase):
             updated_at=self.now,
         )
 
-        processing_after_redaction = await self.store.get_outbox_item(outbox.outbox_id)
-        self.assertEqual(processing_after_redaction.state, models.GitHubOutboxState.PROCESSING)
-        self.assertIsNone(processing_after_redaction.actor_user_id)
-        self.assertEqual(processing_after_redaction.github_login, "private-login")
+        self.assertIsNone(await self.store.get_outbox_item(outbox.outbox_id))
+        self.assertIsNone(await self.store.claim_next_outbox(
+            now=self.now, stale_before=self.now - timedelta(minutes=5),
+        ))
         redacted = await self.store.get_ticket(ticket.ticket_id)
         self.assertEqual(redacted.state, models.TicketState.OPEN)
         self.assertIsNone(redacted.assignee_id)
-        self.assertIsNotNone(await self.store.get_pull_request(100, 7))
-
         self.assertTrue(await self.store.delete_guild_state(10))
         self.assertIsNone(await self.store.get_pull_request(100, 7))
         self.assertIsNone(await self.store.get_delivery("private-delivery"))
-        processing_after_cleanup = await self.store.get_outbox_item(outbox.outbox_id)
-        self.assertEqual(processing_after_cleanup.state, models.GitHubOutboxState.PROCESSING)
-        self.assertEqual(
-            processing_after_cleanup.repository_full_name,
-            "NewHorizons/NHCogs",
-        )
-        self.assertIsNone(processing_after_cleanup.actor_user_id)
-        self.assertTrue(
-            await self.store.complete_outbox(
-                processing_after_cleanup.outbox_id,
-                completed_at=self.now,
-            )
-        )
-        pending = await self.store.claim_next_outbox(
-            now=self.now,
-            stale_before=self.now - timedelta(minutes=5),
-        )
-        self.assertEqual(pending.github_login, "pending-login")
-        self.assertEqual(pending.repository_full_name, "NewHorizons/NHCogs")
-        self.assertIsNone(pending.actor_user_id)
-        retry_at = self.now + timedelta(minutes=1)
-        self.assertTrue(
-            await self.store.defer_outbox(
-                pending.outbox_id,
-                next_attempt_at=retry_at,
-                error_summary="retry after cleanup",
-            )
-        )
-        self.assertIsNone(
-            await self.store.claim_next_outbox(
-                now=self.now,
-                stale_before=self.now - timedelta(minutes=5),
-            )
-        )
-        retried = await self.store.claim_next_outbox(
-            now=retry_at,
-            stale_before=self.now - timedelta(minutes=5),
-        )
-        self.assertEqual(retried.outbox_id, pending.outbox_id)
-        self.assertTrue(
-            await self.store.complete_outbox(
-                retried.outbox_id,
-                completed_at=retry_at,
-            )
-        )

@@ -46,6 +46,18 @@ async def report_operational_error(
     return None
 
 
+async def recover_operational_error(
+    bot: Any, *, guild_id: int, source: str, action: str,
+) -> None:
+    """Close a recovered operation without publishing success chatter."""
+    try:
+        support = bot.get_cog("OperationalSupport")
+        if support is not None:
+            await support.recover_operational_error(guild_id=guild_id, source=source, action=action)
+    except Exception:
+        logging.getLogger("red.NHCogs").exception("Could not mark %s during %s recovered", source, action)
+
+
 @dataclass(frozen=True)
 class OperationalFailure:
     guild_id: int

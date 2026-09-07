@@ -7,8 +7,9 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, TypeVar
 
-from NHCogs.operational_errors import report_operational_error
+from NHCogs.operational_errors import recover_operational_error, report_operational_error
 
+from .events import InvalidGitHubDelivery
 from .github_app import (
     GitHubAppClient,
     GitHubAssigneeUnavailable,
@@ -17,9 +18,10 @@ from .github_app import (
 )
 from .models import (
     GitHubDelivery,
-    GitHubDeliveryState,
+    GitHubIdentityConflict,
     GitHubOutboxItem,
     GitHubOutboxOperation,
+    RedeliveryStatus,
 )
 from .store import DELIVERY_IDENTITY_RETENTION, GitHubTicketsStore
 from .webhook import GitHubWebhookReceiver
@@ -174,6 +176,7 @@ class GitHubIntegrationRuntime:
         self._recovery_not_before = None
         try:
             await self._recover_deliveries()
+            await self._recovered("recover GitHub deliveries")
         finally:
             try:
                 await self._await_store(self._store.prune_deliveries(self._clock()))
@@ -181,6 +184,8 @@ class GitHubIntegrationRuntime:
                 raise
             except Exception as error:
                 await self._report("prune GitHub webhook deliveries", error)
+            else:
+                await self._recovered("prune GitHub webhook deliveries")
 
     def request_recovery(self) -> None:
         self._recovery_requested.set()
@@ -191,6 +196,8 @@ class GitHubIntegrationRuntime:
                 await self._refresh_catalog()
             except Exception as error:
                 await self._report("refresh GitHub label catalog", error)
+            else:
+                await self._recovered("refresh GitHub label catalog")
         client = self._client
         if client is None:
             raise RuntimeError("GitHub integration is not configured")
@@ -208,6 +215,7 @@ class GitHubIntegrationRuntime:
                 await self._report("list GitHub webhook deliveries", error)
                 self._apply_recovery_failure(error)
                 return
+            await self._recovered("list GitHub webhook deliveries")
             if resume_after_delivery_id is not None:
                 resume_index = next(
                     (
@@ -269,7 +277,7 @@ class GitHubIntegrationRuntime:
             ):
                 last_checked_delivery_id = delivery.delivery_id
                 continue
-            should_redeliver, prepared_body = (
+            should_redeliver = (
                 await self._prepare_recovery_redelivery(
                     delivery,
                     redelivery_available=attempted < remaining_redeliveries,
@@ -281,10 +289,7 @@ class GitHubIntegrationRuntime:
             if attempted >= remaining_redeliveries:
                 return attempted, last_checked_delivery_id, True
             attempted += 1
-            checked, stopped = await self._redeliver_recovery_delivery(
-                delivery,
-                prepared_body,
-            )
+            checked, stopped = await self._redeliver_recovery_delivery(delivery)
             if checked:
                 last_checked_delivery_id = delivery.delivery_id
             if stopped:
@@ -292,65 +297,34 @@ class GitHubIntegrationRuntime:
         return attempted, last_checked_delivery_id, False
 
     async def _prepare_recovery_redelivery(
-        self,
-        delivery: GitHubDeliverySummary,
-        *,
-        redelivery_available: bool,
-    ) -> tuple[bool, bytes | None]:
+        self, delivery: GitHubDeliverySummary, *, redelivery_available: bool,
+    ) -> bool:
         try:
-            local_delivery = await self._await_store(
-                self._store.get_delivery(delivery.guid)
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            await self._report(
-                f"inspect GitHub webhook delivery {delivery.delivery_id}",
-                error,
-            )
-            return False, None
-        should_redeliver = local_delivery is None or (
-            local_delivery.state
-            in {
-                GitHubDeliveryState.FAILED,
-                GitHubDeliveryState.AWAITING_REDELIVERY,
-            }
-            and (
-                local_delivery.next_attempt_at is None
-                or local_delivery.next_attempt_at <= self._clock()
-            )
-        )
-        if not should_redeliver or not redelivery_available:
-            return should_redeliver, None
-        if local_delivery is None:
-            return True, None
-        prepared_body = local_delivery.raw_body
-        now = self._clock()
-        try:
-            prepared = await self._await_store(
-                self._store.prepare_delivery_redelivery(
-                    delivery.guid,
-                    github_delivery_id=delivery.delivery_id,
-                    now=now,
-                    next_attempt_at=now + self._retry_base,
+            local_delivery = await self._await_store(self._store.get_delivery(delivery.guid))
+            if local_delivery is not None:
+                await self._recovered(f"receive requested GitHub delivery {delivery.guid}")
+                await self._recovered(f"prepare GitHub webhook redelivery {delivery.guid}")
+                return False
+            if not redelivery_available:
+                return True
+            now = self._clock()
+            status = await self._await_store(self._store.reserve_redelivery(
+                delivery.guid, now=now, next_attempt_at=now + timedelta(hours=1),
+            ))
+            await self._recovered(f"prepare GitHub webhook redelivery {delivery.guid}")
+            if status is RedeliveryStatus.EXHAUSTED:
+                await self._report(
+                    f"receive requested GitHub delivery {delivery.guid}",
+                    RuntimeError("Webhook was not received after repeated redelivery requests"),
                 )
-            )
-        except asyncio.CancelledError:
-            raise
+            return status is RedeliveryStatus.RESERVED
         except Exception as error:
-            await self._report(
-                f"prepare GitHub webhook redelivery {delivery.delivery_id}",
-                error,
-            )
-            return False, None
-        if not prepared:
-            return False, None
-        return True, prepared_body
+            await self._report(f"prepare GitHub webhook redelivery {delivery.guid}", error)
+            return False
 
     async def _redeliver_recovery_delivery(
         self,
         delivery: GitHubDeliverySummary,
-        prepared_body: bytes | None,
     ) -> tuple[bool, bool]:
         client = self._client
         if client is None:
@@ -362,29 +336,16 @@ class GitHubIntegrationRuntime:
             raise
         except Exception as error:
             await self._report(
-                f"redeliver GitHub webhook delivery {delivery.delivery_id}",
+                f"redeliver GitHub webhook delivery {delivery.guid}",
                 error,
             )
             next_attempt_at = self._apply_recovery_failure(error)
+            if next_attempt_at is not None:
+                await self._await_store(self._store.defer_redelivery(delivery.guid, next_attempt_at))
             retryable, _rate_limited, _retry_at = _classify_github_request(error)
-            try:
-                await self._await_store(
-                    self._store.restore_delivery_redelivery(
-                        delivery.guid,
-                        raw_body=prepared_body,
-                        next_attempt_at=next_attempt_at,
-                        error_summary=_error_summary(error),
-                    )
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as restore_error:
-                await self._report(
-                    f"restore GitHub webhook delivery {delivery.delivery_id}",
-                    restore_error,
-                )
             return not retryable, True
         self._recovery_failure_attempts = 0
+        await self._recovered(f"redeliver GitHub webhook delivery {delivery.guid}")
         return True, False
 
     async def _guard_background(
@@ -402,6 +363,7 @@ class GitHubIntegrationRuntime:
                 await asyncio.sleep(self._poll_interval)
 
     async def _delivery_loop(self) -> None:
+        recovered = False
         while not self._stop_requested.is_set():
             now = self._clock()
             delivery = await self._await_store(
@@ -410,12 +372,16 @@ class GitHubIntegrationRuntime:
                     stale_before=now - self._stale_after,
                 )
             )
+            if not recovered:
+                await self._recovered("process webhook deliveries")
+                recovered = True
             if delivery is None:
                 await asyncio.sleep(self._poll_interval)
                 continue
             await self._process_delivery(delivery)
 
     async def _process_delivery(self, delivery: GitHubDelivery) -> None:
+        await self._recovered(f"receive requested GitHub delivery {delivery.delivery_guid}")
         try:
             disposition = await self._delivery_handler(delivery)
         except asyncio.CancelledError:
@@ -427,7 +393,9 @@ class GitHubIntegrationRuntime:
             )
             summary = _error_summary(error)
             retryable, _rate_limited, retry_at = _classify_github_request(error)
-            terminal = isinstance(error, GitHubRequestError) and not retryable
+            terminal = isinstance(error, (InvalidGitHubDelivery, GitHubIdentityConflict)) or (
+                isinstance(error, GitHubRequestError) and not retryable
+            )
             if terminal or delivery.attempts >= self._max_delivery_attempts:
                 await self._await_store(
                     self._store.fail_delivery(
@@ -455,6 +423,7 @@ class GitHubIntegrationRuntime:
                 ignored=disposition is DeliveryDisposition.IGNORED,
             )
         )
+        await self._recovered(f"process GitHub delivery {delivery.delivery_guid}")
         if disposition is DeliveryDisposition.STOPPED:
             await self._stop_after_lifecycle_delivery(delivery)
 
@@ -512,6 +481,7 @@ class GitHubIntegrationRuntime:
         return calculated
 
     async def _outbox_loop(self) -> None:
+        recovered = False
         while not self._stop_requested.is_set():
             now = self._clock()
             item = await self._await_store(
@@ -520,12 +490,20 @@ class GitHubIntegrationRuntime:
                     stale_before=now - self._stale_after,
                 )
             )
+            if not recovered:
+                await self._recovered("process GitHub outbox")
+                recovered = True
             if item is None:
                 await asyncio.sleep(self._poll_interval)
                 continue
             await self._process_outbox(item)
 
     async def _process_outbox(self, item: GitHubOutboxItem) -> None:
+        async with self._store.outbox_execution(item.outbox_id) as current:
+            if current is not None:
+                await self._apply_outbox(current)
+
+    async def _apply_outbox(self, item: GitHubOutboxItem) -> None:
         client = self._client
         if client is None:
             raise RuntimeError("GitHub integration is not configured")
@@ -581,6 +559,7 @@ class GitHubIntegrationRuntime:
                 completed_at=self._clock(),
             )
         )
+        await self._recovered(f"apply GitHub outbox item {item.outbox_id}")
 
     async def _recovery_loop(self) -> None:
         while not self._stop_requested.is_set():
@@ -630,6 +609,8 @@ class GitHubIntegrationRuntime:
             raise
         except Exception as error:
             await self._report("save GitHub delivery recovery checkpoint", error)
+        else:
+            await self._recovered("save GitHub delivery recovery checkpoint")
 
     async def _await_store(self, operation: Awaitable[_ResultT]) -> _ResultT:
         task = asyncio.ensure_future(operation)
@@ -646,6 +627,11 @@ class GitHubIntegrationRuntime:
             source="GitHubTickets",
             action=action,
             error=error,
+        )
+
+    async def _recovered(self, action: str) -> None:
+        await recover_operational_error(
+            self._bot, guild_id=self._guild_id, source="GitHubTickets", action=action,
         )
 
 
