@@ -244,7 +244,7 @@ class CustomCommandRuntime:
     ) -> tuple[str, int, str, int]:
         return command.name, command.guild_id, "invocation_channel", ctx.channel.id
 
-    async def handle_message(self, message: Any) -> None:  # noqa: PLR0911
+    async def handle_message(self, message: Any) -> None:  # noqa: PLR0911, PLR0912
         if (
             message.guild is None
             or message.author.bot
@@ -306,6 +306,11 @@ class CustomCommandRuntime:
             await ctx.send(rendered)
         except Exception as error:
             await self._report(ctx, "send custom command response", error)
+            return
+        try:
+            await self._catalog.record_usage(message.guild.id, message.channel.id, command.name)
+        except Exception as error:
+            await self._report(ctx, "record custom command usage", error)
 
     async def _send_cooldown_feedback(self, ctx: Any, retry_after: float) -> None:
         seconds = max(1, int(retry_after + 0.999))
