@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -34,6 +35,7 @@ from .synchronization import (
 log = logging.getLogger("red.NHModeration")
 AUDIT_BATCH_SIZE = 100
 FILTER_CONFIG_EMBED_TITLE = "Message filter"
+MAX_FILTER_GROUP_NAME_LENGTH = 64
 
 
 class NHModeration(commands.Cog):
@@ -51,6 +53,7 @@ class NHModeration(commands.Cog):
         )
         self.config.register_guild(
             message_filter_phrases=[],
+            message_filter_groups=None,
         )
         database_path = cog_data_path(self) / "moderation.sqlite"
         self.history = NHModerationHistory(database_path)
@@ -62,17 +65,23 @@ class NHModeration(commands.Cog):
         self._startup_task: asyncio.Task[None] | None = None
         self._gateway_catchup_task: asyncio.Task[None] | None = None
         self._sync_tasks: dict[int, asyncio.Task[Any]] = {}
-        self._message_filter_phrases: dict[int, tuple[str, ...]] = {}
+        self._message_filter_groups: dict[int, dict[str, dict]] = {}
         self._message_filter_lock = asyncio.Lock()
 
     async def cog_load(self) -> None:
         await self.history.initialize()
         await self._operational_errors.initialize()
         guild_configs = await self.config.all_guilds()
-        self._message_filter_phrases = {
-            int(guild_id): tuple(settings.get("message_filter_phrases", ()))
-            for guild_id, settings in guild_configs.items()
-        }
+        self._message_filter_groups = {}
+        for guild_id, settings in guild_configs.items():
+            groups = settings.get("message_filter_groups")
+            if groups is None:
+                phrases = settings.get("message_filter_phrases", [])
+                groups = {"default": {"phrases": phrases, "mode": "all", "channels": []}} if phrases else {}
+                await self.config.guild_from_id(int(guild_id)).set_raw(
+                    "message_filter_groups", value=groups
+                )
+            self._message_filter_groups[int(guild_id)] = groups
         self._synchronizer = ModerationSynchronizer(
             self.history,
             bot_user_id=lambda: getattr(getattr(self.bot, "user", None), "id", 0),
@@ -116,7 +125,7 @@ class NHModeration(commands.Cog):
         await self.history.delete_guild_data(guild.id)
         await self._operational_errors.delete_guild(guild.id)
         async with self._message_filter_lock:
-            self._message_filter_phrases.pop(guild.id, None)
+            self._message_filter_groups.pop(guild.id, None)
             await self.config.guild(guild).clear()
 
     @commands.Cog.listener()
@@ -140,7 +149,14 @@ class NHModeration(commands.Cog):
             embed.title == FILTER_CONFIG_EMBED_TITLE for embed in message.embeds
         ):
             return
-        phrases = self._message_filter_phrases.get(message.guild.id, ())
+        channel_ids = {message.channel.id, getattr(message.channel, "parent_id", None)}
+        phrases = tuple(
+            phrase
+            for group in self._message_filter_groups.get(message.guild.id, {}).values()
+            if group["mode"] == "all"
+            or (bool(channel_ids.intersection(group["channels"])) == (group["mode"] == "whitelist"))
+            for phrase in group["phrases"]
+        )
         if not phrases:
             return
         if not self._message_matches_phrases(message, phrases):
@@ -630,80 +646,77 @@ class NHModeration(commands.Cog):
 
     @nhmod.group(name="filter", invoke_without_command=True)
     async def nhmod_filter(self, ctx: commands.Context) -> None:
-        """Manage phrases that cause matching messages to be deleted."""
+        """Manage filter groups, their phrases, and channel rules."""
         self._require_private_channel(ctx)
         await send_group_overview(
             ctx,
-            lambda: self._send_filter_phrases(ctx),
+            lambda: self._send_filter_groups(ctx),
         )
         await self._mark_operational_recovered(ctx.guild, "nhmod filter")
 
     @nhmod_filter.command(name="add")
-    async def nhmod_filter_add(self, ctx: commands.Context, *, phrase: str) -> None:
-        """Add a phrase to the message filter."""
+    async def nhmod_filter_add(self, ctx: commands.Context, group: str, *, phrase: str) -> None:
+        """Add a case-insensitive substring to a filter group."""
         self._require_private_channel(ctx)
         normalized = phrase.strip().casefold()
         if not normalized:
             raise commands.UserFeedbackCheckFailure("Phrase cannot be empty")
         async with self._message_filter_lock:
-            phrases = list(self._message_filter_phrases.get(ctx.guild.id, ()))
+            groups, name, settings = self._filter_group(ctx.guild.id, group)
+            phrases = settings["phrases"]
             if normalized in phrases:
                 raise commands.UserFeedbackCheckFailure("That phrase is already configured")
             phrases.append(normalized)
-            await self.config.guild(ctx.guild).set_raw(
-                "message_filter_phrases",
-                value=phrases,
-            )
-            self._message_filter_phrases[ctx.guild.id] = tuple(phrases)
+            await self._save_filter_groups(ctx.guild, groups)
         await self._send_filter_output(
             ctx,
-            f"Phrase added: `{normalized}`",
+            f"Phrase added to {name}: `{normalized}`",
             [],
         )
         await self._mark_operational_recovered(ctx.guild, "nhmod filter add")
 
     @nhmod_filter.command(name="remove")
-    async def nhmod_filter_remove(self, ctx: commands.Context, *, phrase: str) -> None:
-        """Remove a phrase from the message filter."""
+    async def nhmod_filter_remove(self, ctx: commands.Context, group: str, *, phrase: str) -> None:
+        """Remove a phrase from a filter group."""
         self._require_private_channel(ctx)
         normalized = phrase.strip().casefold()
         if not normalized:
             raise commands.UserFeedbackCheckFailure("Phrase cannot be empty")
         async with self._message_filter_lock:
-            phrases = list(self._message_filter_phrases.get(ctx.guild.id, ()))
+            groups, name, settings = self._filter_group(ctx.guild.id, group)
+            phrases = settings["phrases"]
             if normalized not in phrases:
                 raise commands.UserFeedbackCheckFailure("Phrase is not configured")
             phrases.remove(normalized)
-            await self.config.guild(ctx.guild).set_raw(
-                "message_filter_phrases",
-                value=phrases,
-            )
-            self._message_filter_phrases[ctx.guild.id] = tuple(phrases)
+            await self._save_filter_groups(ctx.guild, groups)
         await self._send_filter_output(
             ctx,
-            f"Phrase removed: `{normalized}`",
+            f"Phrase removed from {name}: `{normalized}`",
             [],
         )
         await self._mark_operational_recovered(ctx.guild, "nhmod filter remove")
 
     @nhmod_filter.command(name="list")
     async def nhmod_filter_list(self, ctx: commands.Context) -> None:
-        """List phrases in the message filter."""
+        """List filter groups, modes, and phrase counts."""
         self._require_private_channel(ctx)
-        await self._send_filter_phrases(ctx)
+        await self._send_filter_groups(ctx)
         await self._mark_operational_recovered(ctx.guild, "nhmod filter list")
 
-    async def _send_filter_phrases(self, ctx: commands.Context) -> None:
-        phrases = self._message_filter_phrases.get(ctx.guild.id, ())
-        if not phrases:
-            description = "No message filter phrases are configured"
+    async def _send_filter_groups(self, ctx: commands.Context) -> None:
+        groups = self._message_filter_groups.get(ctx.guild.id, {})
+        if not groups:
+            description = "No message filter groups are configured"
             fields = []
         else:
-            description = "Messages containing any configured phrase are deleted"
-            content = "\n".join(f"{index}. {phrase}" for index, phrase in enumerate(phrases, 1))
+            description = "Each group controls its phrases and channels. Use show to inspect a group"
+            content = "\n".join(
+                f"{name}: {settings['mode']}, {len(settings['phrases'])} phrases"
+                for name, settings in groups.items()
+            )
             fields = [
                 (
-                    "Configured phrases" if index == 0 else "Configured phrases continued",
+                    "Configured groups" if index == 0 else "Configured groups continued",
                     page,
                 )
                 for index, page in enumerate(
@@ -715,6 +728,127 @@ class NHModeration(commands.Cog):
                 )
             ]
         await self._send_filter_output(ctx, description, fields)
+
+    @staticmethod
+    def _filter_group_name(group: str) -> str:
+        name = group.strip().casefold()
+        if not name or len(name) > MAX_FILTER_GROUP_NAME_LENGTH or not all(c.isalnum() or c in "_-" for c in name):
+            raise commands.UserFeedbackCheckFailure(
+                "Group names must contain 1-64 letters, numbers, underscores, or hyphens"
+            )
+        return name
+
+    def _filter_group(self, guild_id: int, group: str):
+        name = self._filter_group_name(group)
+        groups = deepcopy(self._message_filter_groups.get(guild_id, {}))
+        if name not in groups:
+            raise commands.UserFeedbackCheckFailure("Filter group does not exist")
+        return groups, name, groups[name]
+
+    async def _save_filter_groups(self, guild, groups) -> None:
+        await self.config.guild(guild).set_raw("message_filter_groups", value=groups)
+        self._message_filter_groups[guild.id] = groups
+
+    @nhmod_filter.command(name="create")
+    async def nhmod_filter_create(self, ctx: commands.Context, group: str) -> None:
+        """Create an empty filter group that applies to all channels."""
+        self._require_private_channel(ctx)
+        name = self._filter_group_name(group)
+        async with self._message_filter_lock:
+            groups = deepcopy(self._message_filter_groups.get(ctx.guild.id, {}))
+            if name in groups:
+                raise commands.UserFeedbackCheckFailure("Filter group already exists")
+            groups[name] = {"phrases": [], "mode": "all", "channels": []}
+            await self._save_filter_groups(ctx.guild, groups)
+        await self._send_filter_output(ctx, f"Group created: {name}. Mode: all", [])
+        await self._mark_operational_recovered(ctx.guild, "nhmod filter create")
+
+    @nhmod_filter.command(name="delete")
+    async def nhmod_filter_delete(self, ctx: commands.Context, group: str) -> None:
+        """Delete a group with all its phrases and channel settings."""
+        self._require_private_channel(ctx)
+        async with self._message_filter_lock:
+            groups, name, _ = self._filter_group(ctx.guild.id, group)
+            del groups[name]
+            await self._save_filter_groups(ctx.guild, groups)
+        await self._send_filter_output(ctx, f"Group deleted: {name}", [])
+        await self._mark_operational_recovered(ctx.guild, "nhmod filter delete")
+
+    @nhmod_filter.command(name="mode", usage="<group> <all|whitelist|blacklist>")
+    async def nhmod_filter_mode(self, ctx: commands.Context, group: str, mode: str) -> None:
+        """Apply a group everywhere, only on listed channels, or except listed channels."""
+        self._require_private_channel(ctx)
+        mode = mode.casefold()
+        if mode not in {"all", "whitelist", "blacklist"}:
+            raise commands.UserFeedbackCheckFailure("Mode must be all, whitelist, or blacklist")
+        async with self._message_filter_lock:
+            groups, name, settings = self._filter_group(ctx.guild.id, group)
+            settings["mode"] = mode
+            await self._save_filter_groups(ctx.guild, groups)
+        await self._send_filter_output(ctx, f"Group {name} mode: {mode}", [])
+        await self._mark_operational_recovered(ctx.guild, "nhmod filter mode")
+
+    @nhmod_filter.command(name="show")
+    async def nhmod_filter_show(self, ctx: commands.Context, group: str) -> None:
+        """Show a group's phrases, mode, and channels, including thread inheritance."""
+        self._require_private_channel(ctx)
+        _, name, settings = self._filter_group(ctx.guild.id, group)
+        channels = []
+        for channel_id in settings["channels"]:
+            channel = ctx.guild.get_channel_or_thread(channel_id)
+            channels.append(f"#{channel.name}" if channel else "Unavailable channel")
+        fields = []
+        for title, content in (
+            ("Phrases", "\n".join(settings["phrases"]) or "Not configured"),
+            ("Channels", "\n".join(channels) or "Not configured"),
+        ):
+            fields.extend((title, page) for page in pagify(content, page_length=MAX_FIELD_VALUE_LENGTH))
+        await self._send_filter_output(
+            ctx,
+            f"Group: {name}. Mode: {settings['mode']}\n"
+            "Channel rules include threads and forum posts. An empty whitelist matches no channels. "
+            "An empty blacklist matches all channels. The all mode ignores the channel list.",
+            fields,
+        )
+
+        await self._mark_operational_recovered(ctx.guild, "nhmod filter show")
+
+    @nhmod_filter.group(name="channels", invoke_without_command=True)
+    async def nhmod_filter_channels(self, ctx: commands.Context) -> None:
+        """Manage group channel lists. Parent channels include their threads and forum posts."""
+        self._require_private_channel(ctx)
+        await send_group_overview(ctx, lambda: self._send_filter_groups(ctx))
+        await self._mark_operational_recovered(ctx.guild, "nhmod filter channels")
+
+    @nhmod_filter_channels.command(name="add", usage="<group> <channels...>")
+    async def nhmod_filter_channels_add(
+        self, ctx: commands.Context, group: str, *channels: discord.abc.GuildChannel | discord.Thread
+    ) -> None:
+        """Add channels to a group's whitelist or blacklist without changing its mode."""
+        await self._change_filter_channels(ctx, group, channels, add=True)
+
+    @nhmod_filter_channels.command(name="remove", usage="<group> <channels...>")
+    async def nhmod_filter_channels_remove(
+        self, ctx: commands.Context, group: str, *channels: discord.abc.GuildChannel | discord.Thread
+    ) -> None:
+        """Remove channels from a group's whitelist or blacklist."""
+        await self._change_filter_channels(ctx, group, channels, add=False)
+
+    async def _change_filter_channels(self, ctx, group, channels, *, add: bool) -> None:
+        self._require_private_channel(ctx)
+        if not channels:
+            raise commands.UserFeedbackCheckFailure("Provide at least one channel")
+        if any(channel.guild.id != ctx.guild.id or isinstance(channel, discord.CategoryChannel) for channel in channels):
+            raise commands.UserFeedbackCheckFailure("Choose server channels or threads, not categories")
+        async with self._message_filter_lock:
+            groups, name, settings = self._filter_group(ctx.guild.id, group)
+            ids = {channel.id for channel in channels}
+            current = set(settings["channels"])
+            settings["channels"] = sorted(current | ids if add else current - ids)
+            await self._save_filter_groups(ctx.guild, groups)
+        await self._send_filter_output(ctx, f"Channel list updated for {name}. Mode: {settings['mode']}", [])
+        action = "add" if add else "remove"
+        await self._mark_operational_recovered(ctx.guild, f"nhmod filter channels {action}")
 
     @staticmethod
     async def _send_filter_output(

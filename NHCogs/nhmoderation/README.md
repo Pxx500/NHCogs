@@ -49,10 +49,17 @@ Names are resolved only from the Discord cache. The command does not call `fetch
 |---|---|
 | `[p]nhmod` | Show the NHModeration command overview |
 | `[p]nhmod status` | Show private migration, historical coverage, synchronization, and schedule health |
-| `[p]nhmod filter` | Show filter commands and the configured phrases |
-| `[p]nhmod filter add <phrase>` | Add a phrase to the message filter |
-| `[p]nhmod filter remove <phrase>` | Remove a phrase from the message filter |
-| `[p]nhmod filter list` | List the configured phrases |
+| `[p]nhmod filter` | Show all filter commands and configured groups |
+| `[p]nhmod filter create <group>` | Create an empty group in all-channel mode |
+| `[p]nhmod filter add <group> <phrase>` | Add a phrase to the group |
+| `[p]nhmod filter remove <group> <phrase>` | Remove a phrase from the group |
+| `[p]nhmod filter list` | List groups, modes, and phrase counts |
+| `[p]nhmod filter show <group>` | Show the group's phrases, mode, and channels |
+| `[p]nhmod filter delete <group>` | Delete the group and its phrases and channel settings |
+| `[p]nhmod filter mode <group> <all\|whitelist\|blacklist>` | Choose where the group applies |
+| `[p]nhmod filter channels` | Show channel commands and configured groups |
+| `[p]nhmod filter channels add <group> <channels...>` | Add channel mentions or IDs to the group list |
+| `[p]nhmod filter channels remove <group> <channels...>` | Remove channels from the group list |
 | `[p]nhmod migrate` | Show migration commands |
 | `[p]nhmod migrate plan` | Check cached permissions and local readiness without importing history |
 | `[p]nhmod migrate run` | Start or resume the initial import |
@@ -67,7 +74,17 @@ The filter applies to guild message content and text inside embeds. It checks em
 
 New messages and cached message edits are checked. This covers embeds that Discord adds or updates after the original message without fetching the message from the Discord API.
 
-Phrases are configured per guild and normalized before storage. The listener reads a memory cache that is restored when the cog loads and updated by the filter commands. Deletion is not recorded as a moderation action and does not affect BanChart.
+Phrases belong to named groups configured per guild. Create a group before adding phrases. Group names ignore case and contain 1-64 letters, numbers, underscores, or hyphens. Duplicate phrases are rejected within a group but can appear in different groups.
+
+Each group has one mode: `all` applies everywhere, `whitelist` applies only to listed channels, and `blacklist` applies everywhere except listed channels. A new group starts empty in `all` mode. An empty whitelist applies nowhere. An empty blacklist applies everywhere. Switching modes preserves the channel list, which `all` ignores. Adding or removing channels does not change the mode.
+
+A listed parent channel includes its threads. A listed forum includes all its posts. Individual threads can also be listed. Categories are not supported. A message is deleted once if any applicable group matches. Channel checks use cached IDs without Discord API requests.
+
+For example, create `ads`, add its phrases, set its mode to `blacklist`, and add `#advertising` to allow those phrases there and in its threads. Use `show ads` to inspect the complete configuration. Bare `filter` and `filter channels` show runtime command overviews and group summaries. All configuration commands require Manage Messages and a channel hidden from `@everyone`.
+
+Existing phrases are automatically migrated on load to `default` in `all` mode. The new command syntax requires the group name, including when editing those migrated phrases. The migration is recorded so deleting `default` does not restore old phrases on reload.
+
+The listener reads a memory cache restored when the cog loads and updated after successful configuration writes. Deletion is not recorded as a moderation action and does not affect BanChart.
 
 ## Synchronization
 
@@ -89,6 +106,6 @@ source keys, reasons, or database identifiers.
 
 ## Stored data and deletion
 
-NHModeration stores immutable source observations and rebuildable canonical actions. Stored fields may include guild, target, technical executor, credited moderator, and channel IDs, action type, timestamps, reasons, expiry, source identity, migration identity, attribution, synchronization cursors, and operational failures. Configured message filter phrases are stored per guild in Red Config.
+NHModeration stores immutable source observations and rebuildable canonical actions. Stored fields may include guild, target, technical executor, credited moderator, and channel IDs, action type, timestamps, reasons, expiry, source identity, migration identity, attribution, synchronization cursors, and operational failures. Message filter groups, phrases, modes, and channel IDs are stored per guild in Red Config.
 
 Red user-data deletion anonymizes matching identities and reasons, then rebuilds affected actions. Guild removal deletes the guild's history, synchronization state, migration state, failures, and configuration.
