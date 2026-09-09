@@ -156,7 +156,8 @@ def load_cog_module():  # noqa: PLR0915
     discord.PartialMessageable = type("PartialMessageable", (), {})
     discord.Interaction = object
     discord.Message = object
-    discord.Thread = object
+    discord.Thread = type("Thread", (types.SimpleNamespace,), {})
+    discord.NotFound = type("NotFound", (Exception,), {})
     discord.Member = type("Member", (), {})
     discord.File = File
     discord.utils = types.SimpleNamespace(
@@ -264,6 +265,38 @@ cog, migration_controller = load_cog_module()
 
 
 class CommandUsageChartTests(unittest.IsolatedAsyncioTestCase):
+    async def test_private_thread_access_and_output_privacy(self):
+        for public_output, manager, member, allowed in (
+            (True, True, True, False),
+            (False, False, False, False),
+            (False, False, True, True),
+            (False, True, False, True),
+        ):
+            with self.subTest(public_output=public_output, manager=manager, member=member):
+                ctx = self.context(private=not public_output)
+                ctx.author = types.SimpleNamespace(id=99)
+                target = cog.discord.Thread(
+                    id=20, name="private", send=mock.AsyncMock(),
+                    is_private=lambda: True,
+                    permissions_for=lambda _, manager=manager: types.SimpleNamespace(
+                        view_channel=True, manage_threads=manager,
+                    ),
+                    fetch_member=mock.AsyncMock(
+                        return_value=object(),
+                        side_effect=None if member else cog.discord.NotFound(),
+                    ),
+                )
+                ctx.guild.get_channel_or_thread = lambda _, target=target: target
+                subject = object.__new__(cog.CustomCommands)
+                subject.catalog = types.SimpleNamespace(usage_counts=mock.AsyncMock(return_value=[]))
+                if allowed:
+                    await cog.CustomCommands.comchart.callback(subject, ctx, "<#20>", 7)
+                    subject.catalog.usage_counts.assert_awaited_once()
+                else:
+                    with self.assertRaises(cog.commands.UserFeedbackCheckFailure):
+                        await cog.CustomCommands.comchart.callback(subject, ctx, "<#20>", 7)
+                    subject.catalog.usage_counts.assert_not_awaited()
+
     def test_command_is_standalone_and_requires_only_manage_messages(self):
         command = cog.CustomCommands.comchart
         self.assertIsNone(command.parent)

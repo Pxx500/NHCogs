@@ -528,6 +528,7 @@ class CustomCommands(commands.Cog):
             await ctx.send_help(ctx.command)
             return
         target, days = self._resolve_comchart_request(ctx, target_or_days, days)
+        await self._check_comchart_access(ctx, target)
         today = datetime.now(timezone.utc).date()
         rows = await self.catalog.usage_counts(
             ctx.guild.id,
@@ -578,18 +579,30 @@ class CustomCommands(commands.Cog):
             raise commands.UserFeedbackCheckFailure(
                 "Provide a positive number of days within the calendar range"
             )
+        return target, days
+
+    @staticmethod
+    async def _check_comchart_access(ctx, target) -> None:
         output_public = ctx.channel.permissions_for(ctx.guild.default_role).view_channel
         if target is None:
             if output_public:
                 raise commands.UserFeedbackCheckFailure("Run server reports in a private moderator channel")
-        else:
-            if not target.permissions_for(ctx.author).view_channel:
-                raise commands.UserFeedbackCheckFailure("You can't view that channel")
-            if output_public and not target.permissions_for(ctx.guild.default_role).view_channel:
-                raise commands.UserFeedbackCheckFailure(
-                    "Run private-channel reports in a private moderator channel"
-                )
-        return target, days
+            return
+        permissions = target.permissions_for(ctx.author)
+        if not permissions.view_channel:
+            raise commands.UserFeedbackCheckFailure("You can't view that channel")
+        private_thread = isinstance(target, discord.Thread) and target.is_private()
+        if output_public and (
+            private_thread or not target.permissions_for(ctx.guild.default_role).view_channel
+        ):
+            raise commands.UserFeedbackCheckFailure(
+                "Run private-channel reports in a private moderator channel"
+            )
+        if private_thread and not permissions.manage_threads:
+            try:
+                await target.fetch_member(ctx.author.id)
+            except discord.NotFound as error:
+                raise commands.UserFeedbackCheckFailure("You can't view that thread") from error
 
     async def _assert_legacy_purge_authority(self) -> None:
         if self.bot.get_cog("CustomCommands") is not self:
