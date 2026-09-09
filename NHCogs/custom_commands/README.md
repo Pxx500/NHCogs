@@ -28,6 +28,32 @@ Running the custom command itself preserves normal Discord mention behavior. `ra
 exact whitespace in code blocks with Previous and Next buttons. Responses containing a
 code fence are provided in one exact `.txt` transcript instead.
 
+## Usage chart
+
+`[p]comchart` requires Manage Messages and shows help when called without arguments.
+It uses the same ranked bars and donut chart as `chatchart`, with the top 10 custom
+commands, counts, percentages, and an Other slice for the remaining commands.
+
+```ini
+[p]comchart <days>
+[p]comchart <channel_or_thread> <days>
+[p]comchart server <days>
+```
+
+Without a target, the chart covers the current channel. A channel or thread accepts
+a mention or raw ID and must be visible to the caller. `server` covers the whole
+guild and must be used in a private moderator channel. Reports from private channels
+also require a private destination.
+
+For example, `[p]comchart 7` shows this channel and `[p]comchart server 30` shows
+the server. Days are UTC calendar days including today, not rolling 24-hour periods.
+Collection starts when this version is deployed. Earlier usage isn't backfilled.
+
+Only successfully sent responses count. Rejected invocations and failed responses
+don't count. Random variants share their command's counter. Daily totals live in the
+existing Custom Commands database without message content or user IDs. Deleting a
+command keeps its historical totals. Reusing its name continues the same ranking entry.
+
 ## Create and edit
 
 These commands require Manage Messages:

@@ -3,7 +3,7 @@ import inspect
 import sys
 import types
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -56,6 +56,31 @@ catalog, migration_state = load_catalog_modules()
 
 
 class CustomCommandCatalogTests(unittest.IsolatedAsyncioTestCase):
+    async def test_usage_persists_and_ranks_daily_counts_with_scope_and_window(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "commands.sqlite"
+            store = catalog.CustomCommandCatalog(path)
+            await store.initialize()
+            for guild, channel, name, day in (
+                (1, 10, "a", 1), (1, 10, "a", 2), (1, 10, "a", 2),
+                (1, 10, "b", 2), (1, 20, "b", 2), (2, 10, "a", 2),
+                (1, 10, "a", 3),
+            ):
+                await store.record_usage(
+                    guild, channel, name,
+                    occurred_at=datetime(2026, 9, day, tzinfo=timezone.utc),
+                )
+            store = catalog.CustomCommandCatalog(path)
+            await store.initialize()
+            self.assertEqual(await store.usage_counts(
+                1, channel_id=10, start_day=date(2026, 9, 2),
+                end_day=date(2026, 9, 3),
+            ), [("a", 2), ("b", 1)])
+            self.assertEqual(await store.usage_counts(
+                1, channel_id=None, start_day=date(2026, 9, 2),
+                end_day=date(2026, 9, 3),
+            ), [("a", 2), ("b", 2)])
+
     def test_invalid_name_explains_the_actual_constraints(self):
         expected = (
             "Command names must be one word with no spaces and no more than "
