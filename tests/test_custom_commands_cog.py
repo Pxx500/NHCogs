@@ -44,7 +44,11 @@ def _tag(name, value=True):
 
 
 def load_cog_module():  # noqa: PLR0915
-    package_name = "custom_commands_cog_subject"
+    root_name = "custom_commands_cog_subject"
+    root = types.ModuleType(root_name)
+    root.__path__ = [str(PACKAGE_PATH.parent)]
+    sys.modules[root_name] = root
+    package_name = f"{root_name}.custom_commands"
     package = types.ModuleType(package_name)
     package.__path__ = [str(PACKAGE_PATH)]
     sys.modules[package_name] = package
@@ -257,6 +261,80 @@ def load_cog_module():  # noqa: PLR0915
 
 
 cog, migration_controller = load_cog_module()
+
+
+class CommandUsageChartTests(unittest.IsolatedAsyncioTestCase):
+    def test_command_is_standalone_and_requires_only_manage_messages(self):
+        command = cog.CustomCommands.comchart
+        self.assertIsNone(command.parent)
+        self.assertEqual(command.callback.direct_permissions, {"manage_messages": True})
+        self.assertTrue(command.callback.guild_only)
+
+    def context(self, *, private=True):
+        channel = types.SimpleNamespace(
+            id=10, name="general", send=mock.AsyncMock(),
+            permissions_for=lambda member: types.SimpleNamespace(
+                view_channel=member != "everyone" or not private,
+            ),
+        )
+        return types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=1, name="Guild", default_role="everyone",
+                                        get_channel_or_thread=lambda _: channel),
+            channel=channel, author="moderator", send=mock.AsyncMock(),
+            send_help=mock.AsyncMock(), command=cog.CustomCommands.comchart,
+        )
+
+    async def test_bare_command_shows_help_without_query(self):
+        subject = object.__new__(cog.CustomCommands)
+        ctx = self.context()
+        await cog.CustomCommands.comchart.callback(subject, ctx)
+        ctx.send_help.assert_awaited_once_with(ctx.command)
+
+    async def test_channel_server_and_current_channel_use_shared_chart(self):
+        for args, channel_id in ((('7',), 10), (('<#10>', 30), 10),
+                                 (('123456789012345678', 7), 10), (('server', 30), None)):
+            with self.subTest(args=args):
+                subject = object.__new__(cog.CustomCommands)
+                subject.catalog = types.SimpleNamespace(
+                    usage_counts=mock.AsyncMock(return_value=[(str(i), 20-i) for i in range(12)]),
+                )
+                ctx = self.context()
+                with mock.patch.object(cog, 'render_ranked_donut_chart', return_value='file') as render:
+                    await cog.CustomCommands.comchart.callback(subject, ctx, *args)
+                query = subject.catalog.usage_counts.call_args
+                self.assertEqual(query.args, (1,))
+                self.assertEqual(query.kwargs['channel_id'], channel_id)
+                self.assertEqual((query.kwargs['end_day'] - query.kwargs['start_day']).days,
+                                 30 if 30 in args else 7)
+                self.assertEqual(len(render.call_args.args[0]), 10)
+                self.assertEqual(render.call_args.kwargs['other_count'], 19)
+                self.assertEqual(ctx.send.call_args.kwargs['file'], 'file')
+
+    async def test_server_chart_does_not_expose_private_usage_in_public(self):
+        subject = object.__new__(cog.CustomCommands)
+        subject.catalog = types.SimpleNamespace(usage_counts=mock.AsyncMock())
+        with self.assertRaises(cog.commands.UserFeedbackCheckFailure):
+            await cog.CustomCommands.comchart.callback(subject, self.context(private=False), 'server', 7)
+        subject.catalog.usage_counts.assert_not_awaited()
+
+    async def test_invalid_requests_do_not_query_usage(self):
+        subject = object.__new__(cog.CustomCommands)
+        subject.catalog = types.SimpleNamespace(usage_counts=mock.AsyncMock())
+        for args in (("0",), ("-1",), ("bad",), ("server",),
+                     ("<#invalid>", 7), ("7", 30)):
+            with self.subTest(args=args):
+                with self.assertRaises(cog.commands.UserFeedbackCheckFailure):
+                    await cog.CustomCommands.comchart.callback(subject, self.context(), *args)
+        subject.catalog.usage_counts.assert_not_awaited()
+
+    async def test_empty_usage_has_feedback_and_does_not_render(self):
+        subject = object.__new__(cog.CustomCommands)
+        subject.catalog = types.SimpleNamespace(usage_counts=mock.AsyncMock(return_value=[]))
+        ctx = self.context()
+        with mock.patch.object(cog, "render_ranked_donut_chart") as render:
+            await cog.CustomCommands.comchart.callback(subject, ctx, "7")
+        render.assert_not_called()
+        self.assertEqual(ctx.send.call_args.args, ("No recorded custom command uses in this period",))
 
 
 class CustomCommandsStartupTests(unittest.IsolatedAsyncioTestCase):

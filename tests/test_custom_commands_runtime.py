@@ -276,6 +276,48 @@ class CustomCommandRuntimeTests(unittest.TestCase):
 
 
 class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_accounting_failure_is_reported_without_resending_response(self):
+        ctx, message = self.invocation_context()
+        failure = OSError("database unavailable")
+        reporter = SimpleNamespace(report=mock.AsyncMock())
+        engine = runtime.CustomCommandRuntime(
+            SimpleNamespace(get_context=mock.AsyncMock(return_value=ctx), invoke=mock.AsyncMock()),
+            SimpleNamespace(get=mock.AsyncMock(return_value=command_with_weights(100)),
+                            record_usage=mock.AsyncMock(side_effect=failure)),
+            reporter, logger=mock.Mock(),
+        )
+        await engine.handle_message(message)
+        ctx.send.assert_awaited_once_with("response 0")
+        self.assertEqual(reporter.report.call_args.kwargs["action"], "record custom command usage")
+        self.assertIs(reporter.report.call_args.kwargs["error"], failure)
+
+    async def test_only_successful_sends_are_counted(self):
+        for failure in (None, "send", "arguments", "render"):
+            with self.subTest(failure=failure):
+                ctx, message = self.invocation_context()
+                ctx.command_failed = failure == "arguments"
+                if failure == "send":
+                    ctx.send.side_effect = RuntimeError("send failed")
+                store = SimpleNamespace(
+                    get=mock.AsyncMock(return_value=command_with_weights(100)),
+                    record_usage=mock.AsyncMock(),
+                )
+                engine = runtime.CustomCommandRuntime(
+                    SimpleNamespace(get_context=mock.AsyncMock(return_value=ctx),
+                                    invoke=mock.AsyncMock()),
+                    store, SimpleNamespace(report=mock.AsyncMock()), logger=mock.Mock(),
+                )
+                with mock.patch.object(
+                    engine, "render_response", return_value="response",
+                    side_effect=RuntimeError("render failed") if failure == "render" else None,
+                ):
+                    await engine.handle_message(message)
+                    await engine.handle_message(message)
+                if failure is None:
+                    store.record_usage.assert_awaited_once_with(100, 200, "weighted")
+                else:
+                    store.record_usage.assert_not_awaited()
+
     @staticmethod
     def invocation_context(
         *,
@@ -320,7 +362,7 @@ class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
                 ),
             }
         )
-        store = SimpleNamespace(get=mock.AsyncMock(return_value=command))
+        store = SimpleNamespace(get=mock.AsyncMock(return_value=command), record_usage=mock.AsyncMock())
         ctx = SimpleNamespace(
             prefix="!",
             invoked_with="weighted",
@@ -373,7 +415,7 @@ class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
         reporter = SimpleNamespace(report=mock.AsyncMock())
         engine = runtime.CustomCommandRuntime(
             bot,
-            SimpleNamespace(get=mock.AsyncMock(return_value=command)),
+            SimpleNamespace(get=mock.AsyncMock(return_value=command), record_usage=mock.AsyncMock()),
             reporter,
             random_index=lambda _total: 0,
             logger=mock.Mock(),
@@ -410,7 +452,7 @@ class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
         reporter = SimpleNamespace(report=mock.AsyncMock())
         engine = runtime.CustomCommandRuntime(
             bot,
-            SimpleNamespace(get=mock.AsyncMock(return_value=command)),
+            SimpleNamespace(get=mock.AsyncMock(return_value=command), record_usage=mock.AsyncMock()),
             reporter,
             random_index=lambda _total: 0,
             logger=mock.Mock(),
@@ -459,7 +501,8 @@ class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
                         command_with_weights(100),
                         other_command,
                     )
-                )
+                ),
+                record_usage=mock.AsyncMock(),
             ),
             reporter,
             random_index=lambda _total: 0,
@@ -535,7 +578,7 @@ class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
         )
         engine = runtime.CustomCommandRuntime(
             bot,
-            SimpleNamespace(get=mock.AsyncMock(return_value=command)),
+            SimpleNamespace(get=mock.AsyncMock(return_value=command), record_usage=mock.AsyncMock()),
             reporter,
             random_index=lambda _total: 0,
             logger=mock.Mock(),

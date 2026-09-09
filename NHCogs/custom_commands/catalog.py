@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
 from uuid import uuid4
@@ -127,6 +127,14 @@ class CustomCommandCatalog:
                        revision INTEGER NOT NULL,
                        PRIMARY KEY (guild_id, name)
                    );
+                   CREATE TABLE IF NOT EXISTS custom_command_usage (
+                       guild_id INTEGER NOT NULL,
+                       channel_id INTEGER NOT NULL,
+                       command_name TEXT NOT NULL,
+                       day TEXT NOT NULL,
+                       uses INTEGER NOT NULL,
+                       PRIMARY KEY (guild_id, day, channel_id, command_name)
+                   );
                    CREATE TABLE IF NOT EXISTS custom_command_responses (
                        response_id TEXT PRIMARY KEY,
                        guild_id INTEGER NOT NULL,
@@ -162,6 +170,57 @@ class CustomCommandCatalog:
                            ON DELETE CASCADE
                    );"""
             )
+
+    async def record_usage(
+        self,
+        guild_id: int,
+        channel_id: int,
+        command_name: str,
+        *,
+        occurred_at: datetime | None = None,
+    ) -> None:
+        day = (occurred_at or datetime.now(timezone.utc)).astimezone(timezone.utc).date()
+        await asyncio.to_thread(
+            self._record_usage_sync, guild_id, channel_id, command_name, day.isoformat()
+        )
+
+    def _record_usage_sync(
+        self, guild_id: int, channel_id: int, command_name: str, day: str,
+    ) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                """INSERT INTO custom_command_usage VALUES (?, ?, ?, ?, 1)
+                   ON CONFLICT (guild_id, day, channel_id, command_name)
+                   DO UPDATE SET uses = uses + 1""",
+                (guild_id, channel_id, command_name, day),
+            )
+
+    async def usage_counts(
+        self,
+        guild_id: int,
+        *,
+        channel_id: int | None,
+        start_day: date,
+        end_day: date,
+    ) -> list[tuple[str, int]]:
+        """Rank usage in UTC days, including start_day and excluding end_day."""
+        return await asyncio.to_thread(
+            self._usage_counts_sync, guild_id, channel_id,
+            start_day.isoformat(), end_day.isoformat(),
+        )
+
+    def _usage_counts_sync(
+        self, guild_id: int, channel_id: int | None, start_day: str, end_day: str,
+    ) -> list[tuple[str, int]]:
+        query = """SELECT command_name, SUM(uses) AS total FROM custom_command_usage
+                   WHERE guild_id = ? AND day >= ? AND day < ?"""
+        parameters: list[int | str] = [guild_id, start_day, end_day]
+        if channel_id is not None:
+            query += " AND channel_id = ?"
+            parameters.append(channel_id)
+        query += " GROUP BY command_name ORDER BY total DESC, command_name ASC"
+        with closing(self._connect()) as connection:
+            return [(row[0], row[1]) for row in connection.execute(query, parameters)]
 
     @staticmethod
     def normalize_name(name: str) -> str:

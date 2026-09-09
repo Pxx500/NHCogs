@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Literal
 
@@ -11,6 +12,7 @@ from redbot.core.data_manager import cog_data_path
 from redbot.core.utils import menus
 from redbot.core.utils.chat_formatting import pagify
 
+from ..ranked_donut_chart import render_ranked_donut_chart
 from .catalog import (
     CatalogError,
     CustomCommand,
@@ -37,6 +39,7 @@ EMBED_PAGE_LENGTH = 3_800
 FUZZY_MATCH_THRESHOLD = 60
 INTERACTIVE_VIEW_TIMEOUT_SECONDS = 30
 COMMAND_NOT_FOUND_MESSAGE = "That custom command doesn't exist"
+DISCORD_SNOWFLAKE_MIN_DIGITS = 15
 
 
 class CommandListView(discord.ui.View):
@@ -502,6 +505,91 @@ class CustomCommands(commands.Cog):
     async def public_commands(self, ctx: commands.Context) -> None:
         """List all available custom commands."""
         await self._show_all_commands(ctx)
+
+    @commands.command(
+        name="comchart",
+        usage="<days> | <channel_or_thread> <days> | server <days>",
+    )
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def comchart(
+        self,
+        ctx: commands.Context,
+        target_or_days: str | None = None,
+        days: int | None = None,
+    ) -> None:
+        """Chart successful custom command uses for a channel or the server.
+
+        Days include today and the preceding UTC calendar days. The default target
+        is this channel. Channels accept mentions or IDs. Server reports require
+        a private moderator channel. Shows the top 10 commands plus Other.
+        """
+        if target_or_days is None:
+            await ctx.send_help(ctx.command)
+            return
+        target, days = self._resolve_comchart_request(ctx, target_or_days, days)
+        today = datetime.now(timezone.utc).date()
+        rows = await self.catalog.usage_counts(
+            ctx.guild.id,
+            channel_id=target.id if target is not None else None,
+            start_day=today - timedelta(days=days - 1),
+            end_day=today + timedelta(days=1),
+        )
+        if not rows:
+            await ctx.send(
+                "No recorded custom command uses in this period",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        chart = render_ranked_donut_chart(
+            rows[:10],
+            other_count=sum(count for _, count in rows[10:]),
+            title=f"Custom commands | {days} days",
+            context_label=ctx.guild.name if target is None else f"#{target.name}",
+            center_unit="uses",
+            donut_title="Command usage",
+            filename="comchart.png",
+        )
+        await ctx.send(file=chart, allowed_mentions=discord.AllowedMentions.none())
+
+    @staticmethod
+    def _resolve_comchart_request(ctx, target_or_days: str, days: int | None):
+        token = target_or_days.strip()
+        target = ctx.channel
+        if token.casefold() == "server":
+            target = None
+        elif token.startswith("<#") or (
+            token.isdecimal() and len(token) >= DISCORD_SNOWFLAKE_MIN_DIGITS
+        ):
+            raw_id = token[2:-1] if token.startswith("<#") and token.endswith(">") else token
+            target = ctx.guild.get_channel_or_thread(int(raw_id)) if raw_id.isdecimal() else None
+            if target is None or not hasattr(target, "send"):
+                raise commands.UserFeedbackCheckFailure(
+                    "Choose a text channel or thread in this server"
+                )
+        else:
+            if days is not None or not token.isdecimal():
+                raise commands.UserFeedbackCheckFailure(
+                    "Use a number of days, or a channel or server followed by days"
+                )
+            days = int(token)
+        today = datetime.now(timezone.utc).date()
+        if days is None or not 1 <= days <= today.toordinal():
+            raise commands.UserFeedbackCheckFailure(
+                "Provide a positive number of days within the calendar range"
+            )
+        output_public = ctx.channel.permissions_for(ctx.guild.default_role).view_channel
+        if target is None:
+            if output_public:
+                raise commands.UserFeedbackCheckFailure("Run server reports in a private moderator channel")
+        else:
+            if not target.permissions_for(ctx.author).view_channel:
+                raise commands.UserFeedbackCheckFailure("You can't view that channel")
+            if output_public and not target.permissions_for(ctx.guild.default_role).view_channel:
+                raise commands.UserFeedbackCheckFailure(
+                    "Run private-channel reports in a private moderator channel"
+                )
+        return target, days
 
     async def _assert_legacy_purge_authority(self) -> None:
         if self.bot.get_cog("CustomCommands") is not self:
