@@ -166,6 +166,21 @@ class GitHubTicketsPresentationTests(unittest.TestCase):
             "Finished by <@40> | Author <@30>",
         )
 
+    def test_finished_ticket_log_handles_github_finish_without_discord_author(self):
+        presentation = load_presentation_module()
+
+        self.assertEqual(
+            presentation.finished_ticket_log(
+                title="Improve rendering",
+                url="https://github.com/example/repository/pull/123",
+                actor_id=None,
+                author_id=None,
+                reviewer_id=50,
+            ),
+            "[Improve rendering](<https://github.com/example/repository/pull/123>)\n"
+            "Finished from GitHub | Reviewer <@50>",
+        )
+
     def test_configuration_overview_uses_the_accepted_labels(self):
         presentation = load_presentation_module()
 

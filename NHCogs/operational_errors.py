@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import logging
 import sqlite3
 import traceback
 from contextlib import closing
@@ -14,6 +15,47 @@ from typing import Any
 import discord
 
 MAX_SUMMARY_LENGTH = 1_000
+
+
+async def report_operational_error(
+    bot: Any,
+    *,
+    guild_id: int,
+    source: str,
+    action: str,
+    error: BaseException,
+    channel_id: int | None = None,
+    thread_id: int | None = None,
+    message_id: int | None = None,
+) -> Any:
+    """Route integration failures to the shared support without swallowing cancellation."""
+    logger = logging.getLogger("red.NHCogs")
+    try:
+        support = bot.get_cog("OperationalSupport")
+        if support is not None:
+            return await support.report_operational_error(
+                guild_id=guild_id, source=source, action=action, error=error,
+                channel_id=channel_id, thread_id=thread_id, message_id=message_id,
+            )
+        logger.error(
+            "%s failed during %s", source, action,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+    except Exception:
+        logger.exception("Could not report %s during %s", source, action)
+    return None
+
+
+async def recover_operational_error(
+    bot: Any, *, guild_id: int, source: str, action: str,
+) -> None:
+    """Close a recovered operation without publishing success chatter."""
+    try:
+        support = bot.get_cog("OperationalSupport")
+        if support is not None:
+            await support.recover_operational_error(guild_id=guild_id, source=source, action=action)
+    except Exception:
+        logging.getLogger("red.NHCogs").exception("Could not mark %s during %s recovered", source, action)
 
 
 @dataclass(frozen=True)
@@ -245,15 +287,15 @@ class OperationalErrorReporter:
         )
 
     async def send_alert(
-        self, guild_id: int, content: str, *, file: discord.File | None = None
-    ) -> None:
+        self, guild_id: int, content: str, *, file: discord.File | None = None, view=None
+    ):
         """Publish technical failure details only to the shared private destination."""
         guild = self._bot.get_guild(guild_id)
         if guild is None:
             self._logger.error(
                 "Cannot publish NH operational error because guild %s is unavailable", guild_id
             )
-            return
+            return None
         guild_config = self._config.guild_from_id(guild_id)
         channel_id = await guild_config.error_channel()
         maintainer_id = await guild_config.error_maintainer_id()
@@ -262,12 +304,12 @@ class OperationalErrorReporter:
             self._logger.error(
                 "Cannot publish NH operational error because its channel is not configured"
             )
-            return
+            return None
         if channel.permissions_for(guild.default_role).view_channel:
             self._logger.error(
                 "Cannot publish NH operational error because channel %s is public", channel.id
             )
-            return
+            return None
         maintainer = guild.get_member(maintainer_id) if maintainer_id is not None else None
         if maintainer_id is not None:
             mention = maintainer.mention if maintainer is not None else f"<@{maintainer_id}>"
@@ -281,7 +323,10 @@ class OperationalErrorReporter:
             roles=False,
             replied_user=False,
         )
-        await channel.send(content, file=file, allowed_mentions=allowed_mentions)
+        kwargs = {"file": file, "allowed_mentions": allowed_mentions}
+        if view is not None:
+            kwargs["view"] = view
+        return await channel.send(content, **kwargs)
 
     @staticmethod
     def _format_context(failure: OperationalFailure) -> str | None:

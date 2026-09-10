@@ -16,6 +16,7 @@ class FakeBot(_Bot):
         self.channels = {}
         self.guild_map = {}
         self.fetch_calls = 0
+        self.api_tokens = {}
 
     def get_channel(self, channel_id):
         return self.channels.get(channel_id)
@@ -29,6 +30,35 @@ class FakeBot(_Bot):
     async def fetch_channel(self, _channel_id):
         self.fetch_calls += 1
         raise AssertionError("startup must not fetch Discord objects")
+
+    async def get_shared_api_tokens(self, service):
+        return self.api_tokens if service == "githubtickets" else {}
+
+
+class FakeGitHubSession:
+    def __init__(self):
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
+
+
+class FakeGitHubRuntime:
+    instances = []
+
+    def __init__(self, store, **kwargs):
+        self.store = store
+        self.kwargs = kwargs
+        self.started = []
+        self.closed = False
+        self.__class__.instances.append(self)
+
+    async def start(self, host, port):
+        self.started.append((host, port))
+        return port
+
+    async def close(self):
+        self.closed = True
 
 
 class FakeInteractionResponse:
@@ -124,6 +154,10 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.temporary_directory = TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
         self.data_path = Path(self.temporary_directory.name)
+        secret_path = self.data_path / "secrets"
+        secret_path.mkdir()
+        (secret_path / "github-app.pem").write_bytes(b"private-key")
+        (secret_path / "webhook-secret.txt").write_bytes(b"webhook-secret")
 
     async def test_startup_restores_views_locally_then_starts_deadline_scheduler(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
@@ -190,10 +224,10 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         break
                     await asyncio.sleep(0.01)
 
-                self.assertEqual(len(bot.restored_views), 2)
+                self.assertEqual(len(bot.restored_views), 4)
                 self.assertEqual(
                     [message_id for _view, message_id in bot.restored_views],
-                    [40, 41],
+                    [40, None, 41, None],
                 )
                 self.assertTrue(
                     all(view.timeout is None for view, _message_id in bot.restored_views)
@@ -207,6 +241,147 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await cog.cog_unload()
             self.assertIsNone(cog.scheduler._task)
             await asyncio.sleep(0.01)
+
+    async def test_configured_github_runtime_starts_after_discord_restore_and_closes(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            bot = FakeBot(ready=True)
+            bot.api_tokens = {
+                "organization": "NewHorizons",
+                "client_id": "Iv1.client",
+                "app_id": "123",
+                "installation_id": "456",
+            }
+            cog = modules.githubtickets.GitHubTickets(bot, mock.Mock(report_operational_error=mock.AsyncMock()))
+            await cog.config.set_raw("guild_id", value=10)
+            await cog.config.set_raw("enabled", value=True)
+            await cog.config.set_raw("bind_host", value="127.0.0.1")
+            await cog.config.set_raw("bind_port", value=8765)
+            await cog.config.set_raw("recovery_seconds", value=60)
+            session = FakeGitHubSession()
+            FakeGitHubRuntime.instances.clear()
+
+            with (
+                mock.patch.object(
+                    modules.githubtickets.aiohttp,
+                    "ClientSession",
+                    return_value=session,
+                ),
+                mock.patch.object(
+                    modules.githubtickets,
+                    "GitHubIntegrationRuntime",
+                    FakeGitHubRuntime,
+                ),
+            ):
+                await cog.cog_load()
+                for _attempt in range(50):
+                    if getattr(cog, "_github_runtime", None) is not None:
+                        break
+                    await asyncio.sleep(0.01)
+
+                self.assertEqual(len(FakeGitHubRuntime.instances), 1)
+                runtime = FakeGitHubRuntime.instances[0]
+                self.assertIs(cog._github_runtime, runtime)
+                self.assertEqual(runtime.started, [("127.0.0.1", 8765)])
+                self.assertEqual(runtime.kwargs["guild_id"], 10)
+                self.assertEqual(
+                    runtime.kwargs["recovery_interval"].total_seconds(),
+                    60,
+                )
+                self.assertIsInstance(
+                    runtime.kwargs["delivery_handler"],
+                    modules.event_handler.GitHubEventHandler,
+                )
+                self.assertEqual(cog._github_organization, "NewHorizons")
+
+                await cog.cog_unload()
+
+            self.assertTrue(runtime.closed)
+            self.assertTrue(session.closed)
+            self.assertIsNone(cog._github_runtime)
+            self.assertIsNone(cog._github_client)
+
+    async def test_shared_githubtickets_token_update_restarts_only_its_runtime(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            cog = modules.githubtickets.GitHubTickets(FakeBot(ready=True), mock.Mock(report_operational_error=mock.AsyncMock()))
+            listener = getattr(cog, "on_red_api_tokens_update", None)
+            self.assertIsNotNone(listener)
+            if listener is None:
+                return
+            cog._restart_github_integration = mock.AsyncMock(return_value=True)
+
+            await listener("youtube", {"api_key": "ignored"})
+            cog._restart_github_integration.assert_not_awaited()
+
+            await listener("githubtickets", {"client_id": "replacement"})
+            cog._restart_github_integration.assert_awaited_once_with()
+
+            failure = RuntimeError("restart failed")
+            cog._restart_github_integration = mock.AsyncMock(side_effect=failure)
+            with mock.patch.object(
+                modules.githubtickets,
+                "report_operational_error",
+                new=mock.AsyncMock(),
+            ) as report:
+                await listener("githubtickets", {})
+
+            report.assert_awaited_once()
+            self.assertEqual(report.await_args.kwargs["source"], "GitHubTickets")
+            self.assertEqual(
+                report.await_args.kwargs["action"],
+                "restart GitHub integration after API token update",
+            )
+            self.assertIs(report.await_args.kwargs["error"], failure)
+
+    async def test_lifecycle_stop_disables_owner_until_moderator_enable(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            bot = FakeBot(ready=True)
+            bot.api_tokens = {
+                "organization": "NewHorizons",
+                "client_id": "Iv1.client",
+                "app_id": "123",
+                "installation_id": "456",
+            }
+            cog = modules.githubtickets.GitHubTickets(bot, mock.Mock(report_operational_error=mock.AsyncMock()))
+            await cog.config.set_raw("guild_id", value=10)
+            await cog.config.set_raw("enabled", value=True)
+            await cog.config.set_raw("bind_host", value="127.0.0.1")
+            await cog.config.set_raw("bind_port", value=8765)
+            session = FakeGitHubSession()
+            FakeGitHubRuntime.instances.clear()
+
+            with (
+                mock.patch.object(
+                    modules.githubtickets.aiohttp,
+                    "ClientSession",
+                    return_value=session,
+                ),
+                mock.patch.object(
+                    modules.githubtickets,
+                    "GitHubIntegrationRuntime",
+                    FakeGitHubRuntime,
+                ),
+            ):
+                self.assertTrue(await cog._restart_github_integration())
+                runtime = FakeGitHubRuntime.instances[0]
+                lifecycle_stopped = runtime.kwargs.get("lifecycle_stopped")
+                self.assertIsNotNone(lifecycle_stopped)
+                if lifecycle_stopped is None:
+                    return
+
+                await lifecycle_stopped(runtime)
+
+                integration = modules.settings.GitHubIntegrationSettings.from_mapping(
+                    await cog.config.all()
+                )
+                self.assertFalse(integration.enabled)
+                self.assertIsNone(cog._github_runtime)
+                self.assertIsNone(cog._github_client)
+                self.assertIsNone(cog._github_session)
+                self.assertIsNone(cog._github_organization)
+                self.assertTrue(session.closed)
+
+                self.assertFalse(await cog._restart_github_integration())
+                self.assertEqual(len(FakeGitHubRuntime.instances), 1)
 
     async def test_application_commands_are_guild_only_and_runtime_authorized(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
@@ -260,8 +435,21 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
                 accepted = FakeInteraction(role_ids=(99,))
                 await new_ticket_command.callback(accepted)
+                self.assertEqual(
+                    accepted.response.messages[0][0],
+                    "GitHub integration is unavailable",
+                )
+                self.assertTrue(accepted.response.messages[0][1]["ephemeral"])
+                self.assertEqual(accepted.response.modals, [])
+
+                cog._github_client = SimpleNamespace(
+                    get_pull_request=mock.AsyncMock(),
+                )
+                cog._github_organization = "NewHorizons"
+                configured = FakeInteraction(role_ids=(99,))
+                await new_ticket_command.callback(configured)
                 self.assertIsInstance(
-                    accepted.response.modals[0],
+                    configured.response.modals[0],
                     modules.dashboard.NewTicketModal,
                 )
 
@@ -517,64 +705,6 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await cog.cog_unload()
 
-    async def test_automatic_candidate_count_uses_strict_cached_policy_and_excludes_author(self):
-        with isolated_githubtickets_modules(self.data_path) as modules:
-            bot = FakeBot(ready=False)
-            cog = modules.githubtickets.GitHubTickets(bot, mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
-            await cog.config.guild_from_id(10).set_raw(
-                "participant_role_ids",
-                value=[99],
-            )
-            await cog.cog_load()
-            now = datetime.now(timezone.utc)
-            rendering = await cog.store.add_category(10, "rendering", now)
-            mixins = await cog.store.add_category(10, "mixins", now)
-            both_categories = (rendering.category_id, mixins.category_id)
-            profiles = (
-                (30, both_categories, True),
-                (200, both_categories, True),
-                (201, (rendering.category_id,), True),
-                (202, both_categories, False),
-                (203, both_categories, True),
-                (204, both_categories, True),
-            )
-            for user_id, category_ids, automatic_pings in profiles:
-                await cog.store.save_profile(
-                    guild_id=10,
-                    user_id=user_id,
-                    github_username=None,
-                    category_ids=category_ids,
-                    automatic_pings=automatic_pings,
-                    updated_at=now,
-                )
-            participant = SimpleNamespace(id=99)
-            no_permissions = SimpleNamespace(manage_messages=False)
-            bot.guild_map[10] = SimpleNamespace(
-                id=10,
-                members=[
-                    SimpleNamespace(id=30, roles=[participant], guild_permissions=no_permissions),
-                    SimpleNamespace(id=200, roles=[participant], guild_permissions=no_permissions),
-                    SimpleNamespace(id=201, roles=[participant], guild_permissions=no_permissions),
-                    SimpleNamespace(id=202, roles=[participant], guild_permissions=no_permissions),
-                    SimpleNamespace(id=203, roles=[], guild_permissions=no_permissions),
-                    SimpleNamespace(
-                        id=204,
-                        roles=[],
-                        guild_permissions=SimpleNamespace(manage_messages=True),
-                    ),
-                ],
-            )
-            try:
-                count = await cog._count_automatic_candidates(
-                    10,
-                    both_categories,
-                    frozenset({30, 200}),
-                )
-
-                self.assertEqual(count, 1)
-                self.assertEqual(bot.fetch_calls, 0)
-            finally:
-                await cog.cog_unload()
 
     async def test_member_remove_deletes_only_the_departed_guild_profile(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
@@ -1039,7 +1169,7 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
             cleanup = await cog.store.get_ticket(created.ticket_id)
             self.assertEqual(cleanup.state, modules.models.TicketState.FINISHING)
-            self.assertEqual(cleanup.author_id, 0)
+            self.assertIsNone(cleanup.author_id)
             self.assertEqual(cleanup.pr_title, "")
             self.assertEqual(cleanup.pr_url, "")
             self.assertEqual(cleanup.category_display, "")

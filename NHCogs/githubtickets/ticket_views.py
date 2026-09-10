@@ -88,3 +88,91 @@ class TicketControls(discord.ui.View):
             guild_id=self._guild_id, source="GitHubTickets", action="ticket control feedback", error=error,
             channel_id=getattr(interaction, "channel_id", None),
         )
+
+
+
+
+class DraftTicketControls(discord.ui.View):
+    def __init__(
+        self,
+        public_token: str,
+        *,
+        actor_factory: ActorFactory,
+        keep_ticket: TicketAction,
+        remove_ticket: TicketAction,
+    ) -> None:
+        super().__init__(timeout=None)
+        self.public_token = public_token
+        self._actor_factory = actor_factory
+        self._keep_ticket = keep_ticket
+        self._remove_ticket = remove_ticket
+
+        keep = discord.ui.Button(
+            label=presentation.KEEP_TICKET,
+            style=discord.ButtonStyle.primary,
+            custom_id=f"githubtickets:{public_token}:keep_draft_ticket",
+        )
+        keep.callback = self._keep
+        self.add_item(keep)
+        self._add_remove_button()
+
+    def _add_remove_button(self) -> None:
+        remove = discord.ui.Button(
+            label=presentation.REMOVE_TICKET,
+            style=discord.ButtonStyle.danger,
+            custom_id=f"githubtickets:{self.public_token}:remove_draft_ticket",
+        )
+        remove.callback = self._remove
+        self.add_item(remove)
+
+    async def _keep(self, interaction: discord.Interaction) -> None:
+        try:
+            actor = self._actor_factory(interaction)
+            result = await self._keep_ticket(self.public_token, actor)
+        except Exception:
+            log.exception("GitHub Tickets keep-draft callback failed")
+            await interaction.response.send_message(
+                presentation.COULD_NOT_COMPLETE_ACTION,
+                ephemeral=True,
+            )
+            return
+        if not result.success:
+            await interaction.response.send_message(result.response, ephemeral=True)
+            return
+        await interaction.response.edit_message(
+            view=RetainedDraftTicketControls(
+                self.public_token,
+                actor_factory=self._actor_factory,
+                remove_ticket=self._remove_ticket,
+            )
+        )
+
+    async def _remove(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        try:
+            actor = self._actor_factory(interaction)
+            result = await self._remove_ticket(self.public_token, actor)
+        except Exception:
+            log.exception("GitHub Tickets remove-draft callback failed")
+            await interaction.followup.send(
+                presentation.COULD_NOT_COMPLETE_ACTION,
+                ephemeral=True,
+            )
+            return
+        if not result.success:
+            await interaction.followup.send(result.response, ephemeral=True)
+
+
+class RetainedDraftTicketControls(DraftTicketControls):
+    def __init__(
+        self,
+        public_token: str,
+        *,
+        actor_factory: ActorFactory,
+        remove_ticket: TicketAction,
+    ) -> None:
+        discord.ui.View.__init__(self, timeout=None)
+        self.public_token = public_token
+        self._actor_factory = actor_factory
+        self._remove_ticket = remove_ticket
+        self._add_remove_button()

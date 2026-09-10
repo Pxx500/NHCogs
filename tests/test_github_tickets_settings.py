@@ -5,9 +5,7 @@ import unittest
 from dataclasses import asdict
 from pathlib import Path
 
-SETTINGS_PATH = (
-    Path(__file__).parents[1] / "NHCogs" / "githubtickets" / "settings.py"
-)
+SETTINGS_PATH = Path(__file__).parents[1] / "NHCogs" / "githubtickets" / "settings.py"
 INFO_PATH = Path(__file__).parents[1] / "NHCogs" / "githubtickets" / "info.json"
 
 
@@ -110,6 +108,50 @@ class GitHubTicketsSettingsTests(unittest.TestCase):
         )
 
         self.assertEqual(snapshot, settings.GuildSettings.from_mapping({}))
+
+    def test_github_integration_defaults_are_dormant_and_unconfigured(self):
+        settings = load_settings_module()
+
+        snapshot = settings.GitHubIntegrationSettings.from_mapping({})
+
+        self.assertEqual(asdict(snapshot), settings.GITHUB_INTEGRATION_DEFAULTS)
+        self.assertFalse(snapshot.receiver_configured)
+
+    def test_github_integration_mapping_normalizes_runtime_configuration(self):
+        settings = load_settings_module()
+
+        snapshot = settings.GitHubIntegrationSettings.from_mapping(
+            {
+                "guild_id": "42",
+                "enabled": True,
+                "bind_host": " 127.0.0.1 ",
+                "bind_port": 8080,
+                "recovery_seconds": 30,
+                "private_key": "must not be modeled",
+            }
+        )
+
+        self.assertEqual(snapshot.guild_id, 42)
+        self.assertTrue(snapshot.enabled)
+        self.assertEqual(snapshot.bind_host, "127.0.0.1")
+        self.assertEqual(snapshot.bind_port, 8080)
+        self.assertEqual(snapshot.recovery_seconds, 30)
+        self.assertTrue(snapshot.receiver_configured)
+
+    def test_github_integration_mapping_rejects_partial_or_malformed_bind_values(self):
+        settings = load_settings_module()
+
+        snapshot = settings.GitHubIntegrationSettings.from_mapping(
+            {
+                "guild_id": 0,
+                "enabled": "yes",
+                "bind_host": "  ",
+                "bind_port": 65536,
+                "recovery_seconds": 0,
+            }
+        )
+
+        self.assertEqual(snapshot, settings.GitHubIntegrationSettings.from_mapping({}))
 
     def test_duration_parser_accepts_compact_units_and_distinguishes_negatives(self):
         settings = load_settings_module()
