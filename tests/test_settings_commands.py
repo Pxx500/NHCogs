@@ -367,6 +367,76 @@ class JoinwatchSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class JoinwatchCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bantimers_is_direct_joinwatch_command_and_keeps_moderator_gate(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                root = honeypot.Honeypot.honeypot
+                command = honeypot.Honeypot.joinwatch_bantimers
+                self.assertEqual(command.qualified_name, "honeypot joinwatch bantimers")
+                self.assertIs(command.parent, honeypot.Honeypot.joinwatch)
+                self.assertEqual(root.has_permissions, {"manage_messages": True})
+
+    async def test_bantimers_rejects_public_output_before_reading_configuration(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = object.__new__(honeypot.Honeypot)
+                cog.config = mock.Mock()
+                ctx = SimpleNamespace(
+                    guild=SimpleNamespace(default_role=object()),
+                    channel=SimpleNamespace(permissions_for=lambda role: SimpleNamespace(view_channel=True)),
+                    send=mock.AsyncMock(),
+                )
+                await honeypot.Honeypot.joinwatch_bantimers.callback(cog, ctx)
+                cog.config.guild.assert_not_called()
+                ctx.send.assert_awaited_once_with("Use this command in a private moderator channel")
+
+    async def test_bantimers_includes_role_holders_without_creating_timers(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                for timed in (False, True):
+                    with self.subTest(timed=timed):
+                        manual = SimpleNamespace(id=12, display_name="manual")
+                        automatic = SimpleNamespace(id=11, display_name="automatic")
+                        pending = {
+                            "11": {
+                                "role_id": 99,
+                                "expires_at": "2099-01-01T00:00:00+00:00",
+                            }
+                        } if timed else {}
+                        config = dict(honeypot.settings.DEFAULTS)
+                        config.update(joinwatch_auto_role_id=99, joinwatch_pending_roles=pending)
+                        role = SimpleNamespace(members=[manual, automatic] if timed else [manual])
+                        guild = SimpleNamespace(
+                            default_role=object(), chunked=True,
+                            get_role=mock.Mock(return_value=role),
+                            get_member=mock.Mock(return_value=automatic),
+                        )
+                        cog = object.__new__(honeypot.Honeypot)
+                        cog.config = SimpleNamespace(guild=mock.Mock(
+                            return_value=SimpleNamespace(all=mock.AsyncMock(return_value=config))
+                        ))
+                        cog._get_member_or_fetch = mock.AsyncMock(return_value=automatic)
+                        ctx = SimpleNamespace(
+                            guild=guild, send=mock.AsyncMock(),
+                            channel=SimpleNamespace(permissions_for=lambda role: SimpleNamespace(view_channel=False)),
+                        )
+                        with mock.patch.object(honeypot.discord.utils, "format_dt", return_value="later", create=True):
+                            await honeypot.Honeypot.joinwatch_bantimers.callback(cog, ctx)
+                        output = "\n".join(call.args[0] for call in ctx.send.await_args_list)
+                        self.assertIn("Without JoinWatch timer: 1", output)
+                        self.assertIn("manual (12)", output)
+                        self.assertIn(f"With timer: {int(timed)}", output)
+                        self.assertEqual(len(pending), int(timed))
+                        cog._get_member_or_fetch.assert_not_awaited()
+                        self.assertNotIn("cache is incomplete", output)
+                        guild.chunked = False
+                        ctx.send.reset_mock()
+                        with mock.patch.object(honeypot.discord.utils, "format_dt", return_value="later", create=True):
+                            await honeypot.Honeypot.joinwatch_bantimers.callback(cog, ctx)
+                        output = "\n".join(call.args[0] for call in ctx.send.await_args_list)
+                        self.assertIn("Member cache is incomplete", output)
+                        self.assertIn("manual (12)", output)
+
     async def test_max_age_enforces_practical_upper_boundary(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:

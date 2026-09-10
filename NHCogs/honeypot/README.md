@@ -186,7 +186,7 @@ Detection cases expire 24 hours after the first detection. This lifetime is fixe
 | `!honeypot joinwatch autorole role <role>` | Role to apply to young accounts |
 | `!honeypot joinwatch autorole timer <1-10080>` | Minutes before punishment if the role remains |
 | `!honeypot joinwatch autorole action <none\|kick\|ban>` | Action when the auto-role is not removed in time |
-| `!honeypot joinwatch autorole bantimers` | List active auto-role punishment timers |
+| `[p]honeypot joinwatch bantimers` | List active punishment timers and shadowban role holders without a JoinWatch timer. Requires Manage Messages and a private moderator channel. Uses the local member cache without fetching members and reports when the cache is incomplete. Does not create timers for manually assigned roles |
 | `!honeypot joinwatch autorole randomize toggle <bool>` | Enable or disable randomized delay before the auto-role is applied |
 | `!honeypot joinwatch autorole randomize min_time <1-10080>` | Minimum minutes before applying the auto-role |
 | `!honeypot joinwatch autorole randomize max_time <1-10080>` | Maximum minutes before applying the auto-role |

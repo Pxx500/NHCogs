@@ -1,6 +1,6 @@
 {
   "command_count": 141,
-  "command_structure_sha256": "e8293cfb107fffa42e90ab8a4265de623082aeefa1aba7245b33ed73fd4e1baf",
+  "command_structure_sha256": "47b85f70df7976df7ae946ba12f19ac4768d02f560455612f58090116b9418c8",
   "intentionally_undocumented_debug_commands": [
     "honeypot debug imagescan cleanup_events",
     "honeypot debug imagescan dump",
