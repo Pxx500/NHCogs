@@ -184,13 +184,19 @@ async def joinwatch_autorole_action(
         )
 
 
-async def joinwatch_autorole_bantimers(cog, ctx: commands.Context) -> None:
+async def joinwatch_bantimers(cog, ctx: commands.Context) -> None:
+    if not cog._group_overview_is_private(ctx):
+        await ctx.send(_("Use this command in a private moderator channel"))
+        return
     raw_config = await cog.config.guild(ctx.guild).all()
     guild_settings = GuildSettings.from_mapping(raw_config)
     pending_roles = guild_settings.joinwatch_pending_roles
-    if not pending_roles:
-        await ctx.send(_("No active joinwatch punishment timers"))
-        return
+    role = ctx.guild.get_role(guild_settings.joinwatch_auto_role_id)
+    role_members = role.members if role is not None else []
+    without_timer = sorted(
+        (member for member in role_members if str(member.id) not in pending_roles),
+        key=lambda member: (member.display_name.casefold(), member.id),
+    )
 
     now = datetime.now(timezone.utc)
     invalid = 0
@@ -203,7 +209,7 @@ async def joinwatch_autorole_bantimers(cog, ctx: commands.Context) -> None:
             invalid += 1
             continue
 
-        member = await cog._get_member_or_fetch(ctx.guild, member_id)
+        member = ctx.guild.get_member(member_id)
         member_label = (
             f"{member.display_name} ({member.id})"
             if member is not None
@@ -238,18 +244,23 @@ async def joinwatch_autorole_bantimers(cog, ctx: commands.Context) -> None:
             )
         )
 
-    if not entries:
-        await ctx.send(_("No readable joinwatch punishment timers"))
-        return
-
     entries.sort(key=lambda item: item[0])
-    header = _("Joinwatch active punishment timers: {count}").format(
-        count=len(entries),
-    )
+    lines = [_("JoinWatch shadowbans")]
+    if role is None:
+        lines.append(_("Shadowban role: Not configured or unavailable"))
+    else:
+        lines.append(_("Shadowban role holders: {count}").format(count=len(role_members)))
+    if not ctx.guild.chunked:
+        lines.append(_("Member cache is incomplete: role holders may be missing from this list"))
     if invalid:
-        header += _("\nSkipped invalid entries: {count}").format(count=invalid)
-    lines = [header, ""]
+        lines.append(_("Skipped invalid timers: {count}").format(count=invalid))
+    lines.extend(["", _("With timer: {count}").format(count=len(entries))])
     lines.extend(f"{index}. {entry}" for index, (_, entry) in enumerate(entries, 1))
+    lines.extend(["", _("Without JoinWatch timer: {count}").format(count=len(without_timer))])
+    lines.extend(
+        f"{index}. {member.display_name} ({member.id})"
+        for index, member in enumerate(without_timer, 1)
+    )
     for page in pagify("\n".join(lines), page_length=1900):
         await ctx.send(page, allowed_mentions=discord.AllowedMentions.none())
 

@@ -2110,10 +2110,10 @@ class Honeypot(Cog):
         """Set the action when the temporary role is not removed in time."""
         return await joinwatch_commands.joinwatch_autorole_action(self, ctx, value)
 
-    @joinwatch_autorole.command(name="bantimers")
-    async def joinwatch_autorole_bantimers(self, ctx: commands.Context) -> None:
-        """List active joinwatch auto-role timers."""
-        return await joinwatch_commands.joinwatch_autorole_bantimers(self, ctx)
+    @joinwatch.command(name="bantimers")
+    async def joinwatch_bantimers(self, ctx: commands.Context) -> None:
+        """List shadowban timers and role holders without a timer in a private channel."""
+        return await joinwatch_commands.joinwatch_bantimers(self, ctx)
 
     @joinwatch_autorole.group(name="randomize", invoke_without_command=True)
     async def joinwatch_autorole_randomize(self, ctx: commands.Context) -> None:
