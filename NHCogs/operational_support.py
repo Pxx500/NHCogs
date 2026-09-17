@@ -317,6 +317,22 @@ class OperationalSupport(commands.Cog):
         log_failure: bool = True,
     ) -> bool:
         """Send to a configured guild log destination."""
+        return await self.send_configured_log_message(
+            guild, config_key, content, ping_user=ping_user,
+            require_private=require_private, log_failure=log_failure,
+        ) is not None
+
+    async def send_configured_log_message(
+        self,
+        guild: discord.Guild,
+        config_key: str,
+        content: str,
+        *,
+        ping_user: discord.abc.Snowflake | None = None,
+        require_private: bool = False,
+        log_failure: bool = True,
+    ) -> discord.Message | None:
+        """Send a configured log and retain its message for later updates."""
         config_value = getattr(self.log_config.guild(guild), config_key)
         channel = self.get_log_channel(guild, await config_value())
         if channel is None:
@@ -325,14 +341,14 @@ class OperationalSupport(commands.Cog):
                 guild.id,
                 config_key,
             )
-            return False
+            return None
         if require_private and channel.permissions_for(guild.default_role).view_channel:
             log.warning(
                 "Could not send NHMisc log for guild %s because %s is public",
                 guild.id,
                 config_key,
             )
-            return False
+            return None
 
         allowed_mentions = (
             discord.AllowedMentions(
@@ -344,14 +360,11 @@ class OperationalSupport(commands.Cog):
             if ping_user is not None
             else None
         )
-        return (
-            await self.send_log_message(
-                channel,
-                content,
-                allowed_mentions=allowed_mentions,
-                log_failure=log_failure,
-            )
-            is not None
+        return await self.send_log_message(
+            channel,
+            content,
+            allowed_mentions=allowed_mentions,
+            log_failure=log_failure,
         )
 
     async def send_moderation_log(

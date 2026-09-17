@@ -616,6 +616,18 @@ roles. Later uses deliberately replace achievement progress with Discord's curre
 state. In every normal sync, the achievement database has priority and Discord roles are
 restored from it.
 
+If achievement role reconciliation skips members because of errors or aborts, its
+maintenance message includes `Retrying` with a Discord relative timestamp. One retry
+runs an hour later and edits that same message with updated counts and `Retry completed`
+or `Retry failed`. A failed retry waits for the next regular or manual synchronization.
+Repeated syncs share one pending retry per guild. A successful manual sync completes
+the pending report early and cancels the delayed retry. Departed members are ignored.
+Retrying restores roles only and does not send achievement congratulations.
+
+Pending retries are cancelled when the cog unloads, and their messages are marked
+`Retry cancelled` when Discord is reachable. After a reload, the normal startup sync
+checks roles again and schedules a new retry if needed.
+
 A reconciliation builds the replacement snapshot in a separate generation and swaps it in
 atomically, so `rolestats` and `roleusers` keep answering from the previous snapshot for
 the whole duration. If a reconciliation fails, the previous snapshot stays queryable and
