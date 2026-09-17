@@ -7,7 +7,7 @@ import logging
 import re
 import time
 from collections.abc import Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as datetime_time
 from typing import TypeVar
@@ -182,6 +182,17 @@ class GateIncrementCandidate:
     target_ordinal: int | None = None
     highest_ordinal: int = 0
     has_solo_gater: bool = False
+
+
+ACHIEVEMENT_RETRY_SECONDS = 60 * 60
+
+
+@dataclass
+class _AchievementReconciliation:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    retry_at: int = 0
+    task: asyncio.Task | None = None
+    message: discord.Message | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -560,6 +571,9 @@ class NHMisc(commands.Cog):
         self._activity_task: asyncio.Task | None = None
         self._role_analytics_startup_task: asyncio.Task | None = None
         self._role_analytics_daily_task: asyncio.Task | None = None
+        self._achievement_reconciliations: dict[int, _AchievementReconciliation] = {}
+        self._achievement_reconciliation_runs: set[asyncio.Task] = set()
+        self._achievement_reconciliation_closing = False
         self._gate_increment_store = GateIncrementStore(
             achievements_path
         )
@@ -797,17 +811,20 @@ class NHMisc(commands.Cog):
         )
 
     async def cog_unload(self) -> None:
-        tasks = tuple(
+        self._achievement_reconciliation_closing = True
+        tasks = {
             task
             for task in (
                 *self._audit_log_tasks,
+                *self._achievement_reconciliation_runs,
                 self._activity_task,
                 self._role_analytics_startup_task,
                 self._role_analytics_daily_task,
                 self._gate_increment_recovery_task,
+                *(state.task for state in self._achievement_reconciliations.values()),
             )
             if task is not None
-        )
+        }
         self._unregister_gate_increment_context_menu()
         self._unregister_achievement_commands()
         for task in tasks:
@@ -819,6 +836,11 @@ class NHMisc(commands.Cog):
         )
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        for state in self._achievement_reconciliations.values():
+            if state.task is not None and state.message is not None:
+                content = state.message.content.rsplit("\n", 1)[0] + "\nRetry cancelled"
+                await self._publish_achievement_reconciliation(state.message.guild, state, content)
+        self._achievement_reconciliations.clear()
         await analytics_shutdown
         if bot_proxy_shutdown is not None:
             await bot_proxy_shutdown
@@ -1015,9 +1037,81 @@ class NHMisc(commands.Cog):
             return None
         return tuple(users_by_role)
 
-    async def _reconcile_achievement_roles_for_guild(  # noqa: PLR0912
-        self, guild: discord.Guild
+    async def _reconcile_achievement_roles_for_guild(
+        self, guild: discord.Guild, *, retry: bool = False,
     ) -> None:
+        if self._achievement_reconciliation_closing:
+            return
+        task = asyncio.current_task()
+        self._achievement_reconciliation_runs.add(task)
+        try:
+            await self._run_achievement_reconciliation(guild, retry=retry)
+        finally:
+            self._achievement_reconciliation_runs.discard(task)
+
+    async def _run_achievement_reconciliation(self, guild, *, retry: bool) -> None:
+        state = self._achievement_reconciliations.setdefault(guild.id, _AchievementReconciliation())
+        async with state.lock:
+            aborted = False
+            try:
+                corrected, failed = await self._reconcile_achievement_roles_once(guild)
+            except Exception as error:
+                corrected = failed = None
+                aborted = True
+                log.exception("Achievement role reconciliation failed for guild %s", guild.id)
+                await self._support.report_operational_error(
+                    guild_id=guild.id, source="NHMisc",
+                    action="reconcile achievement roles", error=error,
+                )
+            unsuccessful = aborted or bool(failed)
+            pending = state.task is not None
+            if unsuccessful and not retry and not pending:
+                state.retry_at = int(time.time()) + ACHIEVEMENT_RETRY_SECONDS
+                state.task = asyncio.create_task(self._retry_achievement_roles(guild, state))
+            header = "failed" if aborted else "complete"
+            content = (
+                f"Achievement role reconciliation {header}\n"
+                f"Members corrected: {corrected if corrected is not None else 'unknown'}\n"
+                f"Members skipped: {failed if failed is not None else 'unknown'}"
+            )
+            if retry or (pending and not unsuccessful):
+                content += "\nRetry failed" if unsuccessful else "\nRetry completed"
+            elif unsuccessful:
+                content += f"\nRetrying <t:{state.retry_at}:R>"
+            if corrected or unsuccessful or pending or retry:
+                await self._publish_achievement_reconciliation(guild, state, content)
+            if retry or not unsuccessful:
+                if state.task is not None and state.task is not asyncio.current_task():
+                    state.task.cancel()
+                state.task = None
+                state.message = None
+                state.retry_at = 0
+
+    async def _retry_achievement_roles(self, guild, state) -> None:
+        await asyncio.sleep(max(0, state.retry_at - time.time()))
+        await self._reconcile_achievement_roles_for_guild(guild, retry=True)
+
+    async def _publish_achievement_reconciliation(self, guild, state, content) -> None:
+        try:
+            if state.message is None:
+                state.message = await self._support.send_configured_log_message(
+                    guild, "maintenance_channel", content, require_private=True,
+                )
+            elif not state.message.channel.permissions_for(guild.default_role).view_channel:
+                state.message = await state.message.edit(
+                    content=content, allowed_mentions=discord.AllowedMentions.none(),
+                )
+            else:
+                raise commands.UserFeedbackCheckFailure("The maintenance channel is now public")
+        except Exception as error:
+            await self._support.report_operational_error(
+                guild_id=guild.id, source="NHMisc",
+                action="update achievement reconciliation log", error=error,
+            )
+
+    async def _reconcile_achievement_roles_once(  # noqa: PLR0912
+        self, guild: discord.Guild
+    ) -> tuple[int, int]:
         definitions = tuple(
             definition
             for definition in await self._achievement_store.list_definitions(guild.id)
@@ -1031,7 +1125,7 @@ class NHMisc(commands.Cog):
             ),
         )
         if users_by_role is None:
-            return
+            raise AnalyticsUnavailableError("Role analytics are unavailable")
         gate_role_count = len(GATE_TIER_ROLE_IDS)
         actual_gate_roles: dict[int, set[int]] = {}
         for role_id, user_ids in zip(
@@ -1114,13 +1208,7 @@ class NHMisc(commands.Cog):
                         guild.id,
                         user_id,
                     )
-        if corrected or failed:
-            await self._send_maintenance_log(
-                guild,
-                "Achievement role reconciliation complete\n"
-                f"Members corrected: {corrected}\n"
-                f"Members skipped: {failed}",
-            )
+        return corrected, failed
 
     @staticmethod
     async def _restore_gate_projection(
@@ -1131,20 +1219,8 @@ class NHMisc(commands.Cog):
         reason: str,
     ) -> bool:
         if not 0 <= completed_count <= len(GATE_TIER_ROLE_IDS):
-            log.error(
-                "Gate projection exceeds configured tiers for guild %s member %s",
-                guild.id,
-                member.id,
-            )
-            return False
+            raise commands.UserFeedbackCheckFailure("Gate projection exceeds configured tiers")
         _validate_gate_increment_configuration(guild)
-        if member.top_role.position >= guild.me.top_role.position:
-            log.warning(
-                "Cannot restore Gate projection for guild %s member %s due to hierarchy",
-                guild.id,
-                member.id,
-            )
-            return False
         current_role_ids = tuple(role.id for role in member.roles)
         non_gate_role_ids = tuple(
             role_id
@@ -1165,6 +1241,8 @@ class NHMisc(commands.Cog):
         }
         if set(desired_role_ids) == current_assignable:
             return False
+        if member.top_role.position >= guild.me.top_role.position:
+            raise commands.UserFeedbackCheckFailure("I cannot restore this member's Gate roles due to hierarchy")
         desired_roles = [guild.get_role(role_id) for role_id in desired_role_ids]
         if any(role is None for role in desired_roles):
             raise commands.UserFeedbackCheckFailure(
