@@ -270,6 +270,7 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
         cog._audit_log_tasks = set()
         cog._activity_task = writer_task
         cog._achievement_reconciliations = {}
+        cog._achievement_reconciliation_runs = set()
         cog._role_analytics_startup_task = None
         cog._role_analytics_daily_task = None
         cog._gate_increment_recovery_task = None

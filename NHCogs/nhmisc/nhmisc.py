@@ -572,6 +572,8 @@ class NHMisc(commands.Cog):
         self._role_analytics_startup_task: asyncio.Task | None = None
         self._role_analytics_daily_task: asyncio.Task | None = None
         self._achievement_reconciliations: dict[int, _AchievementReconciliation] = {}
+        self._achievement_reconciliation_runs: set[asyncio.Task] = set()
+        self._achievement_reconciliation_closing = False
         self._gate_increment_store = GateIncrementStore(
             achievements_path
         )
@@ -809,10 +811,12 @@ class NHMisc(commands.Cog):
         )
 
     async def cog_unload(self) -> None:
-        tasks = tuple(
+        self._achievement_reconciliation_closing = True
+        tasks = {
             task
             for task in (
                 *self._audit_log_tasks,
+                *self._achievement_reconciliation_runs,
                 self._activity_task,
                 self._role_analytics_startup_task,
                 self._role_analytics_daily_task,
@@ -820,7 +824,7 @@ class NHMisc(commands.Cog):
                 *(state.task for state in self._achievement_reconciliations.values()),
             )
             if task is not None
-        )
+        }
         self._unregister_gate_increment_context_menu()
         self._unregister_achievement_commands()
         for task in tasks:
@@ -1036,6 +1040,16 @@ class NHMisc(commands.Cog):
     async def _reconcile_achievement_roles_for_guild(
         self, guild: discord.Guild, *, retry: bool = False,
     ) -> None:
+        if self._achievement_reconciliation_closing:
+            return
+        task = asyncio.current_task()
+        self._achievement_reconciliation_runs.add(task)
+        try:
+            await self._run_achievement_reconciliation(guild, retry=retry)
+        finally:
+            self._achievement_reconciliation_runs.discard(task)
+
+    async def _run_achievement_reconciliation(self, guild, *, retry: bool) -> None:
         state = self._achievement_reconciliations.setdefault(guild.id, _AchievementReconciliation())
         async with state.lock:
             aborted = False

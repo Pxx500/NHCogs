@@ -57,6 +57,8 @@ class AchievementReconciliationRetryTests(unittest.IsolatedAsyncioTestCase):
         self.cog = object.__new__(nhmisc.NHMisc)
         self.cog.bot = SimpleNamespace(guilds=[self.guild])
         self.cog._achievement_reconciliations = {}
+        self.cog._achievement_reconciliation_runs = set()
+        self.cog._achievement_reconciliation_closing = False
         self.cog._achievement_store = SimpleNamespace(
             is_bootstrapped=mock.AsyncMock(return_value=True),
             list_definitions=mock.AsyncMock(return_value=()),
@@ -174,7 +176,7 @@ class AchievementReconciliationRetryTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertEqual(self.guild.fetch_member.await_count, 2)
 
-    async def test_unload_cancels_retry_and_removes_countdown(self):
+    def prepare_unload(self):
         self.cog._audit_log_tasks = set()
         self.cog._activity_task = None
         self.cog._role_analytics_startup_task = None
@@ -183,6 +185,9 @@ class AchievementReconciliationRetryTests(unittest.IsolatedAsyncioTestCase):
         self.cog._gate_increment_context_registered = False
         self.cog._achievement_commands_registered = False
         self.cog._role_analytics.shutdown = mock.AsyncMock()
+
+    async def test_unload_cancels_retry_and_removes_countdown(self):
+        self.prepare_unload()
         await self.cog.on_resumed()
         await asyncio.wait_for(self.sleeping.wait(), 1)
         await self.cog.cog_unload()
@@ -190,3 +195,23 @@ class AchievementReconciliationRetryTests(unittest.IsolatedAsyncioTestCase):
         self.release.set()
         await asyncio.sleep(0)
         self.assertEqual(self.guild.fetch_member.await_count, 1)
+
+    async def test_unload_stops_inflight_sync_before_it_can_schedule_retry(self):
+        self.prepare_unload()
+        fetching = asyncio.Event()
+        finish_fetch = asyncio.Event()
+
+        async def fetch(_user_id):
+            fetching.set()
+            await finish_fetch.wait()
+            raise nhmisc.discord.HTTPException()
+
+        self.guild.fetch_member.side_effect = fetch
+        running = asyncio.create_task(self.cog.on_resumed())
+        await asyncio.wait_for(fetching.wait(), 1)
+        await self.cog.cog_unload()
+        finish_fetch.set()
+        await asyncio.gather(running, return_exceptions=True)
+        await asyncio.sleep(0)
+        self.assertEqual(self.channel.messages, [])
+        self.assertEqual(self.delays, [])
