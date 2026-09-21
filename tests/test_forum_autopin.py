@@ -369,13 +369,19 @@ class ForumAutopinCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             cog.config.store_for(guild)["forum_autopin_channel_ids"], [42]
         )
-        self.assertIn("is now enabled", ctx.send.await_args_list[-1].args[0])
+        self.assertEqual(
+            ctx.send.await_args_list[-1].args[0],
+            "Forum autopin is now enabled for <#42>",
+        )
 
         await nhmisc.NHMisc.nhmisc_forumautopin_add.callback(cog, ctx, forum)
         self.assertEqual(
             cog.config.store_for(guild)["forum_autopin_channel_ids"], [42]
         )
-        self.assertIn("is already enabled", ctx.send.await_args_list[-1].args[0])
+        self.assertEqual(
+            ctx.send.await_args_list[-1].args[0],
+            "Forum autopin is already enabled for <#42>",
+        )
 
     async def test_remove_deletes_only_the_requested_forum(self):
         cog = self.make_cog()
@@ -389,7 +395,10 @@ class ForumAutopinCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             cog.config.store_for(guild)["forum_autopin_channel_ids"], [11]
         )
-        self.assertIn("is disabled", ctx.send.await_args_list[-1].args[0])
+        self.assertEqual(
+            ctx.send.await_args_list[-1].args[0],
+            "Forum autopin is disabled for <#42>",
+        )
 
     async def test_remove_reports_forum_that_was_not_configured(self):
         cog = self.make_cog()
@@ -399,7 +408,21 @@ class ForumAutopinCommandTests(unittest.IsolatedAsyncioTestCase):
 
         await nhmisc.NHMisc.nhmisc_forumautopin_remove.callback(cog, ctx, forum)
 
-        self.assertIn("is not enabled", ctx.send.await_args_list[-1].args[0])
+        self.assertEqual(
+            ctx.send.await_args_list[-1].args[0],
+            "Forum autopin is not enabled for <#42>",
+        )
+
+    async def test_list_reports_when_nothing_is_configured(self):
+        cog = self.make_cog()
+        ctx = make_context(FakeGuild())
+
+        await nhmisc.NHMisc.nhmisc_forumautopin_list.callback(cog, ctx)
+
+        self.assertEqual(
+            ctx.send.await_args.args[0],
+            "No forums are configured for automatic starter-message pinning",
+        )
 
     async def test_send_guild_alert_reports_missing_alert_channel(self):
         cog = self.make_cog()
@@ -430,6 +453,182 @@ class ForumAutopinCommandTests(unittest.IsolatedAsyncioTestCase):
 
         allowed_mentions = channel.allowed_mentions[-1]
         self.assertIs(allowed_mentions, ALLOWED_MENTIONS_NONE)
+
+    def test_add_and_remove_use_the_forum_channel_converter(self):
+        for callback in (
+            nhmisc.NHMisc.nhmisc_forumautopin_add.callback,
+            nhmisc.NHMisc.nhmisc_forumautopin_remove.callback,
+        ):
+            self.assertEqual(
+                callback.__annotations__["channel"],
+                "ForumChannelConverter",
+            )
+
+    async def test_add_names_every_missing_permission(self):
+        cog = self.make_cog()
+        guild = FakeGuild()
+        forum = FakeForumChannel(
+            42,
+            guild=guild,
+            permissions=make_permissions(
+                view_channel=False,
+                read_message_history=False,
+                pin_messages=False,
+            ),
+        )
+
+        with self.assertRaises(UserFeedbackCheckFailure) as caught:
+            await nhmisc.NHMisc.nhmisc_forumautopin_add.callback(
+                cog, make_context(guild), forum
+            )
+
+        message = str(caught.exception)
+        self.assertIn("View Channel", message)
+        self.assertIn("Read Message History", message)
+        self.assertIn("Pin Messages", message)
+
+    async def test_add_reports_when_permissions_cannot_be_checked(self):
+        cog = self.make_cog()
+        guild = FakeGuild()
+        guild.me = None
+        forum = FakeForumChannel(42, guild=guild, permissions=make_permissions())
+
+        with self.assertRaises(UserFeedbackCheckFailure) as caught:
+            await nhmisc.NHMisc.nhmisc_forumautopin_add.callback(
+                cog, make_context(guild), forum
+            )
+
+        self.assertIn("cannot check permissions", str(caught.exception))
+
+    async def test_list_labels_a_media_channel_that_is_not_a_forum_class(self):
+        cog = self.make_cog()
+        guild = FakeGuild()
+        media = types.SimpleNamespace(
+            id=16,
+            mention="<#16>",
+            type=types.SimpleNamespace(value=16, name="media"),
+            guild=guild,
+        )
+        guild.channels[16] = media
+        cog.config.store_for(guild)["forum_autopin_channel_ids"] = [16]
+
+        ctx = make_context(guild)
+        await nhmisc.NHMisc.nhmisc_forumautopin_list.callback(cog, ctx)
+
+        self.assertIn("<#16>", ctx.send.await_args.args[0])
+        self.assertNotIn("Missing forum", ctx.send.await_args.args[0])
+
+
+class ForumChannelResolutionTests(unittest.IsolatedAsyncioTestCase):
+    def context(self, guild, *, fetch_result=None, fetch_error=None):
+        async def fetch_channel(_channel_id):
+            if fetch_error is not None:
+                raise fetch_error
+            return fetch_result
+
+        return types.SimpleNamespace(
+            guild=guild,
+            bot=types.SimpleNamespace(
+                get_channel=lambda _channel_id: None,
+                fetch_channel=fetch_channel,
+            ),
+        )
+
+    async def test_mention_and_id_resolve_a_cached_forum(self):
+        guild = FakeGuild()
+        forum = FakeForumChannel(1303124711202623550, guild=guild, name="areas-of-interest")
+        guild.channels[forum.id] = forum
+        ctx = self.context(guild)
+
+        for argument in (forum.mention, str(forum.id)):
+            channel, failure = await forum_autopin.resolve_forum_channel(ctx, argument)
+            self.assertIs(channel, forum)
+            self.assertIsNone(failure)
+
+    async def test_channel_url_and_name_resolve_a_cached_forum(self):
+        guild = FakeGuild()
+        forum = FakeForumChannel(88, guild=guild, name="areas-of-interest")
+        guild.channels[88] = forum
+        ctx = self.context(guild)
+
+        for argument in (
+            f"https://discord.com/channels/{guild.id}/88",
+            "areas-of-interest",
+            "Areas-Of-Interest",
+        ):
+            channel, failure = await forum_autopin.resolve_forum_channel(ctx, argument)
+            self.assertIs(channel, forum)
+            self.assertIsNone(failure)
+
+    async def test_uncached_type_value_is_accepted_after_fetch(self):
+        guild = FakeGuild()
+        fetched = types.SimpleNamespace(
+            id=15,
+            mention="<#15>",
+            name="topics",
+            guild=guild,
+            type=types.SimpleNamespace(value=15, name="forum"),
+        )
+        ctx = self.context(guild, fetch_result=fetched)
+
+        channel, failure = await forum_autopin.resolve_forum_channel(ctx, "15")
+
+        self.assertIs(channel, fetched)
+        self.assertIsNone(failure)
+
+    async def test_text_channel_and_thread_are_rejected(self):
+        guild = FakeGuild()
+        text = FakeTextChannel(7)
+        text.guild = guild
+        thread = types.SimpleNamespace(
+            id=9,
+            mention="<#9>",
+            guild=guild,
+            type=types.SimpleNamespace(value=11, name="public_thread"),
+        )
+        guild.channels[7] = text
+        guild.channels[9] = thread
+        ctx = self.context(guild)
+
+        _channel, text_failure = await forum_autopin.resolve_forum_channel(ctx, "<#7>")
+        _channel, thread_failure = await forum_autopin.resolve_forum_channel(ctx, "9")
+
+        self.assertIn("<#7> is not a forum channel", text_failure)
+        self.assertIn("not a forum channel", thread_failure)
+        self.assertIn("not a post", thread_failure)
+
+    async def test_missing_view_channel_is_named_when_fetch_is_forbidden(self):
+        guild = FakeGuild()
+        ctx = self.context(guild, fetch_error=discord.Forbidden())
+
+        channel, failure = await forum_autopin.resolve_forum_channel(ctx, "42")
+
+        self.assertIsNone(channel)
+        self.assertIn("View Channel", failure)
+
+    async def test_wrong_guild_url_is_not_found(self):
+        guild = FakeGuild()
+        forum = FakeForumChannel(88, guild=guild, name="areas-of-interest")
+        guild.channels[88] = forum
+        ctx = self.context(guild)
+
+        channel, failure = await forum_autopin.resolve_forum_channel(
+            ctx, "https://discord.com/channels/999/88"
+        )
+
+        self.assertIsNone(channel)
+        self.assertIn("could not find", failure)
+
+    async def test_converter_raises_the_resolution_failure(self):
+        guild = FakeGuild()
+        text = FakeTextChannel(7)
+        text.guild = guild
+        guild.channels[7] = text
+
+        with self.assertRaises(UserFeedbackCheckFailure) as caught:
+            await forum_autopin.ForumChannelConverter().convert(self.context(guild), "<#7>")
+
+        self.assertIn("is not a forum channel", str(caught.exception))
 
 
 class ForumAutopinServiceTests(unittest.IsolatedAsyncioTestCase):

@@ -690,48 +690,21 @@ class CustomCommandsLegacyPurgeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CustomCommandsCommandErrorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_listener_reports_only_unexpected_errors_from_this_cog(self):
-        listener = getattr(cog.CustomCommands, "on_command_error", None)
-        self.assertIsNotNone(listener)
-
+    async def test_command_error_is_delegated_to_operational_support(self):
+        handler = cog.CustomCommands.cog_command_error
+        self.assertIsNone(getattr(cog.CustomCommands, "on_command_error", None))
         subject = object.__new__(cog.CustomCommands)
-        subject.support = types.SimpleNamespace(
-            report_operational_error=mock.AsyncMock()
-        )
-        command = types.SimpleNamespace(qualified_name="customcom raw")
-        ctx = types.SimpleNamespace(
-            cog=subject,
-            command=command,
-            guild=types.SimpleNamespace(id=100),
-            channel=types.SimpleNamespace(id=200),
-            message=types.SimpleNamespace(id=300),
-        )
+        subject.support = types.SimpleNamespace(handle_command_error=mock.AsyncMock())
+        ctx = types.SimpleNamespace()
+        error = cog.commands.UserFeedbackCheckFailure("expected")
 
-        await listener(
-            subject,
+        await handler(subject, ctx, error)
+
+        subject.support.handle_command_error.assert_awaited_once_with(
             ctx,
-            cog.commands.UserFeedbackCheckFailure("expected"),
-        )
-        subject.support.report_operational_error.assert_not_awaited()
-
-        await listener(subject, ctx, cog.commands.UserInputError("invalid input"))
-        subject.support.report_operational_error.assert_not_awaited()
-
-        failure = RuntimeError("paginator failed")
-        await listener(subject, ctx, types.SimpleNamespace(original=failure))
-        subject.support.report_operational_error.assert_awaited_once_with(
-            guild_id=100,
+            error,
             source="CustomCommands",
-            action="customcom raw",
-            error=failure,
-            channel_id=200,
-            message_id=300,
         )
-
-        subject.support.report_operational_error.reset_mock()
-        ctx.cog = object()
-        await listener(subject, ctx, failure)
-        subject.support.report_operational_error.assert_not_awaited()
 
 
 class CustomCommandsCopyTests(unittest.IsolatedAsyncioTestCase):

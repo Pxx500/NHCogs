@@ -78,29 +78,7 @@ class CustomCommandsMigration(commands.Cog):
         ctx: commands.Context,
         error: commands.CommandError,
     ) -> None:
-        expected_types = tuple(
-            error_type
-            for name in (
-                "UserFeedbackCheckFailure",
-                "CheckFailure",
-                "BadArgument",
-                "MissingRequiredArgument",
-            )
-            if isinstance((error_type := getattr(commands, name, None)), type)
-        )
-        original = getattr(error, "original", error)
-        if isinstance(error, expected_types) or isinstance(original, expected_types):
-            return
-        if ctx.guild is None:
-            return
-        await self.support.report_operational_error(
-            guild_id=ctx.guild.id,
-            source="CustomCommands",
-            action="legacy migration command",
-            error=original,
-            channel_id=getattr(ctx.channel, "id", None),
-            message_id=getattr(ctx.message, "id", None),
-        )
+        await self.support.handle_command_error(ctx, error, source="CustomCommands")
 
     @commands.group(name="nhcustomcom", hidden=True, invoke_without_command=True)
     @commands.guild_only()

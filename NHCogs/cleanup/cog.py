@@ -28,6 +28,9 @@ class Cleanup(commands.Cog):
         self.support = support
         self.honeypot = honeypot
 
+    async def cog_command_error(self, ctx, error) -> None:
+        await self.support.handle_command_error(ctx, error, source="Cleanup")
+
     @commands.group(
         name="cleanup",
         invoke_without_command=True,

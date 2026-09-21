@@ -258,7 +258,7 @@ class OperationalErrorReporterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unexpected_prefix_command_failure_is_reported(self):
         cog = object.__new__(nhmisc.NHMisc)
-        cog.report_operational_error = mock.AsyncMock()
+        cog._support = SimpleNamespace(handle_command_error=mock.AsyncMock())
         error = RuntimeError("send failed")
         ctx = SimpleNamespace(
             guild=SimpleNamespace(id=100),
@@ -269,13 +269,10 @@ class OperationalErrorReporterTests(unittest.IsolatedAsyncioTestCase):
 
         await nhmisc.NHMisc.cog_command_error(cog, ctx, error)
 
-        cog.report_operational_error.assert_awaited_once_with(
-            guild_id=100,
+        cog._support.handle_command_error.assert_awaited_once_with(
+            ctx,
+            error,
             source="NHMisc",
-            action="nhmisc log voice",
-            error=error,
-            channel_id=200,
-            message_id=300,
         )
 
 
