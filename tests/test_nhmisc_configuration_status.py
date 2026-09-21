@@ -94,6 +94,7 @@ def field_map(embed):
 class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         nhmisc.discord.Embed = FakeEmbed
+        nhmisc.send_group_overview.__globals__["discord"].Embed = FakeEmbed
         self.channels = {}
         self.guild = types.SimpleNamespace(
             id=123,
