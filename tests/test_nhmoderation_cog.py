@@ -966,7 +966,7 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
             subject.report_operational_error.assert_not_awaited()
             self.assertEqual(
                 ctx.send.await_args.args[0],
-                "You do not have permission to use this command.",
+                "You do not have permission to use this command",
             )
 
     async def test_expected_command_error_is_sent_to_the_user(self):

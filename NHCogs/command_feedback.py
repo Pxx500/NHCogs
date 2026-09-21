@@ -12,11 +12,11 @@ log = logging.getLogger("red.NHCogs")
 UNEXPECTED_COMMAND_MESSAGE = "Something went wrong while running this command. The error was logged."
 _IGNORED_ERROR_BASES = frozenset({BaseException, Exception, object})
 _STATIC_MESSAGES = (
-    ("NoPrivateMessage", "This command cannot be used in private messages."),
-    ("PrivateMessageOnly", "This command can only be used in private messages."),
-    ("NSFWChannelRequired", "This command can only be used in an NSFW channel."),
-    ("MaxConcurrencyReached", "That command is already running."),
-    ("DisabledCommand", "That command is disabled."),
+    ("NoPrivateMessage", "This command cannot be used in private messages"),
+    ("PrivateMessageOnly", "This command can only be used in private messages"),
+    ("NSFWChannelRequired", "This command can only be used in an NSFW channel"),
+    ("MaxConcurrencyReached", "That command is already running"),
+    ("DisabledCommand", "That command is disabled"),
 )
 _PERMISSION_TYPES = (
     "MissingPermissions",
@@ -75,24 +75,24 @@ def _permission_names(error: BaseException) -> str:
 def _specific_feedback(error: BaseException) -> str | None:
     message = None
     if _matches(error, "UserFeedbackCheckFailure"):
-        message = _error_text(error) or "That command could not be completed."
+        message = _error_text(error) or "That command could not be completed"
     elif _matches(error, "MissingRequiredArgument"):
         param = getattr(error, "param", None)
         name = getattr(param, "name", None) or "argument"
-        message = f"Missing required argument `{name}`."
+        message = f"Missing required argument `{name}`"
     elif _matches(error, "BotMissingPermissions"):
         names = _permission_names(error)
         message = (
-            f"I need these permissions: {names}."
+            f"I need these permissions: {names}"
             if names
-            else "I am missing permissions required for this command."
+            else "I am missing permissions required for this command"
         )
     elif _matches(error, "CommandOnCooldown"):
         retry_after = getattr(error, "retry_after", None)
         message = (
             f"That command is on cooldown. Try again in {retry_after:.1f} seconds."
             if isinstance(retry_after, int | float)
-            else "That command is on cooldown."
+            else "That command is on cooldown"
         )
     else:
         for name, static_message in _STATIC_MESSAGES:
@@ -105,20 +105,20 @@ def _specific_feedback(error: BaseException) -> str | None:
 def _argument_message(error: BaseException) -> str | None:
     for name in _ARGUMENT_TYPES:
         if _matches(error, name):
-            return _error_text(error) or "I could not understand that argument."
+            return _error_text(error) or "I could not understand that argument"
     return None
 
 
 def _check_message(error: BaseException) -> str | None:
     for name in _PERMISSION_TYPES:
         if _matches(error, name):
-            return "You do not have permission to use this command."
+            return "You do not have permission to use this command"
     if not _matches(error, "CheckFailure"):
         return None
     text = _error_text(error)
     if text and "global check" not in text.casefold():
         return text
-    return "You do not have permission to use this command."
+    return "You do not have permission to use this command"
 
 
 def _message_for_error(error: BaseException) -> str | None:

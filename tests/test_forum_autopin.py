@@ -570,7 +570,7 @@ class ForumChannelResolutionTests(unittest.IsolatedAsyncioTestCase):
         _channel, text_failure = await forum_autopin.resolve_forum_channel(ctx, "<#7>")
         _channel, thread_failure = await forum_autopin.resolve_forum_channel(ctx, "9")
 
-        self.assertIn("<#7> is not a forum channel.", text_failure)
+        self.assertIn("<#7> is not a forum channel", text_failure)
         self.assertIn("not a forum channel", thread_failure)
         self.assertIn("not a post", thread_failure)
 

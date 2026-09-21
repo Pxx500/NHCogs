@@ -4327,7 +4327,7 @@ class NHMisc(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
     async def nhmisc(self, ctx: commands.Context) -> None:
-        """Configuration, activity, and moderation tools."""
+        """Configuration, activity, and moderation tools"""
         await send_group_overview(ctx, title="NHMisc", include_descendants=False)
 
     @nhmisc.group(name="roleanalytics", invoke_without_command=True)

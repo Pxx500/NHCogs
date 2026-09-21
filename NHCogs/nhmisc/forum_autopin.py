@@ -123,7 +123,7 @@ def _forum_by_name(ctx, argument: str):
 
 
 def _missing_forum_message(argument: str) -> str:
-    return f"I could not find a forum channel for `{argument.strip()}`."
+    return f"I could not find a forum channel for `{argument.strip()}`"
 
 
 def _not_forum_message(channel, argument: str) -> str:
@@ -137,7 +137,7 @@ def _not_forum_message(channel, argument: str) -> str:
     )
     if is_thread:
         return f"{label} is not a forum channel. Choose the forum channel, not a post."
-    return f"{label} is not a forum channel."
+    return f"{label} is not a forum channel"
 
 
 async def _fetch_channel(ctx, channel_id: int, argument: str):
@@ -148,11 +148,11 @@ async def _fetch_channel(ctx, channel_id: int, argument: str):
     try:
         channel = await fetch(channel_id)
     except discord.Forbidden:
-        return None, "I need the View Channel permission to use that forum."
+        return None, "I need the View Channel permission to use that forum"
     except discord.NotFound:
         return None, None
     except discord.HTTPException:
-        return None, f"I could not look up `{argument.strip()}`."
+        return None, f"I could not look up `{argument.strip()}`"
     if not _channel_in_context_guild(ctx, channel):
         return None, None
     return channel, None
@@ -161,7 +161,7 @@ async def _fetch_channel(ctx, channel_id: int, argument: str):
 def _named_forum(ctx, argument: str):
     channel = _forum_by_name(ctx, argument.strip())
     if channel is None:
-        return None, f"I could not find a forum channel named `{argument.strip()}`."
+        return None, f"I could not find a forum channel named `{argument.strip()}`"
     return channel, None
 
 
@@ -246,11 +246,11 @@ class ForumAutopinService:
         me = getattr(guild, "me", None)
         mention = getattr(channel, "mention", "that forum")
         if me is None:
-            return "I cannot check permissions for that forum."
+            return "I cannot check permissions for that forum"
         try:
             permissions = channel.permissions_for(me)
         except (AttributeError, TypeError):
-            return "I cannot check permissions for that forum."
+            return "I cannot check permissions for that forum"
         missing = [
             label
             for attribute, label in (
@@ -263,9 +263,9 @@ class ForumAutopinService:
         if not missing:
             return None
         if len(missing) == 1:
-            return f"I need the {missing[0]} permission in {mention}."
+            return f"I need the {missing[0]} permission in {mention}"
         listed = ", ".join(missing[:-1]) + f", and {missing[-1]}"
-        return f"I need these permissions in {mention}: {listed}."
+        return f"I need these permissions in {mention}: {listed}"
 
     async def handle_thread_create(self, thread: discord.Thread) -> None:
         """Pin the starter message for a new post in a configured forum."""

@@ -170,7 +170,7 @@ class OperationalSupportTests(unittest.IsolatedAsyncioTestCase):
             await self.support.handle_command_error(ctx, CheckFailure(), source="NHMisc")
             self.assertEqual(
                 ctx.send.await_args.args[0],
-                "You do not have permission to use this command.",
+                "You do not have permission to use this command",
             )
 
             ctx.send.reset_mock()
@@ -181,7 +181,7 @@ class OperationalSupportTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 ctx.send.await_args.args[0],
-                "You do not have permission to use this command.",
+                "You do not have permission to use this command",
             )
 
             ctx.send.reset_mock()
@@ -192,7 +192,7 @@ class OperationalSupportTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 ctx.send.await_args.args[0],
-                "Missing required argument `channel`.",
+                "Missing required argument `channel`"
             )
 
             ctx.send.reset_mock()
