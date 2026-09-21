@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Awaitable, Callable
 
 import discord
@@ -10,6 +11,9 @@ from redbot.core import commands
 
 log = logging.getLogger("red.NHCogs")
 UNEXPECTED_COMMAND_MESSAGE = "Something went wrong while running this command. The error was logged."
+_NO_REPLY = object()
+_LOCAL_CHECK_FAILURE = re.compile(r"^The check functions for command .+ failed\.$")
+_GLOBAL_CHECK_FAILURE = re.compile(r"^The global check functions for command .+ failed\.$")
 _IGNORED_ERROR_BASES = frozenset({BaseException, Exception, object})
 _STATIC_MESSAGES = (
     ("NoPrivateMessage", "This command cannot be used in private messages"),
@@ -63,12 +67,56 @@ def _error_text(error: BaseException) -> str:
     return ""
 
 
-def _permission_names(error: BaseException) -> str:
-    missing = getattr(error, "missing_permissions", ()) or ()
+def _is_permissions(value: object) -> bool:
+    permissions_type = getattr(discord, "Permissions", None)
+    if not isinstance(permissions_type, type) or permissions_type is object:
+        return False
+    return isinstance(value, permissions_type)
+
+
+def _flag_label(name: object) -> str:
+    return str(name).replace("_", " ").title()
+
+
+def _names_from_sequence(missing: object) -> list[str]:
+    if missing is None or isinstance(missing, str | bytes) or _is_permissions(missing):
+        return []
+    try:
+        items = list(missing)
+    except TypeError:
+        return []
     names = []
-    for permission in missing:
-        raw = getattr(permission, "name", permission)
-        names.append(str(raw).replace("_", " ").title())
+    for permission in items:
+        if isinstance(permission, tuple):
+            return []
+        names.append(_flag_label(getattr(permission, "name", permission)))
+    return names
+
+
+def _names_from_permissions(missing: object) -> list[str]:
+    if not _is_permissions(missing):
+        return []
+    try:
+        pairs = list(missing)
+    except TypeError:
+        return []
+    names = []
+    for item in pairs:
+        if not isinstance(item, tuple):
+            continue
+        try:
+            name, enabled = item
+        except ValueError:
+            continue
+        if enabled:
+            names.append(_flag_label(name))
+    return names
+
+
+def _permission_names(error: BaseException) -> str:
+    names = _names_from_sequence(getattr(error, "missing_permissions", None))
+    if not names:
+        names = _names_from_permissions(getattr(error, "missing", None))
     return ", ".join(names)
 
 
@@ -109,24 +157,30 @@ def _argument_message(error: BaseException) -> str | None:
     return None
 
 
-def _check_message(error: BaseException) -> str | None:
+def _check_message(error: BaseException) -> str | object | None:
     for name in _PERMISSION_TYPES:
         if _matches(error, name):
             return "You do not have permission to use this command"
     if not _matches(error, "CheckFailure"):
         return None
     text = _error_text(error)
-    if text and "global check" not in text.casefold():
-        return text
-    return "You do not have permission to use this command"
+    if _GLOBAL_CHECK_FAILURE.fullmatch(text):
+        return _NO_REPLY
+    if not text or _LOCAL_CHECK_FAILURE.fullmatch(text):
+        return "You do not have permission to use this command"
+    return text
 
 
-def _message_for_error(error: BaseException) -> str | None:
-    return _specific_feedback(error) or _argument_message(error) or _check_message(error)
+def _message_for_error(error: BaseException) -> str | object | None:
+    for resolver in (_specific_feedback, _argument_message, _check_message):
+        message = resolver(error)
+        if message is not None:
+            return message
+    return None
 
 
-def user_facing_command_message(error: BaseException) -> str | None:
-    """Return the reply for a user-facing error, or None when it is unexpected."""
+def user_facing_command_message(error: BaseException) -> str | object | None:
+    """Return the reply, ``_NO_REPLY`` for a quiet global check, or None when unexpected."""
     message = _message_for_error(error)
     if message is not None:
         return message
@@ -148,8 +202,10 @@ async def send_command_feedback(ctx, content: str) -> None:
 
 
 async def respond_to_command_error(ctx, error: BaseException, *, report: ErrorReporter | None = None) -> None:
-    """Send exactly one reply. Unexpected failures are reported, then acknowledged."""
+    """Send one reply. Global ignore and blacklist checks stay quiet."""
     message = user_facing_command_message(error)
+    if message is _NO_REPLY:
+        return
     if message is None:
         original = getattr(error, "original", None)
         reported = original if isinstance(original, BaseException) else error
