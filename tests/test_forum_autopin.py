@@ -369,13 +369,19 @@ class ForumAutopinCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             cog.config.store_for(guild)["forum_autopin_channel_ids"], [42]
         )
-        self.assertIn("is now enabled", ctx.send.await_args_list[-1].args[0])
+        self.assertEqual(
+            ctx.send.await_args_list[-1].args[0],
+            "Forum autopin is now enabled for <#42>",
+        )
 
         await nhmisc.NHMisc.nhmisc_forumautopin_add.callback(cog, ctx, forum)
         self.assertEqual(
             cog.config.store_for(guild)["forum_autopin_channel_ids"], [42]
         )
-        self.assertIn("is already enabled", ctx.send.await_args_list[-1].args[0])
+        self.assertEqual(
+            ctx.send.await_args_list[-1].args[0],
+            "Forum autopin is already enabled for <#42>",
+        )
 
     async def test_remove_deletes_only_the_requested_forum(self):
         cog = self.make_cog()
@@ -389,7 +395,10 @@ class ForumAutopinCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             cog.config.store_for(guild)["forum_autopin_channel_ids"], [11]
         )
-        self.assertIn("is disabled", ctx.send.await_args_list[-1].args[0])
+        self.assertEqual(
+            ctx.send.await_args_list[-1].args[0],
+            "Forum autopin is disabled for <#42>",
+        )
 
     async def test_remove_reports_forum_that_was_not_configured(self):
         cog = self.make_cog()
@@ -399,7 +408,21 @@ class ForumAutopinCommandTests(unittest.IsolatedAsyncioTestCase):
 
         await nhmisc.NHMisc.nhmisc_forumautopin_remove.callback(cog, ctx, forum)
 
-        self.assertIn("is not enabled", ctx.send.await_args_list[-1].args[0])
+        self.assertEqual(
+            ctx.send.await_args_list[-1].args[0],
+            "Forum autopin is not enabled for <#42>",
+        )
+
+    async def test_list_reports_when_nothing_is_configured(self):
+        cog = self.make_cog()
+        ctx = make_context(FakeGuild())
+
+        await nhmisc.NHMisc.nhmisc_forumautopin_list.callback(cog, ctx)
+
+        self.assertEqual(
+            ctx.send.await_args.args[0],
+            "No forums are configured for automatic starter-message pinning",
+        )
 
     async def test_send_guild_alert_reports_missing_alert_channel(self):
         cog = self.make_cog()

@@ -4550,7 +4550,7 @@ class NHMisc(commands.Cog):
         enabled = await self._forum_autopin.enable(ctx.guild, channel.id)
         state = "is now enabled" if enabled else "is already enabled"
         await ctx.send(
-            f"Forum autopin {state} for {channel.mention}.",
+            f"Forum autopin {state} for {channel.mention}",
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
@@ -4564,7 +4564,7 @@ class NHMisc(commands.Cog):
         disabled = await self._forum_autopin.disable(ctx.guild, channel.id)
         state = "is disabled" if disabled else "is not enabled"
         await ctx.send(
-            f"Forum autopin {state} for {channel.mention}.",
+            f"Forum autopin {state} for {channel.mention}",
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
@@ -4574,7 +4574,7 @@ class NHMisc(commands.Cog):
         configured = await self._forum_autopin.get_forum_ids(ctx.guild)
         if not configured:
             await ctx.send(
-                "No forums are configured for automatic starter-message pinning."
+                "No forums are configured for automatic starter-message pinning"
             )
             return
 
