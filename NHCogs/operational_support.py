@@ -9,6 +9,7 @@ import discord
 from redbot.core import Config, commands
 from redbot.core.data_manager import cog_data_path
 
+from .command_feedback import respond_to_command_error
 from .command_overview import channel_is_private, send_group_overview
 from .operational_errors import OperationalErrorReporter, OperationalFailure
 
@@ -94,30 +95,18 @@ class OperationalSupport(commands.Cog):
             log.exception("Could not publish operational alert for guild %s", guild_id)
 
     async def handle_command_error(self, ctx, error, *, source: str) -> None:
-        expected = tuple(
-            kind for name in (
-                "UserInputError", "UserFeedbackCheckFailure", "CheckFailure",
-                "CommandOnCooldown", "DisabledCommand", "MaxConcurrencyReached",
-            ) if isinstance((kind := getattr(commands, name, None)), type)
-            and kind not in (Exception, BaseException, object)
-        )
-        original = getattr(error, "original", error)
-        if isinstance(error, expected) or isinstance(original, expected):
-            await ctx.bot.on_command_error(ctx, original, unhandled_by_cog=True)
-            return
-        if ctx.guild is not None:
+        async def report(original: BaseException) -> None:
+            command = getattr(ctx, "command", None)
             await self.report_operational_error(
-                guild_id=ctx.guild.id, source=source,
-                action=getattr(ctx.command, "qualified_name", "unknown command"), error=original,
-                channel_id=ctx.channel.id, message_id=ctx.message.id,
+                guild_id=ctx.guild.id,
+                source=source,
+                action=getattr(command, "qualified_name", None) or "unknown command",
+                error=original,
+                channel_id=getattr(getattr(ctx, "channel", None), "id", None),
+                message_id=getattr(getattr(ctx, "message", None), "id", None),
             )
-        try:
-            await ctx.send(
-                "Something went wrong while running this command. The error was logged.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except discord.HTTPException:
-            log.exception("Could not send command error feedback")
+
+        await respond_to_command_error(ctx, error, report=report)
 
     async def cog_command_error(self, ctx, error) -> None:
         await self.handle_command_error(ctx, error, source="NHCogs")

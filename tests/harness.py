@@ -522,6 +522,7 @@ def _isolated_honeypot_modules(data_path: Path):
         "AAA3A_utils",
         "NHCogs",
         "NHCogs.command_overview",
+        "NHCogs.command_feedback",
         "NHCogs.storage",
         package_name,
         *(f"{package_name}.{name}" for name in (*load_order, "honeypot")),
@@ -844,6 +845,7 @@ def _isolated_honeypot_modules(data_path: Path):
         for name in preexisting_honeypot_names:
             sys.modules.pop(name, None)
         sys.modules.pop("NHCogs.command_overview", None)
+        sys.modules.pop("NHCogs.command_feedback", None)
         sys.modules.update(
             {
                 "discord": discord,

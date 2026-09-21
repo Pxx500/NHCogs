@@ -13,6 +13,7 @@ from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
 from redbot.core.utils.chat_formatting import pagify
 
+from ..command_feedback import respond_to_command_error
 from ..command_overview import (
     MAX_FIELD_VALUE_LENGTH,
     channel_is_private,
@@ -231,43 +232,10 @@ class NHModeration(commands.Cog):
     async def cog_command_error(
         self, ctx: commands.Context, error: commands.CommandError
     ) -> None:
-        red_handled_types = tuple(
-            error_type
-            for name in (
-                "UserFeedbackCheckFailure",
-                "UserInputError",
-                "CommandOnCooldown",
-                "DisabledCommand",
-                "MaxConcurrencyReached",
-                "NoPrivateMessage",
-                "PrivateMessageOnly",
-                "NSFWChannelRequired",
-                "BotMissingPermissions",
-            )
-            if isinstance((error_type := getattr(commands, name, None)), type)
-            and error_type not in {BaseException, Exception, object}
-        )
-        original = getattr(error, "original", error)
-        if isinstance(error, red_handled_types) or isinstance(
-            original, red_handled_types
-        ):
-            await ctx.bot.on_command_error(
-                ctx,
-                original,
-                unhandled_by_cog=True,
-            )
-            return
-        check_failure = getattr(commands, "CheckFailure", None)
-        if isinstance(check_failure, type) and (
-            isinstance(error, check_failure) or isinstance(original, check_failure)
-        ):
-            await ctx.send(
-                "You do not have permission to use this command.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-        guild = getattr(ctx, "guild", None)
-        if guild is not None:
+        async def report(original: BaseException) -> None:
+            guild = getattr(ctx, "guild", None)
+            if guild is None:
+                return
             command = getattr(ctx, "command", None)
             await self.report_operational_error(
                 guild_id=guild.id,
@@ -276,13 +244,8 @@ class NHModeration(commands.Cog):
                 channel_id=getattr(getattr(ctx, "channel", None), "id", None),
                 message_id=getattr(getattr(ctx, "message", None), "id", None),
             )
-        try:
-            await ctx.send(
-                "Something went wrong while running this command. The error was logged.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except Exception:
-            log.exception("Failed to send NHModeration command error feedback")
+
+        await respond_to_command_error(ctx, error, report=report)
 
     async def _report_background_error(
         self, guild: discord.Guild, action: str, error: BaseException

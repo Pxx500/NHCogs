@@ -17,6 +17,7 @@ import discord
 from redbot.core import commands
 from redbot.core.data_manager import cog_data_path
 
+from ..command_overview import send_group_overview
 from ..operational_errors import OperationalFailure
 from ..operational_support import NHMISC_CONFIG_IDENTIFIER, OperationalSupport
 from ..ranked_donut_chart import OTHER_COLOR, SERIES_COLORS, render_ranked_donut_chart
@@ -55,7 +56,7 @@ from .activity_storage import (
 )
 from .bot_proxy_store import BotProxyStore
 from .discord_links import MESSAGE_LINK_PATTERN
-from .forum_autopin import ForumAutopinService
+from .forum_autopin import ForumAutopinService, ForumChannelConverter, is_forum_channel
 from .gate_increment_store import (
     AchievementDefinitionConflict,
     GateIncrementAchievementPlan,
@@ -684,34 +685,7 @@ class NHMisc(commands.Cog):
         ctx: commands.Context,
         error: commands.CommandError,
     ) -> None:
-        expected_types = tuple(
-            error_type
-            for name in (
-                "UserFeedbackCheckFailure",
-                "CheckFailure",
-                "BadArgument",
-                "MissingRequiredArgument",
-                "CommandOnCooldown",
-                "DisabledCommand",
-            )
-            if isinstance((error_type := getattr(commands, name, None)), type)
-        )
-        original = getattr(error, "original", error)
-        if isinstance(error, expected_types) or isinstance(original, expected_types):
-            return
-        guild = getattr(ctx, "guild", None)
-        if guild is None:
-            return
-        command = getattr(ctx, "command", None)
-        action = getattr(command, "qualified_name", None) or "unknown command"
-        await self.report_operational_error(
-            guild_id=guild.id,
-            source="NHMisc",
-            action=action,
-            error=original,
-            channel_id=getattr(getattr(ctx, "channel", None), "id", None),
-            message_id=getattr(getattr(ctx, "message", None), "id", None),
-        )
+        await self._support.handle_command_error(ctx, error, source="NHMisc")
 
     async def _report_operational_error_for_guilds(
         self,
@@ -4059,32 +4033,31 @@ class NHMisc(commands.Cog):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    def _configuration_embed(
+    async def _send_nhmisc_overview(
         self,
-        *,
         ctx: commands.Context,
+        *,
         title: str,
-        current: tuple[str, ...],
-        action_heading: str = "Commands",
-    ) -> discord.Embed:
-        embed = discord.Embed(title=title)
-        current_value = (
-            "Run this command in a channel hidden from @everyone "
-            "to view the current configuration."
-            if self._channel_is_public(ctx)
-            else "\n".join(current)
+        current: tuple[str, ...] | None = None,
+        include_descendants: bool = True,
+    ) -> None:
+        async def send_configuration() -> None:
+            if not current:
+                return
+            embed = discord.Embed(title=title)
+            embed.add_field(
+                name="Current configuration",
+                value="\n".join(current),
+                inline=False,
+            )
+            await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+        await send_group_overview(
+            ctx,
+            send_configuration if current else None,
+            include_descendants=include_descendants,
+            title=title,
         )
-        embed.add_field(
-            name="Current configuration",
-            value=current_value,
-            inline=False,
-        )
-        embed.add_field(
-            name=action_heading,
-            value=self._format_direct_commands(ctx, expand_singletons=True),
-            inline=False,
-        )
-        return embed
 
     @staticmethod
     def _channel_allows_everyone(
@@ -4354,31 +4327,8 @@ class NHMisc(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
     async def nhmisc(self, ctx: commands.Context) -> None:
-        """Configure NHMisc."""
-        embed = discord.Embed(
-            title="NHMisc",
-            description="Configuration, activity, and moderation tools.",
-        )
-        embed.add_field(
-            name="Commands",
-            value=self._format_direct_commands(
-                ctx,
-                preferred_order=(
-                    "log",
-                    "errors",
-                    "vcjumping",
-                    "forumautopin",
-                    "stickyroles",
-                    "activity",
-                    "usermodstats",
-                    "topyapper",
-                    "roleanalytics",
-                ),
-                expand_singletons=True,
-            ),
-            inline=False,
-        )
-        await ctx.send(embed=embed)
+        """Configuration, activity, and moderation tools"""
+        await send_group_overview(ctx, title="NHMisc", include_descendants=False)
 
     @nhmisc.group(name="roleanalytics", invoke_without_command=True)
     @commands.has_permissions(manage_messages=True)
@@ -4390,8 +4340,8 @@ class NHMisc(commands.Cog):
             if state.source_member_count is not None
             else "Not available"
         )
-        embed = self._configuration_embed(
-            ctx=ctx,
+        await self._send_nhmisc_overview(
+            ctx,
             title="Role analytics",
             current=(
                 f"Enabled: {'Yes' if state.enabled else 'No'}",
@@ -4399,7 +4349,6 @@ class NHMisc(commands.Cog):
                 f"Members in snapshot: {member_count}",
             ),
         )
-        await ctx.send(embed=embed)
 
     @nhmisc_roleanalytics.command(name="disable")
     async def nhmisc_roleanalytics_disable(self, ctx: commands.Context) -> None:
@@ -4412,8 +4361,8 @@ class NHMisc(commands.Cog):
     async def nhmisc_log(self, ctx: commands.Context) -> None:
         """Configure NHMisc logging destinations."""
         config = await self.config.guild(ctx.guild).all()
-        embed = self._configuration_embed(
-            ctx=ctx,
+        await self._send_nhmisc_overview(
+            ctx,
             title="Logging",
             current=(
                 "Voice: "
@@ -4428,7 +4377,6 @@ class NHMisc(commands.Cog):
                 ),
             ),
         )
-        await ctx.send(embed=embed)
 
     async def _show_log_destination(
         self,
@@ -4541,16 +4489,14 @@ class NHMisc(commands.Cog):
     async def nhmisc_vcjumping(self, ctx: commands.Context) -> None:
         """Configure voice channel jumping detection."""
         config = await self.config.guild(ctx.guild).all()
-        embed = self._configuration_embed(
-            ctx=ctx,
+        await self._send_nhmisc_overview(
+            ctx,
             title="VC jumping detection",
             current=(
                 f"Channel entries: {config['vcjumping_visit_count']}",
                 f"Time window: {config['vcjumping_window_seconds']} seconds",
             ),
-            action_heading="Change it",
         )
-        await ctx.send(embed=embed)
 
     @nhmisc_vcjumping.command(name="visits")
     async def nhmisc_vcjumping_visits(self, ctx: commands.Context, count: int) -> None:
@@ -4584,18 +4530,17 @@ class NHMisc(commands.Cog):
         if len(configured) > 10:
             forum_lines.append(f"...and {len(configured) - 10} more")
 
-        embed = self._configuration_embed(
-            ctx=ctx,
+        await self._send_nhmisc_overview(
+            ctx,
             title="Forum autopin",
             current=tuple(forum_lines),
         )
-        await ctx.send(embed=embed)
 
     @nhmisc_forumautopin.command(name="add")
     async def nhmisc_forumautopin_add(
         self,
         ctx: commands.Context,
-        channel: discord.ForumChannel,
+        channel: ForumChannelConverter,
     ) -> None:
         """Enable starter-message autopinning in a forum."""
         missing_permission = self._forum_autopin.missing_permissions(ctx.guild, channel)
@@ -4605,7 +4550,7 @@ class NHMisc(commands.Cog):
         enabled = await self._forum_autopin.enable(ctx.guild, channel.id)
         state = "is now enabled" if enabled else "is already enabled"
         await ctx.send(
-            f"Forum autopin {state} for {channel.mention}.",
+            f"Forum autopin {state} for {channel.mention}",
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
@@ -4613,13 +4558,13 @@ class NHMisc(commands.Cog):
     async def nhmisc_forumautopin_remove(
         self,
         ctx: commands.Context,
-        channel: discord.ForumChannel,
+        channel: ForumChannelConverter,
     ) -> None:
         """Disable starter-message autopinning in a forum."""
         disabled = await self._forum_autopin.disable(ctx.guild, channel.id)
         state = "is disabled" if disabled else "is not enabled"
         await ctx.send(
-            f"Forum autopin {state} for {channel.mention}.",
+            f"Forum autopin {state} for {channel.mention}",
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
@@ -4629,14 +4574,14 @@ class NHMisc(commands.Cog):
         configured = await self._forum_autopin.get_forum_ids(ctx.guild)
         if not configured:
             await ctx.send(
-                "No forums are configured for automatic starter-message pinning."
+                "No forums are configured for automatic starter-message pinning"
             )
             return
 
         lines = ["Forums with starter-message autopinning:"]
         for channel_id in configured:
             channel = ctx.guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
-            if isinstance(channel, discord.ForumChannel):
+            if is_forum_channel(channel):
                 lines.append(f"- {channel.mention} (`{channel_id}`)")
             else:
                 lines.append(f"- Missing forum (`{channel_id}`)")
@@ -5853,12 +5798,11 @@ class NHMisc(commands.Cog):
         if len(role_ids) > 10:
             role_lines.append(f"...and {len(role_ids) - 10} more")
 
-        embed = self._configuration_embed(
-            ctx=ctx,
+        await self._send_nhmisc_overview(
+            ctx,
             title="Sticky roles",
             current=tuple(role_lines),
         )
-        await ctx.send(embed=embed)
 
     @nhmisc_stickyroles.command(name="add")
     async def nhmisc_stickyroles_add(self, ctx: commands.Context, role: str) -> None:
@@ -5958,8 +5902,8 @@ class NHMisc(commands.Cog):
         """Configure sticky role debug logging."""
         await self._require_manage_guild(ctx)
         config = await self.config.guild(ctx.guild).all()
-        embed = self._configuration_embed(
-            ctx=ctx,
+        await self._send_nhmisc_overview(
+            ctx,
             title="Sticky role debug logging",
             current=(
                 "Enabled: "
@@ -5970,9 +5914,7 @@ class NHMisc(commands.Cog):
                     config["maintenance_channel"]
                 ),
             ),
-            action_heading="Change it",
         )
-        await ctx.send(embed=embed)
 
     @nhmisc_stickyroles_debuglogging.command(name="toggle")
     async def nhmisc_stickyroles_debuglogging_toggle(
@@ -5997,8 +5939,8 @@ class NHMisc(commands.Cog):
         else:
             history_label = f"{history_days} days"
 
-        embed = self._configuration_embed(
-            ctx=ctx,
+        await self._send_nhmisc_overview(
+            ctx,
             title="Activity tracking",
             current=(
                 "Summary channel: "
@@ -6007,7 +5949,6 @@ class NHMisc(commands.Cog):
                 f"History retention: {history_label}",
             ),
         )
-        await ctx.send(embed=embed)
 
     @nhmisc_activity.command(name="channel")
     async def nhmisc_activity_channel(
