@@ -128,6 +128,103 @@ class OperationalSupportTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.support.send_moderation_log(self.guild, "private log"))
         self.assertEqual(await self.support.operational_errors.active_count(self.guild.id), 1)
 
+    async def test_command_errors_always_reply_and_do_not_delegate_to_red(self):
+        self.support.report_operational_error = mock.AsyncMock()
+        ctx = SimpleNamespace(
+            guild=self.guild,
+            channel=SimpleNamespace(id=20),
+            message=SimpleNamespace(id=30),
+            command=SimpleNamespace(qualified_name="nhmisc forumautopin add"),
+            send=mock.AsyncMock(),
+            bot=SimpleNamespace(on_command_error=mock.AsyncMock()),
+        )
+        feedback = UserFeedbackCheckFailure("I need the View Channel permission in <#1>.")
+
+        await self.support.handle_command_error(ctx, feedback, source="NHMisc")
+
+        ctx.send.assert_awaited_once_with(
+            "I need the View Channel permission in <#1>.",
+            allowed_mentions=ALLOWED_MENTIONS_NONE,
+        )
+        ctx.bot.on_command_error.assert_not_awaited()
+        self.support.report_operational_error.assert_not_awaited()
+
+        class CheckFailure(Exception):
+            pass
+
+        class MissingRequiredArgument(Exception):
+            def __init__(self, param):
+                self.param = param
+
+        class BadArgument(Exception):
+            pass
+
+        with mock.patch.multiple(
+            nhmisc.commands,
+            CheckFailure=CheckFailure,
+            MissingRequiredArgument=MissingRequiredArgument,
+            BadArgument=BadArgument,
+            create=True,
+        ):
+            ctx.send.reset_mock()
+            await self.support.handle_command_error(ctx, CheckFailure(), source="NHMisc")
+            self.assertEqual(
+                ctx.send.await_args.args[0],
+                "You do not have permission to use this command.",
+            )
+
+            ctx.send.reset_mock()
+            await self.support.handle_command_error(
+                ctx,
+                CheckFailure("One global check failed."),
+                source="NHMisc",
+            )
+            self.assertEqual(
+                ctx.send.await_args.args[0],
+                "You do not have permission to use this command.",
+            )
+
+            ctx.send.reset_mock()
+            await self.support.handle_command_error(
+                ctx,
+                MissingRequiredArgument(SimpleNamespace(name="channel")),
+                source="NHMisc",
+            )
+            self.assertEqual(
+                ctx.send.await_args.args[0],
+                "Missing required argument `channel`.",
+            )
+
+            ctx.send.reset_mock()
+            await self.support.handle_command_error(
+                ctx,
+                BadArgument('Channel "general" not found.'),
+                source="NHMisc",
+            )
+            self.assertEqual(ctx.send.await_args.args[0], 'Channel "general" not found.')
+
+        ctx.send.reset_mock()
+        failure = RuntimeError("send failed")
+        await self.support.handle_command_error(
+            ctx,
+            SimpleNamespace(original=failure),
+            source="NHMisc",
+        )
+        self.support.report_operational_error.assert_awaited_once()
+        self.assertIs(self.support.report_operational_error.await_args.kwargs["error"], failure)
+        self.assertEqual(
+            ctx.send.await_args.args[0],
+            "Something went wrong while running this command. The error was logged.",
+        )
+        ctx.bot.on_command_error.assert_not_awaited()
+
+        ctx.guild = None
+        ctx.send.reset_mock()
+        self.support.report_operational_error.reset_mock()
+        await self.support.handle_command_error(ctx, RuntimeError("dm"), source="NHMisc")
+        self.support.report_operational_error.assert_not_awaited()
+        self.assertIn("Something went wrong", ctx.send.await_args.args[0])
+
     async def test_maintainer_deletion_does_not_require_nhmisc_or_clear_other_settings(self):
         settings = self.error_config.store_for(self.guild)
         settings.update(error_maintainer_id=73, moderation_log_channel=42)

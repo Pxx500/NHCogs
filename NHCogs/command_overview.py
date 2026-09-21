@@ -31,6 +31,8 @@ def group_overview_is_private(ctx: commands.Context) -> bool:
 
 def descendant_leaf_commands(parent: commands.Group) -> typing.Iterator[typing.Any]:
     for child in getattr(parent, "commands", ()):
+        if getattr(child, "hidden", False):
+            continue
         descendants = getattr(child, "commands", ())
         if descendants:
             yield from descendant_leaf_commands(child)
@@ -88,7 +90,7 @@ async def send_group_overview(
 
     command = ctx.command
     overview_title = title or command.name.replace("_", " ").title()
-    description = command.short_doc
+    description = getattr(command, "short_doc", "") or ""
     if not include_descendants:
         description = (
             f"{description}\n\n"
@@ -113,10 +115,14 @@ async def send_group_overview(
     )
     command_lines = []
     for child in children:
+        if getattr(child, "hidden", False):
+            continue
+        signature = getattr(child, "signature", "") or ""
+        short_doc = getattr(child, "short_doc", "") or ""
         usage = f"{ctx.clean_prefix}{child.qualified_name}"
-        if child.signature:
-            usage = f"{usage} {child.signature}"
-        command_lines.append(f"`{usage}` - {child.short_doc}")
+        if isinstance(signature, str) and signature.strip():
+            usage = f"{usage} {signature.strip()}"
+        command_lines.append(f"`{usage}` - {short_doc}")
 
     chunks: list[str] = []
     current: list[str] = []

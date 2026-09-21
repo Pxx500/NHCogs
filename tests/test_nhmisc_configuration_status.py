@@ -76,6 +76,21 @@ def command_metadata(
     )
 
 
+def sent_embeds(ctx):
+    return [call.kwargs["embed"] for call in ctx.send.await_args_list]
+
+
+def configuration_embed(ctx):
+    for embed in sent_embeds(ctx):
+        if any(field.name == "Current configuration" for field in embed.fields):
+            return embed
+    raise AssertionError("configuration embed was not sent")
+
+
+def field_map(embed):
+    return {field.name: field.value for field in embed.fields}
+
+
 class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         nhmisc.discord.Embed = FakeEmbed
@@ -171,7 +186,7 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(await self.cog.config.guild(self.guild).maintenance_channel())
 
-    async def test_group_commands_expand_singletons_to_the_first_branch(self):
+    async def test_group_commands_list_leaf_commands_and_skip_hidden(self):
         self.ctx.author.guild_permissions.manage_guild = True
         terminal = command_metadata(
             "nhmisc stickyroles debuglogging toggle",
@@ -190,14 +205,11 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
 
         await nhmisc.NHMisc.nhmisc_stickyroles.callback(self.cog, self.ctx)
 
-        embed = self.ctx.send.await_args.kwargs["embed"]
-        fields = {field.name: field.value for field in embed.fields}
-        commands = fields["Commands"]
+        commands = field_map(self.ctx.send.await_args.kwargs["embed"])["Commands"]
         self.assertIn(
             "?nhmisc stickyroles debuglogging toggle <enabled>",
             commands,
         )
-        self.assertNotIn("`?nhmisc stickyroles debuglogging`", commands)
         self.assertNotIn("internal", commands)
 
     async def test_log_group_shows_all_destinations_and_complete_commands(self):
@@ -226,15 +238,16 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
 
         await nhmisc.NHMisc.nhmisc_log.callback(self.cog, self.ctx)
 
-        embed = self.ctx.send.await_args.kwargs["embed"]
-        fields = {field.name: field.value for field in embed.fields}
+        embed = configuration_embed(self.ctx)
+        fields = field_map(embed)
         self.assertEqual(embed.title, "Logging")
         self.assertIn("Voice: <#41>", fields["Current configuration"])
         self.assertIn("Alert: <#42>", fields["Current configuration"])
         self.assertIn("Maintenance: Not configured", fields["Current configuration"])
         self.assertIn("Moderation: Not configured", fields["Current configuration"])
+        commands = field_map(self.ctx.send.await_args.kwargs["embed"])["Commands"]
         for log_type in ("voice", "alert", "maintenance", "moderation"):
-            self.assertIn(f"!nhmisc log {log_type} [channel]", fields["Commands"])
+            self.assertIn(f"!nhmisc log {log_type} [channel]", commands)
 
     async def test_log_child_without_channel_shows_current_destination(self):
         self.channels[42] = types.SimpleNamespace(mention="<#42>")
@@ -326,9 +339,12 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         await nhmisc.NHMisc.nhmisc_log.callback(self.cog, self.ctx)
 
         embed = self.ctx.send.await_args.kwargs["embed"]
-        fields = {field.name: field.value for field in embed.fields}
+        fields = field_map(embed)
         self.assertNotIn("<#42>", fields["Current configuration"])
-        self.assertIn("hidden from @everyone", fields["Current configuration"])
+        self.assertIn(
+            "Current values are hidden in channels visible to regular members",
+            fields["Current configuration"],
+        )
         self.assertIn("!nhmisc log alert [channel]", fields["Commands"])
 
     async def test_activity_group_shows_channel_retention_and_useful_commands(self):
@@ -343,10 +359,8 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
 
         await nhmisc.NHMisc.nhmisc_activity.callback(self.cog, self.ctx)
 
-        self.ctx.send.assert_awaited_once()
-        embed = self.ctx.send.await_args.kwargs["embed"]
-        fields = {field.name: field.value for field in embed.fields}
-        current = fields["Current configuration"]
+        embed = configuration_embed(self.ctx)
+        current = field_map(embed)["Current configuration"]
         self.assertEqual(embed.title, "Activity tracking")
         self.assertIn("<#73>", current)
         self.assertIn("Detail retention: 30 days", current)
@@ -378,10 +392,8 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
 
         await nhmisc.NHMisc.nhmisc_vcjumping.callback(self.cog, self.ctx)
 
-        self.ctx.send.assert_awaited_once()
-        embed = self.ctx.send.await_args.kwargs["embed"]
-        fields = {field.name: field.value for field in embed.fields}
-        current = fields["Current configuration"]
+        embed = configuration_embed(self.ctx)
+        current = field_map(embed)["Current configuration"]
         self.assertEqual(embed.title, "VC jumping detection")
         self.assertIn("Channel entries: 5", current)
         self.assertIn("Time window: 12 seconds", current)
@@ -400,10 +412,8 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
 
         await nhmisc.NHMisc.nhmisc_forumautopin.callback(self.cog, self.ctx)
 
-        self.ctx.send.assert_awaited_once()
-        embed = self.ctx.send.await_args.kwargs["embed"]
-        fields = {field.name: field.value for field in embed.fields}
-        current = fields["Current configuration"]
+        embed = configuration_embed(self.ctx)
+        current = field_map(embed)["Current configuration"]
         self.assertEqual(embed.title, "Forum autopin")
         self.assertIn("Configured forums: 2", current)
         self.assertIn("<#88>", current)
@@ -417,10 +427,7 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
 
         await nhmisc.NHMisc.nhmisc_forumautopin.callback(self.cog, self.ctx)
 
-        embed = self.ctx.send.await_args.kwargs["embed"]
-        current = next(
-            field.value for field in embed.fields if field.name == "Current configuration"
-        )
+        current = field_map(configuration_embed(self.ctx))["Current configuration"]
         self.assertIn("Configured forum is missing", current)
         self.assertNotIn("505", current)
 
@@ -437,10 +444,8 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
 
         await nhmisc.NHMisc.nhmisc_stickyroles.callback(self.cog, self.ctx)
 
-        self.ctx.send.assert_awaited_once()
-        embed = self.ctx.send.await_args.kwargs["embed"]
-        fields = {field.name: field.value for field in embed.fields}
-        current = fields["Current configuration"]
+        embed = configuration_embed(self.ctx)
+        current = field_map(embed)["Current configuration"]
         self.assertEqual(embed.title, "Sticky roles")
         self.assertIn("Configured roles: 2", current)
         self.assertIn("<@&100>", current)
@@ -458,10 +463,7 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
 
         await nhmisc.NHMisc.nhmisc_stickyroles.callback(self.cog, self.ctx)
 
-        embed = self.ctx.send.await_args.kwargs["embed"]
-        current = next(
-            field.value for field in embed.fields if field.name == "Current configuration"
-        )
+        current = field_map(configuration_embed(self.ctx))["Current configuration"]
         self.assertIn("Configured role is missing", current)
         self.assertNotIn("606", current)
 
@@ -479,10 +481,8 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
             self.cog, self.ctx
         )
 
-        self.ctx.send.assert_awaited_once()
-        embed = self.ctx.send.await_args.kwargs["embed"]
-        fields = {field.name: field.value for field in embed.fields}
-        current = fields["Current configuration"]
+        embed = configuration_embed(self.ctx)
+        current = field_map(embed)["Current configuration"]
         self.assertEqual(embed.title, "Sticky role debug logging")
         self.assertIn("Enabled: Yes", current)
         self.assertIn("Maintenance channel: <#321>", current)
@@ -598,10 +598,8 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
 
         await nhmisc.NHMisc.nhmisc_roleanalytics.callback(self.cog, self.ctx)
 
-        self.ctx.send.assert_awaited_once()
-        embed = self.ctx.send.await_args.kwargs["embed"]
-        fields = {field.name: field.value for field in embed.fields}
-        current = fields["Current configuration"]
+        embed = configuration_embed(self.ctx)
+        current = field_map(embed)["Current configuration"]
         self.assertEqual(embed.title, "Role analytics")
         self.assertIn("Enabled: Yes", current)
         self.assertIn("Status: Ready", current)
@@ -637,9 +635,11 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         embed = self.ctx.send.await_args.kwargs["embed"]
         fields = {field.name: field.value for field in embed.fields}
         self.assertEqual(embed.title, "NHMisc")
+        self.assertIn("Run a category below to see its complete command list", embed.description)
         commands = fields["Commands"]
         self.assertIn("!nhmisc log", commands)
-        self.assertIn("!nhmisc roleanalytics disable", commands)
+        self.assertIn("!nhmisc roleanalytics", commands)
+        self.assertNotIn("disable", commands)
         self.assertIn("!nhmisc activity", commands)
         self.assertNotIn("retention", commands)
         self.assertNotIn("!nhmisc status", commands)

@@ -969,7 +969,7 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                 "You do not have permission to use this command.",
             )
 
-    async def test_expected_command_error_is_delegated_to_red(self):
+    async def test_expected_command_error_is_sent_to_the_user(self):
         class CheckFailure(Exception):
             pass
 
@@ -1005,12 +1005,12 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await module.NHModeration.cog_command_error(subject, ctx, error)
 
-            bot.on_command_error.assert_awaited_once_with(
-                ctx,
-                error,
-                unhandled_by_cog=True,
-            )
+            bot.on_command_error.assert_not_awaited()
             subject.report_operational_error.assert_not_awaited()
+            self.assertEqual(
+                ctx.send.await_args.args[0],
+                "Run this command in a private channel",
+            )
 
     async def test_operational_error_is_written_to_python_logger(self):
         with loaded_nhmoderation() as module:

@@ -405,42 +405,12 @@ class CustomCommands(commands.Cog):
                 user_id,
             )
 
-    @commands.Cog.listener()
-    async def on_command_error(
+    async def cog_command_error(
         self,
         ctx: commands.Context,
         error: commands.CommandError,
     ) -> None:
-        if getattr(ctx, "cog", None) is not self:
-            return
-        expected_types = tuple(
-            error_type
-            for name in (
-                "UserFeedbackCheckFailure",
-                "UserInputError",
-                "CheckFailure",
-                "CommandOnCooldown",
-                "DisabledCommand",
-                "MaxConcurrencyReached",
-            )
-            if isinstance((error_type := getattr(commands, name, None)), type)
-        )
-        original = getattr(error, "original", error)
-        if isinstance(error, expected_types) or isinstance(original, expected_types):
-            return
-        guild = getattr(ctx, "guild", None)
-        if guild is None:
-            return
-        command = getattr(ctx, "command", None)
-        action = getattr(command, "qualified_name", None) or "unknown command"
-        await self.support.report_operational_error(
-            guild_id=guild.id,
-            source="CustomCommands",
-            action=action,
-            error=original,
-            channel_id=getattr(getattr(ctx, "channel", None), "id", None),
-            message_id=getattr(getattr(ctx, "message", None), "id", None),
-        )
+        await self.support.handle_command_error(ctx, error, source="CustomCommands")
 
     async def _log_moderation_action(self, guild, content: str) -> None:
         try:
