@@ -28,6 +28,9 @@ class TicketProjection(Protocol):
 
     async def create_thread(self, ticket: Ticket, message_id: int) -> int: ...
 
+
+    async def prompt_draft_decision(self, ticket: Ticket) -> None: ...
+
     async def edit_ticket(
         self,
         ticket: Ticket,

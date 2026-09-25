@@ -22,6 +22,7 @@ def _install_discord_stub():
         primary = "primary"
         success = "success"
         danger = "danger"
+        secondary = "secondary"
 
     class View:
         def __init__(self, *, timeout=None):
@@ -32,16 +33,40 @@ def _install_discord_stub():
             self.children.append(item)
 
     class Button:
-        def __init__(self, *, label, style, custom_id):
+        def __init__(self, *, label, style, custom_id=None):
             self.label = label
             self.style = style
             self.custom_id = custom_id
             self.callback = None
 
+    class Select:
+        def __init__(
+            self,
+            *,
+            placeholder,
+            options,
+            min_values,
+            max_values,
+            required,
+        ):
+            self.placeholder = placeholder
+            self.options = options
+            self.min_values = min_values
+            self.max_values = max_values
+            self.required = required
+            self.values = []
+
+    class SelectOption:
+        def __init__(self, *, label, value):
+            self.label = label
+            self.value = value
+
     ui.View = View
     ui.Button = Button
+    ui.Select = Select
     discord.ui = ui
     discord.ButtonStyle = ButtonStyle
+    discord.SelectOption = SelectOption
     discord.Interaction = type("Interaction", (), {})
     sys.modules["discord"] = discord
     sys.modules["discord.ui"] = ui
@@ -74,18 +99,25 @@ class FakeResponse:
     def __init__(self):
         self.defer_calls = 0
         self.messages = []
+        self.message_kwargs = []
+        self.edit_calls = []
 
     async def defer(self):
         self.defer_calls += 1
 
-    async def send_message(self, content, *, ephemeral):
+    async def send_message(self, content, *, ephemeral, **kwargs):
         self.messages.append((content, ephemeral))
+        self.message_kwargs.append(kwargs)
+
+    async def edit_message(self, **kwargs):
+        self.edit_calls.append(kwargs)
 
 
 class FakeInteraction:
     def __init__(self):
         self.response = FakeResponse()
         self.followup = types.SimpleNamespace(send=mock.AsyncMock())
+        self.edit_original_response = mock.AsyncMock()
 
 
 class TicketControlsTests(unittest.IsolatedAsyncioTestCase):
@@ -219,3 +251,70 @@ class TicketControlsTests(unittest.IsolatedAsyncioTestCase):
             ticket_views.presentation.COULD_NOT_COMPLETE_ACTION,
             ephemeral=True,
         )
+
+
+class GitHubLifecycleControlsTests(unittest.IsolatedAsyncioTestCase):
+    def actor(self, *, participant=True, staff=False):
+        return types.SimpleNamespace(
+            can_participate=participant or staff,
+            can_manage_messages=staff,
+        )
+
+
+
+    async def test_draft_keep_retains_only_remove_and_remove_defers_cleanup(self):
+        actor = self.actor(participant=False, staff=True)
+        calls = []
+
+        async def keep_ticket(public_token, selected_actor):
+            calls.append(("keep", public_token, selected_actor))
+            return types.SimpleNamespace(success=True, response=None)
+
+        async def remove_ticket(public_token, selected_actor):
+            calls.append(("remove", public_token, selected_actor))
+            return types.SimpleNamespace(success=True, response=None)
+
+        view = ticket_views.DraftTicketControls(
+            "opaque-ticket-token",
+            actor_factory=lambda _interaction: actor,
+            keep_ticket=keep_ticket,
+            remove_ticket=remove_ticket,
+        )
+        self.assertEqual(
+            [(button.label, button.custom_id) for button in view.children],
+            [
+                (
+                    ticket_views.presentation.KEEP_TICKET,
+                    "githubtickets:opaque-ticket-token:keep_draft_ticket",
+                ),
+                (
+                    ticket_views.presentation.REMOVE_TICKET,
+                    "githubtickets:opaque-ticket-token:remove_draft_ticket",
+                ),
+            ],
+        )
+        keep_interaction = FakeInteraction()
+
+        await view.children[0].callback(keep_interaction)
+
+        retained = keep_interaction.response.edit_calls[0]["view"]
+        self.assertEqual(
+            [(button.label, button.custom_id) for button in retained.children],
+            [
+                (
+                    ticket_views.presentation.REMOVE_TICKET,
+                    "githubtickets:opaque-ticket-token:remove_draft_ticket",
+                )
+            ],
+        )
+        remove_interaction = FakeInteraction()
+        await retained.children[0].callback(remove_interaction)
+
+        self.assertEqual(
+            calls,
+            [
+                ("keep", "opaque-ticket-token", actor),
+                ("remove", "opaque-ticket-token", actor),
+            ],
+        )
+        self.assertEqual(remove_interaction.response.defer_calls, 1)

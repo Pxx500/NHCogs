@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import importlib
 import sys
 import types
@@ -194,6 +193,7 @@ class FakeResponse:
         self.modals = []
         self.edits = []
         self.defer_calls = 0
+        self.defer_kwargs = []
 
     async def send_message(self, content=None, **kwargs):
         self.messages.append((content, kwargs))
@@ -207,8 +207,9 @@ class FakeResponse:
     async def edit_message(self, **kwargs):
         self.edits.append(kwargs)
 
-    async def defer(self):
+    async def defer(self, **kwargs):
         self.defer_calls += 1
+        self.defer_kwargs.append(kwargs)
 
 
 class FakeInteraction:
@@ -282,13 +283,34 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         store=None,
         actor=None,
         create_ticket=None,
+        *,
         count_candidates=None,
+        fetch_pull_request=None,
+        expected_organization="NewHorizons",
     ):
         store = store or FakeStore()
         actor = actor or coordinator.TicketActor(10, True, False)
 
-        async def successful_create(_request, _actor):
+        async def successful_create(_request, _actor, _pull_request):
             return coordinator.TicketResult(True)
+
+        async def successful_fetch(_owner, _repository, number):
+            return types.SimpleNamespace(
+                pull_request_id=700,
+                number=number,
+                repository_id=100,
+                repository_full_name="NewHorizons/NHCogs",
+                title="Fetched pull request",
+                url=f"https://github.com/NewHorizons/NHCogs/pull/{number}",
+                state="open",
+                draft=False,
+                merged=False,
+                author_id=900,
+                author_login="author",
+                updated_at=datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc),
+                labels=(),
+                assignees=(),
+            )
 
         async def no_candidates(_guild_id, _category_ids, _excluded_user_ids):
             return 0
@@ -300,10 +322,13 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             support=mock.Mock(report_operational_error=mock.AsyncMock()),
             guild_id=100,
             create_ticket=create_ticket or successful_create,
+            fetch_pull_request=fetch_pull_request or successful_fetch,
+            expected_organization=expected_organization,
             actor_factory=lambda _interaction: actor,
-            count_automatic_candidates=count_candidates or no_candidates,
         )
-        return interaction.response.modals[0]
+        modal = interaction.response.modals[0]
+        modal.pr_link.value = "https://github.com/NewHorizons/NHCogs/pull/42"
+        return modal
 
     async def test_dashboard_is_exact_ephemeral_profile_interface(self):
         view, _store, _actor = self.make_dashboard()
@@ -522,21 +547,24 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [label.text for label in modal.children],
             [
-                presentation.GITHUB_USERNAME,
+                presentation.GITHUB_PROFILE_LINK,
                 presentation.CATEGORIES,
                 presentation.ALLOW_AUTOMATIC_PINGS,
             ],
         )
         self.assertEqual(
             [label.description for label in modal.children],
-            [presentation.GITHUB_USERNAME_DESCRIPTION, None, None],
+            [presentation.GITHUB_PROFILE_LINK_DESCRIPTION, None, None],
         )
-        self.assertIsInstance(modal.github_username, discord.ui.TextInput)
-        self.assertFalse(modal.github_username.required)
-        self.assertEqual(modal.github_username.default, "old-name")
+        self.assertIsInstance(modal.github_profile_link, discord.ui.TextInput)
+        self.assertFalse(modal.github_profile_link.required)
         self.assertEqual(
-            modal.github_username.max_length,
-            presentation.MAX_GITHUB_USERNAME_LENGTH,
+            modal.github_profile_link.default,
+            "https://github.com/old-name",
+        )
+        self.assertEqual(
+            modal.github_profile_link.max_length,
+            presentation.MAX_GITHUB_PROFILE_LINK_LENGTH,
         )
         self.assertIsInstance(modal.categories, discord.ui.Select)
         self.assertFalse(modal.categories.required)
@@ -552,7 +580,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(modal.automatic_pings, discord.ui.Checkbox)
         self.assertTrue(modal.automatic_pings.default)
 
-        modal.github_username.value = "  new-name  "
+        modal.github_profile_link.value = "  https://github.com/new-name/  "
         modal.categories.values = ["2"]
         modal.automatic_pings.value = True
         submit_interaction = FakeInteraction()
@@ -564,7 +592,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "guild_id": 100,
                     "user_id": 10,
-                    "github_username": "  new-name  ",
+                    "github_username": "new-name",
                     "category_ids": (2,),
                     "automatic_pings": True,
                     "updated_at": datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc),
@@ -573,6 +601,48 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(submit_interaction.response.defer_calls, 1)
         self.assertEqual(submit_interaction.response.messages, [])
+
+    async def test_profile_can_select_categories_from_both_lists(self):
+        store = FakeStore()
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        store.categories = [models.Category(i, 100, f"category-{i:02}", now) for i in range(1, 51)]
+        view, _, _ = self.make_dashboard(store)
+        interaction = FakeInteraction()
+        await view.children[0].callback(interaction)
+        modal = interaction.response.modals[0]
+        selectors = [label.component for label in modal.children if isinstance(label.component, discord.ui.Select)]
+        self.assertEqual(len(selectors), 2)
+        self.assertEqual([len(select.options) for select in selectors], [25, 25])
+        selectors[0].values = ["1"]
+        selectors[1].values = ["50"]
+        modal.automatic_pings.value = True
+        await modal.on_submit(FakeInteraction())
+        self.assertEqual(store.save_calls[0]["category_ids"], (1, 50))
+
+    async def test_edit_profile_rejects_non_profile_github_links_without_saving(self):
+        view, store, _actor = self.make_dashboard()
+        open_interaction = FakeInteraction()
+        await view.children[0].callback(open_interaction)
+        modal = open_interaction.response.modals[0]
+
+        for invalid_value in (
+            "some-user",
+            "http://github.com/some-user",
+            "https://github.com/some-user/repositories",
+            "https://example.com/some-user",
+        ):
+            with self.subTest(value=invalid_value):
+                modal.github_profile_link.value = invalid_value
+                submit_interaction = FakeInteraction()
+
+                await modal.on_submit(submit_interaction)
+
+                content, kwargs = submit_interaction.response.messages[0]
+                self.assertEqual(content, presentation.INVALID_GITHUB_PROFILE_LINK)
+                self.assertTrue(kwargs["ephemeral"])
+                self.assertFalse(kwargs["allowed_mentions"].users)
+
+        self.assertEqual(store.save_calls, [])
 
     async def test_edit_profile_rejects_automatic_pings_without_categories(self):
         view, store, _actor = self.make_dashboard()
@@ -619,9 +689,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         await view.children[0].callback(profile_interaction)
         profile_select = profile_interaction.response.modals[0].categories
 
-        ticket_select = (await self.open_ticket_modal(_store)).categories
-
-        for select in (profile_select, ticket_select):
+        for select in (profile_select,):
             self.assertTrue(select.disabled)
             self.assertEqual(len(select.options), 1)
             self.assertEqual(select.options[0].label, presentation.NO_CATEGORIES_CONFIGURED)
@@ -767,6 +835,22 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(back["view"], dashboard)
         self.assertFalse(back["allowed_mentions"].users)
 
+    async def test_category_browser_can_select_fiftieth_category(self):
+        store = FakeStore()
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        store.categories = [models.Category(i, 100, f"label-{i:02}", now) for i in range(1, 51)]
+        dashboard, _, _ = self.make_dashboard(store)
+        opening = FakeInteraction()
+        await dashboard.children[1].callback(opening)
+        browser = opening.response.edits[0]["view"]
+        selects = [item for item in browser.children if isinstance(item, discord.ui.Select)]
+        self.assertEqual(len(selects), 2)
+        self.assertEqual([len(select.options) for select in selects], [25, 25])
+        selects[1].values = ["50"]
+        selection = FakeInteraction()
+        await selects[1].callback(selection)
+        self.assertIn("label-50", selection.response.edits[0]["content"])
+
     async def test_developer_profile_helper_uses_exact_non_pinging_variants(self):
         store = FakeStore()
         now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
@@ -812,7 +896,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(profile_interaction.response.messages[0][1]["ephemeral"])
         self.assertFalse(profile_interaction.response.messages[0][1]["allowed_mentions"].users)
 
-    async def test_new_ticket_modal_has_all_five_exact_components_at_once(self):
+    async def test_new_ticket_modal_has_link_and_existing_routing_components(self):
         store = FakeStore()
         now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
         store.categories = [
@@ -824,9 +908,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [label.text for label in modal.children],
             [
-                presentation.PR_TITLE,
                 presentation.PR_LINK,
-                presentation.CATEGORIES,
                 presentation.PING_BEHAVIOR,
                 presentation.DIRECT_REVIEWER,
             ],
@@ -839,25 +921,14 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             [label.description for label in modal.children],
             [
                 None,
-                None,
-                None,
                 presentation.SELECT_PING_BEHAVIOR,
                 "Ignored unless a direct ping option is selected",
             ],
         )
-        self.assertIsInstance(modal.pr_title, discord.ui.TextInput)
-        self.assertTrue(modal.pr_title.required)
-        self.assertEqual(modal.pr_title.placeholder, presentation.ENTER_PR_TITLE)
-        self.assertEqual(modal.pr_title.max_length, presentation.MAX_PR_TITLE_LENGTH)
         self.assertIsInstance(modal.pr_link, discord.ui.TextInput)
         self.assertTrue(modal.pr_link.required)
         self.assertEqual(modal.pr_link.placeholder, presentation.ENTER_PR_LINK)
         self.assertEqual(modal.pr_link.max_length, presentation.MAX_PR_URL_LENGTH)
-        self.assertIsInstance(modal.categories, discord.ui.Select)
-        self.assertFalse(modal.categories.required)
-        self.assertEqual(modal.categories.min_values, 0)
-        self.assertEqual(modal.categories.max_values, 25)
-        self.assertEqual(len(modal.categories.options), 25)
         self.assertIsInstance(modal.ping_behavior, discord.ui.RadioGroup)
         self.assertTrue(modal.ping_behavior.required)
         self.assertEqual(
@@ -886,9 +957,9 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             for category_id in range(1, 26)
         ]
         modal = await self.open_ticket_modal(store)
-        selected = [option.label for option in modal.categories.options[: modal.categories.max_values]]
+        selected = [category.name for category in store.categories]
         content = presentation.ticket_message(
-            title="x" * modal.pr_title.max_length,
+            title="x" * presentation.MAX_PR_TITLE_LENGTH,
             url="x" * modal.pr_link.max_length,
             author_mention="<@18446744073709551615>",
             categories=selected,
@@ -897,11 +968,10 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertLessEqual(len(content), presentation.DISCORD_MESSAGE_LIMIT)
-        self.assertLess(modal.categories.max_values, len(modal.categories.options))
-        self.assertGreater(
+        self.assertLessEqual(
             len(
                 presentation.ticket_message(
-                    title="x" * modal.pr_title.max_length,
+                    title="x" * presentation.MAX_PR_TITLE_LENGTH,
                     url="x" * modal.pr_link.max_length,
                     author_mention="<@18446744073709551615>",
                     categories=[*selected, "x" * 100],
@@ -912,17 +982,17 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             presentation.DISCORD_MESSAGE_LIMIT,
         )
 
-    async def test_new_ticket_maps_all_routing_modes_and_only_trims_title_and_link(self):
+    async def test_new_ticket_fetches_canonical_link_once_and_preserves_routing(self):
         now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
         cases = (
-            (models.RoutingMode.NONE, (), (), "", None),
-            (models.RoutingMode.AUTOMATIC, ("1",), (), "rendering", None),
-            (models.RoutingMode.DIRECT_WAIT, (), (types.SimpleNamespace(id=99),), "", 99),
+            (models.RoutingMode.NONE, ("1",), (), "bug, rendering", None),
+            (models.RoutingMode.AUTOMATIC, ("1",), (), "bug, rendering", None),
+            (models.RoutingMode.DIRECT_WAIT, ("1",), (types.SimpleNamespace(id=99),), "bug, rendering", 99),
             (
                 models.RoutingMode.DIRECT_AUTOMATIC,
                 ("1",),
                 (types.SimpleNamespace(id=99),),
-                "rendering",
+                "bug, rendering",
                 99,
             ),
         )
@@ -933,329 +1003,227 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
                 store.categories = [models.Category(1, 100, "rendering", now)]
                 actor = coordinator.TicketActor(10, True, False)
                 create_calls = []
+                fetch_calls = []
 
-                async def create_ticket(request, selected_actor, calls=create_calls):
-                    calls.append((request, selected_actor))
+                async def create_ticket(
+                    request,
+                    selected_actor,
+                    pull_request,
+                    calls=create_calls,
+                ):
+                    calls.append((request, selected_actor, pull_request))
                     return coordinator.TicketResult(True)
 
-                modal = await self.open_ticket_modal(store, actor, create_ticket)
-                modal.pr_title.value = "  title  "
-                modal.pr_link.value = "  not validated  "
-                modal.categories.values = list(category_values)
+                async def fetch_pull_request(
+                    owner,
+                    repository,
+                    number,
+                    calls=fetch_calls,
+                ):
+                    calls.append((owner, repository, number))
+                    return types.SimpleNamespace(
+                        pull_request_id=700,
+                        number=42,
+                        repository_id=100,
+                        repository_full_name="NewHorizons/NHCogs",
+                        title="Fetched pull request",
+                        url="https://github.com/NewHorizons/NHCogs/pull/42",
+                        state="open",
+                        draft=False,
+                        merged=False,
+                        author_id=900,
+                        author_login="author",
+                        updated_at=now,
+                        labels=("bug", "rendering", "discord-ticket"),
+                        assignees=("reviewer",),
+                    )
+
+                modal = await self.open_ticket_modal(
+                    store,
+                    actor,
+                    create_ticket,
+                    fetch_pull_request=fetch_pull_request,
+                )
+                modal.pr_link.value = (
+                    "https://github.com/NewHorizons/NHCogs/pull/42"
+                )
                 modal.ping_behavior.value = mode.value
                 modal.direct_reviewer.values = list(reviewer_values)
                 submit_interaction = FakeInteraction()
 
                 await modal.on_submit(submit_interaction)
 
-                request, selected_actor = create_calls[0]
+                request, selected_actor, pull_request = create_calls[0]
                 self.assertEqual(selected_actor, actor)
+                self.assertEqual(
+                    fetch_calls,
+                    [("NewHorizons", "NHCogs", 42)],
+                )
                 self.assertEqual(
                     request,
                     coordinator.TicketRequest(
                         guild_id=100,
-                        pr_title="title",
-                        pr_url="not validated",
+                        pr_title="Fetched pull request",
+                        pr_url="https://github.com/NewHorizons/NHCogs/pull/42",
                         category_display=display,
                         routing_mode=mode,
                         direct_target_id=target_id,
                         category_ids=tuple(int(value) for value in category_values),
                     ),
                 )
+                self.assertEqual(
+                    pull_request,
+                    models.GitHubPullRequest(
+                        repository_id=100,
+                        pr_number=42,
+                        github_pr_id=700,
+                        github_author_id=900,
+                        repository_full_name="NewHorizons/NHCogs",
+                        url="https://github.com/NewHorizons/NHCogs/pull/42",
+                        title="Fetched pull request",
+                        github_author_login="author",
+                        draft=False,
+                        open=True,
+                        labels=("bug", "rendering", "discord-ticket"),
+                        github_updated_at=now,
+                        assignees=("reviewer",),
+                    ),
+                )
                 self.assertEqual(submit_interaction.response.defer_calls, 1)
+                self.assertEqual(
+                    submit_interaction.response.defer_kwargs,
+                    [{"ephemeral": True}],
+                )
                 self.assertEqual(submit_interaction.response.messages, [])
 
-    async def test_multiple_automatic_categories_open_confirmation_before_create(self):
+    async def test_new_ticket_rejects_invalid_links_and_ineligible_pull_requests(self):
+        invalid_links = (
+            "http://github.com/NewHorizons/NHCogs/pull/42",
+            "https://www.github.com/NewHorizons/NHCogs/pull/42",
+            "https://github.com/NewHorizons/NHCogs/issues/42",
+            "https://github.com/NewHorizons/NHCogs/pull/42/",
+            "https://github.com/NewHorizons/NHCogs/pull/42?diff=split",
+        )
+        for link in invalid_links:
+            with self.subTest(link=link):
+                fetch_pull_request = mock.AsyncMock()
+                create_ticket = mock.AsyncMock()
+                modal = await self.open_ticket_modal(
+                    create_ticket=create_ticket,
+                    fetch_pull_request=fetch_pull_request,
+                )
+                modal.pr_link.value = link
+                modal.ping_behavior.value = models.RoutingMode.NONE.value
+                interaction = FakeInteraction()
+
+                await modal.on_submit(interaction)
+
+                self.assertEqual(
+                    interaction.response.messages[0][0],
+                    presentation.COULD_NOT_CREATE_TICKET,
+                )
+                fetch_pull_request.assert_not_awaited()
+                create_ticket.assert_not_awaited()
+
         now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
-        store = FakeStore()
-        store.categories = [
-            models.Category(1, 100, "rendering", now),
-            models.Category(2, 100, "mixins", now),
-        ]
-        actor = coordinator.TicketActor(10, True, False)
-        create_calls = []
-        count_calls = []
+        cases = (
+            {
+                "repository_full_name": "OtherOrganization/NHCogs",
+            },
+            {"state": "closed"},
+            {"draft": True},
+        )
+        for overrides in cases:
+            with self.subTest(snapshot=overrides):
+                values = {
+                    "pull_request_id": 700,
+                    "number": 42,
+                    "repository_id": 100,
+                    "repository_full_name": "NewHorizons/NHCogs",
+                    "title": "Fetched pull request",
+                    "url": "https://github.com/NewHorizons/NHCogs/pull/42",
+                    "state": "open",
+                    "draft": False,
+                    "merged": False,
+                    "author_id": 900,
+                    "author_login": "author",
+                    "updated_at": now,
+                    "labels": (),
+                    "assignees": (),
+                }
+                values.update(overrides)
+                fetch_pull_request = mock.AsyncMock(
+                    return_value=types.SimpleNamespace(**values)
+                )
+                create_ticket = mock.AsyncMock()
+                modal = await self.open_ticket_modal(
+                    create_ticket=create_ticket,
+                    fetch_pull_request=fetch_pull_request,
+                )
+                modal.ping_behavior.value = models.RoutingMode.NONE.value
+                interaction = FakeInteraction()
 
-        async def create_ticket(request, selected_actor):
-            create_calls.append((request, selected_actor))
-            return coordinator.TicketResult(True)
+                await modal.on_submit(interaction)
 
-        async def count_candidates(guild_id, category_ids, excluded_user_ids):
-            count_calls.append((guild_id, category_ids, excluded_user_ids))
-            return 4
+                fetch_pull_request.assert_awaited_once_with(
+                    "NewHorizons",
+                    "NHCogs",
+                    42,
+                )
+                self.assertEqual(
+                    interaction.followup.send.await_args.args[0],
+                    presentation.COULD_NOT_CREATE_TICKET,
+                )
+                self.assertNotIn("OtherOrganization", str(interaction.followup.send.await_args))
+                create_ticket.assert_not_awaited()
 
+        fetch_pull_request = mock.AsyncMock(side_effect=RuntimeError("private failure"))
+        create_ticket = mock.AsyncMock()
         modal = await self.open_ticket_modal(
-            store,
-            actor,
-            create_ticket,
-            count_candidates,
+            create_ticket=create_ticket,
+            fetch_pull_request=fetch_pull_request,
         )
-        modal.pr_title.value = "title"
-        modal.pr_link.value = "link"
-        modal.categories.values = ["1", "2"]
-        modal.ping_behavior.value = models.RoutingMode.AUTOMATIC.value
-        submit_interaction = FakeInteraction()
-
-        await modal.on_submit(submit_interaction)
-
-        self.assertEqual(create_calls, [])
-        self.assertEqual(count_calls, [(100, (1, 2), frozenset({10}))])
-        content, kwargs = submit_interaction.response.messages[0]
-        self.assertEqual(
-            content,
-            "Confirm categories\n4 people can receive automatic pings for all selected categories",
-        )
-        self.assertTrue(kwargs["ephemeral"])
-        self.assertFalse(kwargs["allowed_mentions"].users)
-        view = kwargs["view"]
-        self.assertEqual(view.categories.min_values, 1)
-        self.assertEqual(view.categories.max_values, 2)
-        self.assertEqual(
-            [(option.label, option.value, option.default) for option in view.categories.options],
-            [
-                ("rendering", "1", True),
-                ("mixins", "2", True),
-            ],
-        )
-        self.assertEqual(
-            [item.label for item in view.children[1:]],
-            [presentation.BACK, presentation.CREATE_TICKET],
-        )
-
-    async def test_confirmation_updates_count_creates_filtered_ticket_and_prefills_back(self):
-        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
-        store = FakeStore()
-        store.categories = [
-            models.Category(1, 100, "rendering", now),
-            models.Category(2, 100, "mixins", now),
-        ]
-        actor = coordinator.TicketActor(10, True, False)
-        create_calls = []
-
-        async def create_ticket(request, selected_actor):
-            create_calls.append((request, selected_actor))
-            return coordinator.TicketResult(True)
-
-        async def count_candidates(_guild_id, category_ids, _excluded_user_ids):
-            return len(category_ids)
-
-        modal = await self.open_ticket_modal(
-            store,
-            actor,
-            create_ticket,
-            count_candidates,
-        )
-        modal.pr_title.value = "title"
-        modal.pr_link.value = "link"
-        modal.categories.values = ["1", "2"]
-        modal.ping_behavior.value = models.RoutingMode.DIRECT_AUTOMATIC.value
-        modal.direct_reviewer.values = [types.SimpleNamespace(id=99)]
-        submit_interaction = FakeInteraction()
-        await modal.on_submit(submit_interaction)
-        view = submit_interaction.response.messages[0][1]["view"]
-
-        view.categories.values = ["2"]
-        select_interaction = FakeInteraction()
-        await view.categories.callback(select_interaction)
-        self.assertEqual(
-            select_interaction.response.edits[0]["content"],
-            "Confirm categories\n1 person can receive automatic pings for all selected categories",
-        )
-        self.assertEqual(
-            [option.default for option in view.categories.options],
-            [False, True],
-        )
-
-        back_button = next(
-            item
-            for item in view.children
-            if getattr(item, "label", None) == presentation.BACK
-        )
-        back_interaction = FakeInteraction()
-        await back_button.callback(back_interaction)
-        reopened = back_interaction.response.modals[0]
-        self.assertEqual(reopened.pr_title.default, "title")
-        self.assertEqual(reopened.pr_link.default, "link")
-        self.assertEqual(
-            [option.default for option in reopened.categories.options],
-            [False, True],
-        )
-        self.assertEqual(
-            [option.default for option in reopened.ping_behavior.options],
-            [False, False, False, True],
-        )
-        self.assertEqual(reopened.direct_reviewer.default_values[0].id, 99)
-
-        create_button = next(
-            item
-            for item in view.children
-            if getattr(item, "label", None) == presentation.CREATE_TICKET
-        )
-        create_interaction = FakeInteraction()
-        await create_button.callback(create_interaction)
-        self.assertEqual(create_interaction.response.defer_calls, 1)
-        self.assertEqual(create_calls, [])
-
-    async def test_confirmation_create_uses_defaults_and_prevents_double_submit(self):
-        class YieldingStore(FakeStore):
-            async def list_categories(self, guild_id):
-                await asyncio.sleep(0)
-                return await super().list_categories(guild_id)
-
-        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
-        store = YieldingStore()
-        store.categories = [
-            models.Category(1, 100, "rendering", now),
-            models.Category(2, 100, "mixins", now),
-        ]
-        actor = coordinator.TicketActor(10, True, False)
-        create_calls = []
-
-        async def create_ticket(request, selected_actor):
-            await asyncio.sleep(0)
-            create_calls.append((request, selected_actor))
-            return coordinator.TicketResult(True)
-
-        modal = await self.open_ticket_modal(store, actor, create_ticket)
-        modal.pr_title.value = "title"
-        modal.pr_link.value = "link"
-        modal.categories.values = ["1", "2"]
-        modal.ping_behavior.value = models.RoutingMode.AUTOMATIC.value
-        submit_interaction = FakeInteraction()
-        await modal.on_submit(submit_interaction)
-        view = submit_interaction.response.messages[0][1]["view"]
-        create_button = next(
-            item
-            for item in view.children
-            if getattr(item, "label", None) == presentation.CREATE_TICKET
-        )
-        first = FakeInteraction()
-        second = FakeInteraction()
-
-        await asyncio.gather(
-            create_button.callback(first),
-            create_button.callback(second),
-        )
-
-        self.assertEqual(len(create_calls), 1)
-        request, selected_actor = create_calls[0]
-        self.assertEqual(selected_actor, actor)
-        self.assertEqual(request.category_ids, (1, 2))
-        self.assertEqual(request.category_display, "rendering, mixins")
-
-    async def test_confirmation_selection_creates_only_the_visible_defaults(self):
-        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
-        store = FakeStore()
-        store.categories = [
-            models.Category(1, 100, "rendering", now),
-            models.Category(2, 100, "mixins", now),
-        ]
-        create_calls = []
-
-        async def create_ticket(request, actor):
-            create_calls.append((request, actor))
-            return coordinator.TicketResult(True)
-
-        modal = await self.open_ticket_modal(store, create_ticket=create_ticket)
-        modal.pr_title.value = "title"
-        modal.pr_link.value = "link"
-        modal.categories.values = ["1", "2"]
-        modal.ping_behavior.value = models.RoutingMode.AUTOMATIC.value
-        submit_interaction = FakeInteraction()
-        await modal.on_submit(submit_interaction)
-        view = submit_interaction.response.messages[0][1]["view"]
-        view.categories.values = ["2"]
-        await view.categories.callback(FakeInteraction())
-        create_button = next(
-            item
-            for item in view.children
-            if getattr(item, "label", None) == presentation.CREATE_TICKET
-        )
-
-        await create_button.callback(FakeInteraction())
-
-        self.assertEqual(create_calls[0][0].category_ids, (2,))
-        self.assertEqual(create_calls[0][0].category_display, "mixins")
-
-    async def test_direct_automatic_count_excludes_author_and_direct_target(self):
-        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
-        store = FakeStore()
-        store.categories = [
-            models.Category(1, 100, "rendering", now),
-            models.Category(2, 100, "mixins", now),
-        ]
-        count_candidates = mock.AsyncMock(return_value=1)
-        modal = await self.open_ticket_modal(
-            store,
-            count_candidates=count_candidates,
-        )
-        modal.pr_title.value = "title"
-        modal.pr_link.value = "link"
-        modal.categories.values = ["1", "2"]
-        modal.ping_behavior.value = models.RoutingMode.DIRECT_AUTOMATIC.value
-        modal.direct_reviewer.values = [types.SimpleNamespace(id=99)]
-
-        await modal.on_submit(FakeInteraction())
-
-        count_candidates.assert_awaited_once_with(
-            100,
-            (1, 2),
-            frozenset({10, 99}),
-        )
-
-    async def test_confirmation_revalidates_categories_before_refreshing_count(self):
-        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
-        store = FakeStore()
-        store.categories = [
-            models.Category(1, 100, "rendering", now),
-            models.Category(2, 100, "mixins", now),
-        ]
-        count_candidates = mock.AsyncMock(return_value=2)
-        modal = await self.open_ticket_modal(
-            store,
-            count_candidates=count_candidates,
-        )
-        modal.pr_title.value = "title"
-        modal.pr_link.value = "link"
-        modal.categories.values = ["1", "2"]
-        modal.ping_behavior.value = models.RoutingMode.AUTOMATIC.value
-        submit_interaction = FakeInteraction()
-        await modal.on_submit(submit_interaction)
-        view = submit_interaction.response.messages[0][1]["view"]
-        store.categories = [store.categories[0]]
-        view.categories.values = ["1", "2"]
+        modal.ping_behavior.value = models.RoutingMode.NONE.value
         interaction = FakeInteraction()
 
-        await view.categories.callback(interaction)
+        await modal.on_submit(interaction)
+
+        self.assertEqual(
+            interaction.followup.send.await_args.args[0],
+            presentation.COULD_NOT_CREATE_TICKET,
+        )
+        self.assertNotIn("private failure", str(interaction.followup.send.await_args))
+        create_ticket.assert_not_awaited()
+
+    async def test_new_ticket_rejects_foreign_organization_before_fetch(self):
+        fetch_pull_request = mock.AsyncMock()
+        create_ticket = mock.AsyncMock()
+        modal = await self.open_ticket_modal(
+            create_ticket=create_ticket,
+            fetch_pull_request=fetch_pull_request,
+            expected_organization="NewHorizons",
+        )
+        modal.pr_link.value = "https://github.com/OtherOrganization/NHCogs/pull/42"
+        modal.ping_behavior.value = models.RoutingMode.NONE.value
+        interaction = FakeInteraction()
+
+        await modal.on_submit(interaction)
 
         self.assertEqual(
             interaction.response.messages[0][0],
-            presentation.CATEGORY_NO_LONGER_EXISTS,
+            presentation.COULD_NOT_CREATE_TICKET,
         )
-        self.assertEqual(count_candidates.await_count, 1)
+        fetch_pull_request.assert_not_awaited()
+        create_ticket.assert_not_awaited()
 
-    async def test_confirmation_reports_when_no_one_matches_all_categories(self):
-        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
-        store = FakeStore()
-        store.categories = [
-            models.Category(1, 100, "rendering", now),
-            models.Category(2, 100, "mixins", now),
-        ]
-        modal = await self.open_ticket_modal(store)
-        modal.pr_title.value = "title"
-        modal.pr_link.value = "link"
-        modal.categories.values = ["1", "2"]
-        modal.ping_behavior.value = models.RoutingMode.AUTOMATIC.value
-        submit_interaction = FakeInteraction()
 
-        await modal.on_submit(submit_interaction)
 
-        self.assertEqual(
-            submit_interaction.response.messages[0][0],
-            "Confirm categories\nNo one can receive automatic pings for all selected categories",
-        )
 
-    async def test_direct_self_review_is_rejected_before_category_confirmation(self):
+
+
+
+
+    async def test_direct_self_review_is_rejected_before_creation(self):
         now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
         store = FakeStore()
         store.categories = [
@@ -1268,11 +1236,8 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             store,
             coordinator.TicketActor(10, True, False),
             create_ticket,
-            count_candidates,
+            count_candidates=count_candidates,
         )
-        modal.pr_title.value = "title"
-        modal.pr_link.value = "link"
-        modal.categories.values = ["1", "2"]
         modal.ping_behavior.value = models.RoutingMode.DIRECT_AUTOMATIC.value
         modal.direct_reviewer.values = [types.SimpleNamespace(id=10)]
         interaction = FakeInteraction()
@@ -1292,14 +1257,11 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         store.categories = [models.Category(1, 100, "rendering", now)]
         create_calls = []
 
-        async def create_ticket(request, actor):
+        async def create_ticket(request, actor, _pull_request):
             create_calls.append((request, actor))
             return coordinator.TicketResult(True)
 
         modal = await self.open_ticket_modal(store, create_ticket=create_ticket)
-        modal.pr_title.value = "title"
-        modal.pr_link.value = "link"
-        modal.categories.values = ["1"]
         modal.ping_behavior.value = models.RoutingMode.AUTOMATIC.value
         modal.direct_reviewer.values = [types.SimpleNamespace(id=10)]
         interaction = FakeInteraction()
@@ -1316,7 +1278,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         actor = coordinator.TicketActor(10, True, False)
         create_calls = []
 
-        async def create_ticket(request, selected_actor):
+        async def create_ticket(request, selected_actor, _pull_request):
             create_calls.append((request, selected_actor))
             return coordinator.TicketResult(False, "coordinator error")
 
@@ -1327,10 +1289,10 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         automatic.ping_behavior.value = models.RoutingMode.AUTOMATIC.value
         automatic_interaction = FakeInteraction()
         await automatic.on_submit(automatic_interaction)
-        self.assertEqual(
-            automatic_interaction.response.messages[0][0],
-            presentation.AUTOMATIC_REQUIRES_CATEGORY,
+        automatic_interaction.followup.send.assert_awaited_once_with(
+            "coordinator error", ephemeral=True,
         )
+        self.assertEqual(create_calls[0][0].category_ids, ())
 
         direct = await modal()
         direct.ping_behavior.value = models.RoutingMode.DIRECT_WAIT.value
@@ -1339,17 +1301,6 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             direct_interaction.response.messages[0][0],
             presentation.DIRECT_REQUIRES_REVIEWER,
-        )
-
-        stale = await modal()
-        stale.ping_behavior.value = models.RoutingMode.AUTOMATIC.value
-        stale.categories.values = ["1"]
-        store.categories = []
-        stale_interaction = FakeInteraction()
-        await stale.on_submit(stale_interaction)
-        self.assertEqual(
-            stale_interaction.response.messages[0][0],
-            presentation.CATEGORY_NO_LONGER_EXISTS,
         )
 
         store.categories = [models.Category(1, 100, "rendering", now)]
@@ -1363,4 +1314,4 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             "coordinator error",
             ephemeral=True,
         )
-        self.assertEqual(len(create_calls), 1)
+        self.assertEqual(len(create_calls), 2)

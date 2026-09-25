@@ -29,8 +29,14 @@ _QUERY_SECRET_PATTERN = re.compile(
     r"[^&#\s]+"
 )
 _NAMED_SECRET_PATTERN = re.compile(
-    r"(?i)\b((?:access[_-]?token|api[_-]?key|password|secret|token)\s*[:=]\s*)"
+    r"(?i)\b((?:access[_-]?token|api[_-]?key|client[_-]?secret|"
+    r"webhook[_-]?secret|private[_-]?key|password|secret|token)\s*[:=]\s*)"
     r"(?:['\"])?[^\s,'\";]+(?:['\"])?"
+)
+_PRIVATE_KEY_BLOCK_PATTERN = re.compile(
+    r"-----BEGIN (?P<label>(?:RSA |EC |OPENSSH )?PRIVATE KEY)-----.*?"
+    r"-----END (?P=label)-----",
+    re.DOTALL,
 )
 _DISCORD_TOKEN_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_-])(?:mfa\.[A-Za-z0-9_-]{20,}|"
@@ -66,9 +72,10 @@ class LogDump:
 
 
 def redact_log_text(text: str) -> str:
+    redacted = _PRIVATE_KEY_BLOCK_PATTERN.sub(_REDACTED, text)
     redacted = _AUTHORIZATION_PATTERN.sub(
         lambda match: match.group(1) + match.group(2) + _REDACTED,
-        text,
+        redacted,
     )
     redacted = _BEARER_PATTERN.sub("Bearer " + _REDACTED, redacted)
     redacted = _WEBHOOK_PATTERN.sub(lambda match: match.group(1) + _REDACTED, redacted)
