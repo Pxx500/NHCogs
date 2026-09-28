@@ -219,6 +219,27 @@ class WorkflowDraftTests(unittest.TestCase):
 
 
 class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
+    def test_large_access_list_fits_one_discord_embed_field(self):
+        ids = tuple(1_000_000_000_000_000_000 + value for value in range(50))
+        session = workflows.WorkflowSession(
+            SimpleNamespace(session_timeout_seconds=30 * 60),
+            thread=SimpleNamespace(
+                id=10, guild=SimpleNamespace(get_member=lambda _: None),
+            ),
+            opener=SimpleNamespace(id=200),
+            draft=workflows.WorkflowDraft(
+                "limited", responses=[catalog.ResponseDraft("response")],
+                access=catalog.AccessRules(user_ids=ids),
+            ),
+        )
+        access_fields = [
+            item["value"] for item in session.render_embed().fields
+            if item["name"] == "Access"
+        ]
+        self.assertEqual(len(access_fields), 1)
+        self.assertLessEqual(len(access_fields[0]), 1_024)
+        self.assertTrue(access_fields[0].endswith("..."))
+
     def test_dashboard_shows_hide_preview_without_other_restrictions(self):
         session = workflows.WorkflowSession(
             SimpleNamespace(session_timeout_seconds=30 * 60),

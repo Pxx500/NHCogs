@@ -25,6 +25,7 @@ from .presentation import present_exact_response
 SESSION_TIMEOUT_SECONDS = 30 * 60
 RESPONSES_PER_PAGE = 5
 DASHBOARD_PREVIEW_LENGTH = 160
+DISCORD_EMBED_FIELD_LIMIT = 1_024
 WEIGHT_COMMAND_PARTS = 3
 INDEX_COMMAND_PARTS = 2
 MOVE_COMMAND_PARTS = 3
@@ -707,7 +708,11 @@ class WorkflowSession:
         if access.private_only:
             lines.append("Private channels only")
         lines.append("Hide preview: " + ("On" if access.hide_preview else "Off"))
-        return "\n".join(lines)
+        summary = "\n".join(lines)
+        return (
+            summary if len(summary) <= DISCORD_EMBED_FIELD_LIMIT
+            else summary[: DISCORD_EMBED_FIELD_LIMIT - 3] + "..."
+        )
 
     def _signature_label(self) -> str:
         if not self.draft.responses:
