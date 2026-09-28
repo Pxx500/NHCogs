@@ -264,6 +264,8 @@ class CustomCommandRuntime:
             return
         if command is None:
             return
+        if not self.can_use(command, ctx.guild, ctx.author, ctx.channel):
+            return
         now = time.monotonic()
         invocation_channel_key = self._invocation_channel_key(command, ctx)
         if self._cooldown_deadlines.get(invocation_channel_key, 0.0) > now:
@@ -311,6 +313,23 @@ class CustomCommandRuntime:
             await self._catalog.record_usage(message.guild.id, message.channel.id, command.name)
         except Exception as error:
             await self._report(ctx, "record custom command usage", error)
+
+    @staticmethod
+    def can_use(command, guild, author, channel) -> bool:
+        access = command.access
+        if not access.restricted:
+            return True
+        private = False
+        if access.private_only:
+            private = (
+                isinstance(channel, discord.Thread) and channel.is_private()
+            ) or not channel.permissions_for(guild.default_role).view_channel
+        return access.allows(
+            user_id=author.id,
+            role_ids={role.id for role in author.roles},
+            channel_id=channel.id,
+            private=private,
+        )
 
     async def _send_cooldown_feedback(self, ctx: Any, retry_after: float) -> None:
         seconds = max(1, int(retry_after + 0.999))

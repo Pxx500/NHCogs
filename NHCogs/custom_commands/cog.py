@@ -665,7 +665,9 @@ class CustomCommands(commands.Cog):
     async def cc_raw(self, ctx: commands.Context, command: str) -> None:
         """Show exact stored responses without triggering mentions."""
         stored = await self.catalog.get(ctx.guild.id, command)
-        if stored is None:
+        if stored is None or not CustomCommandRuntime.can_use(
+            stored, ctx.guild, ctx.author, ctx.channel,
+        ):
             await ctx.send(COMMAND_NOT_FOUND_MESSAGE)
             return
         presentations = tuple(
@@ -704,7 +706,7 @@ class CustomCommands(commands.Cog):
     @customcom.command(name="search")
     async def cc_search(self, ctx: commands.Context, *, query: str) -> None:
         """Search custom command names with fuzzy matching."""
-        stored = await self.catalog.list_commands(ctx.guild.id)
+        stored = self._listed_commands(ctx, await self.catalog.list_commands(ctx.guild.id))
         by_name = {command.name: command for command in stored}
         matches = rapidfuzz.process.extract(
             query,
@@ -734,7 +736,20 @@ class CustomCommands(commands.Cog):
                 f"`{ctx.clean_prefix}customcom create <name>` to add one."
             )
             return
-        await self._send_command_list(ctx, stored, title="Custom Command List")
+        visible = self._listed_commands(ctx, stored)
+        if not visible:
+            await ctx.send("No custom commands are available here")
+            return
+        await self._send_command_list(ctx, visible, title="Custom Command List")
+
+    @staticmethod
+    def _listed_commands(ctx, stored):
+        return tuple(
+            command for command in stored
+            if CustomCommandRuntime.can_use(
+                command, ctx.guild, ctx.author, ctx.channel,
+            )
+        )
 
     async def _send_command_list(
         self,
@@ -745,10 +760,13 @@ class CustomCommands(commands.Cog):
     ) -> None:
         lines = []
         for command in stored:
-            preview = " ".join(command.responses[0].content.split())
-            if len(preview) > PREVIEW_LENGTH:
-                preview = preview[: PREVIEW_LENGTH - 3] + "..."
-            preview = discord.utils.escape_markdown(preview)
+            if command.access.hide_preview:
+                preview = "[redacted]"
+            else:
+                preview = " ".join(command.responses[0].content.split())
+                if len(preview) > PREVIEW_LENGTH:
+                    preview = preview[: PREVIEW_LENGTH - 3] + "..."
+                preview = discord.utils.escape_markdown(preview)
             name = discord.utils.escape_markdown(
                 f"{ctx.clean_prefix}{command.name}"
             )
@@ -794,7 +812,9 @@ class CustomCommands(commands.Cog):
     async def cc_show(self, ctx: commands.Context, command_name: str) -> None:
         """Show responses, weights, cooldowns, and metadata."""
         command = await self.catalog.get(ctx.guild.id, command_name)
-        if command is None:
+        if command is None or not CustomCommandRuntime.can_use(
+            command, ctx.guild, ctx.author, ctx.channel,
+        ):
             await ctx.send(COMMAND_NOT_FOUND_MESSAGE)
             return
         member = ctx.guild.get_member(command.author_id)
@@ -888,6 +908,7 @@ class CustomCommands(commands.Cog):
         command: str,
         text: str | None,
     ) -> None:
+        self._require_private_workflow_channel(ctx)
         try:
             normalized = self.catalog.normalize_name(command)
         except CatalogError as error:
@@ -916,6 +937,7 @@ class CustomCommands(commands.Cog):
         text: str | None = None,
     ) -> None:
         """Open a thread to edit an existing custom command."""
+        self._require_private_workflow_channel(ctx)
         stored = await self.catalog.get(ctx.guild.id, command)
         if stored is None:
             await ctx.send(COMMAND_NOT_FOUND_MESSAGE)
@@ -925,6 +947,13 @@ class CustomCommands(commands.Cog):
             response_id = stored.responses[0].response_id if stored.responses else None
             draft.responses = [ResponseDraft(text, response_id=response_id)]
         await self.workflows.open(ctx, draft)
+
+    @staticmethod
+    def _require_private_workflow_channel(ctx: commands.Context) -> None:
+        if ctx.channel.permissions_for(ctx.guild.default_role).view_channel:
+            raise commands.UserFeedbackCheckFailure(
+                "Open custom command editors in a private moderator channel"
+            )
 
     @customcom.command(name="cooldown")
     @commands.has_permissions(manage_messages=True)

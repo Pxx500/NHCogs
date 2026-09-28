@@ -1,8 +1,10 @@
 import importlib.util
 import inspect
+import sqlite3
 import sys
 import types
 import unittest
+from contextlib import closing
 from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -56,6 +58,100 @@ catalog, migration_state = load_catalog_modules()
 
 
 class CustomCommandCatalogTests(unittest.IsolatedAsyncioTestCase):
+    async def test_access_rules_survive_create_edit_and_reopen(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "commands.sqlite"
+            store = catalog.CustomCommandCatalog(path)
+            await store.initialize()
+            initial = catalog.AccessRules(user_ids=(200,), role_ids=(300,), channel_ids=(400,))
+            created = await store.create(
+                guild_id=100, name="locked", author_id=1, author_name="Moderator",
+                responses=(catalog.ResponseDraft("secret"),), access=initial,
+            )
+            self.assertEqual(created.access, initial)
+
+            updated = catalog.AccessRules(role_ids=(300,), private_only=True, hide_preview=True)
+            await store.edit(
+                guild_id=100, name="locked", expected_revision=created.revision,
+                editor_id=1, editor_name="Moderator", access=updated,
+            )
+            reopened = catalog.CustomCommandCatalog(path)
+            await reopened.initialize()
+            self.assertEqual((await reopened.get(100, "locked")).access, updated)
+            self.assertEqual((await reopened.list_commands(100))[0].access, updated)
+
+    async def test_existing_commands_default_to_open_access(self):
+        with TemporaryDirectory() as directory:
+            store = catalog.CustomCommandCatalog(Path(directory) / "commands.sqlite")
+            await store.initialize()
+            created = await store.create(
+                guild_id=100, name="open", author_id=1, author_name="Moderator",
+                responses=(catalog.ResponseDraft("hello"),),
+            )
+            self.assertEqual(created.access, catalog.AccessRules())
+            with closing(sqlite3.connect(Path(directory) / "commands.sqlite")) as connection, connection:
+                connection.execute("DELETE FROM custom_command_access")
+            self.assertEqual((await store.get(100, "open")).access, catalog.AccessRules())
+
+    async def test_user_redaction_keeps_user_only_command_restricted(self):
+        with TemporaryDirectory() as directory:
+            store = catalog.CustomCommandCatalog(Path(directory) / "commands.sqlite")
+            await store.initialize()
+            created = await store.create(
+                guild_id=100, name="personal", author_id=1, author_name="Moderator",
+                responses=(catalog.ResponseDraft("hello"),),
+                access=catalog.AccessRules(user_ids=(200,)),
+            )
+            await store.redact_user(200)
+            command = await store.get(100, "personal")
+            self.assertEqual(command.access.user_ids, (catalog.DELETED_USER_ID,))
+            self.assertTrue(command.access.restricted)
+            self.assertFalse(command.access.allows(
+                user_id=300, role_ids=set(), channel_id=10, private=False,
+            ))
+            with self.assertRaises(catalog.StaleRevision):
+                await store.edit(
+                    guild_id=100, name="personal", expected_revision=created.revision,
+                    editor_id=1, editor_name="Moderator", access=created.access,
+                )
+
+    async def test_import_retains_access_rules(self):
+        with TemporaryDirectory() as directory:
+            source = catalog.CustomCommandCatalog(Path(directory) / "source.sqlite")
+            target = catalog.CustomCommandCatalog(Path(directory) / "target.sqlite")
+            await source.initialize()
+            await target.initialize()
+            command = await source.create(
+                guild_id=100, name="limited", author_id=1, author_name="Moderator",
+                responses=(catalog.ResponseDraft("hello"),),
+                access=catalog.AccessRules(channel_ids=(10,), hide_preview=True),
+            )
+            await target.import_all((command,))
+            self.assertEqual((await target.get(100, "limited")).access, command.access)
+
+    async def test_stale_edit_cannot_replace_response_or_access(self):
+        with TemporaryDirectory() as directory:
+            store = catalog.CustomCommandCatalog(Path(directory) / "commands.sqlite")
+            await store.initialize()
+            created = await store.create(
+                guild_id=100, name="limited", author_id=1, author_name="Moderator",
+                responses=(catalog.ResponseDraft("first"),),
+            )
+            locked = await store.edit(
+                guild_id=100, name="limited", expected_revision=created.revision,
+                editor_id=1, editor_name="Moderator",
+                responses=(catalog.ResponseDraft("second"),),
+                access=catalog.AccessRules(role_ids=(300,), hide_preview=True),
+            )
+            with self.assertRaises(catalog.StaleRevision):
+                await store.edit(
+                    guild_id=100, name="limited", expected_revision=created.revision,
+                    editor_id=2, editor_name="Stale editor",
+                    responses=(catalog.ResponseDraft("should not save"),),
+                    access=catalog.AccessRules(),
+                )
+            self.assertEqual(await store.get(100, "limited"), locked)
+
     async def test_usage_persists_and_ranks_daily_counts_with_scope_and_window(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "commands.sqlite"

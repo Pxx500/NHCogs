@@ -262,6 +262,7 @@ def load_cog_module():  # noqa: PLR0915
 
 
 cog, migration_controller = load_cog_module()
+AccessRules = sys.modules[f"{cog.__package__}.catalog"].AccessRules
 
 
 class CommandUsageChartTests(unittest.IsolatedAsyncioTestCase):
@@ -708,11 +709,83 @@ class CustomCommandsCommandErrorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CustomCommandsCopyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_create_and_edit_reject_public_workflow_channels(self):
+        subject = object.__new__(cog.CustomCommands)
+        subject.catalog = types.SimpleNamespace(
+            normalize_name=lambda name: name,
+            get=mock.AsyncMock(return_value=types.SimpleNamespace(name="existing")),
+        )
+        subject.bot = types.SimpleNamespace(all_commands={})
+        subject.workflows = types.SimpleNamespace(open=mock.AsyncMock())
+        ctx = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=100, default_role=object()),
+            channel=types.SimpleNamespace(
+                permissions_for=lambda _: types.SimpleNamespace(view_channel=True),
+            ),
+            send=mock.AsyncMock(),
+        )
+        for callback, name in (
+            (cog.CustomCommands.cc_create.callback, "new"),
+            (cog.CustomCommands.cc_edit.callback, "existing"),
+        ):
+            with self.subTest(name=name):
+                with self.assertRaises(cog.commands.UserFeedbackCheckFailure):
+                    await callback(subject, ctx, name)
+        subject.catalog.get.assert_not_awaited()
+        subject.workflows.open.assert_not_awaited()
+
+    async def test_private_moderator_channel_opens_create_and_edit_workflows(self):
+        stored = types.SimpleNamespace(
+            name="existing", revision=1, cooldowns={}, access=AccessRules(user_ids=(200,)),
+            responses=(types.SimpleNamespace(content="response", weight=100, response_id="id"),),
+        )
+        subject = object.__new__(cog.CustomCommands)
+        subject.catalog = types.SimpleNamespace(
+            normalize_name=lambda name: name,
+            get=mock.AsyncMock(side_effect=(None, stored)),
+        )
+        subject.bot = types.SimpleNamespace(all_commands={})
+        subject.workflows = types.SimpleNamespace(open=mock.AsyncMock())
+        ctx = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=100, default_role=object()),
+            channel=types.SimpleNamespace(
+                permissions_for=lambda _: types.SimpleNamespace(view_channel=False),
+            ),
+            send=mock.AsyncMock(),
+        )
+        await cog.CustomCommands.cc_create.callback(subject, ctx, "new")
+        await cog.CustomCommands.cc_edit.callback(subject, ctx, "existing")
+        self.assertEqual(subject.workflows.open.await_count, 2)
+        self.assertEqual(subject.workflows.open.await_args.args[1].access, stored.access)
+
+    async def test_response_previews_hide_commands_from_ineligible_members(self):
+        command = types.SimpleNamespace(
+            name="secret", access=AccessRules(user_ids=(999,)),
+            responses=(types.SimpleNamespace(content="private response"),),
+        )
+        subject = object.__new__(cog.CustomCommands)
+        subject.catalog = types.SimpleNamespace(get=mock.AsyncMock(return_value=command))
+        ctx = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=100),
+            author=types.SimpleNamespace(id=200, roles=[]),
+            channel=types.SimpleNamespace(id=10),
+            send=mock.AsyncMock(),
+        )
+        for callback in (cog.CustomCommands.cc_show.callback,
+                         cog.CustomCommands.cc_raw.callback):
+            with self.subTest(callback=callback.__name__):
+                ctx.send.reset_mock()
+                await callback(subject, ctx, "secret")
+                ctx.send.assert_awaited_once_with("That custom command doesn't exist")
+
     async def test_commands_share_one_not_found_message(self):
         subject = object.__new__(cog.CustomCommands)
         subject.catalog = types.SimpleNamespace(get=mock.AsyncMock(return_value=None))
         ctx = types.SimpleNamespace(
-            guild=types.SimpleNamespace(id=100),
+            guild=types.SimpleNamespace(id=100, default_role=object()),
+            channel=types.SimpleNamespace(
+                permissions_for=lambda _: types.SimpleNamespace(view_channel=False),
+            ),
             send=mock.AsyncMock(),
         )
         callbacks = (
@@ -741,6 +814,7 @@ class CustomCommandsCopyTests(unittest.IsolatedAsyncioTestCase):
             revision=3,
             cooldowns={},
             responses=(types.SimpleNamespace(weight=100, content="response"),),
+            access=AccessRules(),
         )
         subject = object.__new__(cog.CustomCommands)
         subject.catalog = types.SimpleNamespace(get=mock.AsyncMock(return_value=command))
@@ -749,6 +823,8 @@ class CustomCommandsCopyTests(unittest.IsolatedAsyncioTestCase):
                 id=100,
                 get_member=lambda _user_id: None,
             ),
+            author=types.SimpleNamespace(id=200),
+            channel=types.SimpleNamespace(id=10),
             send=mock.AsyncMock(),
         )
         cog.menus.menu.reset_mock()
@@ -770,7 +846,10 @@ class CustomCommandsCopyTests(unittest.IsolatedAsyncioTestCase):
         )
         subject.workflows = types.SimpleNamespace(open=mock.AsyncMock())
         ctx = types.SimpleNamespace(
-            guild=types.SimpleNamespace(id=100),
+            guild=types.SimpleNamespace(id=100, default_role=object()),
+            channel=types.SimpleNamespace(
+                permissions_for=lambda _: types.SimpleNamespace(view_channel=False),
+            ),
             send=mock.AsyncMock(),
         )
 
@@ -791,12 +870,44 @@ class CustomCommandsCopyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CustomCommandsListTests(unittest.IsolatedAsyncioTestCase):
+    async def test_commands_lists_only_visible_and_usable_commands(self):
+        restricted = AccessRules(user_ids=(200,), channel_ids=(10,))
+        stored = (
+            types.SimpleNamespace(name="open", responses=(types.SimpleNamespace(content="hello"),),
+                                  access=AccessRules()),
+            types.SimpleNamespace(name="allowed", responses=(types.SimpleNamespace(content="visible"),),
+                                  access=restricted),
+            types.SimpleNamespace(name="blocked", responses=(types.SimpleNamespace(content="secret"),),
+                                  access=AccessRules(user_ids=(999,))),
+            types.SimpleNamespace(name="hidden", responses=(types.SimpleNamespace(content="hidden"),),
+                                  access=AccessRules(user_ids=(200,), hide_preview=True)),
+        )
+        subject, ctx, _message = self._subject_and_ctx(stored=stored)
+        ctx.guild.default_role = object()
+        ctx.author.roles = []
+        ctx.channel = types.SimpleNamespace(
+            id=10,
+            permissions_for=lambda _: types.SimpleNamespace(view_channel=True),
+        )
+        await cog.CustomCommands.public_commands.callback(subject, ctx)
+        description = ctx.send.call_args.kwargs["embed"].description
+        self.assertIn("!open", description)
+        self.assertIn("!allowed", description)
+        self.assertNotIn("blocked", description)
+        self.assertIn("!hidden** - [redacted]", description)
+        self.assertNotIn("**!hidden** - hidden", description)
+        ctx.send.reset_mock()
+        ctx.channel.id = 11
+        await cog.CustomCommands.public_commands.callback(subject, ctx)
+        self.assertNotIn("!allowed", ctx.send.call_args.kwargs["embed"].description)
+
     @staticmethod
     def _subject_and_ctx(command_count=16, *, stored=None):
         if stored is None:
             stored = tuple(
                 types.SimpleNamespace(
                     name=f"command{index:02}",
+                    access=AccessRules(),
                     responses=(
                         types.SimpleNamespace(
                             content="**first**\n\tsecond   " + "x" * 80
@@ -816,6 +927,7 @@ class CustomCommandsListTests(unittest.IsolatedAsyncioTestCase):
         ctx = types.SimpleNamespace(
             guild=types.SimpleNamespace(id=100),
             author=types.SimpleNamespace(id=200),
+            channel=types.SimpleNamespace(id=10),
             clean_prefix="!",
             send=mock.AsyncMock(return_value=message),
         )
@@ -939,6 +1051,7 @@ class CustomCommandsListTests(unittest.IsolatedAsyncioTestCase):
         stored = tuple(
             types.SimpleNamespace(
                 name=f"cmd{index:02}" + "*" * 95,
+                access=AccessRules(),
                 responses=(types.SimpleNamespace(content="*" * 52),),
             )
             for index in range(30)
@@ -1047,6 +1160,7 @@ class CustomCommandsRawTests(unittest.IsolatedAsyncioTestCase):
     async def test_raw_uses_an_invoker_owned_button_view_and_exact_code_block(self):
         stored = types.SimpleNamespace(
             name="ben",
+            access=AccessRules(),
             responses=(
                 types.SimpleNamespace(content="first   response  "),
                 types.SimpleNamespace(content="second response"),
@@ -1059,6 +1173,7 @@ class CustomCommandsRawTests(unittest.IsolatedAsyncioTestCase):
         ctx = types.SimpleNamespace(
             guild=types.SimpleNamespace(id=100),
             author=types.SimpleNamespace(id=200),
+            channel=types.SimpleNamespace(id=10),
             send=mock.AsyncMock(return_value=types.SimpleNamespace()),
         )
 
@@ -1148,7 +1263,7 @@ class CustomCommandsRawTests(unittest.IsolatedAsyncioTestCase):
             types.SimpleNamespace(content="before  "),
             types.SimpleNamespace(content="```py\nvalue = 1\n```  "),
         )
-        stored = types.SimpleNamespace(name="ben", responses=responses)
+        stored = types.SimpleNamespace(name="ben", responses=responses, access=AccessRules())
         subject = object.__new__(cog.CustomCommands)
         subject.catalog = types.SimpleNamespace(
             get=mock.AsyncMock(return_value=stored)
@@ -1156,6 +1271,7 @@ class CustomCommandsRawTests(unittest.IsolatedAsyncioTestCase):
         ctx = types.SimpleNamespace(
             guild=types.SimpleNamespace(id=100),
             author=types.SimpleNamespace(id=200),
+            channel=types.SimpleNamespace(id=10),
             send=mock.AsyncMock(return_value=types.SimpleNamespace()),
         )
 
