@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import sqlite3
 from collections.abc import Mapping, Sequence
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -68,6 +69,39 @@ class CommandEditor:
 
 
 @dataclass(frozen=True)
+class AccessRules:
+    user_ids: tuple[int, ...] = ()
+    role_ids: tuple[int, ...] = ()
+    channel_ids: tuple[int, ...] = ()
+    private_only: bool = False
+    hide_preview: bool = False
+
+    def __post_init__(self) -> None:
+        for field_name in ("user_ids", "role_ids", "channel_ids"):
+            values = getattr(self, field_name)
+            if any(type(value) is not int or value <= 0 for value in values):
+                raise InvalidCommand("Access IDs must be positive whole numbers")
+            object.__setattr__(self, field_name, tuple(sorted(set(values))))
+        if type(self.private_only) is not bool or type(self.hide_preview) is not bool:
+            raise InvalidCommand("Access switches must be true or false")
+
+    @property
+    def restricted(self) -> bool:
+        return bool(self.user_ids or self.role_ids or self.channel_ids or self.private_only)
+
+    def allows(
+        self, *, user_id: int, role_ids: set[int], channel_id: int, private: bool,
+    ) -> bool:
+        if (self.user_ids or self.role_ids) and (
+            user_id not in self.user_ids and not role_ids.intersection(self.role_ids)
+        ):
+            return False
+        if self.channel_ids and channel_id not in self.channel_ids:
+            return False
+        return not self.private_only or private
+
+
+@dataclass(frozen=True)
 class CustomCommand:
     guild_id: int
     name: str
@@ -79,6 +113,7 @@ class CustomCommand:
     responses: tuple[CustomResponse, ...]
     cooldowns: Mapping[str, int]
     editors: tuple[CommandEditor, ...]
+    access: AccessRules = field(default_factory=AccessRules)
 
 
 def _to_timestamp(value: datetime) -> str:
@@ -153,6 +188,19 @@ class CustomCommandCatalog:
                        scope TEXT NOT NULL,
                        seconds INTEGER NOT NULL,
                        PRIMARY KEY (guild_id, command_name, scope),
+                       FOREIGN KEY (guild_id, command_name)
+                           REFERENCES custom_commands(guild_id, name)
+                           ON DELETE CASCADE
+                   );
+                   CREATE TABLE IF NOT EXISTS custom_command_access (
+                       guild_id INTEGER NOT NULL,
+                       command_name TEXT NOT NULL,
+                       user_ids TEXT NOT NULL,
+                       role_ids TEXT NOT NULL,
+                       channel_ids TEXT NOT NULL,
+                       private_only INTEGER NOT NULL,
+                       hide_preview INTEGER NOT NULL,
+                       PRIMARY KEY (guild_id, command_name),
                        FOREIGN KEY (guild_id, command_name)
                            REFERENCES custom_commands(guild_id, name)
                            ON DELETE CASCADE
@@ -295,6 +343,7 @@ class CustomCommandCatalog:
         author_name: str,
         responses: Sequence[ResponseDraft],
         cooldowns: Mapping[str, int] | None = None,
+        access: AccessRules | None = None,
         created_at: datetime | None = None,
     ) -> CustomCommand:
         normalized = self.normalize_name(name)
@@ -309,6 +358,7 @@ class CustomCommandCatalog:
             author_name=author_name,
             responses=validated_responses,
             cooldowns=validated_cooldowns,
+            access=access or AccessRules(),
             created_at=created,
         )
 
@@ -321,6 +371,7 @@ class CustomCommandCatalog:
         author_name: str,
         responses: tuple[CustomResponse, ...],
         cooldowns: Mapping[str, int],
+        access: AccessRules,
         created_at: datetime,
     ) -> CustomCommand:
         with closing(self._connect()) as connection, connection:
@@ -339,6 +390,7 @@ class CustomCommandCatalog:
                 responses=responses,
                 cooldowns=cooldowns,
                 editors=(),
+                access=access,
             )
             return self._read_command(connection, guild_id, name)
 
@@ -416,6 +468,24 @@ class CustomCommandCatalog:
             ),
         )
 
+    @staticmethod
+    def _write_access(
+        connection: sqlite3.Connection, guild_id: int, name: str, access: AccessRules,
+    ) -> None:
+        connection.execute(
+            """INSERT INTO custom_command_access
+               (guild_id, command_name, user_ids, role_ids, channel_ids,
+                private_only, hide_preview) VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT (guild_id, command_name) DO UPDATE SET
+                   user_ids = excluded.user_ids, role_ids = excluded.role_ids,
+                   channel_ids = excluded.channel_ids,
+                   private_only = excluded.private_only,
+                   hide_preview = excluded.hide_preview""",
+            (guild_id, name, json.dumps(access.user_ids), json.dumps(access.role_ids),
+             json.dumps(access.channel_ids), int(access.private_only),
+             int(access.hide_preview)),
+        )
+
     def _insert_command(
         self,
         connection: sqlite3.Connection,
@@ -430,6 +500,7 @@ class CustomCommandCatalog:
         responses: Sequence[CustomResponse],
         cooldowns: Mapping[str, int],
         editors: Sequence[CommandEditor],
+        access: AccessRules | None = None,
     ) -> None:
         connection.execute(
             """INSERT INTO custom_commands
@@ -448,6 +519,7 @@ class CustomCommandCatalog:
         self._insert_responses(connection, guild_id, name, responses)
         self._insert_cooldowns(connection, guild_id, name, cooldowns)
         self._insert_editors(connection, guild_id, name, editors)
+        self._write_access(connection, guild_id, name, access or AccessRules())
 
     def _read_command(
         self, connection: sqlite3.Connection, guild_id: int, name: str
@@ -498,6 +570,19 @@ class CustomCommandCatalog:
                 (guild_id, name),
             )
         )
+        access_row = connection.execute(
+            """SELECT * FROM custom_command_access
+               WHERE guild_id = ? AND command_name = ?""", (guild_id, name),
+        ).fetchone()
+        access = (
+            AccessRules(
+                user_ids=tuple(json.loads(access_row["user_ids"])),
+                role_ids=tuple(json.loads(access_row["role_ids"])),
+                channel_ids=tuple(json.loads(access_row["channel_ids"])),
+                private_only=bool(access_row["private_only"]),
+                hide_preview=bool(access_row["hide_preview"]),
+            ) if access_row is not None else AccessRules()
+        )
         created_at = _required_timestamp(row["created_at"], "creation")
         return CustomCommand(
             guild_id=row["guild_id"],
@@ -510,6 +595,7 @@ class CustomCommandCatalog:
             responses=responses,
             cooldowns=cooldowns,
             editors=editors,
+            access=access,
         )
 
     async def get(self, guild_id: int, name: str) -> CustomCommand | None:
@@ -546,6 +632,7 @@ class CustomCommandCatalog:
         editor_name: str,
         responses: Sequence[ResponseDraft] | None = None,
         cooldowns: Mapping[str, int] | None = None,
+        access: AccessRules | None = None,
         edited_at: datetime | None = None,
     ) -> CustomCommand:
         normalized = self.normalize_name(name)
@@ -564,6 +651,7 @@ class CustomCommandCatalog:
             editor_name=editor_name,
             responses=validated_responses,
             cooldowns=validated_cooldowns,
+            access=access,
             edited_at=edited_at or datetime.now(timezone.utc),
         )
 
@@ -577,6 +665,7 @@ class CustomCommandCatalog:
         editor_name: str,
         responses: tuple[CustomResponse, ...] | None,
         cooldowns: Mapping[str, int] | None,
+        access: AccessRules | None,
         edited_at: datetime,
     ) -> CustomCommand:
         with closing(self._connect()) as connection, connection:
@@ -606,6 +695,8 @@ class CustomCommandCatalog:
                     (guild_id, name),
                 )
                 self._insert_cooldowns(connection, guild_id, name, cooldowns)
+            if access is not None:
+                self._write_access(connection, guild_id, name, access)
             timestamp = _to_timestamp(edited_at)
             connection.execute(
                 """INSERT INTO custom_command_editors
@@ -704,7 +795,27 @@ class CustomCommandCatalog:
                        WHERE guild_id = ? AND command_name = ? AND user_id = ?""",
                     (editor["guild_id"], editor["command_name"], user_id),
                 )
-            return author_result.rowcount + len(editor_rows)
+            redacted_accesses = 0
+            for row in tuple(connection.execute("SELECT * FROM custom_command_access")):
+                allowed = json.loads(row["user_ids"])
+                if user_id not in allowed:
+                    continue
+                allowed = sorted({
+                    DELETED_USER_ID if member_id == user_id else member_id
+                    for member_id in allowed
+                })
+                connection.execute(
+                    """UPDATE custom_command_access SET user_ids = ?
+                       WHERE guild_id = ? AND command_name = ?""",
+                    (json.dumps(allowed), row["guild_id"], row["command_name"]),
+                )
+                connection.execute(
+                    """UPDATE custom_commands SET revision = revision + 1
+                       WHERE guild_id = ? AND name = ?""",
+                    (row["guild_id"], row["command_name"]),
+                )
+                redacted_accesses += 1
+            return author_result.rowcount + len(editor_rows) + redacted_accesses
 
     async def import_all(self, commands: Sequence[CustomCommand]) -> None:
         await asyncio.to_thread(self._import_all_sync, tuple(commands), None)
@@ -757,6 +868,7 @@ class CustomCommandCatalog:
                 responses=responses,
                 cooldowns=MappingProxyType(cooldowns),
                 editors=command.editors,
+                access=command.access,
             )
             validated.append(expected)
         expected_commands = tuple(
@@ -800,6 +912,7 @@ class CustomCommandCatalog:
                     responses=command.responses,
                     cooldowns=command.cooldowns,
                     editors=command.editors,
+                    access=command.access,
                 )
             if migration_digests is None:
                 stored = tuple(

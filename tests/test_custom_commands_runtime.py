@@ -22,6 +22,7 @@ def load_runtime_modules():
     discord.member = types.ModuleType("discord.member")
     discord.Member = type("Member", (), {})
     discord.PartialMessageable = type("PartialMessageable", (), {})
+    discord.Thread = type("Thread", (), {})
     commands = types.ModuleType("redbot.core.commands")
     commands.Parameter = inspect.Parameter
     commands.MemberConverter = object
@@ -276,6 +277,72 @@ class CustomCommandRuntimeTests(unittest.TestCase):
 
 
 class CustomCommandInvocationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_restricted_invocations_require_an_allowed_actor_and_channel(self):
+        rules = catalog.AccessRules(user_ids=(300,), role_ids=(700,), channel_ids=(200,))
+        for author_id, roles, channel_id, allowed in (
+            (300, (), 200, True),
+            (301, (700,), 200, True),
+            (301, (), 200, False),
+            (300, (), 201, False),
+        ):
+            with self.subTest(author_id=author_id, roles=roles, channel_id=channel_id):
+                ctx, message = self.invocation_context(
+                    author_id=author_id, channel_id=channel_id,
+                )
+                ctx.author.roles = [SimpleNamespace(id=role) for role in roles]
+                stored = command_with_weights(100)
+                stored = catalog.CustomCommand(**{**stored.__dict__, "access": rules})
+                bot = SimpleNamespace(
+                    get_context=mock.AsyncMock(return_value=ctx), invoke=mock.AsyncMock(),
+                )
+                store = SimpleNamespace(
+                    get=mock.AsyncMock(return_value=stored), record_usage=mock.AsyncMock(),
+                )
+                engine = runtime.CustomCommandRuntime(
+                    bot, store, SimpleNamespace(report=mock.AsyncMock()), logger=mock.Mock(),
+                )
+                await engine.handle_message(message)
+                if allowed:
+                    ctx.send.assert_awaited_once()
+                    store.record_usage.assert_awaited_once()
+                else:
+                    ctx.send.assert_not_awaited()
+                    bot.invoke.assert_not_awaited()
+                    store.record_usage.assert_not_awaited()
+
+    async def test_private_channel_rule_includes_private_threads(self):
+        rules = catalog.AccessRules(private_only=True)
+        for channel_private, thread_private, allowed in (
+            (False, False, False), (True, False, True), (False, True, True),
+        ):
+            with self.subTest(channel_private=channel_private, thread_private=thread_private):
+                ctx, message = self.invocation_context()
+                ctx.guild.default_role = object()
+                ctx.author.roles = []
+                ctx.channel.permissions_for = lambda _, private=channel_private: SimpleNamespace(
+                    view_channel=not private,
+                )
+                if thread_private:
+                    ctx.channel = type("PrivateThread", (runtime.discord.Thread,), {
+                        "is_private": lambda self: True,
+                    })()
+                    ctx.channel.id = 200
+                    ctx.channel.permissions_for = lambda _: SimpleNamespace(view_channel=True)
+                    message.channel = ctx.channel
+                stored = command_with_weights(100)
+                stored = catalog.CustomCommand(**{**stored.__dict__, "access": rules})
+                store = SimpleNamespace(
+                    get=mock.AsyncMock(return_value=stored), record_usage=mock.AsyncMock(),
+                )
+                bot = SimpleNamespace(
+                    get_context=mock.AsyncMock(return_value=ctx), invoke=mock.AsyncMock(),
+                )
+                engine = runtime.CustomCommandRuntime(
+                    bot, store, SimpleNamespace(report=mock.AsyncMock()), logger=mock.Mock(),
+                )
+                await engine.handle_message(message)
+                self.assertEqual(ctx.send.await_count, int(allowed))
+
     async def test_accounting_failure_is_reported_without_resending_response(self):
         ctx, message = self.invocation_context()
         failure = OSError("database unavailable")
