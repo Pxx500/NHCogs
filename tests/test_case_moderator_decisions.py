@@ -443,6 +443,9 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 cog._ban_delete_message_seconds = mock.Mock(return_value=0)
                 cog._increment_stat = mock.AsyncMock()
                 cog._cached_purge_user_messages = mock.AsyncMock(return_value=0)
+                cog._run_detection_reconciliation = mock.AsyncMock(
+                    side_effect=AssertionError("a case button must not reconcile other cases")
+                )
                 honeypot.modlog.create_case = mock.AsyncMock()
                 honeypot.detection.POST_BAN_SWEEP_DELAY_SECONDS = 0
                 appended = self._append_case(
@@ -489,6 +492,8 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 self.assertEqual(snapshot.case.status.value, "resolved")
                 self.assertEqual(snapshot.case.resolution, "ban")
                 self.assertEqual(snapshot.case.moderator_id, 99)
+                cog._run_detection_reconciliation.assert_not_awaited()
+                await drain_background_work(cog)
 
     async def test_automatic_ban_does_not_inherit_image_reviewer_attribution(self):
         with TemporaryDirectory() as directory:
@@ -638,6 +643,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                     honeypot.render_case(snapshot).moderation_status,
                     "Ban planned (dry run)",
                 )
+                await drain_background_work(cog)
 
     async def test_moderator_ban_uses_persisted_ids_when_member_cache_misses(self):
         with TemporaryDirectory() as directory:
@@ -702,6 +708,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 self.assertEqual(snapshot.case.status.value, "resolved")
                 self.assertEqual(snapshot.case.resolution, "ban")
                 self.assertEqual(snapshot.case.moderator_id, actor.id)
+                await drain_background_work(cog)
 
     async def test_moderator_kick_missing_member_finishes_with_explicit_result(self):
         with TemporaryDirectory() as directory:
@@ -756,6 +763,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 self.assertEqual(snapshot.case.status.value, "resolved")
                 self.assertEqual(snapshot.case.resolution, "kick")
                 self.assertEqual(snapshot.case.moderator_id, 99)
+                await drain_background_work(cog)
 
     async def test_moderator_actor_survives_failed_action_retry_and_resolution(self):
         with TemporaryDirectory() as directory:
@@ -837,6 +845,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                         for call in cog._execute_action.await_args_list
                     )
                 )
+                await drain_background_work(cog)
 
     async def test_moderator_ban_intent_fences_concurrent_ignore(self):
         with TemporaryDirectory() as directory:
@@ -905,8 +914,9 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 self.assertEqual(snapshot.case.status.value, "resolved")
                 self.assertEqual(snapshot.case.resolution, "ban")
                 self.assertEqual(snapshot.case.moderator_id, 99)
+                await drain_background_work(cog)
 
-    async def test_moderator_action_publishes_owned_state_before_discord_finishes(self):
+    async def test_moderator_ban_runs_before_publishing_final_case_state(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 action_started = asyncio.Event()
@@ -980,17 +990,140 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 )
                 await asyncio.wait_for(action_started.wait(), timeout=1)
                 try:
-                    self.assertTrue(published)
-                    self.assertEqual(published[-1].moderation_status, "Action pending")
-                    self.assertEqual(published[-1].moderation_actions, ())
+                    self.assertEqual(published, [])
+                    in_flight = cog._case_store.get_case(appended.case.case_id)
+                    self.assertEqual(in_flight.case.status.value, "resolving")
+                    late = await asyncio.to_thread(
+                        cog._case_store.append_message,
+                        honeypot.NewMessage(
+                            10,
+                            20,
+                            31,
+                            41,
+                            "late evidence",
+                            datetime.now(timezone.utc),
+                            None,
+                            (
+                                honeypot.NewAttachment(
+                                    0, "late.png", 8, "image/png", None, None, "late-url"
+                                ),
+                            ),
+                        ),
+                        (),
+                    )
+                    self.assertEqual(late.case.case_id, appended.case.case_id)
                 finally:
                     release_action.set()
                     await task
+                    await drain_background_work(cog)
                 final = cog._case_store.get_case(appended.case.case_id)
-                self.assertEqual(final.case.status.value, "resolved")
+                self.assertEqual(final.case.status.value, "resolving")
+                self.assertEqual(len(final.messages), 2)
+                self.assertEqual(final.attachments[0].capture_status, "pending")
                 self.assertTrue(
-                    any(projection.resolution == "ban" for projection in published)
+                    any(
+                        item.operation_type == "moderator_ban"
+                        and item.status.value == "succeeded"
+                        for item in final.operations
+                    )
                 )
+                self.assertEqual(len(published), 1)
+                self.assertEqual(published[0].message_count, 2)
+
+    async def test_ban_waits_for_inflight_message_admission_before_closing_case(self):
+        class ObservedAdmissionLock:
+            def __init__(self):
+                self.lock = asyncio.Lock()
+                self.waiting = asyncio.Event()
+
+            async def acquire(self):
+                if self.lock.locked():
+                    self.waiting.set()
+                await self.lock.acquire()
+
+            def release(self):
+                self.lock.release()
+
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                effect_done = asyncio.Event()
+                member = SimpleNamespace(id=20, roles=[])
+                guild = SimpleNamespace(
+                    id=10,
+                    me=SimpleNamespace(id=1),
+                    get_member=lambda user_id: member,
+                )
+                bot = _Bot()
+                bot.get_guild = lambda guild_id: guild
+                cog = honeypot.Honeypot(bot, _operational_support())
+                cog.config = self._config({"dry_run": False})
+
+                async def ban_effect(*args, **kwargs):
+                    effect_done.set()
+                    return _effect_result(honeypot, "ban")
+
+                cog._execute_action = ban_effect
+                cog._publish_detection_case = mock.AsyncMock(return_value=True)
+                appended = self._append_case(honeypot, cog, datetime.now(timezone.utc))
+                cog._case_store.update_message_delete(
+                    appended.case.case_id,
+                    appended.message.sequence,
+                    honeypot.DeleteStatus.DELETED,
+                    None,
+                    False,
+                )
+                admission_lock = ObservedAdmissionLock()
+                lock_index = (guild.id * 31 + member.id) % len(
+                    cog._detection_admission_locks
+                )
+                locks = list(cog._detection_admission_locks)
+                locks[lock_index] = admission_lock
+                cog._detection_admission_locks = tuple(locks)
+                await admission_lock.acquire()
+                interaction = SimpleNamespace(
+                    user=SimpleNamespace(
+                        id=99,
+                        guild_permissions=SimpleNamespace(manage_messages=True),
+                    ),
+                    response=SimpleNamespace(
+                        defer=mock.AsyncMock(), is_done=lambda: True
+                    ),
+                    followup=SimpleNamespace(send=mock.AsyncMock()),
+                )
+                task = asyncio.create_task(
+                    cog._case_review_moderation_interaction(
+                        interaction, appended.case.case_id, "ban"
+                    )
+                )
+                try:
+                    await asyncio.wait_for(effect_done.wait(), timeout=1)
+                    await asyncio.wait_for(admission_lock.waiting.wait(), timeout=1)
+                    late = cog._case_store.append_message(
+                        honeypot.NewMessage(
+                            10,
+                            20,
+                            31,
+                            41,
+                            "already processing",
+                            datetime.now(timezone.utc),
+                            None,
+                            (
+                                honeypot.NewAttachment(
+                                    0, "late.png", 8, "image/png", None, None, "late-url"
+                                ),
+                            ),
+                        ),
+                        (),
+                    )
+                finally:
+                    admission_lock.release()
+                    await task
+                    await drain_background_work(cog)
+
+                final = cog._case_store.get_case(appended.case.case_id)
+                self.assertEqual(late.case.case_id, appended.case.case_id)
+                self.assertEqual(final.case.status.value, "resolving")
+                self.assertEqual(len(final.messages), 2)
 
     async def test_competing_executor_does_not_report_inflight_moderation_as_failed(
         self,
@@ -999,8 +1132,11 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 action_started = asyncio.Event()
                 release_action = asyncio.Event()
+                action_attempts = 0
 
                 async def blocked_action(*args, **kwargs):
+                    nonlocal action_attempts
+                    action_attempts += 1
                     action_started.set()
                     await release_action.wait()
                     return _effect_result(honeypot, "ban")
@@ -1035,36 +1171,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                         60,
                     )
                 )
-                executor_tasks = []
-                executor_started = False
-
-                async def publish_case(case_id, _config, **kwargs):
-                    nonlocal executor_started
-                    if executor_started:
-                        return True
-                    executor_started = True
-                    snapshot = await asyncio.to_thread(
-                        cog._case_store.get_case, case_id
-                    )
-                    operation = next(
-                        item
-                        for item in snapshot.operations
-                        if item.operation_type.value == "moderator_ban"
-                    )
-                    now = datetime.now(timezone.utc)
-                    claimed = await asyncio.to_thread(
-                        cog._case_store.claim_operation,
-                        operation.operation_id,
-                        now,
-                    )
-                    task = asyncio.create_task(
-                        cog._execute_detection_case_operation(claimed, now)
-                    )
-                    executor_tasks.append(task)
-                    await asyncio.wait_for(action_started.wait(), timeout=1)
-                    return True
-
-                cog._publish_detection_case = publish_case
+                cog._publish_detection_case = mock.AsyncMock(return_value=True)
                 interaction = SimpleNamespace(
                     user=SimpleNamespace(
                         id=99,
@@ -1080,25 +1187,29 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                     followup=SimpleNamespace(send=mock.AsyncMock()),
                 )
 
-                try:
-                    accepted = await cog._case_review_moderation_interaction(
+                first_click = asyncio.create_task(
+                    cog._case_review_moderation_interaction(
                         interaction,
                         appended.case.case_id,
                         "ban",
                     )
+                )
+                await asyncio.wait_for(action_started.wait(), timeout=1)
+                try:
+                    accepted = await cog._case_review_moderation_interaction(
+                        interaction, appended.case.case_id, "ban"
+                    )
+                    in_flight = cog._case_store.get_case(appended.case.case_id)
+                    self.assertEqual(in_flight.case.status.value, "resolving")
                 finally:
                     release_action.set()
-                    await asyncio.gather(*executor_tasks)
+                    await first_click
+                    await drain_background_work(cog)
 
                 final = cog._case_store.get_case(appended.case.case_id)
-                operation = next(
-                    item
-                    for item in final.operations
-                    if item.operation_type.value == "moderator_ban"
-                )
                 self.assertTrue(accepted)
                 interaction.followup.send.assert_not_awaited()
-                self.assertEqual(operation.status.value, "succeeded")
+                self.assertEqual(action_attempts, 1)
                 self.assertEqual(final.case.status.value, "resolved")
 
     async def test_reconciliation_completes_started_moderator_ban_without_repeating_it(self):
@@ -1154,6 +1265,7 @@ class CaseModeratorDecisionTests(CaseExpiryTestCase):
                 self.assertEqual(resolved.case.status.value, "resolved")
                 self.assertEqual(resolved.case.resolution, "ban")
                 self.assertEqual(resolved.case.moderator_id, 99)
+                await drain_background_work(restarted)
 
     async def test_started_moderator_effect_waits_for_late_evidence_and_containment(self):
         with TemporaryDirectory() as directory:

@@ -145,6 +145,7 @@ async def _apply_moderator_decision(
         and action is ActionIntent.BAN
         and await _ban_already_applied(cog, guild, snapshot.case.user_id)
     ):
+        await cog._wait_for_detection_admission(guild.id, snapshot.case.user_id)
         return OperationOutcome(result=action.value)
     member = await _decision_target(cog, guild, snapshot.case.user_id, action)
     if member is None:
@@ -157,6 +158,8 @@ async def _apply_moderator_decision(
         action=action,
         guild_settings=guild_settings,
     )
+    if result.status is EffectStatus.SUCCEEDED:
+        await cog._wait_for_detection_admission(guild.id, snapshot.case.user_id)
     if result.status is EffectStatus.PLANNED:
         return OperationOutcome(result=f"{PLANNED_PREFIX}{action.value}")
     if result.status is EffectStatus.FAILED:

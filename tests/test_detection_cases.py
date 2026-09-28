@@ -378,7 +378,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
                 )
             }
 
-        self.assertEqual(version, 2)
+        self.assertEqual(version, 3)
         self.assertIn("detection_cases", tables)
         self.assertIn("detection_attachments", tables)
         self.assertIn("public_daily_stats", tables)
@@ -398,7 +398,28 @@ class DetectionCaseStoreTests(unittest.TestCase):
 
         self.assertEqual(snapshot.case.case_id, stored_case.case_id)
         self.assertEqual(snapshot.messages[0].message_id, 40)
-        self.assertEqual(version, 2)
+        self.assertEqual(version, 3)
+
+    def test_initialize_preserves_timeline_publications_from_previous_schema(self):
+        now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
+        case = self.store.append_message(self.message(40, now), ()).case
+        publication = self.store.ensure_timeline_publication(
+            case.case_id, kind="message", message_sequence=1
+        )
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
+            connection.execute(
+                "ALTER TABLE detection_timeline_publications "
+                "DROP COLUMN render_fingerprint"
+            )
+            connection.execute("PRAGMA user_version = 2")
+
+        DetectionCaseStore(self.database_path).initialize()
+
+        reopened = DetectionCaseStore(self.database_path)
+        restored = reopened.list_timeline_publications(case.case_id)
+        self.assertEqual(len(restored), 1)
+        self.assertEqual(restored[0].logical_key, publication.logical_key)
+        self.assertIsNone(restored[0].render_fingerprint)
 
     def test_daily_stats_record_each_metric_by_guild_and_utc_date(self):
         occurred_at = datetime(2026, 8, 19, 23, 30, tzinfo=timezone.utc)
@@ -553,6 +574,33 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertEqual(resolved.case.status, CaseStatus.RESOLVED)
         self.assertEqual(resolved.case.resolution, "ignore")
 
+    def test_reconciling_one_moderator_case_leaves_other_case_untouched(self):
+        now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
+        attachment = NewAttachment(
+            0, "proof.png", 128, "image/png", 32, 16, "https://cdn.test/proof.png"
+        )
+        first = self.store.append_message(
+            self.message(40, now, attachments=(attachment,)), ()
+        )
+        second = self.store.append_message(
+            self.message(41, now, user_id=21, attachments=(attachment,)), ()
+        )
+        for appended in (first, second):
+            self.store.record_moderator_ignore(appended.case.case_id, 99, now)
+            self.store.fail_pending_attachment_captures(
+                appended.case.case_id, appended.message.sequence, "capture failed"
+            )
+
+        reconciled = self.store.reconcile_moderator_actions(
+            now, case_id=first.case.case_id
+        )
+
+        self.assertEqual(reconciled, (first.case.case_id,))
+        self.assertEqual(self.store.get_case(first.case.case_id).case.status, CaseStatus.RESOLVED)
+        self.assertEqual(
+            self.store.get_case(second.case.case_id).case.status, CaseStatus.RESOLVING
+        )
+
     def test_attachment_description_and_spoiler_survive_store_roundtrip(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
         attachment = NewAttachment(
@@ -625,7 +673,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertIn("description", columns)
         self.assertIn("spoiler", columns)
         self.assertEqual(row, ("legacy.png", None, 0))
-        self.assertEqual(version, 2)
+        self.assertEqual(version, 3)
 
     def test_projection_endpoint_survives_store_restart(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)

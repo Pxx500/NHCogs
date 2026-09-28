@@ -3,7 +3,7 @@
 import json
 import logging
 import sqlite3
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -300,6 +300,7 @@ class TimelinePublicationRecord:
     last_error: str | None
     claim_token: str | None
     claimed_at: datetime | None
+    render_fingerprint: str | None
 
 
 @dataclass(frozen=True)
@@ -764,10 +765,23 @@ class DetectionCaseStore:
                    )"""
             )
 
+        def migrate_schema_2(connection: sqlite3.Connection) -> None:
+            columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(detection_timeline_publications)"
+                )
+            }
+            if "render_fingerprint" not in columns:
+                connection.execute(
+                    "ALTER TABLE detection_timeline_publications "
+                    "ADD COLUMN render_fingerprint TEXT"
+                )
+
         with closing(self._connect()) as connection:
             apply_migrations(
                 connection,
-                (migrate_schema_0, migrate_schema_1),
+                (migrate_schema_0, migrate_schema_1, migrate_schema_2),
                 label="detection case storage",
             )
 
@@ -972,11 +986,13 @@ class DetectionCaseStore:
         channel_id: int,
         message_id: int,
         revision: int,
+        render_fingerprint: str | None = None,
     ) -> TimelinePublicationRecord:
         with closing(self._connect()) as connection, connection:
             cursor = connection.execute(
                 """UPDATE detection_timeline_publications
                    SET state = 'published', revision = ?, channel_id = ?, message_id = ?,
+                       render_fingerprint = ?,
                        last_error = NULL, claim_token = NULL, claimed_at = NULL
                    WHERE logical_key = ?
                      AND claim_token = ?
@@ -984,7 +1000,14 @@ class DetectionCaseStore:
                          SELECT 1 FROM detection_case_deletions deletion
                          WHERE deletion.case_id = detection_timeline_publications.case_id
                      )""",
-                (revision, channel_id, message_id, logical_key, claim_token),
+                (
+                    revision,
+                    channel_id,
+                    message_id,
+                    render_fingerprint,
+                    logical_key,
+                    claim_token,
+                ),
             )
             if cursor.rowcount != 1:
                 raise KeyError(logical_key)
@@ -994,21 +1017,45 @@ class DetectionCaseStore:
             ).fetchone()
         return self._timeline_publication_from_row(row)
 
-    def update_timeline_publication_revision(
+    def record_timeline_render(
         self,
         logical_key: str,
         *,
         message_id: int,
         revision: int,
+        render_fingerprint: str,
     ) -> bool:
         with closing(self._connect()) as connection, connection:
             cursor = connection.execute(
                 """UPDATE detection_timeline_publications
-                   SET revision = MAX(revision, ?)
+                   SET revision = MAX(revision, ?), render_fingerprint = ?
                    WHERE logical_key = ? AND state = 'published' AND message_id = ?""",
-                (revision, logical_key, message_id),
+                (revision, render_fingerprint, logical_key, message_id),
             )
             return cursor.rowcount == 1
+
+    def invalidate_timeline_publications(
+        self, channel_id: int, message_ids: Iterable[int]
+    ) -> int:
+        with closing(self._connect()) as connection, connection:
+            cursor = connection.executemany(
+                """UPDATE detection_timeline_publications
+                   SET render_fingerprint = NULL
+                   WHERE channel_id = ? AND message_id = ? AND state = 'published'""",
+                ((channel_id, message_id) for message_id in message_ids),
+            )
+            return cursor.rowcount
+
+    def invalidate_case_timeline_renders(self, case_id: str) -> int:
+        with closing(self._connect()) as connection, connection:
+            cursor = connection.execute(
+                """UPDATE detection_timeline_publications
+                   SET render_fingerprint = NULL
+                   WHERE case_id = ? AND state = 'published'
+                     AND render_fingerprint IS NOT NULL""",
+                (case_id,),
+            )
+            return cursor.rowcount
 
     def claim_timeline_publication(
         self,
@@ -2784,10 +2831,20 @@ class DetectionCaseStore:
             ).fetchone()
             return self._operation_from_row(row)
 
-    def reconcile_moderator_actions(self, now: datetime) -> tuple[str, ...]:
+    def reconcile_moderator_actions(
+        self, now: datetime, *, case_id: str | None = None
+    ) -> tuple[str, ...]:
         now_value = _to_timestamp(now)
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
+            if case_id is not None:
+                return (
+                    (case_id,)
+                    if self._finalize_moderator_action_locked(
+                        connection, case_id, now_value
+                    )
+                    else ()
+                )
             case_ids = tuple(
                 str(row[0])
                 for row in connection.execute(
@@ -3576,6 +3633,7 @@ class DetectionCaseStore:
             row["last_error"],
             row["claim_token"],
             _from_timestamp(row["claimed_at"]),
+            row["render_fingerprint"],
         )
 
     @staticmethod

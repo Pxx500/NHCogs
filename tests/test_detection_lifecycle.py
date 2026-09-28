@@ -146,13 +146,16 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     set_pinned=mock.AsyncMock(),
                     forget_channel=mock.AsyncMock(),
                 )
+                cog._case_store.invalidate_timeline_publications = mock.Mock()
                 honeypot.channel_routing.clear_deleted_channel = mock.AsyncMock()
                 honeypot.manual_punishment.clear_deleted_channel = mock.AsyncMock()
                 honeypot.manual_punishment.clear_deleted_role = mock.AsyncMock()
 
-                await cog.on_raw_message_delete(SimpleNamespace(message_id=10))
+                await cog.on_raw_message_delete(
+                    SimpleNamespace(channel_id=20, message_id=10)
+                )
                 await cog.on_raw_bulk_message_delete(
-                    SimpleNamespace(message_ids={11, 12})
+                    SimpleNamespace(channel_id=20, message_ids={11, 12})
                 )
                 await cog.on_raw_message_edit(
                     SimpleNamespace(message_id=13, data={"pinned": True})
@@ -164,6 +167,10 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
                 cog._message_registry.forget.assert_awaited_once_with(10)
                 cog._message_registry.forget_many.assert_awaited_once_with({11, 12})
+                self.assertEqual(
+                    cog._case_store.invalidate_timeline_publications.call_args_list,
+                    [mock.call(20, (10,)), mock.call(20, {11, 12})],
+                )
                 cog._message_registry.set_pinned.assert_awaited_once_with(13, True)
                 cog._message_registry.forget_channel.assert_awaited_once_with(15, 14)
                 honeypot.channel_routing.clear_deleted_channel.assert_awaited_once_with(

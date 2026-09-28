@@ -97,6 +97,20 @@ ATTACHMENT_ONLY_SCAM_KEYWORDS = {"bro"}
 WORD_KEYWORD_RE = re.compile(r"^[\w ]+$")
 
 
+class _AdmissionLease:
+    def __init__(self, lock: asyncio.Lock) -> None:
+        self._lock = lock
+        self._released = False
+
+    async def acquire(self) -> None:
+        await self._lock.acquire()
+
+    def release(self) -> None:
+        if not self._released:
+            self._released = True
+            self._lock.release()
+
+
 def missing_purge_permissions(permissions: object) -> list[str]:
     if not bool(getattr(permissions, "view_channel", False)):
         return ["View Channel"]
@@ -719,11 +733,24 @@ async def _run_detection_operation_follow_ups(
                 cog._case_store.compact_terminal_case, operation.case_id
             )
         elif follow_up.kind is FollowUpKind.FINISH_MODERATION:
-            await cog._finish_case_review_if_ready(
-                operation.case_id,
-                operation.actor_id,
-            )
-            await review_publication._case_review_rerender_safely(cog, operation.case_id)
+            if operation.operation_type in {
+                OperationType.MODERATOR_BAN,
+                OperationType.MODERATOR_KICK,
+            }:
+                await cog._finish_case_review_if_ready(
+                    operation.case_id,
+                    operation.actor_id,
+                    defer_final_operations=True,
+                )
+                cog._schedule_case_review_followup(operation.case_id)
+            else:
+                await cog._finish_case_review_if_ready(
+                    operation.case_id,
+                    operation.actor_id,
+                )
+                await review_publication._case_review_rerender_safely(
+                    cog, operation.case_id
+                )
         elif follow_up.kind is FollowUpKind.FINISH_MESSAGE_PROCESS:
             await cog._finish_case_review_if_ready(operation.case_id, None)
 
@@ -1089,7 +1116,7 @@ async def _process_detected_message(
     signals: tuple[DetectionSignal, ...],
     *,
     timings: dict[str, float] | None = None,
-    admission_lock: asyncio.Lock | None = None,
+    admission_lock: _AdmissionLease | None = None,
 ) -> None:
     timings = timings if timings is not None else {}
     signals = _resolve_unavailable_review_signals(guild_settings, signals)
@@ -1769,39 +1796,42 @@ async def _execute_action(
     )
 
 
-async def on_message(cog, message: discord.Message) -> None:
+async def on_message(
+    cog,
+    message: discord.Message,
+    *,
+    admission_lock: _AdmissionLease | None = None,
+) -> None:
     if message.guild is None:
         return
-    if await cog.bot.cog_disabled_in_guild(cog, message.guild):
-        return
-    try:
-        await cog._observe_message(message)
-    except Exception as error:
-        log.exception("Message registry observation failed")
-        try:
-            await cog._record_operational_failure(
-                message.guild.id,
-                "message_registry_observation",
-                f"{type(error).__name__}: {error}",
-            )
-        except Exception:
-            log.exception("Failed to record message registry observation error")
-    if message.author.bot:
-        return
-    if message.webhook_id is not None:
-        return
-    lock_index = (
-        message.guild.id * 31 + message.author.id
-    ) % len(cog._detection_admission_locks)
-    batch_key = (message.guild.id, message.id)
+    track_admission = not message.author.bot and message.webhook_id is None
     pipeline_started = perf_counter()
-    admission_lock = cog._detection_admission_locks[lock_index]
-    admission_lock_owned = False
-    try:
+    if track_admission and admission_lock is None:
+        admission_lock = _AdmissionLease(
+            cog._detection_admission_lock(message.guild.id, message.author.id)
+        )
         await admission_lock.acquire()
-        admission_lock_owned = True
+    admission_lock_owned = admission_lock is not None
+    try:
+        queue_wait_ms = (perf_counter() - pipeline_started) * 1000
+        if await cog.bot.cog_disabled_in_guild(cog, message.guild):
+            return
         try:
-            queue_wait_ms = (perf_counter() - pipeline_started) * 1000
+            await cog._observe_message(message)
+        except Exception as error:
+            log.exception("Message registry observation failed")
+            try:
+                await cog._record_operational_failure(
+                    message.guild.id,
+                    "message_registry_observation",
+                    f"{type(error).__name__}: {error}",
+                )
+            except Exception:
+                log.exception("Failed to record message registry observation error")
+        if not track_admission:
+            return
+        batch_key = (message.guild.id, message.id)
+        try:
             raw_config = await cog.config.guild(message.guild).all()
             guild_settings = GuildSettings.from_mapping(raw_config)
             if not guild_settings.enabled:
@@ -1827,10 +1857,10 @@ async def on_message(cog, message: discord.Message) -> None:
                 admission_lock=admission_lock,
             )
         finally:
-            if admission_lock_owned:
-                admission_lock.release()
+            cog._initial_image_scan_batches.pop(batch_key, None)
     finally:
-        cog._initial_image_scan_batches.pop(batch_key, None)
+        if admission_lock_owned:
+            admission_lock.release()
     return
 
 
