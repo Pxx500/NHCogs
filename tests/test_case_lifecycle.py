@@ -524,6 +524,20 @@ class CaseLifecycleTests(CaseExpiryTestCase):
                 first = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, first, datetime.now(timezone.utc))
                 publish_primary(first._case_store, appended.case.case_id, 30, 77)
+                timeline = first._case_store.ensure_timeline_publication(
+                    appended.case.case_id, kind="message", message_sequence=1
+                )
+                claimed = first._case_store.claim_timeline_publication(
+                    timeline.logical_key, datetime.now(timezone.utc)
+                )
+                first._case_store.complete_timeline_publication(
+                    timeline.logical_key,
+                    claimed.claim_token,
+                    channel_id=50,
+                    message_id=80,
+                    revision=1,
+                    render_fingerprint="previous-process-render",
+                )
 
                 bot = _Bot()
                 restarted = honeypot.Honeypot(bot, _operational_support())
@@ -537,6 +551,10 @@ class CaseLifecycleTests(CaseExpiryTestCase):
                 restarted._case_review_rerender.assert_awaited_once_with(
                     appended.case.case_id
                 )
+                restored_timeline = restarted._case_store.list_timeline_publications(
+                    appended.case.case_id
+                )
+                self.assertIsNone(restored_timeline[0].render_fingerprint)
 
     async def test_missing_discord_review_does_not_block_expiry(self):
         with TemporaryDirectory() as directory:

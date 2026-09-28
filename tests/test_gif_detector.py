@@ -173,6 +173,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot(), _operational_support())
                 message = SimpleNamespace(
+                    guild=None,
                     embeds=[],
                     attachments=[],
                     content="https://media.example.test/reaction.webp",
@@ -208,6 +209,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
                 cog = honeypot.Honeypot(_Bot(), _operational_support())
                 message = SimpleNamespace(
+                    guild=None,
                     embeds=[SimpleNamespace(type="gifv")],
                     attachments=[],
                     content="",

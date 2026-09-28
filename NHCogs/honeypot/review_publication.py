@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import math
 import shutil
@@ -26,7 +27,6 @@ from .case_review import (
     CaseFeedbackItem,
     bulk_image_confirmation_label,
     case_feedback_items,
-    is_persisted_image_attachment,
     render_case,
     render_timeline,
     validate_image_review_action,
@@ -46,7 +46,6 @@ from .views import (
     DetectionBulkConfirmationView,
     DetectionCaseView,
     DetectionIndividualView,
-    DetectionModerationConfirmationView,
 )
 
 _ = Translator("Honeypot", __file__)
@@ -56,6 +55,27 @@ DETECTION_CAPTURE_DEADLINE_SECONDS = 20.0
 DETECTION_CAPTURE_CONCURRENCY = 4
 DETECTION_EVIDENCE_RESERVATION_STALE_SECONDS = 5 * 60
 _TIMELINE_VIEW_UNSET = object()
+
+
+def _timeline_render_fingerprint(content: str, view: object) -> str:
+    if view is _TIMELINE_VIEW_UNSET:
+        controls: object = "unchanged"
+    elif view is None:
+        controls = None
+    else:
+        controls = [
+            (
+                getattr(item, "custom_id", None),
+                getattr(item, "label", None),
+                str(getattr(item, "style", None)),
+                str(getattr(item, "emoji", None)),
+                bool(getattr(item, "disabled", False)),
+                getattr(item, "row", None),
+            )
+            for item in view.children
+        ]
+    payload = json.dumps((content, controls), ensure_ascii=False, separators=(",", ":"))
+    return hashlib.blake2b(payload.encode("utf-8"), digest_size=16).hexdigest()
 
 
 def case_evidence_root(evidence_root: Path, guild_id: int, case_id: str) -> Path:
@@ -711,7 +731,9 @@ def _case_publication_nonce(logical_key: str) -> int:
 
 
 async def _complete_case_timeline_publication(
-    cog, publication, sent_message, thread_id: int, *, revision: int = 1
+    cog, publication, sent_message, thread_id: int, *,
+    revision: int = 1,
+    render_fingerprint: str | None = None,
 ) -> None:
     if publication.claim_token is None:
         raise RuntimeError("timeline publication is not claimed")
@@ -723,6 +745,7 @@ async def _complete_case_timeline_publication(
             channel_id=thread_id,
             message_id=sent_message.id,
             revision=revision,
+            render_fingerprint=render_fingerprint,
         )
     except KeyError:
         current = next(
@@ -874,11 +897,18 @@ async def _upsert_case_timeline_text(
         edit_kwargs["view"] = view
     # Revision 1 is text-only; later revisions record the uploaded file count.
     evidence_revision = len(evidence_batch) + 1
+    render_fingerprint = _timeline_render_fingerprint(content, view)
     attach_evidence = bool(evidence_batch) and (
         publication.revision < evidence_revision
     )
     replace_message_id = None
     if publication.state == "published" and publication.message_id is not None:
+        if (
+            publication.channel_id == thread.id
+            and not attach_evidence
+            and publication.render_fingerprint == render_fingerprint
+        ):
+            return
         if attach_evidence:
             edit_kwargs["attachments"] = _case_timeline_discord_files(
                 evidence_batch
@@ -886,13 +916,13 @@ async def _upsert_case_timeline_text(
         try:
             message = thread.get_partial_message(publication.message_id)
             await message.edit(**edit_kwargs)
-            if attach_evidence:
-                await asyncio.to_thread(
-                    cog._case_store.update_timeline_publication_revision,
-                    publication.logical_key,
-                    message_id=publication.message_id,
-                    revision=evidence_revision,
-                )
+            await asyncio.to_thread(
+                cog._case_store.record_timeline_render,
+                publication.logical_key,
+                message_id=publication.message_id,
+                revision=evidence_revision,
+                render_fingerprint=render_fingerprint,
+            )
             return
         except discord.NotFound:
             replace_message_id = publication.message_id
@@ -900,6 +930,12 @@ async def _upsert_case_timeline_text(
         publication, replace_message_id=replace_message_id
     )
     if not owned:
+        if (
+            publication.channel_id == thread.id
+            and publication.render_fingerprint == render_fingerprint
+            and publication.revision >= evidence_revision
+        ):
+            return
         message = await thread.fetch_message(publication.message_id)
         if evidence_batch and publication.revision < evidence_revision:
             edit_kwargs["attachments"] = _case_timeline_discord_files(
@@ -908,13 +944,13 @@ async def _upsert_case_timeline_text(
         else:
             edit_kwargs.pop("attachments", None)
         await message.edit(**edit_kwargs)
-        if "attachments" in edit_kwargs:
-            await asyncio.to_thread(
-                cog._case_store.update_timeline_publication_revision,
-                publication.logical_key,
-                message_id=publication.message_id,
-                revision=evidence_revision,
-            )
+        await asyncio.to_thread(
+            cog._case_store.record_timeline_render,
+            publication.logical_key,
+            message_id=publication.message_id,
+            revision=evidence_revision,
+            render_fingerprint=render_fingerprint,
+        )
         return
     send_kwargs = {}
     if view is not _TIMELINE_VIEW_UNSET:
@@ -933,6 +969,7 @@ async def _upsert_case_timeline_text(
             message,
             thread.id,
             revision=evidence_revision,
+            render_fingerprint=render_fingerprint,
         )
     except BaseException:
         await _release_case_timeline_publication(cog, publication)
@@ -1176,7 +1213,15 @@ async def _publish_case_timeline(
                 else None
             )
             replace_message_id = None
+            evidence_revision = len(batch) + 1
+            render_fingerprint = _timeline_render_fingerprint(content, view)
             if evidence.state == "published" and evidence.message_id is not None:
+                if (
+                    evidence.channel_id == thread.id
+                    and evidence.render_fingerprint == render_fingerprint
+                    and evidence.revision >= evidence_revision
+                ):
+                    continue
                 try:
                     published = await thread.fetch_message(evidence.message_id)
                     existing_attachments = getattr(
@@ -1196,6 +1241,13 @@ async def _publish_case_timeline(
                             attachments=files,
                             view=view,
                         )
+                    await asyncio.to_thread(
+                        cog._case_store.record_timeline_render,
+                        evidence.logical_key,
+                        message_id=evidence.message_id,
+                        revision=evidence_revision,
+                        render_fingerprint=render_fingerprint,
+                    )
                     continue
                 except discord.NotFound:
                     replace_message_id = evidence.message_id
@@ -1203,8 +1255,21 @@ async def _publish_case_timeline(
                 evidence, replace_message_id=replace_message_id
             )
             if not owned:
+                if (
+                    evidence.channel_id == thread.id
+                    and evidence.render_fingerprint == render_fingerprint
+                    and evidence.revision >= evidence_revision
+                ):
+                    continue
                 published = await thread.fetch_message(evidence.message_id)
                 await published.edit(view=view)
+                await asyncio.to_thread(
+                    cog._case_store.record_timeline_render,
+                    evidence.logical_key,
+                    message_id=evidence.message_id,
+                    revision=evidence_revision,
+                    render_fingerprint=render_fingerprint,
+                )
                 continue
             files = _case_timeline_discord_files(batch)
             try:
@@ -1216,7 +1281,9 @@ async def _publish_case_timeline(
                     nonce=_case_publication_nonce(evidence.logical_key),
                 )
                 await _complete_case_timeline_publication(cog,
-                    evidence, published, thread.id
+                    evidence, published, thread.id,
+                    revision=evidence_revision,
+                    render_fingerprint=render_fingerprint,
                 )
             except BaseException:
                 await _release_case_timeline_publication(cog, evidence)
@@ -1234,17 +1301,31 @@ async def _publish_case_timeline(
         for obsolete in existing_evidence:
             if obsolete.state != "published" or obsolete.message_id is None:
                 continue
+            obsolete_content = (
+                f"Message {message.sequence} attachments: "
+                "No additional attachments"
+            )
+            obsolete_fingerprint = _timeline_render_fingerprint(obsolete_content, None)
+            if (
+                obsolete.channel_id == thread.id
+                and obsolete.render_fingerprint == obsolete_fingerprint
+            ):
+                continue
             try:
                 published = await thread.fetch_message(obsolete.message_id)
             except discord.NotFound:
                 continue
             await published.edit(
-                content=(
-                    f"Message {message.sequence} attachments: "
-                    "No additional attachments"
-                ),
+                content=obsolete_content,
                 attachments=[],
                 view=None,
+            )
+            await asyncio.to_thread(
+                cog._case_store.record_timeline_render,
+                obsolete.logical_key,
+                message_id=obsolete.message_id,
+                revision=obsolete.revision,
+                render_fingerprint=obsolete_fingerprint,
             )
 
 
@@ -1668,6 +1749,7 @@ async def _finish_case_review_if_ready(
                 await asyncio.to_thread(
                     cog._case_store.reconcile_moderator_actions,
                     datetime.now(timezone.utc),
+                    case_id=case_id,
                 )
             refreshed = await asyncio.to_thread(
                 cog._case_store.get_case,
@@ -1841,38 +1923,12 @@ async def _case_review_moderation_interaction(
     interaction: discord.Interaction,
     case_id: str,
     action: str,
-    *,
-    confirmed: bool = False,
 ) -> bool:
     if not _case_review_has_action_permission(interaction, action):
         await _case_review_error(
             interaction, _("You do not have permission to review this case.")
         )
         return False
-    if action in {"ban", "kick"} and not confirmed:
-        snapshot = await asyncio.to_thread(cog._case_store.get_case, case_id)
-        has_unreviewed_images = snapshot is not None and any(
-            is_persisted_image_attachment(attachment)
-            and (
-                attachment.capture_status == "pending"
-                or (
-                    attachment.capture_status == "captured"
-                    and attachment.evidence_path is not None
-                    and attachment.learning_decision is None
-                )
-            )
-            for attachment in snapshot.attachments
-        )
-        if has_unreviewed_images:
-            await interaction.response.send_message(
-                _(
-                    "Some images are still processing or have not been reviewed. "
-                    "Continue with moderation now?"
-                ),
-                view=DetectionModerationConfirmationView(cog, case_id, action),
-                ephemeral=True,
-            )
-            return False
     await _case_review_defer(interaction)
     try:
         if action == "ignore":
@@ -1897,7 +1953,6 @@ async def _case_review_moderation_interaction(
             raise ValueError("detection case is already resolving or resolved")
         if operation.operation_type != f"moderator_{action}":
             raise ValueError("another moderator action already owns this case")
-        await _case_review_rerender_safely(cog, case_id)
         now = datetime.now(timezone.utc)
         if operation.status.value == "failed" and operation.retry_at is not None:
             now = max(now, operation.retry_at)

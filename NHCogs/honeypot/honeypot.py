@@ -89,7 +89,6 @@ from .views import (
     DetectionBulkConfirmationView,  # noqa: F401 - public module re-export
     DetectionCaseView,
     DetectionIndividualView,  # noqa: F401 - public module re-export
-    DetectionModerationConfirmationView,  # noqa: F401 - public module re-export
 )
 
 _ = Translator("Honeypot", __file__)
@@ -268,10 +267,20 @@ class Honeypot(Cog):
 
     @commands.Cog.listener()
     async def on_raw_message_delete(self, payload: typing.Any) -> None:
+        await asyncio.to_thread(
+            self._case_store.invalidate_timeline_publications,
+            payload.channel_id,
+            (payload.message_id,),
+        )
         await self._message_registry.forget(payload.message_id)
 
     @commands.Cog.listener()
     async def on_raw_bulk_message_delete(self, payload: typing.Any) -> None:
+        await asyncio.to_thread(
+            self._case_store.invalidate_timeline_publications,
+            payload.channel_id,
+            payload.message_ids,
+        )
         await self._message_registry.forget_many(payload.message_ids)
 
     @commands.Cog.listener()
@@ -505,6 +514,15 @@ class Honeypot(Cog):
     async def _renew_detection_operation(self, operation) -> None:
         return await detection._renew_detection_operation(self, operation)
 
+    def _detection_admission_lock(self, guild_id: int, user_id: int) -> asyncio.Lock:
+        index = (guild_id * 31 + user_id) % len(self._detection_admission_locks)
+        return self._detection_admission_locks[index]
+
+    async def _wait_for_detection_admission(self, guild_id: int, user_id: int) -> None:
+        lock = self._detection_admission_lock(guild_id, user_id)
+        await lock.acquire()
+        lock.release()
+
     async def _collect_detection_signals(
         self, message: discord.Message, guild_settings: GuildSettings
     ) -> tuple[DetectionSignal, ...]:
@@ -517,7 +535,7 @@ class Honeypot(Cog):
         signals: tuple[DetectionSignal, ...],
         *,
         timings: dict[str, float] | None = None,
-        admission_lock: asyncio.Lock | None = None,
+        admission_lock: detection._AdmissionLease | None = None,
     ) -> None:
         return await detection._process_detected_message(
             self,
@@ -1159,6 +1177,10 @@ class Honeypot(Cog):
             )
             self._case_views[snapshot.case.case_id] = view
             self.bot.add_view(view, message_id=message_id)
+            await asyncio.to_thread(
+                self._case_store.invalidate_case_timeline_renders,
+                snapshot.case.case_id,
+            )
             await self._case_review_rerender(snapshot.case.case_id)
 
     # ─── Detection ────────────────────────────────────────────────────────
@@ -1354,11 +1376,9 @@ class Honeypot(Cog):
         interaction: discord.Interaction,
         case_id: str,
         action: str,
-        *,
-        confirmed: bool = False,
     ) -> bool:
         return await review_publication._case_review_moderation_interaction(
-            self, interaction, case_id, action, confirmed=confirmed
+            self, interaction, case_id, action
         )
 
     async def _case_review_attachment_interaction(
@@ -1381,8 +1401,24 @@ class Honeypot(Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        gif_detected = await gif_detector.on_message(self, message)
-        result = await detection.on_message(self, message)
+        admission_lock = None
+        if (
+            message.guild is not None
+            and not message.author.bot
+            and message.webhook_id is None
+        ):
+            admission_lock = detection._AdmissionLease(
+                self._detection_admission_lock(message.guild.id, message.author.id)
+            )
+            await admission_lock.acquire()
+        try:
+            gif_detected = await gif_detector.on_message(self, message)
+            result = await detection.on_message(
+                self, message, admission_lock=admission_lock
+            )
+        finally:
+            if admission_lock is not None:
+                admission_lock.release()
         if not gif_detected:
             await gif_detector.schedule_remote_media_fallback(self, message)
         return result

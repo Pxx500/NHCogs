@@ -99,7 +99,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                 self.assertIsNone(decisions["invoice.pdf"])
                 await drain_background_work(cog)
 
-    async def test_moderator_ban_requires_confirmation_for_unreviewed_attachment(self):
+    async def test_moderator_ban_runs_without_confirmation_for_unreviewed_attachment(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 member = SimpleNamespace(id=20, roles=[], ban=mock.AsyncMock())
@@ -113,12 +113,6 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                 cog = honeypot.Honeypot(bot, _operational_support())
                 cog._case_store.initialize()
                 cog.config = self._config({"dry_run": True})
-                honeypot.DetectionModerationConfirmationView.add_item = (
-                    lambda view, item: setattr(
-                        view, "children", getattr(view, "children", []) + [item]
-                    )
-                )
-                honeypot.discord.ui.Button = lambda **kwargs: SimpleNamespace(**kwargs)
                 now = datetime.now(timezone.utc)
                 appended = cog._case_store.append_message(
                     honeypot.NewMessage(
@@ -161,47 +155,21 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                     interaction, appended.case.case_id, "ban"
                 )
 
-                response.defer.assert_not_awaited()
-                response.send_message.assert_awaited_once()
-                self.assertTrue(response.send_message.await_args.kwargs["ephemeral"])
-                confirmation = response.send_message.await_args.kwargs["view"]
-                self.assertEqual(
-                    [item.label for item in confirmation.children],
-                    ["Confirm Ban"],
-                )
-                snapshot = cog._case_store.get_case(appended.case.case_id)
-                self.assertEqual(snapshot.case.status.value, "pending")
-                self.assertEqual(snapshot.operations, ())
-
-                confirmation_response_done = False
-
-                async def defer_confirmation():
-                    nonlocal confirmation_response_done
-                    confirmation_response_done = True
-
-                confirmation_interaction = SimpleNamespace(
-                    user=interaction.user,
-                    response=SimpleNamespace(
-                        defer=mock.AsyncMock(side_effect=defer_confirmation),
-                        is_done=lambda: confirmation_response_done,
-                    ),
-                    followup=SimpleNamespace(send=mock.AsyncMock()),
-                    delete_original_response=mock.AsyncMock(),
-                )
-                await confirmation.children[0].callback(confirmation_interaction)
-
+                response.defer.assert_awaited_once()
+                response.send_message.assert_not_awaited()
                 snapshot = cog._case_store.get_case(appended.case.case_id)
                 operation = next(
                     item
                     for item in snapshot.operations
                     if item.operation_type == "moderator_ban"
                 )
-                confirmation_interaction.response.defer.assert_awaited_once()
-                confirmation_interaction.delete_original_response.assert_awaited_once_with()
                 self.assertEqual(operation.status.value, "succeeded")
                 self.assertEqual(operation.result, "planned_ban")
+                self.assertEqual(snapshot.case.status.value, "resolving")
+                self.assertEqual(snapshot.attachments[0].capture_status, "pending")
+                await drain_background_work(cog)
 
-    async def test_bulk_confirmation_dismisses_prompt_before_action_finishes(self):
+    async def test_bulk_confirmation_runs_action_before_dismissing_prompt(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 honeypot.DetectionBulkConfirmationView.add_item = (
@@ -255,10 +223,12 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                 )
                 await action_started.wait()
 
-                interaction.delete_original_response.assert_awaited_once_with()
-                self.assertEqual(order, ["defer", "delete", "action"])
+                interaction.delete_original_response.assert_not_awaited()
+                self.assertEqual(order, ["defer", "action"])
                 release_action.set()
                 await callback
+                interaction.delete_original_response.assert_awaited_once_with()
+                self.assertEqual(order, ["defer", "action", "delete"])
 
     async def test_classification_returns_before_final_operations_finish(self):
         with TemporaryDirectory() as directory:
@@ -428,65 +398,6 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                     "You do not have permission to review this case.",
                     ephemeral=True,
                 )
-
-    async def test_moderation_confirmation_dismisses_prompt_before_action_finishes(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                honeypot.DetectionModerationConfirmationView.add_item = (
-                    lambda view, item: setattr(
-                        view, "children", getattr(view, "children", []) + [item]
-                    )
-                )
-                honeypot.discord.ui.Button = lambda **kwargs: SimpleNamespace(**kwargs)
-                cog = honeypot.Honeypot(_Bot(), _operational_support())
-                action_started = asyncio.Event()
-                release_action = asyncio.Event()
-                order = []
-
-                async def run_action(*args, **kwargs):
-                    order.append("action")
-                    action_started.set()
-                    await release_action.wait()
-                    return True
-
-                cog._case_review_moderation_interaction = mock.AsyncMock(
-                    side_effect=run_action
-                )
-                view = honeypot.DetectionModerationConfirmationView(
-                    cog,
-                    "case-1",
-                    "ban",
-                )
-                response_done = False
-
-                async def defer():
-                    nonlocal response_done
-                    order.append("defer")
-                    response_done = True
-
-                async def delete_original_response():
-                    order.append("delete")
-
-                interaction = SimpleNamespace(
-                    response=SimpleNamespace(
-                        defer=mock.AsyncMock(side_effect=defer),
-                        is_done=lambda: response_done,
-                    ),
-                    followup=SimpleNamespace(send=mock.AsyncMock()),
-                    delete_original_response=mock.AsyncMock(
-                        side_effect=delete_original_response
-                    ),
-                )
-
-                callback = asyncio.create_task(
-                    view.children[0].callback(interaction)
-                )
-                await action_started.wait()
-
-                interaction.delete_original_response.assert_awaited_once_with()
-                self.assertEqual(order, ["defer", "delete", "action"])
-                release_action.set()
-                await callback
 
     async def test_case_view_keeps_moderation_and_image_controls_separate(self):
         with TemporaryDirectory() as directory:
@@ -1109,7 +1020,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
 
                 cog._execute_detection_case_operation = mock.AsyncMock()
                 await cog._case_review_moderation_interaction(
-                    interaction, appended.case.case_id, "ban", confirmed=True
+                    interaction, appended.case.case_id, "ban"
                 )
 
                 snapshot = cog._case_store.get_case(appended.case.case_id)

@@ -174,53 +174,28 @@ class DetectionBulkConfirmationView(discord.ui.View):
         button = discord.ui.Button(label=label, style=style)
 
         async def callback(interaction):
-            await self.cog._dismiss_case_review_prompt(interaction)
-            if self.message_sequence is None:
-                await self.cog._case_review_bulk_interaction(
-                    interaction,
-                    self.case_id,
-                    self.action,
-                    confirmed=True,
-                    expected_keys=self.expected_keys,
-                )
-            else:
-                await self.cog._case_review_message_bulk_interaction(
-                    interaction,
-                    self.case_id,
-                    self.message_sequence,
-                    self.action,
-                    confirmed=True,
-                    expected_keys=self.expected_keys,
-                )
-
-        button.callback = callback
-        add_item(button)
-
-
-class DetectionModerationConfirmationView(discord.ui.View):
-    def __init__(self, cog: "Honeypot", case_id: str, action: str) -> None:
-        super().__init__()
-        self.timeout = 60
-        self.cog = cog
-        self.case_id = case_id
-        self.action = action
-        add_item = getattr(self, "add_item", None)
-        if not callable(add_item):
-            return
-        button = discord.ui.Button(
-            label=f"Confirm {action.title()}",
-            style=(
-                discord.ButtonStyle.danger
-                if action == "ban"
-                else discord.ButtonStyle.secondary
-            ),
-        )
-
-        async def callback(interaction):
-            await self.cog._dismiss_case_review_prompt(interaction)
-            await self.cog._case_review_moderation_interaction(
-                interaction, self.case_id, self.action, confirmed=True
-            )
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+            try:
+                if self.message_sequence is None:
+                    await self.cog._case_review_bulk_interaction(
+                        interaction,
+                        self.case_id,
+                        self.action,
+                        confirmed=True,
+                        expected_keys=self.expected_keys,
+                    )
+                else:
+                    await self.cog._case_review_message_bulk_interaction(
+                        interaction,
+                        self.case_id,
+                        self.message_sequence,
+                        self.action,
+                        confirmed=True,
+                        expected_keys=self.expected_keys,
+                    )
+            finally:
+                await self.cog._dismiss_case_review_prompt(interaction)
 
         button.callback = callback
         add_item(button)
