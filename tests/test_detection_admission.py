@@ -53,6 +53,60 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     ),
                 )
 
+    async def test_gif_stage_keeps_message_reserved_for_moderation(self):
+        class ObservedAdmissionLock:
+            def __init__(self):
+                self.lock = asyncio.Lock()
+                self.waiting = asyncio.Event()
+
+            async def acquire(self):
+                if self.lock.locked():
+                    self.waiting.set()
+                await self.lock.acquire()
+
+            def release(self):
+                self.lock.release()
+
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
+                message = self._message(honeypot, attachment_count=0)
+                admission_lock = ObservedAdmissionLock()
+                lock_index = (
+                    message.guild.id * 31 + message.author.id
+                ) % len(cog._detection_admission_locks)
+                locks = list(cog._detection_admission_locks)
+                locks[lock_index] = admission_lock
+                cog._detection_admission_locks = tuple(locks)
+                gif_started = asyncio.Event()
+                release_gif = asyncio.Event()
+
+                async def scan_gif(*args):
+                    gif_started.set()
+                    await release_gif.wait()
+                    return True
+
+                async def admit_message(_cog, _message, *, admission_lock=None):
+                    if admission_lock is not None:
+                        admission_lock.release()
+
+                honeypot.gif_detector.on_message = scan_gif
+                honeypot.detection.on_message = admit_message
+                message_task = asyncio.create_task(cog.on_message(message))
+                await asyncio.wait_for(gif_started.wait(), timeout=1)
+                waiter = asyncio.create_task(
+                    cog._wait_for_detection_admission(
+                        message.guild.id, message.author.id
+                    )
+                )
+                try:
+                    await asyncio.wait_for(admission_lock.waiting.wait(), timeout=1)
+                    self.assertFalse(waiter.done())
+                finally:
+                    release_gif.set()
+                    await message_task
+                    await waiter
+
     async def test_registry_observation_failure_does_not_stop_detection(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
