@@ -17,12 +17,31 @@ These commands are available to regular guild members:
 ```
 
 `[p]commands` is a standalone public command with its own public permission surface. It
-shows the same output as `[p]customcom list`.
+shows the same output as `[p]customcom list`. The list and search results contain only
+commands the caller can use in the channel where they requested the list. A command
+restricted to another channel does not appear there. Direct `show` and `raw` requests
+for inaccessible commands use the normal not-found message.
 Lists and previews disable mentions. `list` and `search` show 15 commands per page. Each
 entry uses one logical line in the form `[p]command - short preview`, with whitespace and
 markdown normalized for compact display. The invoker navigates with Previous and Next
 and closes the list with the red X button. Temporary list, raw, and delete controls expire
 after 30 seconds.
+
+A moderator can set each command's access from the **Access** button in its create or
+edit thread. The modal accepts user IDs or mentions, role IDs or mentions, and channel
+or thread IDs or mentions. Multiple values can be separated by commas or spaces.
+Selected users and roles are alternatives: a matching user **or** role may use the
+command. A channel restriction and **Private channels only** must also match when set.
+A private channel is hidden from `@everyone`, and private threads qualify. Channel IDs
+match the exact channel or thread where the command is invoked.
+
+All access fields are optional. Commands without restrictions remain available to
+everyone, including commands created before access controls were added. **Hide response
+preview** defaults to `Off`. Turning it `On` displays `[redacted]` in command lists for
+people who can use that command. It does not hide the command's name or change direct
+`show` and `raw` behavior for people who can use it. People without access do not see
+the command in lists at all. Restricted invocations without access are silently ignored
+and do not consume cooldowns or record usage.
 
 Running the custom command itself preserves normal Discord mention behavior. `raw` shows
 exact whitespace in code blocks with Previous and Next buttons. Responses containing a

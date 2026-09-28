@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 from io import BytesIO
 from typing import Any
@@ -12,6 +13,7 @@ from .arguments import ArgumentSignatureError, argument_signature
 from .catalog import (
     MAX_RESPONSE_LENGTH,
     MAX_WEIGHT,
+    AccessRules,
     CatalogError,
     CustomCommand,
     CustomCommandCatalog,
@@ -37,6 +39,7 @@ class WorkflowDraft:
     name: str
     responses: list[ResponseDraft] = field(default_factory=list)
     cooldowns: dict[str, int] = field(default_factory=dict)
+    access: AccessRules = field(default_factory=AccessRules)
     expected_revision: int | None = None
     pending_replacement: int | None = None
 
@@ -53,6 +56,7 @@ class WorkflowDraft:
                 for response in command.responses
             ],
             cooldowns=dict(command.cooldowns),
+            access=command.access,
             expected_revision=command.revision,
         )
 
@@ -150,6 +154,86 @@ class WorkflowDraft:
         if not 0 <= index < len(self.responses):
             raise WorkflowInputError("That response does not exist")
         return index
+
+
+def _access_ids(value: str, kind: str) -> tuple[int, ...]:
+    patterns = {
+        "users": r"(?:<@!?(\d+)>|(\d+))",
+        "roles": r"(?:<@&(\d+)>|(\d+))",
+        "channels": r"(?:<#(\d+)>|(\d+))",
+    }
+    ids = []
+    for token in value.replace(",", " ").split():
+        matched = re.fullmatch(patterns[kind], token)
+        if matched is None:
+            raise WorkflowInputError(f"Enter {kind} as mentions or IDs")
+        ids.append(int(matched.group(1) or matched.group(2)))
+    return tuple(ids)
+
+
+def _access_switch(value: str, label: str) -> bool:
+    answer = value.strip().casefold()
+    if answer not in {"yes", "no", "on", "off"}:
+        raise WorkflowInputError(f"{label} must be on or off")
+    return answer in {"yes", "on"}
+
+
+class AccessModal(discord.ui.Modal):
+    def __init__(self, session: WorkflowSession):
+        super().__init__(title="Command access")
+        self._session = session
+        access = session.draft.access
+        for name, label, values in (
+            ("users", "Allowed users", access.user_ids),
+            ("roles", "Allowed roles", access.role_ids),
+            ("channels", "Allowed channels or threads", access.channel_ids),
+        ):
+            field = discord.ui.TextInput(
+                label=label, style=discord.TextStyle.paragraph,
+                default=", ".join(map(str, values)),
+                placeholder="Mentions or IDs, separated by spaces or commas",
+                required=False, max_length=1000,
+            )
+            setattr(self, name, field)
+            self.add_item(field)
+        self.private = discord.ui.TextInput(
+            label="Private channels only?", style=discord.TextStyle.short,
+            default="yes" if access.private_only else "no", required=True, max_length=3,
+        )
+        self.hide = discord.ui.TextInput(
+            label="Hide response preview?", style=discord.TextStyle.short,
+            default="on" if access.hide_preview else "off", required=True, max_length=3,
+        )
+        self.add_item(self.private)
+        self.add_item(self.hide)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            users = _access_ids(self.users.value, "users")
+            roles = _access_ids(self.roles.value, "roles")
+            channels = _access_ids(self.channels.value, "channels")
+            guild = self._session.thread.guild
+            if any(guild.get_role(role_id) is None for role_id in roles):
+                raise WorkflowInputError("One of those roles is not on this server")
+            if any(guild.get_channel_or_thread(channel_id) is None for channel_id in channels):
+                raise WorkflowInputError("One of those channels or threads is not on this server")
+            access = AccessRules(
+                user_ids=users, role_ids=roles, channel_ids=channels,
+                private_only=_access_switch(self.private.value, "Private channels only"),
+                hide_preview=_access_switch(self.hide.value, "Hide preview"),
+            )
+        except (WorkflowInputError, CatalogError) as error:
+            self._session.validation_error = str(error)
+            await interaction.response.send_message(str(error), ephemeral=True)
+            await self._session.update_dashboard()
+            return
+        self._session.draft.access = access
+        self._session.validation_error = None
+        await interaction.response.defer()
+        await self._session.update_dashboard()
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        await self._session.report_interaction_error(interaction, error)
 
 
 class ResponseModal(discord.ui.Modal):
@@ -324,6 +408,11 @@ class WorkflowView(discord.ui.View):
             button.callback = callback
             button.disabled = disabled
             self.add_item(button)
+        access_button = discord.ui.Button(
+            label="Access", style=discord.ButtonStyle.secondary, row=3,
+        )
+        access_button.callback = self._access
+        self.add_item(access_button)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self._session.opener_id:
@@ -378,6 +467,9 @@ class WorkflowView(discord.ui.View):
 
     async def _move(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(NumberModal(self._session, action="move"))
+
+    async def _access(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(AccessModal(self._session))
 
     async def _view_exact(self, interaction: discord.Interaction) -> None:
         await self._session.send_exact_response(interaction)
@@ -575,6 +667,11 @@ class WorkflowSession:
                 ),
                 inline=True,
             )
+        access = self.draft.access
+        if access.restricted or access.hide_preview:
+            embed.add_field(
+                name="Access", value=self._access_summary(access), inline=False,
+            )
         signature = self._signature_label()
         if signature != "None":
             embed.add_field(name="Arguments", value=signature, inline=True)
@@ -585,6 +682,32 @@ class WorkflowSession:
                 inline=False,
             )
         return embed
+
+    def _access_summary(self, access: AccessRules) -> str:
+        guild = self.thread.guild
+        lines = []
+        if access.user_ids:
+            users = []
+            for user_id in access.user_ids:
+                member = guild.get_member(user_id)
+                users.append(f"@{member.display_name}" if member else str(user_id))
+            lines.append("Users: " + ", ".join(users))
+        if access.role_ids:
+            roles = []
+            for role_id in access.role_ids:
+                role = guild.get_role(role_id)
+                roles.append(f"@{role.name}" if role else str(role_id))
+            lines.append("Roles: " + ", ".join(roles))
+        if access.channel_ids:
+            channels = []
+            for channel_id in access.channel_ids:
+                channel = guild.get_channel_or_thread(channel_id)
+                channels.append(f"#{channel.name}" if channel else str(channel_id))
+            lines.append("Channels: " + ", ".join(channels))
+        if access.private_only:
+            lines.append("Private channels only")
+        lines.append("Hide preview: " + ("On" if access.hide_preview else "Off"))
+        return "\n".join(lines)
 
     def _signature_label(self) -> str:
         if not self.draft.responses:
@@ -651,6 +774,7 @@ class WorkflowSession:
                     author_name=self.opener_name,
                     responses=tuple(self.draft.responses),
                     cooldowns=self.draft.cooldowns,
+                    access=self.draft.access,
                 )
             else:
                 await self._manager.catalog.edit(
@@ -661,6 +785,7 @@ class WorkflowSession:
                     editor_name=self.opener_name,
                     responses=tuple(self.draft.responses),
                     cooldowns=self.draft.cooldowns,
+                    access=self.draft.access,
                 )
         except StaleRevision:
             self.validation_error = (

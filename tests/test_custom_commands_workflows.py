@@ -219,6 +219,90 @@ class WorkflowDraftTests(unittest.TestCase):
 
 
 class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
+    def test_dashboard_shows_hide_preview_without_other_restrictions(self):
+        session = workflows.WorkflowSession(
+            SimpleNamespace(session_timeout_seconds=30 * 60),
+            thread=SimpleNamespace(id=10, guild=SimpleNamespace()),
+            opener=SimpleNamespace(id=200),
+            draft=workflows.WorkflowDraft(
+                "open", responses=[catalog.ResponseDraft("hello")],
+                access=catalog.AccessRules(hide_preview=True),
+            ),
+        )
+        access_fields = [
+            item["value"] for item in session.render_embed().fields
+            if item["name"] == "Access"
+        ]
+        self.assertEqual(access_fields, ["Hide preview: On"])
+
+    async def test_access_control_is_configured_and_saved_with_command(self):
+        stored = SimpleNamespace(create=mock.AsyncMock())
+        manager = SimpleNamespace(
+            catalog=stored, session_timeout_seconds=30 * 60,
+            remove=mock.Mock(), log_moderation_action=mock.AsyncMock(),
+        )
+        guild = SimpleNamespace(
+            id=100,
+            get_member=lambda user_id: SimpleNamespace(display_name="User") if user_id == 200 else None,
+            get_role=lambda role_id: SimpleNamespace(name="Role") if role_id == 300 else None,
+            get_channel_or_thread=lambda channel_id: SimpleNamespace(name="channel")
+            if channel_id == 400 else None,
+        )
+        thread = SimpleNamespace(id=10, guild=guild, mention="#thread", edit=mock.AsyncMock())
+        session = workflows.WorkflowSession(
+            manager, thread=thread, opener=SimpleNamespace(id=200),
+            draft=workflows.WorkflowDraft(
+                "hello", responses=[catalog.ResponseDraft("response")],
+            ),
+        )
+        session.dashboard = SimpleNamespace(edit=mock.AsyncMock(), id=20)
+        access_button = next(
+            item for item in session.view.children if getattr(item, "label", None) == "Access"
+        )
+        open_interaction = SimpleNamespace(response=SimpleNamespace(send_modal=mock.AsyncMock()))
+        await access_button.callback(open_interaction)
+        modal = open_interaction.response.send_modal.await_args.args[0]
+        modal.users.value = "<@200>"
+        modal.roles.value = "<@&300>"
+        modal.channels.value = "<#400>"
+        modal.private.value = "yes"
+        modal.hide.value = "on"
+        submit = SimpleNamespace(response=SimpleNamespace(defer=mock.AsyncMock()))
+        await modal.on_submit(submit)
+        self.assertEqual(session.draft.access, catalog.AccessRules(
+            user_ids=(200,), role_ids=(300,), channel_ids=(400,),
+            private_only=True, hide_preview=True,
+        ))
+        await session.save(SimpleNamespace(
+            response=SimpleNamespace(defer=mock.AsyncMock()),
+            followup=SimpleNamespace(send=mock.AsyncMock()),
+        ))
+        self.assertEqual(stored.create.await_args.kwargs["access"], session.draft.access)
+
+    async def test_invalid_access_input_keeps_previous_draft(self):
+        manager = SimpleNamespace(
+            catalog=SimpleNamespace(), session_timeout_seconds=30 * 60,
+            remove=mock.Mock(),
+        )
+        thread = SimpleNamespace(
+            id=10,
+            guild=SimpleNamespace(get_role=lambda _: None, get_channel_or_thread=lambda _: None),
+        )
+        session = workflows.WorkflowSession(
+            manager, thread=thread, opener=SimpleNamespace(id=200),
+            draft=workflows.WorkflowDraft("hello"),
+        )
+        session.dashboard = SimpleNamespace(edit=mock.AsyncMock())
+        button = next(item for item in session.view.children if getattr(item, "label", None) == "Access")
+        opening = SimpleNamespace(response=SimpleNamespace(send_modal=mock.AsyncMock()))
+        await button.callback(opening)
+        modal = opening.response.send_modal.await_args.args[0]
+        modal.roles.value = "<@&300>"
+        submit = SimpleNamespace(response=SimpleNamespace(send_message=mock.AsyncMock()))
+        await modal.on_submit(submit)
+        self.assertEqual(session.draft.access, catalog.AccessRules())
+        self.assertIn("not on this server", submit.response.send_message.await_args.args[0])
+
     async def test_add_modal_preserves_content_and_refreshes_the_dashboard(self):
         manager = SimpleNamespace(
             catalog=SimpleNamespace(),
@@ -429,7 +513,7 @@ class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
         select = session.view.children[0]
         buttons = {item.label: item for item in session.view.children[1:]}
         self.assertEqual([option.label for option in select.options], ["#1", "#2", "#3", "#4", "#5"])
-        self.assertEqual({item.row for item in session.view.children}, {0, 1, 2})
+        self.assertEqual({item.row for item in session.view.children}, {0, 1, 2, 3})
         self.assertEqual(
             set(buttons),
             {
@@ -443,6 +527,7 @@ class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
                 "View exact",
                 "Save",
                 "Cancel",
+                "Access",
             },
         )
         for label in ("Edit", "Delete", "Weight", "Move", "View exact"):
