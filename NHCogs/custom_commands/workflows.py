@@ -25,7 +25,8 @@ from .presentation import present_exact_response
 SESSION_TIMEOUT_SECONDS = 30 * 60
 RESPONSES_PER_PAGE = 5
 DASHBOARD_PREVIEW_LENGTH = 160
-DISCORD_EMBED_FIELD_LIMIT = 1_024
+ACCESS_ITEMS_PER_KIND = 3
+ACCESS_NAME_LENGTH = 40
 WEIGHT_COMMAND_PARTS = 3
 INDEX_COMMAND_PARTS = 2
 MOVE_COMMAND_PARTS = 3
@@ -687,32 +688,38 @@ class WorkflowSession:
     def _access_summary(self, access: AccessRules) -> str:
         guild = self.thread.guild
         lines = []
-        if access.user_ids:
-            users = []
-            for user_id in access.user_ids:
-                member = guild.get_member(user_id)
-                users.append(f"@{member.display_name}" if member else str(user_id))
-            lines.append("Users: " + ", ".join(users))
-        if access.role_ids:
-            roles = []
-            for role_id in access.role_ids:
-                role = guild.get_role(role_id)
-                roles.append(f"@{role.name}" if role else str(role_id))
-            lines.append("Roles: " + ", ".join(roles))
-        if access.channel_ids:
-            channels = []
-            for channel_id in access.channel_ids:
-                channel = guild.get_channel_or_thread(channel_id)
-                channels.append(f"#{channel.name}" if channel else str(channel_id))
-            lines.append("Channels: " + ", ".join(channels))
         if access.private_only:
             lines.append("Private channels only")
         lines.append("Hide preview: " + ("On" if access.hide_preview else "Off"))
-        summary = "\n".join(lines)
-        return (
-            summary if len(summary) <= DISCORD_EMBED_FIELD_LIMIT
-            else summary[: DISCORD_EMBED_FIELD_LIMIT - 3] + "..."
-        )
+        if access.user_ids:
+            users = []
+            for user_id in access.user_ids[:ACCESS_ITEMS_PER_KIND]:
+                member = guild.get_member(user_id)
+                users.append(
+                    f"@{member.display_name}"[:ACCESS_NAME_LENGTH] if member else str(user_id)
+                )
+            if len(access.user_ids) > ACCESS_ITEMS_PER_KIND:
+                users.append(f"+{len(access.user_ids) - ACCESS_ITEMS_PER_KIND} more")
+            lines.append("Users: " + ", ".join(users))
+        if access.role_ids:
+            roles = []
+            for role_id in access.role_ids[:ACCESS_ITEMS_PER_KIND]:
+                role = guild.get_role(role_id)
+                roles.append(f"@{role.name}"[:ACCESS_NAME_LENGTH] if role else str(role_id))
+            if len(access.role_ids) > ACCESS_ITEMS_PER_KIND:
+                roles.append(f"+{len(access.role_ids) - ACCESS_ITEMS_PER_KIND} more")
+            lines.append("Roles: " + ", ".join(roles))
+        if access.channel_ids:
+            channels = []
+            for channel_id in access.channel_ids[:ACCESS_ITEMS_PER_KIND]:
+                channel = guild.get_channel_or_thread(channel_id)
+                channels.append(
+                    f"#{channel.name}"[:ACCESS_NAME_LENGTH] if channel else str(channel_id)
+                )
+            if len(access.channel_ids) > ACCESS_ITEMS_PER_KIND:
+                channels.append(f"+{len(access.channel_ids) - ACCESS_ITEMS_PER_KIND} more")
+            lines.append("Channels: " + ", ".join(channels))
+        return "\n".join(lines)
 
     def _signature_label(self) -> str:
         if not self.draft.responses:

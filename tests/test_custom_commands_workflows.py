@@ -229,7 +229,9 @@ class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
             opener=SimpleNamespace(id=200),
             draft=workflows.WorkflowDraft(
                 "limited", responses=[catalog.ResponseDraft("response")],
-                access=catalog.AccessRules(user_ids=ids),
+                access=catalog.AccessRules(
+                    user_ids=ids, private_only=True, hide_preview=True,
+                ),
             ),
         )
         access_fields = [
@@ -238,7 +240,9 @@ class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(access_fields), 1)
         self.assertLessEqual(len(access_fields[0]), 1_024)
-        self.assertTrue(access_fields[0].endswith("..."))
+        self.assertIn("+47 more", access_fields[0])
+        self.assertIn("Private channels only", access_fields[0])
+        self.assertIn("Hide preview: On", access_fields[0])
 
     def test_dashboard_shows_hide_preview_without_other_restrictions(self):
         session = workflows.WorkflowSession(

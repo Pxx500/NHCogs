@@ -32,6 +32,7 @@ edit thread. The modal accepts user IDs or mentions, role IDs or mentions, and c
 or thread IDs or mentions. Multiple values can be separated by commas or spaces.
 Selected users and roles are alternatives: a matching user **or** role may use the
 command. A channel restriction and **Private channels only** must also match when set.
+A long access list is summarized on the dashboard. Reopen **Access** to see every ID.
 A private channel is hidden from `@everyone`, and private threads qualify. Channel IDs
 match the exact channel or thread where the command is invoked.
 
