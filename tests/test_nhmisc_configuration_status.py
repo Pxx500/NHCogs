@@ -688,13 +688,24 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         )
         self.ctx.send_help.assert_not_awaited()
 
-    def test_achievement_proof_command_keeps_its_permission_and_link_contract(self):
-        callback = nhmisc.NHMisc.achievement_proof.callback
-        parameters = inspect.signature(callback).parameters
+    async def test_achievement_proof_rejects_members_without_manage_messages(self):
+        command = nhmisc.NHMisc.achievement_proof
+        parameters = inspect.signature(command.callback).parameters
+        denied = types.SimpleNamespace(
+            author=types.SimpleNamespace(
+                guild_permissions=types.SimpleNamespace(manage_messages=False)
+            )
+        )
+        allowed = types.SimpleNamespace(
+            author=types.SimpleNamespace(
+                guild_permissions=types.SimpleNamespace(manage_messages=True)
+            )
+        )
 
         self.assertIn("message_link", parameters)
         self.assertEqual(parameters["message_link"].annotation, "str")
-        self.assertEqual(callback.required_permissions, {"manage_messages": True})
+        self.assertFalse(await command.can_run(denied))
+        self.assertTrue(await command.can_run(allowed))
 
     async def test_achievement_role_group_lists_its_direct_commands(self):
         self.ctx.command = types.SimpleNamespace(

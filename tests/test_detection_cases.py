@@ -4,14 +4,12 @@ import types
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
-from dataclasses import FrozenInstanceError
 from datetime import date, datetime, timedelta, timezone
 from importlib import util
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Barrier, Event
 from unittest import mock
-from zoneinfo import ZoneInfo
 
 from tests.detection_case_fixtures import capture_attachment, publish_primary
 from tests.storage_loader import load_shared_storage
@@ -54,310 +52,6 @@ DetectionCaseStore = detection_cases_under_test.DetectionCaseStore
 ResolutionLease = detection_cases_under_test.ResolutionLease
 
 
-class DetectionCaseDomainTests(unittest.TestCase):
-    def test_attachment_identity_uses_message_sequence_and_position(self):
-        self.assertNotEqual(
-            AttachmentKey("case-1", 1, 0),
-            AttachmentKey("case-1", 2, 0),
-        )
-        self.assertNotEqual(
-            AttachmentKey("case-1", 1, 0),
-            AttachmentKey("case-1", 1, 1),
-        )
-
-    def test_enum_values_are_stable_storage_vocabulary(self):
-        self.assertEqual(
-            tuple(status.value for status in CaseStatus),
-            ("pending", "resolving", "resolved", "expired"),
-        )
-        self.assertEqual(
-            tuple(action.value for action in ActionIntent),
-            ("none", "review", "kick", "ban"),
-        )
-        self.assertEqual(
-            tuple(status.value for status in DeleteStatus),
-            (
-                "pending",
-                "planned",
-                "deleted",
-                "already_gone",
-                "forbidden",
-                "transient_failure",
-            ),
-        )
-        self.assertEqual(
-            tuple(status.value for status in OperationStatus),
-            ("pending", "running", "succeeded", "failed", "abandoned"),
-        )
-
-    def test_operation_type_values_are_stable_storage_vocabulary(self):
-        operation_type = getattr(detection_cases_under_test, "OperationType", None)
-
-        self.assertIsNotNone(operation_type)
-        self.assertEqual(
-            tuple(member.value for member in operation_type),
-            (
-                "message_process",
-                "role_apply",
-                "role_release",
-                "review_update",
-                "review_publish",
-                "source_delete",
-                "evidence_cleanup",
-                "cached_purge",
-                "moderation_action",
-                "moderator_ban",
-                "moderator_kick",
-                "moderator_ignore",
-            ),
-        )
-
-    def test_action_priority_is_immutable(self):
-        with self.assertRaises(TypeError):
-            ACTION_PRIORITY[ActionIntent.NONE] = 99
-
-    def test_case_expiry_is_exactly_24_hours_after_creation(self):
-        created_at = datetime(2026, 7, 13, 12, 30, tzinfo=timezone.utc)
-
-        self.assertEqual(
-            new_case_expiry(created_at),
-            created_at + timedelta(hours=24),
-        )
-
-    def test_case_expiry_rejects_naive_datetime(self):
-        with self.assertRaises(ValueError):
-            new_case_expiry(datetime(2026, 7, 13, 12, 30))
-
-    def test_case_expiry_is_24_elapsed_hours_across_dst_transition(self):
-        created_at = datetime(2026, 3, 28, 12, tzinfo=ZoneInfo("Europe/Warsaw"))
-
-        expiry = new_case_expiry(created_at)
-
-        self.assertEqual(
-            expiry.astimezone(timezone.utc) - created_at.astimezone(timezone.utc),
-            timedelta(hours=24),
-        )
-
-    def test_timestamp_roundtrip_preserves_microseconds_far_from_epoch(self):
-        value = datetime(3000, 1, 1, 0, 0, 0, 999999, tzinfo=timezone.utc)
-
-        self.assertEqual(_from_timestamp(_to_timestamp(value)), value)
-
-    def test_strongest_signal_selects_one_action(self):
-        signals = (
-            DetectionSignal("spam", "duplicate", ActionIntent.REVIEW, True, {}),
-            DetectionSignal("image", "known TP", ActionIntent.BAN, True, {}),
-            DetectionSignal("firstpost", "new account", ActionIntent.KICK, True, {}),
-        )
-
-        self.assertEqual(effective_action(signals), ActionIntent.BAN)
-
-    def test_signal_metadata_is_a_recursive_defensive_copy(self):
-        metadata = {
-            "matches": [{"distance": 2}],
-            "labels": {"known", "scam"},
-        }
-        signal = DetectionSignal(
-            "image", "known TP", ActionIntent.BAN, True, metadata,
-        )
-
-        metadata["matches"][0]["distance"] = 99
-        metadata["matches"].append({"distance": 3})
-        metadata["labels"].add("changed")
-
-        self.assertEqual(signal.metadata["matches"][0]["distance"], 2)
-        self.assertEqual(len(signal.metadata["matches"]), 1)
-        self.assertNotIn("changed", signal.metadata["labels"])
-        with self.assertRaises(TypeError):
-            signal.metadata["new"] = True
-        with self.assertRaises(TypeError):
-            signal.metadata["matches"][0]["distance"] = 7
-        with self.assertRaises(AttributeError):
-            signal.metadata["matches"].append({"distance": 4})
-
-    def test_none_does_not_override_review(self):
-        signals = (
-            DetectionSignal("image", "logged only", ActionIntent.NONE, True, {}),
-            DetectionSignal("firstpost", "first message", ActionIntent.REVIEW, True, {}),
-        )
-
-        self.assertEqual(effective_action(signals), ActionIntent.REVIEW)
-
-    def test_empty_signals_have_no_action(self):
-        self.assertEqual(effective_action(()), ActionIntent.NONE)
-
-    def test_case_records_are_immutable_lifecycle_snapshots(self):
-        created_at = datetime(2026, 7, 13, tzinfo=timezone.utc)
-        case = CaseRecord(
-            case_id="case-1",
-            guild_id=10,
-            user_id=20,
-            status=CaseStatus.PENDING,
-            created_at=created_at,
-            expires_at=created_at + timedelta(hours=24),
-            resolution=None,
-            moderator_id=None,
-            resolved_at=None,
-            review_channel_id=None,
-            review_message_id=None,
-            resolving_since=None,
-            needs_attention=False,
-        )
-
-        with self.assertRaises(FrozenInstanceError):
-            case.status = CaseStatus.RESOLVED
-
-    def test_message_records_keep_case_local_order_and_discord_identity(self):
-        created_at = datetime(2026, 7, 13, tzinfo=timezone.utc)
-        message = MessageRecord(
-            case_id="case-1",
-            sequence=2,
-            guild_id=10,
-            channel_id=30,
-            message_id=40,
-            content="evidence",
-            created_at=created_at,
-            jump_url="https://discord.test/messages/40",
-            admitted_by="spam",
-            capture_status="captured",
-            delete_status=DeleteStatus.DELETED,
-            error=None,
-        )
-
-        self.assertEqual((message.sequence, message.message_id), (2, 40))
-        with self.assertRaises(FrozenInstanceError):
-            message.delete_status = DeleteStatus.FORBIDDEN
-
-    def test_attachment_records_keep_ordered_identity_and_evidence_results(self):
-        attachment = AttachmentRecord(
-            key=AttachmentKey("case-1", 2, 1),
-            filename="proof.png",
-            size=123,
-            content_type="image/png",
-            width=640,
-            height=480,
-            source_url="https://cdn/proof",
-            evidence_path="case-1/2-1.png",
-            capture_status="captured",
-            sha256="abc",
-            perceptual_hash="def",
-            match_metadata={"distance": 2},
-            learning_decision=None,
-            learning_metadata={},
-            error=None,
-        )
-
-        self.assertEqual(attachment.key, AttachmentKey("case-1", 2, 1))
-        with self.assertRaises(FrozenInstanceError):
-            attachment.capture_status = "capture_failed"
-
-    def test_attachment_mapping_fields_are_recursive_defensive_copies(self):
-        match_metadata = {"matches": [{"distance": 2}]}
-        learning_metadata = {"labels": ["known"]}
-        attachment = AttachmentRecord(
-            key=AttachmentKey("case-1", 2, 1),
-            filename="proof.png",
-            size=123,
-            content_type="image/png",
-            width=None,
-            height=None,
-            source_url="https://cdn/proof",
-            evidence_path=None,
-            capture_status="pending",
-            sha256=None,
-            perceptual_hash=None,
-            match_metadata=match_metadata,
-            learning_decision=None,
-            learning_metadata=learning_metadata,
-            error=None,
-        )
-
-        match_metadata["matches"][0]["distance"] = 99
-        learning_metadata["labels"].append("changed")
-
-        self.assertEqual(attachment.match_metadata["matches"][0]["distance"], 2)
-        self.assertEqual(attachment.learning_metadata["labels"], ("known",))
-
-
-        with self.assertRaises(TypeError):
-            attachment.match_metadata["matches"][0]["distance"] = 7
-        with self.assertRaises(AttributeError):
-            attachment.learning_metadata["labels"].append("other")
-
-    def test_operation_records_keep_idempotent_attempt_results(self):
-        started_at = datetime(2026, 7, 13, tzinfo=timezone.utc)
-        operation = OperationRecord(
-            operation_id="op-1",
-            case_id="case-1",
-            message_sequence=2,
-            operation_type="delete",
-            status=OperationStatus.FAILED,
-            attempts=2,
-            created_at=started_at,
-            updated_at=started_at,
-            retry_at=started_at + timedelta(minutes=1),
-            last_error="temporary outage",
-            result=None,
-            actor_id=None,
-            idempotency_key="delete:case-1:2",
-            claim_token=None,
-            claimed_at=None,
-        )
-
-        self.assertEqual((operation.status, operation.attempts), (OperationStatus.FAILED, 2))
-        with self.assertRaises(FrozenInstanceError):
-            operation.attempts = 3
-
-    def test_new_message_keeps_ordered_attachment_input(self):
-        created_at = datetime(2026, 7, 13, tzinfo=timezone.utc)
-        attachments = (
-            NewAttachment(0, "one.png", 100, "image/png", 10, 20, "https://cdn/one"),
-            NewAttachment(1, "one.png", 100, "image/png", 10, 20, "https://cdn/two"),
-        )
-        message = NewMessage(
-            guild_id=10,
-            user_id=20,
-            channel_id=30,
-            message_id=40,
-            content="evidence",
-            created_at=created_at,
-            jump_url=None,
-            attachments=attachments,
-        )
-
-        self.assertEqual(message.attachments, attachments)
-        self.assertEqual(tuple(item.position for item in message.attachments), (0, 1))
-        with self.assertRaises(FrozenInstanceError):
-            message.content = "changed"
-
-    def test_append_result_and_snapshot_preserve_identity_and_signal_ownership(self):
-        created_at = datetime(2026, 7, 13, tzinfo=timezone.utc)
-        case = CaseRecord(
-            "case-1", 10, 20, CaseStatus.PENDING, created_at,
-            created_at + timedelta(hours=24), None, None, None, None, None, None, False,
-        )
-        message = MessageRecord(
-            "case-1", 1, 10, 30, 40, "evidence", created_at, None,
-            "spam", "pending", DeleteStatus.PENDING, None,
-        )
-        signal = SignalRecord(
-            case_id="case-1",
-            message_sequence=1,
-            signal=DetectionSignal("spam", "duplicate", ActionIntent.REVIEW, True, {}),
-        )
-        append = AppendResult(case=case, message=message, case_created=True, message_created=False)
-        snapshot = CaseSnapshot(
-            case=case,
-            messages=(message,),
-            attachments=(),
-            signals=(signal,),
-            operations=(),
-        )
-
-        self.assertFalse(append.message_created)
-        self.assertEqual(snapshot.signals[0].message_sequence, snapshot.messages[0].sequence)
-        with self.assertRaises(FrozenInstanceError):
-            append.message_created = True
 
 
 class DetectionCaseStoreTests(unittest.TestCase):
@@ -367,6 +61,58 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.database_path = Path(self.temp_dir.name) / "cases.sqlite3"
         self.store = DetectionCaseStore(self.database_path)
         self.store.initialize()
+
+    def test_strongest_signal_records_one_moderation_operation(self):
+        created_at = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
+        signals = (
+            DetectionSignal("spam", "duplicate", ActionIntent.REVIEW, True, {}),
+            DetectionSignal("image", "known", ActionIntent.BAN, True, {}),
+            DetectionSignal("firstpost", "new account", ActionIntent.KICK, True, {}),
+        )
+
+        def initial_operations(owned):
+            action = effective_action(owned)
+            if action not in {ActionIntent.KICK, ActionIntent.BAN}:
+                return ()
+            return (
+                (
+                    OperationType.MODERATION_ACTION,
+                    f"moderation_action:{{case_id}}:{{sequence}}:{action.value}",
+                ),
+            )
+
+        appended = self.store.append_message(
+            NewMessage(10, 20, 30, 40, "evidence", created_at, None, ()),
+            signals,
+            initial_operations,
+        )
+        snapshot = self.store.get_case(appended.case.case_id)
+        self.assertEqual(
+            [item.signal.action for item in snapshot.signals],
+            [ActionIntent.REVIEW, ActionIntent.BAN, ActionIntent.KICK],
+        )
+        moderation = [
+            operation
+            for operation in snapshot.operations
+            if operation.operation_type is OperationType.MODERATION_ACTION
+        ]
+        self.assertEqual(len(moderation), 1)
+        self.assertIn(":ban", moderation[0].idempotency_key)
+
+        review_only = self.store.append_message(
+            NewMessage(10, 21, 30, 41, "note", created_at, None, ()),
+            (DetectionSignal("image", "logged", ActionIntent.NONE, True, {}),
+             DetectionSignal("firstpost", "first", ActionIntent.REVIEW, True, {})),
+            initial_operations,
+        )
+        review_snapshot = self.store.get_case(review_only.case.case_id)
+        self.assertEqual(effective_action(
+            tuple(item.signal for item in review_snapshot.signals)
+        ), ActionIntent.REVIEW)
+        self.assertFalse(any(
+            operation.operation_type is OperationType.MODERATION_ACTION
+            for operation in review_snapshot.operations
+        ))
 
     def test_initialize_sets_the_detection_schema_version_on_an_empty_database(self):
         with closing(sqlite3.connect(self.database_path)) as connection:

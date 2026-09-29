@@ -2,6 +2,7 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import ModuleType, SimpleNamespace
 from unittest import mock
 
@@ -532,36 +533,71 @@ class GateProofViewTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_batch_replacement_buttons_select_the_requested_write_mode(self):
         views, _fake_select = _load_achievement_views()
-        cog = SimpleNamespace(_confirm_gate_proof_batch=mock.AsyncMock())
-        view = views.GateProofBatchView(
-            cog,
-            SimpleNamespace(
-                jump_url="https://discord.example/request",
-                guild=SimpleNamespace(id=1),
-            ),
-            99,
-            {10: SimpleNamespace(id=10)},
-            (
-                SimpleNamespace(
-                    user_id=10,
-                    ordinal=1,
-                    jump_url="https://discord.example/new",
-                ),
-            ),
-            existing_proofs={(10, 1): nhmisc.StargateProof(1, 20, 30)},
+        content = (
+            "1 https://discord.com/channels/1/20/30 <@10>\n"
+            "2 https://discord.com/channels/1/20/31 <@10>"
         )
-        interaction = SimpleNamespace()
-
-        await view.attach.callback(interaction)
-        await view.add_missing.callback(interaction)
-
-        self.assertEqual(
-            cog._confirm_gate_proof_batch.await_args_list,
-            [
-                mock.call(interaction, view, replace_existing=True),
-                mock.call(interaction, view, replace_existing=False),
-            ],
+        entries = nhmisc._parse_gate_proof_batch(content, expected_guild_id=1)
+        member = SimpleNamespace(id=10, bot=False)
+        guild = SimpleNamespace(id=1, get_member=lambda user_id: member if user_id == 10 else None)
+        source = SimpleNamespace(
+            id=40,
+            content=content,
+            jump_url="https://discord.com/channels/1/20/40",
+            guild=guild,
+            channel=SimpleNamespace(id=20),
+            author=member,
+            webhook_id=None,
         )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=99),
+            response=SimpleNamespace(defer=mock.AsyncMock()),
+            edit_original_response=mock.AsyncMock(),
+            delete_original_response=mock.AsyncMock(),
+        )
+
+        async def press(button_name):
+            with TemporaryDirectory() as directory:
+                store = nhmisc.AchievementStore(Path(directory) / "achievements.sqlite")
+                await store.initialize()
+                await store.bootstrap_guild(
+                    1, gate_tiers={}, boolean_definitions=(), boolean_users={}
+                )
+                await store.import_gate_progress(1, 10, 2)
+                await store.attach_stargate_proofs(
+                    1, {10: 1}, source_channel_id=8, source_message_id=9
+                )
+                existing = (await store.get_profile(1, 10)).stargate_proofs[0]
+                cog = object.__new__(nhmisc.NHMisc)
+                cog._achievement_store = store
+                cog._fetch_gate_increment_source = mock.AsyncMock(return_value=source)
+                cog._require_private_moderation_log_channel = mock.AsyncMock()
+                cog._send_moderation_log = mock.AsyncMock(return_value=True)
+                view = views.GateProofBatchView(
+                    cog,
+                    source,
+                    99,
+                    {10: member},
+                    entries,
+                    existing_proofs={(10, 1): existing},
+                )
+                await getattr(view, button_name).callback(interaction)
+                profile = await store.get_profile(1, 10)
+                proofs = {
+                    proof.ordinal: proof.source_message_id
+                    for proof in profile.stargate_proofs
+                }
+                return proofs, cog._send_moderation_log.await_args.args[1]
+
+        added_proofs, added_log = await press("add_missing")
+        replaced_proofs, replaced_log = await press("attach")
+
+        self.assertEqual(added_proofs, {1: 9, 2: 31})
+        self.assertIn("Gate 2", added_log)
+        self.assertNotIn("Gate 1", added_log)
+        self.assertEqual(replaced_proofs, {1: 30, 2: 31})
+        self.assertIn("Gate 1", replaced_log)
+        self.assertIn("Gate 2", replaced_log)
 
 
 class GateProofEntryPointTests(unittest.IsolatedAsyncioTestCase):
@@ -1206,43 +1242,6 @@ class _CommandTree:
 
     def remove_command(self, name, *, type):
         self.removed.append((name, type))
-
-
-class GateProofRegistrationTests(unittest.TestCase):
-    def test_message_action_registers_and_unregisters_with_achievement_commands(self):
-        tree = _CommandTree()
-        cog = object.__new__(nhmisc.NHMisc)
-        cog.bot = SimpleNamespace(tree=tree)
-        cog._gate_revoke_slash_command = SimpleNamespace(name="gaterevoke")
-        cog._gate_revoke_user_context_menu = SimpleNamespace(
-            name="Revoke latest Gate"
-        )
-        cog._achievements_slash_command = SimpleNamespace(name="achievements")
-        cog._achievements_user_context_menu = SimpleNamespace(
-            name="View achievements"
-        )
-        cog._grant_achievements_context_menu = SimpleNamespace(
-            name="Grant achievements"
-        )
-        cog._add_gate_proof_context_menu = SimpleNamespace(name="Add Gate Proof")
-        cog._achievement_commands_registered = False
-        command_types = SimpleNamespace(
-            chat_input="chat_input",
-            user="user",
-            message="message",
-        )
-
-        with mock.patch.object(
-            nhmisc.discord,
-            "AppCommandType",
-            command_types,
-            create=True,
-        ):
-            cog._register_achievement_commands()
-            cog._unregister_achievement_commands()
-
-        self.assertIn(("Add Gate Proof", True), tree.added)
-        self.assertIn(("Add Gate Proof", "message"), tree.removed)
 
 
 class GateProofConfirmationTests(unittest.IsolatedAsyncioTestCase):

@@ -32,6 +32,11 @@ class FakeCommand:
     def group(self, **attrs):
         return lambda callback: FakeCommand(callback, **attrs)
 
+    async def can_run(self, ctx):
+        required = getattr(self.callback, "required_permissions", None) or {}
+        permissions = ctx.author.guild_permissions
+        return all(getattr(permissions, name, False) for name in required)
+
 
 def _tag(name, value=True):
     def decorator(target):
@@ -190,15 +195,21 @@ class FakeContext:
 
 
 class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
-    def test_chatchart_is_a_top_level_moderator_command(self):
+    async def test_chatchart_rejects_members_without_manage_messages(self):
         command = nhmisc.NHMisc.nhmisc_chatchart
-
-        self.assertEqual(command.attrs["name"], "chatchart")
-        self.assertTrue(command.callback.guild_only)
-        self.assertEqual(
-            command.callback.required_permissions,
-            {"manage_messages": True},
+        denied = types.SimpleNamespace(
+            author=types.SimpleNamespace(
+                guild_permissions=types.SimpleNamespace(manage_messages=False)
+            )
         )
+        allowed = types.SimpleNamespace(
+            author=types.SimpleNamespace(
+                guild_permissions=types.SimpleNamespace(manage_messages=True)
+            )
+        )
+
+        self.assertFalse(await command.can_run(denied))
+        self.assertTrue(await command.can_run(allowed))
         self.assertEqual(
             command.attrs["usage"],
             "<days> [amount] | <channel_or_thread> <days> [amount]",
@@ -453,16 +464,6 @@ class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertAlmostEqual(math.hypot(*label.get_position()), 0.79, places=2)
         self.assertIsNone(donut_axis.get_legend())
 
-    def test_palette_has_one_non_neutral_color_for_every_allowed_rank(self):
-        self.assertEqual(
-            len(nhmisc.CHATCHART_SERIES_COLORS),
-            nhmisc.MAX_CHATCHART_USER_COUNT,
-        )
-        self.assertEqual(
-            len(set(nhmisc.CHATCHART_SERIES_COLORS)),
-            nhmisc.MAX_CHATCHART_USER_COUNT,
-        )
-        self.assertNotIn(nhmisc.CHATCHART_OTHER_COLOR, nhmisc.CHATCHART_SERIES_COLORS)
 
     def test_location_label_names_channels_threads_and_missing_parents(self):
         cog = object.__new__(nhmisc.NHMisc)

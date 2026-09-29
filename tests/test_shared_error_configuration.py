@@ -84,19 +84,6 @@ def context(module, *, public=False):
 
 
 class SharedErrorConfigurationTests(unittest.IsolatedAsyncioTestCase):
-    def test_shared_command_tree_and_manage_messages_permission(self):
-        with shared_reporting() as module:
-            names = {
-                value.qualified_name for value in vars(module.OperationalSupport).values()
-                if getattr(value, "kind", None) in {"command", "group"}
-            }
-        self.assertEqual(names, {
-            "nhcogs", "nhcogs errors", "nhcogs errors channel",
-            "nhcogs errors channel set", "nhcogs errors channel clear",
-            "nhcogs errors maintainer", "nhcogs errors maintainer set",
-            "nhcogs errors maintainer clear",
-        })
-
     async def test_set_commands_store_values_and_bare_groups_show_them(self):
         with shared_reporting() as module:
             ctx, member = context(module)

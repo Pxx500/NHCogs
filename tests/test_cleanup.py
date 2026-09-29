@@ -426,22 +426,35 @@ class CleanupOrchestrationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CleanupCommandAdapterTests(unittest.IsolatedAsyncioTestCase):
-    def test_cleanup_commands_require_manage_messages(self):
+    async def test_cleanup_commands_reject_members_without_manage_messages(self):
+        denied = SimpleNamespace(
+            is_red_mod=False,
+            is_red_admin=False,
+            author=SimpleNamespace(
+                guild_permissions=SimpleNamespace(
+                    manage_messages=False,
+                    administrator=False,
+                )
+            ),
+        )
+        allowed = SimpleNamespace(
+            is_red_mod=False,
+            is_red_admin=False,
+            author=SimpleNamespace(
+                guild_permissions=SimpleNamespace(
+                    manage_messages=True,
+                    administrator=False,
+                )
+            ),
+        )
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
                 with loaded_managed_cleanup() as managed:
                     root = managed.Cleanup.cleanup
-                    self.assertIsNone(root.parent)
-                    self.assertEqual(root.name, "cleanup")
-                    self.assertTrue(root.callback.guild_only)
-                    self.assertEqual(
-                        root.callback.has_permissions,
-                        {"manage_messages": True},
-                    )
-                    self.assertEqual(
-                        {command.name for command in root.commands},
-                        {"messages", "user", "after", "before", "between"},
-                    )
+                    commands = (root, *root.commands)
+                    for command in commands:
+                        self.assertFalse(await command.can_run(denied))
+                        self.assertTrue(await command.can_run(allowed))
                     before = next(command for command in root.commands if command.name == "before")
                     self.assertEqual(
                         before.usage,

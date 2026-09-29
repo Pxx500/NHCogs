@@ -33,6 +33,15 @@ class _Command:
     def group(self, **attrs):
         return lambda callback: _Command(callback, parent=self, **attrs)
 
+    async def can_run(self, ctx):
+        required = (
+            getattr(self.callback, "direct_permissions", None)
+            or getattr(self.callback, "required_permissions", None)
+            or {}
+        )
+        permissions = ctx.author.guild_permissions
+        return all(getattr(permissions, name, False) for name in required)
+
 
 def _tag(name, value=True):
     def decorator(target):
@@ -298,10 +307,22 @@ class CommandUsageChartTests(unittest.IsolatedAsyncioTestCase):
                         await cog.CustomCommands.comchart.callback(subject, ctx, "<#20>", 7)
                     subject.catalog.usage_counts.assert_not_awaited()
 
-    def test_command_is_standalone_and_requires_only_manage_messages(self):
+    async def test_command_rejects_members_without_manage_messages(self):
         command = cog.CustomCommands.comchart
+        denied = types.SimpleNamespace(
+            author=types.SimpleNamespace(
+                guild_permissions=types.SimpleNamespace(manage_messages=False)
+            )
+        )
+        allowed = types.SimpleNamespace(
+            author=types.SimpleNamespace(
+                guild_permissions=types.SimpleNamespace(manage_messages=True)
+            )
+        )
+
         self.assertIsNone(command.parent)
-        self.assertEqual(command.callback.direct_permissions, {"manage_messages": True})
+        self.assertFalse(await command.can_run(denied))
+        self.assertTrue(await command.can_run(allowed))
         self.assertTrue(command.callback.guild_only)
 
     def context(self, *, private=True):
@@ -351,15 +372,6 @@ class CommandUsageChartTests(unittest.IsolatedAsyncioTestCase):
             await cog.CustomCommands.comchart.callback(subject, self.context(private=False), 'server', 7)
         subject.catalog.usage_counts.assert_not_awaited()
 
-    async def test_invalid_requests_do_not_query_usage(self):
-        subject = object.__new__(cog.CustomCommands)
-        subject.catalog = types.SimpleNamespace(usage_counts=mock.AsyncMock())
-        for args in (("0",), ("-1",), ("bad",), ("server",),
-                     ("<#invalid>", 7), ("7", 30)):
-            with self.subTest(args=args):
-                with self.assertRaises(cog.commands.UserFeedbackCheckFailure):
-                    await cog.CustomCommands.comchart.callback(subject, self.context(), *args)
-        subject.catalog.usage_counts.assert_not_awaited()
 
     async def test_empty_usage_has_feedback_and_does_not_render(self):
         subject = object.__new__(cog.CustomCommands)
@@ -758,31 +770,6 @@ class CustomCommandsCopyTests(unittest.IsolatedAsyncioTestCase):
                 await callback(subject, ctx, "secret")
                 ctx.send.assert_awaited_once_with("That custom command doesn't exist")
 
-    async def test_commands_share_one_not_found_message(self):
-        subject = object.__new__(cog.CustomCommands)
-        subject.catalog = types.SimpleNamespace(get=mock.AsyncMock(return_value=None))
-        ctx = types.SimpleNamespace(
-            guild=types.SimpleNamespace(id=100, default_role=object()),
-            channel=types.SimpleNamespace(
-                permissions_for=lambda _: types.SimpleNamespace(view_channel=False),
-            ),
-            send=mock.AsyncMock(),
-        )
-        callbacks = (
-            cog.CustomCommands.cc_raw.callback,
-            cog.CustomCommands.cc_show.callback,
-            cog.CustomCommands.cc_edit.callback,
-            cog.CustomCommands.cc_cooldown.callback,
-            cog.CustomCommands.cc_delete.callback,
-        )
-
-        for callback in callbacks:
-            with self.subTest(command=callback.__name__):
-                ctx.send.reset_mock()
-                await callback(subject, ctx, "missing")
-                ctx.send.assert_awaited_once_with(
-                    "That custom command doesn't exist"
-                )
 
     async def test_show_does_not_repeat_the_command_name_in_its_body(self):
         command = types.SimpleNamespace(

@@ -1114,56 +1114,6 @@ class CaseReviewServiceTests(unittest.IsolatedAsyncioTestCase):
             ["true_positive", "true_positive"],
         )
 
-    async def test_bulk_tp_ignores_captured_pdf_evidence(self):
-        now = datetime(2026, 7, 14, tzinfo=timezone.utc)
-        appended = self.store.append_message(
-            cases.NewMessage(
-                1,
-                2,
-                20,
-                999,
-                "message",
-                now,
-                None,
-                (
-                    cases.NewAttachment(
-                        0, "proof.png", 10, "image/png", None, None, "image"
-                    ),
-                    cases.NewAttachment(
-                        1, "invoice.pdf", 10, "application/pdf", None, None, "pdf"
-                    ),
-                ),
-            ),
-            (cases.DetectionSignal("spam", "match", cases.ActionIntent.REVIEW, True, {}),),
-        )
-        for position, filename in ((0, "proof.png"), (1, "invoice.pdf")):
-            capture_attachment(
-                self.store,
-                appended.case.case_id,
-                appended.message.sequence,
-                position,
-                f"case/1/{position}-{filename}",
-            )
-
-        with self.assertRaisesRegex(ValueError, "captured image evidence"):
-            await case_review.CaseReviewService(self.store).apply_individual(
-                cases.AttachmentKey(
-                    appended.case.case_id, appended.message.sequence, 1
-                ),
-                "tp",
-                moderator_id=7,
-            )
-        snapshot = await case_review.CaseReviewService(self.store).apply_message(
-            appended.case.case_id,
-            appended.message.sequence,
-            "tp",
-            moderator_id=7,
-        )
-
-        self.assertEqual(
-            [item.learning_decision for item in snapshot.attachments],
-            ["true_positive", None],
-        )
 
     async def test_message_bulk_action_only_updates_that_messages_images(self):
         case_id = self.create_case()

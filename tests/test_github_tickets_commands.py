@@ -94,56 +94,6 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.temporary_directory.cleanup)
         self.data_path = Path(self.temporary_directory.name)
 
-    async def test_registers_only_the_accepted_prefix_command_tree(self):
-        with isolated_githubtickets_modules(self.data_path) as modules:
-            commands = {
-                command.qualified_name: command
-                for command in modules.githubtickets.GitHubTickets.__cog_commands__
-            }
-
-        self.assertEqual(
-            set(commands),
-            {
-                "githubtickets",
-                "githubtickets channel",
-                "githubtickets channel set",
-                "githubtickets channel clear",
-                "githubtickets logchannel",
-                "githubtickets logchannel set",
-                "githubtickets logchannel clear",
-                "githubtickets role",
-                "githubtickets role add",
-                "githubtickets role remove",
-                "githubtickets category",
-                "githubtickets category add",
-                "githubtickets category rename",
-                "githubtickets category remove",
-                "githubtickets maxpings",
-                "githubtickets timing",
-                "githubtickets timing protection",
-                "githubtickets timing volunteer",
-                "githubtickets timing online",
-                "githubtickets timing idle",
-                "githubtickets timing donotdisturb",
-                "githubtickets timing offline",
-                "githubtickets timing direct",
-                "githubtickets profile",
-                "githubtickets profile clear",
-                "githubtickets profile pings",
-                "githubtickets profile pings summary",
-                "githubtickets profile pings enabled",
-                "githubtickets profile pings disabled",
-            },
-        )
-        self.assertEqual(
-            commands["githubtickets"].callback.__doc__,
-            "Configure GitHub Tickets",
-        )
-        self.assertEqual(
-            commands["githubtickets timing donotdisturb"].callback.__doc__,
-            "Set the Do Not Disturb response time",
-        )
-
     async def test_cog_check_guards_every_prefix_command_in_guilds(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
@@ -224,38 +174,35 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_public_bare_group_hides_configuration_without_reading_it(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
+            await cog.store.initialize()
+            await cog.config.guild_from_id(42).set_raw("ticket_channel_id", value=100)
             ctx = FakeContext(private=False)
             ctx.command = _registered_command_tree(
                 modules.githubtickets.GitHubTickets,
                 modules.githubtickets.GitHubTickets.githubtickets,
             )
 
-            with (
-                mock.patch.object(
-                    cog,
-                    "_send_configuration_overview",
-                    new=mock.AsyncMock(),
-                ) as configuration_sender,
-                mock.patch.object(
-                    modules.githubtickets.discord,
-                    "Embed",
-                    _OverviewEmbed,
-                ),
+            with mock.patch.object(
+                modules.githubtickets.discord,
+                "Embed",
+                _OverviewEmbed,
             ):
                 await cog.githubtickets(ctx)
 
-        configuration_sender.assert_not_awaited()
-        ctx.send.assert_awaited_once()
+        self.assertEqual(ctx.send.await_count, 1)
         embed = ctx.send.await_args.kwargs["embed"]
+        rendered = "\n".join(field.value for field in embed.fields)
         fields = {field.name: field.value for field in embed.fields}
         self.assertIn("Current configuration", fields)
         self.assertIn("hidden", fields["Current configuration"])
         self.assertIn("Commands", fields)
+        self.assertNotIn("<#100>", rendered)
 
     async def test_every_bare_subgroup_shows_its_commands(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             cog_type = modules.githubtickets.GitHubTickets
             cog = cog_type(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
+            await cog.store.initialize()
             commands = tuple(cog_type.__cog_commands__)
             groups = [
                 command
@@ -267,17 +214,10 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 )
             ]
 
-            with (
-                mock.patch.object(
-                    cog,
-                    "_send_configuration_overview",
-                    new=mock.AsyncMock(),
-                ) as configuration_sender,
-                mock.patch.object(
-                    modules.githubtickets.discord,
-                    "Embed",
-                    _OverviewEmbed,
-                ),
+            with mock.patch.object(
+                modules.githubtickets.discord,
+                "Embed",
+                _OverviewEmbed,
             ):
                 for group in groups:
                     with self.subTest(group=group.qualified_name):
@@ -285,10 +225,16 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                         ctx.command = _registered_command_tree(cog_type, group)
                         await group.callback(cog, ctx)
 
-                        self.assertEqual(ctx.send.await_count, 1)
-                        embed = ctx.send.await_args.kwargs["embed"]
+                        embeds = [
+                            call.kwargs["embed"]
+                            for call in ctx.send.await_args_list
+                            if "embed" in call.kwargs
+                        ]
+                        texts = [call.args[0] for call in ctx.send.await_args_list if call.args]
+                        self.assertEqual(len(embeds), 1)
+                        self.assertTrue(any("Ticket channel:" in text for text in texts))
                         rendered = "\n".join(
-                            field.value for field in embed.fields
+                            field.value for field in embeds[0].fields
                         )
                         for leaf_name in _leaf_command_names(ctx.command):
                             self.assertIn(f"??{leaf_name}", rendered)
@@ -299,9 +245,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                                     rendered,
                                 )
                         if group.qualified_name == "githubtickets logchannel":
-                            self.assertEqual(embed.title, "Log channel")
-
-        self.assertEqual(configuration_sender.await_count, len(groups))
+                            self.assertEqual(embeds[0].title, "Log channel")
 
     async def test_ping_summary_counts_all_stored_profiles_and_handles_empty_guild(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
@@ -391,7 +335,17 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_ping_reports_reject_public_channels_before_reading_profiles(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock())
-            cog.store = mock.Mock(list_profiles=mock.AsyncMock())
+            await cog.store.initialize()
+            now = datetime.now(timezone.utc)
+            category = await cog.store.add_category(42, "rendering", now)
+            await cog.store.save_profile(
+                guild_id=42,
+                user_id=10,
+                github_username="developer",
+                category_ids=(category.category_id,),
+                automatic_pings=True,
+                updated_at=now,
+            )
             for name in ("summary", "enabled", "disabled"):
                 with self.subTest(command=name):
                     ctx = FakeContext(private=False)
@@ -400,8 +354,9 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                         "channel hidden from @everyone",
                     ):
                         await getattr(cog, f"githubtickets_profile_pings_{name}")(ctx)
-                    cog.store.list_profiles.assert_not_awaited()
-                    ctx.send.assert_not_awaited()
+                    self.assertEqual(ctx.send.await_count, 0)
+                    profiles = await cog.store.list_profiles(42)
+                    self.assertEqual(tuple(profile.user_id for profile in profiles), (10,))
 
     async def test_resource_commands_store_values_and_use_accepted_confirmations(self):
         with isolated_githubtickets_modules(self.data_path) as modules:

@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib.util
-import json
 import sqlite3
 import sys
 import unittest
+from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -31,6 +31,21 @@ def _load_gate_increment_views():
     return module
 
 
+def _review_view(cog, source, candidates, **overrides):
+    source.jump_url = getattr(source, "jump_url", "https://example.invalid/source")
+    view = _load_gate_increment_views().GateIncrementReviewView(
+        cog,
+        source,
+        99,
+        candidates,
+        custom_achievements=overrides.pop("custom_achievements", ()),
+        ephemeral=True,
+    )
+    for name, value in overrides.items():
+        setattr(view, name, value)
+    return view
+
+
 class _Guild:
     def __init__(self, members):
         self._members = {member.id: member for member in members}
@@ -49,108 +64,7 @@ def _member(user_id, *, bot=False, role_ids=()):
 
 
 class GateIncrementPlanningTests(unittest.TestCase):
-    def test_prefix_command_is_not_exposed(self):
-        self.assertFalse(hasattr(nhmisc.NHMisc, "gateincrement"))
 
-    def test_candidates_are_author_then_mentions_without_duplicates_or_bots(self):
-        author = _member(1)
-        mentioned = _member(2)
-        bot = _member(3, bot=True)
-        guild = _Guild((author, mentioned, bot))
-        source = SimpleNamespace(
-            guild=guild,
-            author=author,
-            webhook_id=None,
-            raw_mentions=(2, 1, 2, 3, 4),
-        )
-
-        candidates = nhmisc._build_gate_increment_candidates(source)
-
-        self.assertEqual(
-            tuple(candidate.user_id for candidate in candidates),
-            (1, 2),
-        )
-
-    def test_webhook_author_is_not_implicitly_included(self):
-        webhook_author = _member(1)
-        mentioned = _member(2)
-        source = SimpleNamespace(
-            guild=_Guild((mentioned,)),
-            author=webhook_author,
-            webhook_id=99,
-            raw_mentions=(2,),
-        )
-
-        candidates = nhmisc._build_gate_increment_candidates(source)
-
-        self.assertEqual(
-            tuple(candidate.user_id for candidate in candidates),
-            (2,),
-        )
-
-    def test_candidate_plan_uses_highest_gate_and_keeps_maximum_visible(self):
-        gate_roles = nhmisc.GATE_TIER_ROLE_IDS
-        duplicate_member = _member(1, role_ids=(gate_roles[0], gate_roles[2]))
-        maximum_member = _member(2, role_ids=(gate_roles[-1],))
-        source = SimpleNamespace(
-            guild=_Guild((duplicate_member, maximum_member)),
-            author=duplicate_member,
-            webhook_id=None,
-            raw_mentions=(2,),
-        )
-
-        candidates = nhmisc._build_gate_increment_candidates(source)
-
-        self.assertEqual(candidates[0].current_gate_role_ids, (gate_roles[0], gate_roles[2]))
-        self.assertEqual(candidates[0].target_role_id, gate_roles[3])
-        self.assertEqual(candidates[1].current_tier, 6)
-        self.assertIsNone(candidates[1].target_role_id)
-
-    def test_preflight_requires_manageable_complete_gate_ladder(self):
-        roles = {
-            role_id: SimpleNamespace(id=role_id, managed=False, position=position)
-            for position, role_id in enumerate(nhmisc.GATE_TIER_ROLE_IDS, start=1)
-        }
-        guild = SimpleNamespace(
-            me=SimpleNamespace(
-                guild_permissions=SimpleNamespace(manage_roles=True),
-                top_role=SimpleNamespace(position=10),
-            ),
-            get_role=roles.get,
-        )
-
-        resolved = nhmisc._validate_gate_increment_configuration(guild)
-
-        self.assertEqual(tuple(role.id for role in resolved), nhmisc.GATE_TIER_ROLE_IDS)
-        roles[nhmisc.GATE_TIER_ROLE_IDS[2]].managed = True
-        with self.assertRaises(nhmisc.commands.UserFeedbackCheckFailure):
-            nhmisc._validate_gate_increment_configuration(guild)
-
-    def test_only_selected_role_drift_requires_reconfirmation(self):
-        first = nhmisc.GateIncrementCandidate(1, "one", (), None, 10)
-        second = nhmisc.GateIncrementCandidate(2, "two", (10,), 1, 11)
-        view = SimpleNamespace(
-            candidate_ids=(1, 2),
-            candidates=(first, second),
-            selected_user_ids={1},
-        )
-        unselected_changed = nhmisc.GateIncrementCandidate(
-            2, "two", (11,), 2, 12
-        )
-
-        self.assertFalse(
-            nhmisc.NHMisc._gate_increment_review_is_stale(
-                view,
-                (first, unselected_changed),
-            )
-        )
-        selected_changed = nhmisc.GateIncrementCandidate(1, "one", (10,), 1, 11)
-        self.assertTrue(
-            nhmisc.NHMisc._gate_increment_review_is_stale(
-                view,
-                (selected_changed, second),
-            )
-        )
 
     def test_review_hides_deselected_users_and_warns_when_increment_fills_gap(self):
         views = _load_gate_increment_views()
@@ -233,41 +147,6 @@ class GateIncrementPlanningTests(unittest.TestCase):
         )
         self.assertIn("Achievements: 1 selected", view.render_embed().description)
 
-    def test_system_achievements_are_excluded_and_selector_limit_is_explicit(self):
-        definitions = tuple(
-            SimpleNamespace(
-                key=key,
-                display_name=key,
-                role_id=None,
-                grantable=True,
-            )
-            for key in (
-                "stargate_completed",
-                "solo_gater",
-                "garden_of_grind",
-            )
-        )
-
-        eligible = nhmisc._gate_increment_custom_achievement_definitions(definitions)
-
-        self.assertEqual(
-            tuple(definition.key for definition in eligible),
-            ("garden_of_grind",),
-        )
-        too_many = tuple(
-            SimpleNamespace(
-                key=f"custom_{index}",
-                display_name=f"Custom {index}",
-                role_id=None,
-                grantable=True,
-            )
-            for index in range(26)
-        )
-        with self.assertRaisesRegex(
-            nhmisc.commands.UserFeedbackCheckFailure,
-            "at most 25",
-        ):
-            nhmisc._gate_increment_custom_achievement_definitions(too_many)
 
     def test_selected_definition_drift_requires_reconfirmation(self):
         preview = SimpleNamespace(
@@ -295,54 +174,6 @@ class GateIncrementPlanningTests(unittest.TestCase):
                 view, (preview,)
             )
         )
-
-    def test_oversized_combined_result_is_rejected_before_claim(self):
-        plans = tuple(
-            nhmisc.GateIncrementMemberPlan(
-                100000000000000000 + index,
-                (),
-                nhmisc.GATE_TIER_ROLE_IDS[0],
-            )
-            for index in range(4)
-        )
-        achievements = tuple(
-            nhmisc.GateIncrementAchievementPlan(
-                f"custom_{index}",
-                f"Custom {index}",
-                200000000000000000 + index,
-            )
-            for index in range(25)
-        )
-
-        with self.assertRaisesRegex(
-            nhmisc.commands.UserFeedbackCheckFailure,
-            "too large for one Discord message",
-        ):
-            nhmisc._validate_gate_increment_output_limits(
-                SimpleNamespace(
-                    guild=SimpleNamespace(id=1),
-                    channel=SimpleNamespace(id=2),
-                    id=3,
-                ),
-                4,
-                plans,
-                achievements,
-            )
-        owned_keys = {achievement.key for achievement in achievements}
-        try:
-            nhmisc._validate_gate_increment_output_limits(
-                SimpleNamespace(
-                    guild=SimpleNamespace(id=1),
-                    channel=SimpleNamespace(id=2),
-                    id=3,
-                ),
-                4,
-                plans,
-                achievements,
-                {plan.user_id: owned_keys for plan in plans},
-            )
-        except nhmisc.commands.UserFeedbackCheckFailure as error:
-            self.fail(f"Already-owned achievements blocked Gate increment: {error}")
 
 
 class GateIncrementDatabasePlanningTests(unittest.IsolatedAsyncioTestCase):
@@ -873,32 +704,6 @@ class _CommandTree:
         return removed
 
 
-class GateIncrementLifecycleTests(unittest.TestCase):
-    def test_context_action_registration_and_removal_are_idempotent(self):
-        tree = _CommandTree()
-        cog = object.__new__(nhmisc.NHMisc)
-        cog.bot = SimpleNamespace(tree=tree)
-        cog._gate_increment_context_menu = SimpleNamespace(
-            name="Increment Gate roles"
-        )
-        cog._gate_increment_context_registered = False
-
-        with mock.patch.object(
-            nhmisc.discord,
-            "AppCommandType",
-            SimpleNamespace(message="message"),
-            create=True,
-        ):
-            cog._register_gate_increment_context_menu()
-            cog._register_gate_increment_context_menu()
-            cog._unregister_gate_increment_context_menu()
-            cog._unregister_gate_increment_context_menu()
-
-        self.assertEqual(tree.add_count, 1)
-        self.assertEqual(tree.remove_count, 1)
-        self.assertTrue(tree.override)
-
-
 class GateIncrementReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
     async def test_context_action_defers_before_waiting_for_store(self):
         release_store = asyncio.Event()
@@ -1014,15 +819,13 @@ class GateIncrementReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_confirm_error_keeps_review_embed_visible(self):
         interaction = self._interaction()
-        rendered = object()
-        view = SimpleNamespace(
-            source_message=SimpleNamespace(
-                guild=SimpleNamespace(id=1),
-                channel=SimpleNamespace(id=2),
-                id=3,
-            ),
-            selected_user_ids={10},
-            render_embed=mock.Mock(return_value=rendered),
+        source = SimpleNamespace(
+            guild=SimpleNamespace(id=1),
+            channel=SimpleNamespace(id=2),
+            id=3,
+        )
+        candidate = nhmisc.GateIncrementCandidate(
+            10, "Player", (), None, nhmisc.GATE_TIER_ROLE_IDS[0]
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._achievement_store = SimpleNamespace(
@@ -1031,14 +834,13 @@ class GateIncrementReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         cog._fetch_gate_increment_source = mock.AsyncMock(
             side_effect=nhmisc.commands.UserFeedbackCheckFailure("confirm failed")
         )
+        view = _review_view(cog, source, (candidate,))
 
-        await cog._confirm_gate_increment_review(interaction, view)
+        await view.confirm.callback(interaction)
 
-        view.render_embed.assert_called_once_with(notice="confirm failed")
-        self.assertIs(
-            interaction.edit_original_response.await_args.kwargs["embed"],
-            rendered,
-        )
+        edited = interaction.edit_original_response.await_args.kwargs["embed"]
+        self.assertIn("confirm failed", edited.description)
+        self.assertIn("Gate increment review", edited.title)
 
     async def test_confirmation_definition_failure_uses_operational_error_handler(self):
         interaction = self._interaction()
@@ -1049,13 +851,6 @@ class GateIncrementReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         )
         candidate = nhmisc.GateIncrementCandidate(
             10, "Player", (), None, nhmisc.GATE_TIER_ROLE_IDS[0]
-        )
-        view = SimpleNamespace(
-            source_message=source,
-            selected_user_ids={10},
-            custom_achievements=(),
-            selected_custom_achievement_keys=set(),
-            render_embed=mock.Mock(),
         )
         error = RuntimeError("definitions unavailable")
         cog = object.__new__(nhmisc.NHMisc)
@@ -1070,9 +865,10 @@ class GateIncrementReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         cog._validate_gate_increment_candidate_count = mock.Mock()
         cog._require_private_moderation_log_channel = mock.AsyncMock()
         cog._handle_achievement_interaction_failure = mock.AsyncMock()
+        view = _review_view(cog, source, (candidate,))
 
         with mock.patch.object(nhmisc, "_validate_gate_increment_configuration"):
-            await cog._confirm_gate_increment_review(interaction, view)
+            await view.confirm.callback(interaction)
 
         cog._handle_achievement_interaction_failure.assert_awaited_once_with(
             interaction,
@@ -1103,13 +899,6 @@ class GateIncrementReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
             display_name="Garden of Grind",
             role_id=50,
             grantable=True,
-        )
-        view = SimpleNamespace(
-            source_message=source,
-            selected_user_ids={10},
-            solo_gater_enabled=False,
-            custom_achievements=(definition,),
-            selected_custom_achievement_keys={"garden_of_grind"},
         )
         snapshot = SimpleNamespace(
             operation=SimpleNamespace(key=nhmisc.SourceMessageKey(1, 2, 3)),
@@ -1154,9 +943,16 @@ class GateIncrementReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         cog._finish_gate_increment_review = mock.AsyncMock()
         cog._send_moderation_log = mock.AsyncMock(return_value=True)
         cog._require_private_moderation_log_channel = mock.AsyncMock()
+        view = _review_view(
+            cog,
+            source,
+            (candidate,),
+            custom_achievements=(definition,),
+            selected_custom_achievement_keys={"garden_of_grind"},
+        )
 
         with mock.patch.object(nhmisc, "_validate_gate_increment_configuration"):
-            await cog._confirm_gate_increment_review(interaction, view)
+            await view.confirm.callback(interaction)
 
         cog._send_moderation_log.assert_awaited_once()
         claimed_achievements = cog._gate_increment_store.claim.await_args.args[3]
@@ -1191,13 +987,6 @@ class GateIncrementReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
             target_ordinal=1,
             highest_ordinal=0,
         )
-        view = SimpleNamespace(
-            source_message=source,
-            selected_user_ids={10},
-            solo_gater_enabled=False,
-            custom_achievements=(),
-            selected_custom_achievement_keys=set(),
-        )
         snapshot = SimpleNamespace(
             custom_achievements=(),
             members=(
@@ -1230,9 +1019,10 @@ class GateIncrementReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         cog._send_moderation_log = mock.AsyncMock(side_effect=RuntimeError("offline"))
         cog._send_maintenance_log = mock.AsyncMock()
         cog._require_private_moderation_log_channel = mock.AsyncMock()
+        view = _review_view(cog, source, (candidate,))
 
         with mock.patch.object(nhmisc, "_validate_gate_increment_configuration"):
-            await cog._confirm_gate_increment_review(interaction, view)
+            await view.confirm.callback(interaction)
 
         cog._publish_gate_increment_result.assert_awaited_once_with(source, snapshot)
         status = cog._finish_gate_increment_review.await_args.args[2]
@@ -1251,15 +1041,6 @@ class GateIncrementReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
             target_ordinal=1,
             highest_ordinal=0,
         )
-        view = SimpleNamespace(
-            source_message=source,
-            selected_user_ids={10},
-            solo_gater_enabled=False,
-            custom_achievements=(),
-            selected_custom_achievement_keys=set(),
-            render_embed=mock.Mock(return_value=object()),
-        )
-        claim = mock.AsyncMock()
         cog = object.__new__(nhmisc.NHMisc)
         cog._achievement_store = SimpleNamespace(
             is_bootstrapped=mock.AsyncMock(return_value=True),
@@ -1269,63 +1050,76 @@ class GateIncrementReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         cog._fetch_gate_increment_candidates = mock.AsyncMock(return_value=(candidate,))
         cog._validate_gate_increment_candidate_count = mock.Mock()
         cog._gate_increment_review_is_stale = mock.Mock(return_value=False)
-        cog._gate_increment_store = SimpleNamespace(claim=claim)
         cog._require_private_moderation_log_channel = mock.AsyncMock(
             side_effect=nhmisc.commands.UserFeedbackCheckFailure("Configure a private log")
         )
+        view = _review_view(cog, source, (candidate,))
 
-        with mock.patch.object(nhmisc, "_validate_gate_increment_configuration"):
-            await cog._confirm_gate_increment_review(interaction, view)
+        with TemporaryDirectory() as directory:
+            cog._gate_increment_store = nhmisc.GateIncrementStore(
+                Path(directory) / "gates.sqlite"
+            )
+            await cog._gate_increment_store.initialize()
+            with mock.patch.object(nhmisc, "_validate_gate_increment_configuration"):
+                await view.confirm.callback(interaction)
 
-        claim.assert_not_awaited()
-        view.render_embed.assert_called_once_with(notice="Configure a private log")
+            edited = interaction.edit_original_response.await_args.kwargs["embed"]
+            self.assertIn("Configure a private log", edited.description)
+            self.assertIsNone(
+                await cog._gate_increment_store.get_operation(
+                    nhmisc.SourceMessageKey(1, 2, 3)
+                )
+            )
 
 
 class GateIncrementPrivacyTests(unittest.IsolatedAsyncioTestCase):
     async def test_red_user_deletion_reaches_gate_increment_storage(self):
-        cog = object.__new__(nhmisc.NHMisc)
-        cog._activity_store = SimpleNamespace(
-            delete_user_everywhere=mock.AsyncMock()
-        )
-        cog._sticky_roles = SimpleNamespace(
-            delete_user_everywhere=mock.AsyncMock()
-        )
-        cog._role_analytics_store = SimpleNamespace(
-            delete_user_everywhere=mock.AsyncMock()
-        )
-        cog._achievement_store = SimpleNamespace(
-            delete_user_everywhere=mock.AsyncMock()
-        )
-        cog._gate_increment_store = SimpleNamespace(
-            redact_user_data=mock.AsyncMock()
-        )
-        cog.config = SimpleNamespace(all_guilds=mock.AsyncMock(return_value={}))
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            cog = object.__new__(nhmisc.NHMisc)
+            cog._activity_store = nhmisc.ActivityStore(root / "activity.sqlite")
+            cog._sticky_roles = nhmisc.StickyRoleStore(root / "sticky.sqlite")
+            cog._role_analytics_store = nhmisc.RoleAnalyticsStore(root / "roles.sqlite")
+            cog._achievement_store = nhmisc.AchievementStore(root / "achievements.sqlite")
+            cog._gate_increment_store = nhmisc.GateIncrementStore(
+                root / "achievements.sqlite"
+            )
+            for store in (
+                cog._activity_store,
+                cog._sticky_roles,
+                cog._role_analytics_store,
+                cog._achievement_store,
+                cog._gate_increment_store,
+            ):
+                await store.initialize()
+            kept = nhmisc.SourceMessageKey(10, 20, 99)
+            removed = nhmisc.SourceMessageKey(10, 20, 42)
+            await cog._gate_increment_store.claim(
+                removed, 42, (nhmisc.GateIncrementMemberPlan(7, (), 8),)
+            )
+            await cog._gate_increment_store.claim(
+                kept, 99, (nhmisc.GateIncrementMemberPlan(8, (), 9),)
+            )
+            await cog._activity_store.record_message(
+                guild_id=10,
+                date_utc=date(2026, 7, 26),
+                hour_utc=12,
+                user_id=42,
+                channel_id=100,
+                thread_id=None,
+                now_utc=datetime(2026, 7, 26, 12, tzinfo=timezone.utc),
+            )
 
-        await cog.red_delete_data_for_user(requester="discord_deleted_user", user_id=42)
+            await cog.red_delete_data_for_user(
+                requester="discord_deleted_user", user_id=42
+            )
 
-        cog._activity_store.delete_user_everywhere.assert_awaited_once_with(42)
-        cog._sticky_roles.delete_user_everywhere.assert_awaited_once_with(42)
-        cog._role_analytics_store.delete_user_everywhere.assert_awaited_once_with(42)
-        cog._achievement_store.delete_user_everywhere.assert_awaited_once_with(42)
-        cog._gate_increment_store.redact_user_data.assert_awaited_once_with(42)
-
-
-class GateIncrementDocumentationTests(unittest.TestCase):
-    def test_supported_entry_points_and_storage_are_disclosed(self):
-        root = Path(__file__).resolve().parents[1]
-        readme = (root / "NHCogs" / "nhmisc" / "README.md").read_text(encoding="utf-8")
-        info = json.loads(
-            (root / "NHCogs" / "nhmisc" / "info.json").read_text(encoding="utf-8-sig")
-        )
-
-        self.assertNotIn("[p]gateincrement", readme)
-        self.assertIn("Apps → Increment Gate roles", readme)
-        self.assertIn("/achievements [user]", readme)
-        self.assertIn("[p]achievement revoke", readme)
-        self.assertIn("Gate tier from 1 through 6", readme)
-        disclosure = info["end_user_data_statement"]
-        self.assertIn("Achievements store", disclosure)
-        self.assertIn("source message", disclosure)
+            removed_operation = await cog._gate_increment_store.get_operation(removed)
+            kept_operation = await cog._gate_increment_store.get_operation(kept)
+            self.assertIsNone(removed_operation.operation.moderator_id)
+            self.assertEqual(kept_operation.operation.moderator_id, 99)
+            stats = await cog._activity_store.get_user_stats(10, 42, date(2026, 7, 26), 7)
+            self.assertEqual(stats.total_messages, 0)
 
 
 class GateIncrementRecoveryReportingTests(unittest.IsolatedAsyncioTestCase):

@@ -26,6 +26,11 @@ class FakeCommand:
     def group(self, **attrs):
         return lambda callback: FakeCommand(callback, **attrs)
 
+    async def can_run(self, ctx):
+        required = getattr(self.callback, "required_permissions", None) or {}
+        permissions = ctx.author.guild_permissions
+        return all(getattr(permissions, name, False) for name in required)
+
 
 def _tag(name, value=True):
     def decorator(target):
@@ -328,9 +333,21 @@ class ForumAutopinCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         return cog
 
-    def test_group_requires_manage_messages_via_decorator(self):
-        callback = nhmisc.NHMisc.nhmisc_forumautopin.callback
-        self.assertEqual(callback.required_permissions, {"manage_messages": True})
+    async def test_group_rejects_members_without_manage_messages(self):
+        command = nhmisc.NHMisc.nhmisc_forumautopin
+        denied = types.SimpleNamespace(
+            author=types.SimpleNamespace(
+                guild_permissions=types.SimpleNamespace(manage_messages=False)
+            )
+        )
+        allowed = types.SimpleNamespace(
+            author=types.SimpleNamespace(
+                guild_permissions=types.SimpleNamespace(manage_messages=True)
+            )
+        )
+
+        self.assertFalse(await command.can_run(denied))
+        self.assertTrue(await command.can_run(allowed))
 
     async def test_add_rejects_forum_without_pin_messages_permission(self):
         cog = self.make_cog()

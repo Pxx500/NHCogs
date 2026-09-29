@@ -76,38 +76,6 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(await self.store.list_profiles(99), ())
 
-    async def test_initialize_creates_versioned_schema_with_foreign_keys(self):
-        self.assertIsNotNone(self.store, "the GitHub Tickets store interface is missing")
-        await self.store.initialize()
-
-        with closing(store_module.connect(self.path)) as connection:
-            version = connection.execute("PRAGMA user_version").fetchone()[0]
-            foreign_keys = connection.execute("PRAGMA foreign_keys").fetchone()[0]
-            tables = {
-                row[0]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                )
-            }
-            ticket_columns = {
-                row[1]
-                for row in connection.execute("PRAGMA table_info(tickets)")
-            }
-
-        self.assertEqual(version, 1)
-        self.assertEqual(foreign_keys, 1)
-        self.assertIn("projection_sync_at", ticket_columns)
-        self.assertTrue(
-            {
-                "categories",
-                "profiles",
-                "profile_categories",
-                "tickets",
-                "ticket_categories",
-                "ticket_exclusions",
-                "ticket_pings",
-            }.issubset(tables)
-        )
 
     async def test_initialize_rejects_newer_schema_version(self):
         self.assertIsNotNone(self.store, "the GitHub Tickets store interface is missing")

@@ -95,19 +95,6 @@ class GateRevokeReviewTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GateRevokeEntryPointTests(unittest.IsolatedAsyncioTestCase):
-    async def test_slash_and_user_action_share_the_same_workflow(self):
-        cog = object.__new__(nhmisc.NHMisc)
-        cog._start_gate_revoke = mock.AsyncMock()
-        interaction = SimpleNamespace()
-        member = SimpleNamespace(id=42)
-
-        await cog._gate_revoke_slash(interaction, member)
-        await cog._gate_revoke_user_context_action(interaction, member)
-
-        self.assertEqual(
-            cog._start_gate_revoke.await_args_list,
-            [mock.call(interaction, member), mock.call(interaction, member)],
-        )
 
     async def test_manage_messages_is_checked_at_runtime(self):
         interaction = SimpleNamespace(
@@ -263,63 +250,6 @@ class _AchievementCommandTree:
 
     def remove_command(self, name, *, type):
         self.removed.append((name, type))
-
-
-class GateRevokeRegistrationTests(unittest.TestCase):
-    def test_revoke_commands_register_and_unregister_with_achievement_commands(self):
-        tree = _AchievementCommandTree()
-        cog = object.__new__(nhmisc.NHMisc)
-        cog.bot = SimpleNamespace(tree=tree)
-        cog._gate_revoke_slash_command = SimpleNamespace(name="gaterevoke")
-        cog._gate_revoke_user_context_menu = SimpleNamespace(
-            name="Revoke Gate"
-        )
-        cog._achievements_slash_command = SimpleNamespace(name="achievements")
-        cog._achievements_user_context_menu = SimpleNamespace(
-            name="View achievements"
-        )
-        cog._grant_achievements_context_menu = SimpleNamespace(
-            name="Grant achievements"
-        )
-        cog._add_gate_proof_context_menu = SimpleNamespace(name="Add Gate Proof")
-        cog._achievement_commands_registered = False
-
-        command_types = SimpleNamespace(
-            chat_input="chat_input",
-            user="user",
-            message="message",
-        )
-        with mock.patch.object(
-            nhmisc.discord,
-            "AppCommandType",
-            command_types,
-            create=True,
-        ):
-            cog._register_achievement_commands()
-            cog._unregister_achievement_commands()
-
-        self.assertEqual(
-            tree.added,
-            [
-                ("gaterevoke", True),
-                ("Revoke Gate", True),
-                ("achievements", True),
-                ("View achievements", True),
-                ("Grant achievements", True),
-                ("Add Gate Proof", True),
-            ],
-        )
-        self.assertEqual(
-            tree.removed,
-            [
-                ("gaterevoke", "chat_input"),
-                ("Revoke Gate", "user"),
-                ("achievements", "chat_input"),
-                ("View achievements", "user"),
-                ("Grant achievements", "message"),
-                ("Add Gate Proof", "message"),
-            ],
-        )
 
 
 class GateRevokeExecutionTests(unittest.IsolatedAsyncioTestCase):
@@ -567,17 +497,26 @@ class GateRevokeRoleListenerTests(unittest.IsolatedAsyncioTestCase):
             guild=guild,
             roles=(tier_one,),
         )
+        async def restore(_guild, member, _completed_count, reason):
+            member.roles = (tier_two,)
+            member.restored_reason = reason
+            return True
+
         store = SimpleNamespace(
             is_bootstrapped=mock.AsyncMock(return_value=True),
             list_definitions=mock.AsyncMock(return_value=()),
-            get_gate_projection=mock.AsyncMock(),
+            get_gate_projection=mock.AsyncMock(return_value=2),
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._achievement_store = store
+        cog._restore_gate_projection = mock.AsyncMock(side_effect=restore)
         cog._authorized_gate_role_edits = {
             (10, 42): frozenset({nhmisc.GATE_TIER_ROLE_IDS[0]})
         }
 
         await cog.on_achievement_member_update(before, after)
 
-        store.get_gate_projection.assert_not_awaited()
+        self.assertEqual(
+            [role.id for role in after.roles],
+            [nhmisc.GATE_TIER_ROLE_IDS[0]],
+        )

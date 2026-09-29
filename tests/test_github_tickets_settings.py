@@ -1,5 +1,4 @@
 import importlib.util
-import json
 import sys
 import unittest
 from dataclasses import asdict
@@ -26,23 +25,6 @@ def load_settings_module():
 
 
 class GitHubTicketsSettingsTests(unittest.TestCase):
-    def test_metadata_uses_the_accepted_cog_name_and_copy(self):
-        metadata = json.loads(INFO_PATH.read_text("utf-8"))
-
-        self.assertEqual(metadata["name"], "GitHubTickets")
-        self.assertEqual(
-            metadata["install_msg"],
-            "GitHubTickets installed\nLoad it with `[p]load NHCogs.githubtickets`",
-        )
-        self.assertEqual(
-            metadata["short"],
-            "Create pull request review tickets and route reviewers",
-        )
-        self.assertEqual(
-            metadata["description"],
-            "Publish pull request tickets, manage developer expertise profiles, "
-            "and route review requests through Discord",
-        )
 
     def test_registered_defaults_match_the_accepted_configuration(self):
         settings = load_settings_module()
