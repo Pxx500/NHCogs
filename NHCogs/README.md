@@ -9,7 +9,8 @@ error configuration.
 
 All commands below are moderator-only and require Manage Messages. Overview commands can
 show safe syntax in a public channel, but current values are shown only in a private
-moderator channel. The shared error configuration starts unset.
+moderator channel. The shared error configuration starts unset. Shared prefix-group
+rules are in [Command trees](../docs/command-trees.md).
 
 | Command | Description |
 |---|---|

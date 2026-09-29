@@ -42,12 +42,7 @@ def _visible_children(command: typing.Any) -> list[typing.Any]:
 
 
 def public_usage(command: typing.Any) -> str:
-    """Usage mods should see.
-
-    ``usage`` is the public form. A nullable setting documents
-    ``[channel|clear]`` there even when the callback parameter is only named
-    ``channel``. Hidden ``set`` aliases are not part of that form.
-    """
+    """Return the usage string shown to moderators. See docs/command-trees.md."""
     usage = getattr(command, "usage", None)
     if isinstance(usage, str) and usage.strip():
         return usage.strip()
@@ -56,21 +51,7 @@ def public_usage(command: typing.Any) -> str:
 
 
 def descendant_leaf_commands(parent: commands.Group) -> typing.Iterator[typing.Any]:
-    """Visible command lines under a nested group.
-
-    A group with a usage string is itself a public command. That keeps a
-    nullable value on one leaf: omit the argument to show it, pass the value
-    to store it, and pass ``clear`` to remove it. A hidden ``set`` child can
-    keep the old longer path working without appearing here. Visible leaves
-    such as ``reset`` are still listed. An argument-free group is only a
-    category, so the overview lists its visible descendants instead.
-
-    Toggles stay a separate nested command. Collections stay add/remove
-    (and rename where it exists) under an argument-free group. A scalar that
-    is only assigned stays a required-argument leaf; its parent overview is
-    the show screen. A show-or-set leaf stays optional when checking that one
-    setting is the normal action.
-    """
+    """Yield the command lines for a nested group. See docs/command-trees.md."""
     for child in _visible_children(parent):
         usage = public_usage(child)
         visible_descendants = _visible_children(child)

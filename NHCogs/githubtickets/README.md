@@ -93,10 +93,8 @@ categories in an ephemeral response. It does not show presence or automatic ping
 `[p]githubtickets`
 
 The bare root group shows current configuration and its direct command categories. It does
-not dump deeper commands into the root overview. Invoking a bare nested group lists the
-visible commands under that group. A nullable channel is one command instead: omit the
-channel to show it, pass a channel to store it, or pass `clear` to remove it. `set` is
-not part of the public path.
+not dump deeper commands into the root overview. Shared prefix-group rules are in
+[Command trees](../../docs/command-trees.md).
 
 In a channel visible to `@everyone`, configuration values are not read. The overview shows
 only safe command syntax and explains that current values are available in a private
