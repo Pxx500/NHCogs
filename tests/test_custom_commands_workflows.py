@@ -182,6 +182,11 @@ def load_workflow_modules():
     discord.File = File
     commands = types.ModuleType("redbot.core.commands")
     commands.Parameter = inspect.Parameter
+    commands.UserFeedbackCheckFailure = type(
+        "UserFeedbackCheckFailure",
+        (Exception,),
+        {},
+    )
     core = types.ModuleType("redbot.core")
     core.commands = commands
     temporary = {
@@ -932,6 +937,7 @@ class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         ctx = SimpleNamespace(
             author=SimpleNamespace(id=200),
+            channel=SimpleNamespace(type=workflows.discord.ChannelType.text),
             message=SimpleNamespace(
                 create_thread=mock.AsyncMock(return_value=thread),
             ),
@@ -942,6 +948,52 @@ class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(manager._sessions, {})
         thread.edit.assert_awaited_once_with(archived=True, locked=True)
+
+    async def test_open_rejects_channels_that_cannot_start_a_thread(self):
+        manager = workflows.WorkflowManager(
+            SimpleNamespace(),
+            SimpleNamespace(operational_errors=SimpleNamespace(report=mock.AsyncMock())),
+            logger=mock.Mock(),
+        )
+        for channel_type in (
+            workflows.discord.ChannelType.public_thread,
+            workflows.discord.ChannelType.news_thread,
+            workflows.discord.ChannelType.voice,
+        ):
+            create_thread = mock.AsyncMock()
+            ctx = SimpleNamespace(
+                channel=SimpleNamespace(type=channel_type),
+                message=SimpleNamespace(create_thread=create_thread),
+            )
+            with self.assertRaises(workflows.commands.UserFeedbackCheckFailure) as caught:
+                await manager.open(ctx, workflows.WorkflowDraft("hello"))
+            self.assertEqual(str(caught.exception), "Only allowed in standard text channels")
+            create_thread.assert_not_awaited()
+
+    async def test_open_allows_announcement_channels(self):
+        manager = workflows.WorkflowManager(
+            SimpleNamespace(),
+            SimpleNamespace(operational_errors=SimpleNamespace(report=mock.AsyncMock())),
+            logger=mock.Mock(),
+        )
+        thread = SimpleNamespace(
+            id=11,
+            guild=SimpleNamespace(id=100),
+            send=mock.AsyncMock(side_effect=RuntimeError("send failed")),
+            edit=mock.AsyncMock(),
+        )
+        ctx = SimpleNamespace(
+            author=SimpleNamespace(id=200),
+            channel=SimpleNamespace(type=workflows.discord.ChannelType.news),
+            message=SimpleNamespace(
+                create_thread=mock.AsyncMock(return_value=thread),
+            ),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "send failed"):
+            await manager.open(ctx, workflows.WorkflowDraft("hello"))
+
+        ctx.message.create_thread.assert_awaited_once()
 
     async def test_activity_replaces_the_pending_inactivity_timeout(self):
         manager = SimpleNamespace(
