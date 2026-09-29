@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from dataclasses import dataclass, field
 from io import BytesIO
 from typing import Any
@@ -11,6 +10,7 @@ import discord
 
 from .arguments import ArgumentSignatureError, argument_signature
 from .catalog import (
+    MAX_ACCESS_IDS,
     MAX_RESPONSE_LENGTH,
     MAX_WEIGHT,
     AccessRules,
@@ -158,78 +158,79 @@ class WorkflowDraft:
         return index
 
 
-def _access_ids(value: str, kind: str) -> tuple[int, ...]:
-    patterns = {
-        "users": r"(?:<@!?(\d+)>|(\d+))",
-        "roles": r"(?:<@&(\d+)>|(\d+))",
-        "channels": r"(?:<#(\d+)>|(\d+))",
-    }
-    ids = []
-    for token in value.replace(",", " ").split():
-        matched = re.fullmatch(patterns[kind], token)
-        if matched is None:
-            raise WorkflowInputError(f"Enter {kind} as mentions or IDs")
-        ids.append(int(matched.group(1) or matched.group(2)))
-    return tuple(ids)
-
-
-def _access_switch(value: str, label: str) -> bool:
-    answer = value.strip().casefold()
-    if answer not in {"yes", "no", "on", "off"}:
-        raise WorkflowInputError(f"{label} must be on or off")
-    return answer in {"yes", "on"}
-
-
 class AccessModal(discord.ui.Modal):
     def __init__(self, session: WorkflowSession):
         super().__init__(title="Command access")
         self._session = session
         access = session.draft.access
-        for name, label, values in (
-            ("users", "Allowed users", access.user_ids),
-            ("roles", "Allowed roles", access.role_ids),
-            ("channels", "Allowed channels or threads", access.channel_ids),
+
+        self.users = discord.ui.UserSelect(
+            placeholder="Select allowed users",
+            min_values=0,
+            max_values=MAX_ACCESS_IDS,
+            required=False,
+            default_values=[discord.Object(id=user_id) for user_id in access.user_ids],
+        )
+        self.roles = discord.ui.RoleSelect(
+            placeholder="Select allowed roles",
+            min_values=0,
+            max_values=MAX_ACCESS_IDS,
+            required=False,
+            default_values=[discord.Object(id=role_id) for role_id in access.role_ids],
+        )
+        self.channels = discord.ui.ChannelSelect(
+            placeholder="Select allowed channels or threads",
+            min_values=0,
+            max_values=MAX_ACCESS_IDS,
+            required=False,
+            channel_types=[
+                discord.ChannelType.text,
+                discord.ChannelType.news,
+                discord.ChannelType.public_thread,
+                discord.ChannelType.private_thread,
+                discord.ChannelType.news_thread,
+            ],
+            default_values=[discord.Object(id=channel_id) for channel_id in access.channel_ids],
+        )
+        self.private = discord.ui.RadioGroup(
+            options=[
+                discord.RadioGroupOption(
+                    label="Off", value="off", default=not access.private_only,
+                ),
+                discord.RadioGroupOption(
+                    label="On", value="on", default=access.private_only,
+                ),
+            ],
+            required=True,
+        )
+        self.hide = discord.ui.RadioGroup(
+            options=[
+                discord.RadioGroupOption(
+                    label="Off", value="off", default=not access.hide_preview,
+                ),
+                discord.RadioGroupOption(
+                    label="On", value="on", default=access.hide_preview,
+                ),
+            ],
+            required=True,
+        )
+        for label, component in (
+            ("Allowed users", self.users),
+            ("Allowed roles", self.roles),
+            ("Allowed channels or threads", self.channels),
+            ("Private channels only", self.private),
+            ("Hide response preview", self.hide),
         ):
-            field = discord.ui.TextInput(
-                label=label, style=discord.TextStyle.paragraph,
-                default=", ".join(map(str, values)),
-                placeholder="Mentions or IDs, separated by spaces or commas",
-                required=False, max_length=1000,
-            )
-            setattr(self, name, field)
-            self.add_item(field)
-        self.private = discord.ui.TextInput(
-            label="Private channels only?", style=discord.TextStyle.short,
-            default="yes" if access.private_only else "no", required=True, max_length=3,
-        )
-        self.hide = discord.ui.TextInput(
-            label="Hide response preview?", style=discord.TextStyle.short,
-            default="on" if access.hide_preview else "off", required=True, max_length=3,
-        )
-        self.add_item(self.private)
-        self.add_item(self.hide)
+            self.add_item(discord.ui.Label(text=label, component=component))
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        try:
-            users = _access_ids(self.users.value, "users")
-            roles = _access_ids(self.roles.value, "roles")
-            channels = _access_ids(self.channels.value, "channels")
-            guild = self._session.thread.guild
-            if any(guild.get_role(role_id) is None for role_id in roles):
-                raise WorkflowInputError("One of those roles is not on this server")
-            if any(guild.get_channel_or_thread(channel_id) is None for channel_id in channels):
-                raise WorkflowInputError("One of those channels or threads is not on this server")
-            access = AccessRules(
-                user_ids=users, role_ids=roles, channel_ids=channels,
-                private_only=_access_switch(self.private.value, "Private channels only"),
-                hide_preview=_access_switch(self.hide.value, "Hide preview"),
-            )
-        except (WorkflowInputError, CatalogError) as error:
-            self._session.validation_error = str(error)
-            await interaction.response.send_message(str(error), ephemeral=True)
-            await self._session.update_dashboard()
-            return
-        self._session.draft.access = access
+        self._session.draft.access = AccessRules(
+            user_ids=tuple(item.id for item in self.users.values),
+            role_ids=tuple(item.id for item in self.roles.values),
+            channel_ids=tuple(item.id for item in self.channels.values),
+            private_only=self.private.value == "on",
+            hide_preview=self.hide.value == "on",
+        )
         self._session.validation_error = None
         await interaction.response.defer()
         await self._session.update_dashboard()

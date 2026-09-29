@@ -17,6 +17,7 @@ from .migration_state import MigrationPhase
 
 MAX_NAME_LENGTH = 100
 MAX_RESPONSE_LENGTH = 2_000
+MAX_ACCESS_IDS = 25
 MIN_WEIGHT = 1
 MAX_WEIGHT = 1_000
 COOLDOWN_SCOPES = frozenset(("member", "channel", "guild"))
@@ -81,7 +82,10 @@ class AccessRules:
             values = getattr(self, field_name)
             if any(type(value) is not int or value <= 0 for value in values):
                 raise InvalidCommand("Access IDs must be positive whole numbers")
-            object.__setattr__(self, field_name, tuple(sorted(set(values))))
+            normalized = tuple(sorted(set(values)))
+            if len(normalized) > MAX_ACCESS_IDS:
+                raise InvalidCommand(f"Access allows at most {MAX_ACCESS_IDS} {field_name}")
+            object.__setattr__(self, field_name, normalized)
         if type(self.private_only) is not bool or type(self.hide_preview) is not bool:
             raise InvalidCommand("Access switches must be true or false")
 
