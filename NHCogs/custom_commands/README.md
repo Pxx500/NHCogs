@@ -80,13 +80,14 @@ command keeps its historical totals. Reusing its name continues the same ranking
 These commands require Manage Messages:
 
 ```ini
+[p]customcom create
 [p]customcom create <name>
 [p]customcom create simple <name> [initial response]
 [p]customcom create random <name>
 [p]customcom edit <name> [replacement response]
 ```
 
-Create and edit work in any channel where the moderator can run them. The bot opens a
+`create` with no name lists `simple` and `random`. `create <name>` still opens a simple command, and `add` remains an alias of `create`. Create and edit work in any channel where the moderator can run them. The bot opens a
 public thread attached to the moderator's message. Only that moderator
 can change the draft or use its controls. The same editor is used for creation and
 editing. It shows five responses per page and provides a response selector plus Previous,

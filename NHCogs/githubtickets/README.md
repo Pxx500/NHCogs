@@ -43,8 +43,8 @@ channel and categories are optional.
 ```ini
 [p]githubtickets role add @GTNH-Devs
 [p]githubtickets role add @GTNH-Contributors
-[p]githubtickets channel set #github-tickets
-[p]githubtickets logchannel set #github-ticket-logs
+[p]githubtickets channel #github-tickets
+[p]githubtickets logchannel #github-ticket-logs
 [p]githubtickets category add rendering
 [p]githubtickets category add mixins
 ```
@@ -93,8 +93,8 @@ categories in an ephemeral response. It does not show presence or automatic ping
 `[p]githubtickets`
 
 The bare root group shows current configuration and its direct command categories. It does
-not dump deeper commands into the root overview. Invoking a bare nested group shows its
-current configuration and all descendant leaf commands under that group.
+not dump deeper commands into the root overview. Shared prefix-group rules are in
+[Command trees](../../docs/command-trees.md).
 
 In a channel visible to `@everyone`, configuration values are not read. The overview shows
 only safe command syntax and explains that current values are available in a private
@@ -103,8 +103,8 @@ moderator channel. All overview output disables mentions.
 | Command | Description |
 |---|---|
 | `[p]githubtickets` | Show configuration and direct command categories |
-| `[p]githubtickets channel` | Show ticket-channel configuration and commands |
-| `[p]githubtickets logchannel` | Show log-channel configuration and commands |
+| `[p]githubtickets channel [channel|clear]` | Show, set, or clear the ticket channel |
+| `[p]githubtickets logchannel [channel|clear]` | Show, set, or clear the log channel |
 | `[p]githubtickets role` | Show participant-role configuration and commands |
 | `[p]githubtickets category` | Show category configuration and commands |
 | `[p]githubtickets timing` | Show routing timing configuration and commands |
@@ -114,10 +114,8 @@ moderator channel. All overview output disables mentions.
 
 | Command | Description |
 |---|---|
-| `[p]githubtickets channel set <channel>` | Set the text channel where tickets are published |
-| `[p]githubtickets channel clear` | Clear the ticket channel |
-| `[p]githubtickets logchannel set <channel>` | Set the channel that records completed tickets |
-| `[p]githubtickets logchannel clear` | Disable completed-ticket logs |
+| `[p]githubtickets channel [channel|clear]` | Show, set, or clear the text channel where tickets are published |
+| `[p]githubtickets logchannel [channel|clear]` | Show, set, or clear the channel that records completed tickets |
 
 Only Mark finished is logged. A missing log channel or a failed log send never blocks ticket
 completion and is reported only in the bot logs.
@@ -202,7 +200,7 @@ ticket. When the ping limit is exhausted, the ticket remains open for a manual c
 | `[p]githubtickets profile pings enabled` | List developer profiles with automatic pings enabled |
 | `[p]githubtickets profile pings disabled` | List developer profiles with automatic pings disabled |
 
-The `profile clear` command accepts a positive Discord user ID. Participants clear their own profile from
+The `profile clear` command accepts a user mention or a digits-only Discord user ID. Participants clear their own profile from
 the `/developerprofile` dashboard. Leaving the server removes the member's profile and
 profile categories, but does not rewrite or remove their existing ticket history.
 

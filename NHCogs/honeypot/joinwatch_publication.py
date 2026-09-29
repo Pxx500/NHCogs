@@ -48,7 +48,7 @@ def _incident_embed(
         title=_("New account joined"),
         description=_(
             "**{member}**\nMention: {mention}\nID: `{id}`\n"
-            "Account is ~{hours} hours old."
+            "Account is ~{hours} hours old"
         ).format(
             member=incident.get("member_label") or member_display_name,
             mention=member_mention,

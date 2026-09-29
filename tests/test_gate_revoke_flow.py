@@ -235,7 +235,7 @@ class GateRevokeEntryPointTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(
             nhmisc.commands.UserFeedbackCheckFailure,
-            "hidden from @everyone",
+            "hidden from `@everyone`",
         ):
             await cog._require_private_moderation_log_channel(guild)
 

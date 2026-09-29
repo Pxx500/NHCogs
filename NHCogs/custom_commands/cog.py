@@ -12,6 +12,7 @@ from redbot.core.data_manager import cog_data_path
 from redbot.core.utils import menus
 from redbot.core.utils.chat_formatting import pagify
 
+from ..command_overview import send_group_overview
 from ..ranked_donut_chart import render_ranked_donut_chart
 from .catalog import (
     CatalogError,
@@ -80,7 +81,7 @@ class CommandListView(discord.ui.View):
         if interaction.user.id == self._requester_id:
             return True
         await interaction.response.send_message(
-            "Only the person who ran this command can use these controls.",
+            "Only the person who ran this command can use these controls",
             ephemeral=True,
         )
         return False
@@ -184,7 +185,7 @@ class RawResponseView(discord.ui.View):
         if interaction.user.id == self._requester_id:
             return True
         await interaction.response.send_message(
-            "Only the person who ran this command can use these controls.",
+            "Only the person who ran this command can use these controls",
             ephemeral=True,
         )
         return False
@@ -276,7 +277,7 @@ class DeleteConfirmationView(discord.ui.View):
         if interaction.user.id == self._opener_id:
             return True
         await interaction.response.send_message(
-            "Only the moderator who opened this prompt can use it.",
+            "Only the moderator who opened this prompt can use it",
             ephemeral=True,
         )
         return False
@@ -449,31 +450,15 @@ class CustomCommands(commands.Cog):
     @commands.group(name="customcom", aliases=["cc"], invoke_without_command=True)
     @commands.guild_only()
     async def customcom(self, ctx: commands.Context) -> None:
-        """Manage and inspect custom commands."""
-        embed = discord.Embed(
-            title="Custom Commands",
-            description="Create weighted text commands and inspect existing commands.",
+        """Create weighted text commands and inspect existing commands"""
+        await send_group_overview(
+            ctx, title="Custom Commands", include_descendants=False
         )
-        lines = []
-        for command in sorted(self.customcom.commands, key=lambda item: item.name):
-            if command.hidden:
-                continue
-            usage = f"{ctx.clean_prefix}{command.qualified_name}"
-            signature = command.signature.strip()
-            if signature:
-                usage = f"{usage} {signature}"
-            lines.append(f"`{usage}`\n{command.short_doc or 'No description'}")
-        embed.add_field(
-            name="Commands",
-            value="\n".join(lines) or "No commands available",
-            inline=False,
-        )
-        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
     @commands.command(name="commands")
     @commands.guild_only()
     async def public_commands(self, ctx: commands.Context) -> None:
-        """List all available custom commands."""
+        """List all available custom commands"""
         await self._show_all_commands(ctx)
 
     @commands.command(
@@ -488,7 +473,7 @@ class CustomCommands(commands.Cog):
         target_or_days: str | None = None,
         days: int | None = None,
     ) -> None:
-        """Chart successful custom command uses for a channel or the server.
+        """Chart successful custom command uses for a channel or the server
 
         Days include today and the preceding UTC calendar days. The default target
         is this channel. Channels accept mentions or IDs. Server reports require
@@ -599,7 +584,7 @@ class CustomCommands(commands.Cog):
         ctx: commands.Context,
         confirmation: str | None = None,
     ) -> None:
-        """Inspect or permanently remove inactive legacy CustomCom data."""
+        """Inspect or permanently remove inactive legacy CustomCom data"""
         await self._assert_legacy_purge_authority()
         database_path = self._data_root / "custom_commands.sqlite"
         if confirmation is None:
@@ -663,7 +648,7 @@ class CustomCommands(commands.Cog):
 
     @customcom.command(name="raw")
     async def cc_raw(self, ctx: commands.Context, command: str) -> None:
-        """Show exact stored responses without triggering mentions."""
+        """Show exact stored responses without triggering mentions"""
         stored = await self.catalog.get(ctx.guild.id, command)
         if stored is None or not CustomCommandRuntime.can_use(
             stored, ctx.guild, ctx.author, ctx.channel,
@@ -705,7 +690,7 @@ class CustomCommands(commands.Cog):
 
     @customcom.command(name="search")
     async def cc_search(self, ctx: commands.Context, *, query: str) -> None:
-        """Search custom command names with fuzzy matching."""
+        """Search custom command names with fuzzy matching"""
         stored = self._listed_commands(ctx, await self.catalog.list_commands(ctx.guild.id))
         by_name = {command.name: command for command in stored}
         matches = rapidfuzz.process.extract(
@@ -719,13 +704,13 @@ class CustomCommands(commands.Cog):
             if score > FUZZY_MATCH_THRESHOLD
         ]
         if not accepted:
-            await ctx.send("No close matches were found.")
+            await ctx.send("No close matches were found")
             return
         await self._send_command_list(ctx, accepted, title="Search results")
 
     @customcom.command(name="list")
     async def cc_list(self, ctx: commands.Context) -> None:
-        """List all available custom commands."""
+        """List all available custom commands"""
         await self._show_all_commands(ctx)
 
     async def _show_all_commands(self, ctx: commands.Context) -> None:
@@ -810,7 +795,7 @@ class CustomCommands(commands.Cog):
 
     @customcom.command(name="show")
     async def cc_show(self, ctx: commands.Context, command_name: str) -> None:
-        """Show responses, weights, cooldowns, and metadata."""
+        """Show responses, weights, cooldowns, and metadata"""
         command = await self.catalog.get(ctx.guild.id, command_name)
         if command is None or not CustomCommandRuntime.can_use(
             command, ctx.guild, ctx.author, ctx.channel,
@@ -868,19 +853,23 @@ class CustomCommands(commands.Cog):
         name="create",
         aliases=["add"],
         invoke_without_command=True,
+        usage="[name] [text]",
     )
     @commands.has_permissions(manage_messages=True)
     async def cc_create(
         self,
         ctx: commands.Context,
-        command: str,
+        command: str | None = None,
         *,
         text: str | None = None,
     ) -> None:
-        """Open a thread to create a custom command."""
+        """List simple and random creation, or pass a name to open a simple command"""
+        if command is None:
+            await send_group_overview(ctx, title="Create a custom command")
+            return
         await self._open_create_workflow(ctx, command, text)
 
-    @cc_create.command(name="simple")
+    @cc_create.command(name="simple", usage="<name> [text]")
     @commands.has_permissions(manage_messages=True)
     async def cc_create_simple(
         self,
@@ -889,17 +878,17 @@ class CustomCommands(commands.Cog):
         *,
         text: str | None = None,
     ) -> None:
-        """Open a creation thread, optionally seeded with one response."""
+        """Open a creation thread, optionally seeded with one response"""
         await self._open_create_workflow(ctx, command, text)
 
-    @cc_create.command(name="random")
+    @cc_create.command(name="random", usage="<name>")
     @commands.has_permissions(manage_messages=True)
     async def cc_create_random(
         self,
         ctx: commands.Context,
         command: str,
     ) -> None:
-        """Open a creation thread for multiple weighted responses."""
+        """Open a creation thread for multiple weighted responses"""
         await self._open_create_workflow(ctx, command, None)
 
     async def _open_create_workflow(
@@ -935,7 +924,7 @@ class CustomCommands(commands.Cog):
         *,
         text: str | None = None,
     ) -> None:
-        """Open a thread to edit an existing custom command."""
+        """Open a thread to edit an existing custom command"""
         stored = await self.catalog.get(ctx.guild.id, command)
         if stored is None:
             await ctx.send(COMMAND_NOT_FOUND_MESSAGE)
@@ -956,7 +945,7 @@ class CustomCommands(commands.Cog):
         *,
         per: str = "member",
     ) -> None:
-        """Show, set, or remove a member, channel, or guild cooldown."""
+        """Show, set, or remove a member, channel, or guild cooldown"""
         stored = await self.catalog.get(ctx.guild.id, command)
         if stored is None:
             await ctx.send(COMMAND_NOT_FOUND_MESSAGE)
@@ -998,7 +987,7 @@ class CustomCommands(commands.Cog):
     @customcom.command(name="delete", aliases=["del", "remove"])
     @commands.has_permissions(manage_messages=True)
     async def cc_delete(self, ctx: commands.Context, command: str) -> None:
-        """Review and delete a custom command."""
+        """Review and delete a custom command"""
         stored = await self.catalog.get(ctx.guild.id, command)
         if stored is None:
             await ctx.send(COMMAND_NOT_FOUND_MESSAGE)
@@ -1007,7 +996,7 @@ class CustomCommands(commands.Cog):
             title="Delete custom command?",
             description=(
                 f"Command: `{stored.name}`\nResponses: {len(stored.responses)}\n"
-                "This cannot be undone."
+                "This cannot be undone"
             ),
         )
         view = DeleteConfirmationView(

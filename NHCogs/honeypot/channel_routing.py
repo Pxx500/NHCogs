@@ -183,15 +183,15 @@ def _validate_target(
 ) -> None:
     if not spec.allow_threads and not isinstance(target, discord.TextChannel):
         raise commands.UserFeedbackCheckFailure(
-            _("{label} must be a normal text channel.").format(label=spec.label)
+            _("{label} must be a normal text channel").format(label=spec.label)
         )
     if not isinstance(target, (discord.TextChannel, discord.Thread)):
         raise commands.UserFeedbackCheckFailure(
-            _("{label} must be a text channel or thread.").format(label=spec.label)
+            _("{label} must be a text channel or thread").format(label=spec.label)
         )
     if spec.private and not cog._channel_is_private(ctx.guild, target):
         raise commands.UserFeedbackCheckFailure(
-            _("{label} must be private.").format(label=spec.label)
+            _("{label} must be private").format(label=spec.label)
         )
     missing = cog._missing_channel_permissions(
         ctx.guild,
@@ -202,18 +202,38 @@ def _validate_target(
         raise commands.UserFeedbackCheckFailure(missing)
 
 
+def _consume_clear_word(value: object, *, noun: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    if value.casefold() == "clear":
+        return True
+    raise commands.UserFeedbackCheckFailure(
+        _("Provide a {noun} or use clear").format(noun=noun)
+    )
+
+
 async def configure_single(
     cog: Any,
     ctx: commands.Context,
     key: str,
-    target: discord.TextChannel | discord.Thread | None = None,
+    target: discord.TextChannel | discord.Thread | str | None = None,
 ) -> None:
     spec = category(key)
     if spec.cardinality != "single":
         raise ValueError(f"Channel category {key} is not single-valued")
     config = cog.config.guild(ctx.guild)
     accessor = getattr(config, spec.config_field)
+    if _consume_clear_word(target, noun="channel"):
+        await accessor.set(None)
+        await ctx.send(
+            _("{label} channel cleared").format(label=spec.label),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
     if target is None:
+        if not cog._channel_is_private(ctx.guild, ctx.channel):
+            await ctx.send(_("Run this command in a private moderator channel"))
+            return
         channel_id = await accessor()
         await ctx.send(
             _("{label}: {channel}").format(
@@ -262,7 +282,7 @@ async def add_multiple(
     async with accessor() as channel_ids:
         if channel_id in channel_ids:
             raise commands.UserFeedbackCheckFailure(
-                _("{label} already includes that channel.").format(label=spec.label)
+                _("{label} already includes that channel").format(label=spec.label)
             )
         channel_ids.append(channel_id)
     await ctx.send(
@@ -288,7 +308,7 @@ async def remove_multiple(
     async with accessor() as channel_ids:
         if channel_id not in channel_ids:
             raise commands.UserFeedbackCheckFailure(
-                _("{label} does not include that channel.").format(label=spec.label)
+                _("{label} does not include that channel").format(label=spec.label)
             )
         channel_ids.remove(channel_id)
     await ctx.send(
@@ -312,7 +332,7 @@ async def clear_deleted_channel(cog: Any, channel: Any) -> None:
                 channel_ids.remove(channel.id)
 
 
-async def send_overview(cog: Any, ctx: commands.Context) -> None:
+async def _send_channel_configuration(cog: Any, ctx: commands.Context) -> None:
     configured = GuildSettings.from_mapping(await cog.config.guild(ctx.guild).all())
     entries = []
     for section, heading in (
@@ -339,24 +359,12 @@ async def send_overview(cog: Any, ctx: commands.Context) -> None:
                 )
             )
         entries.append((heading, "\n".join(rows)))
-    prefix = getattr(ctx, "clean_prefix", "!")
-    command_lines = []
-    for spec in CHANNEL_CATEGORIES:
-        if spec.central_command is None:
-            continue
-        base = f"{prefix}honeypot channels {spec.central_command}"
-        if spec.cardinality == "single":
-            command_lines.append(f"{base} [channel]")
-            continue
-        target = "[channel]" if spec.default_to_current_channel else "<channel>"
-        command_lines.extend(
-            (
-                f"{base} add {target}",
-                f"{base} remove {target}",
-                f"{base} list",
-            )
-        )
-        if spec.key == "honeypot_scope":
-            command_lines.append(f"{base} create")
-    entries.append((_("Commands"), "\n".join(command_lines)))
     await cog._send_config_dump(ctx, _("Honeypot channels"), entries)
+
+
+async def send_overview(cog: Any, ctx: commands.Context) -> None:
+    await cog._send_group_overview(
+        ctx,
+        _send_channel_configuration,
+        title=_("Honeypot channels"),
+    )

@@ -48,11 +48,13 @@ def _registered_command_tree(honeypot, root):
             if getattr(candidate, "parent", None) is command
         ]
         doc = (command.callback.__doc__ or "").strip().splitlines()
+        signature = getattr(command, "usage", None) or getattr(command, "signature", "") or ""
         return SimpleNamespace(
             name=command.name,
             qualified_name=command.qualified_name,
-            signature="",
+            signature=signature,
             short_doc=doc[0] if doc else "",
+            hidden=bool(getattr(command, "hidden", False)),
             commands=children,
         )
 
@@ -460,7 +462,7 @@ class JoinwatchCommandTests(unittest.IsolatedAsyncioTestCase):
 
                 setting.set.assert_not_awaited()
                 ctx.send.assert_awaited_once_with(
-                    "Hours must be between 1 and 1000000."
+                    "Hours must be between 1 and 1000000"
                 )
 
     async def test_max_age_rejects_zero_at_lower_boundary(self):
@@ -479,7 +481,7 @@ class JoinwatchCommandTests(unittest.IsolatedAsyncioTestCase):
 
                 setting.set.assert_not_awaited()
                 ctx.send.assert_awaited_once_with(
-                    "Hours must be between 1 and 1000000."
+                    "Hours must be between 1 and 1000000"
                 )
 
 
@@ -488,45 +490,70 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = object.__new__(honeypot.Honeypot)
+                configured = mock.AsyncMock(
+                    return_value=dict(honeypot.settings.DEFAULTS)
+                )
                 cog.config = SimpleNamespace(
-                    guild=mock.Mock(
-                        return_value=SimpleNamespace(
-                            all=mock.AsyncMock(
-                                return_value=dict(honeypot.settings.DEFAULTS)
-                            )
-                        )
-                    )
+                    guild=mock.Mock(return_value=SimpleNamespace(all=configured))
                 )
                 cog._format_channel_setting = mock.Mock(
                     return_value="Not configured"
                 )
                 cog._send_config_dump = mock.AsyncMock()
-                ctx = SimpleNamespace(guild=object(), clean_prefix="??")
+                cog._send_group_overview = honeypot.Honeypot._send_group_overview.__get__(
+                    cog, honeypot.Honeypot
+                )
+                ctx = SimpleNamespace(
+                    guild=SimpleNamespace(default_role=object()),
+                    clean_prefix="??",
+                    command=_registered_command_tree(
+                        honeypot, honeypot.Honeypot.channels
+                    ),
+                    channel=SimpleNamespace(
+                        permissions_for=lambda role: SimpleNamespace(view_channel=True)
+                    ),
+                    send=mock.AsyncMock(),
+                )
 
-                await honeypot.Honeypot.channels.callback(cog, ctx)
+                with (
+                    mock.patch.object(honeypot.discord, "Embed", _OverviewEmbed),
+                    mock.patch.object(
+                        honeypot.discord,
+                        "AllowedMentions",
+                        _OverviewAllowedMentions,
+                    ),
+                ):
+                    await honeypot.Honeypot.channels.callback(cog, ctx)
 
-                cog._send_config_dump.assert_awaited_once()
-                entries = cog._send_config_dump.await_args.args[2]
+                configured.assert_not_awaited()
+                cog._send_config_dump.assert_not_awaited()
                 rendered = "\n".join(
-                    f"{label}\n{value}" for label, value in entries
+                    field.value
+                    for call in ctx.send.await_args_list
+                    for field in call.kwargs["embed"].fields
                 )
-                self.assertIn("Destinations", rendered)
-                self.assertIn("Sources and scopes", rendered)
-                self.assertIn("Review: Not configured", rendered)
-                self.assertNotIn("Errors:", rendered)
-                self.assertIn("Daily stats: Not configured", rendered)
-                self.assertIn("GIF debug logging: false", rendered)
-                self.assertIn("??honeypot channels review [channel]", rendered)
+                self.assertIn("Current values are hidden", rendered)
                 self.assertIn(
-                    "??honeypot channels daily-stats [channel]", rendered
-                )
-                self.assertIn("??honeypot channels gif-debug [channel]", rendered)
-                self.assertIn(
-                    "??honeypot channels honeypot add <channel>", rendered
+                    "`??honeypot channels review [channel|clear]` - Show, set, or clear the review destination",
+                    rendered,
                 )
                 self.assertIn(
-                    "??honeypot channels gif-detector remove [channel]", rendered
+                    "`??honeypot channels daily-stats [channel|clear]` - Show, set, or clear the daily statistics destination",
+                    rendered,
                 )
+                self.assertIn(
+                    "`??honeypot channels gif-debug [channel|clear]` - Show, set, or clear the GIF diagnostics destination",
+                    rendered,
+                )
+                self.assertIn(
+                    "`??honeypot channels honeypot add <channel>` - Register an existing channel as a honeypot channel",
+                    rendered,
+                )
+                self.assertIn(
+                    "`??honeypot channels gif-detector remove [channel]` - Remove a channel from the GIF detector scope",
+                    rendered,
+                )
+                self.assertNotIn("Review: Not configured", rendered)
 
     async def test_channels_overview_uses_names_without_repeating_channel_ids(self):
         with TemporaryDirectory() as directory:
@@ -537,6 +564,7 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                     mention="<#77>",
                 )
                 guild = SimpleNamespace(
+                    default_role=object(),
                     get_channel=mock.Mock(
                         side_effect=lambda channel_id: (
                             channel if channel_id == channel.id else None
@@ -555,9 +583,30 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
                 cog._send_config_dump = mock.AsyncMock()
-                ctx = SimpleNamespace(guild=guild, clean_prefix="!")
+                cog._send_group_overview = honeypot.Honeypot._send_group_overview.__get__(
+                    cog, honeypot.Honeypot
+                )
+                ctx = SimpleNamespace(
+                    guild=guild,
+                    clean_prefix="!",
+                    command=_registered_command_tree(
+                        honeypot, honeypot.Honeypot.channels
+                    ),
+                    channel=SimpleNamespace(
+                        permissions_for=lambda role: SimpleNamespace(view_channel=False)
+                    ),
+                    send=mock.AsyncMock(),
+                )
 
-                await honeypot.Honeypot.channels.callback(cog, ctx)
+                with (
+                    mock.patch.object(honeypot.discord, "Embed", _OverviewEmbed),
+                    mock.patch.object(
+                        honeypot.discord,
+                        "AllowedMentions",
+                        _OverviewAllowedMentions,
+                    ),
+                ):
+                    await honeypot.Honeypot.channels.callback(cog, ctx)
 
                 entries = cog._send_config_dump.await_args.args[2]
                 rendered = "\n".join(
@@ -566,6 +615,8 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Review: #automod-filter", rendered)
                 self.assertNotIn("<#77>", rendered)
                 self.assertNotIn("(77)", rendered)
+                self.assertIn("Destinations", rendered)
+                self.assertIn("GIF debug logging: false", rendered)
 
     async def test_gif_scope_paths_share_permission_validation(self):
         with TemporaryDirectory() as directory:
@@ -934,6 +985,7 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                         for value in vars(honeypot.Honeypot).values()
                         if getattr(value, "kind", None) == "group"
                         and value is not honeypot.Honeypot.channels
+                        and value is not honeypot.Honeypot.gif_detector_message
                     ),
                     key=lambda group: group.qualified_name,
                 )

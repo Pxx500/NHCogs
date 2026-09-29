@@ -460,7 +460,7 @@ class BotProxyWorkflowManagerTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(
             workflow.WorkflowInputError,
-            "visible to @everyone",
+            "visible to `@everyone`",
         ):
             await manager.workspace_channel(guild)
 

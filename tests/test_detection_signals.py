@@ -458,7 +458,16 @@ class DetectionSignalOutcomeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(follow_signals[1].action, honeypot.ActionIntent.BAN)
                 self.assertEqual(follow_signals[2].action, honeypot.ActionIntent.KICK)
                 self.assertEqual(self._stats(cog).get("image_hits", 0), 0)
-                attachments[0].read.assert_not_awaited()
+                stored = next(
+                    item
+                    for item in snapshot.attachments
+                    if item.message_sequence == snapshot.messages[-1].sequence
+                    and item.filename == "file-0.png"
+                )
+                self.assertEqual(stored.capture_status, "captured")
+                self.assertIsNotNone(stored.evidence_path)
+                self.assertEqual(stored.sha256, "known-bad")
+                attachments[0].read.assert_awaited()
                 await self._finish(cog)
 
     async def test_review_only_admission_stores_no_moderation_action(self):
@@ -703,7 +712,12 @@ class DetectionSignalOutcomeTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(self._stats(cog).get("image_hits", 0), 0)
                 self.assertGreaterEqual(self._stats(cog).get("spam_hits", 0), 1)
-                attachment.read.assert_not_awaited()
+                stored = snapshot.attachments[0]
+                self.assertEqual(stored.filename, "proof.png")
+                self.assertEqual(stored.capture_status, "captured")
+                self.assertIsNotNone(stored.evidence_path)
+                self.assertEqual(stored.sha256, "known-bad")
+                attachment.read.assert_awaited()
                 await self._finish(cog)
 
     async def _open_cog(self, honeypot, *, protected=False, young=False):

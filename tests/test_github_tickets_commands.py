@@ -8,8 +8,8 @@ from unittest import mock
 from tests.githubtickets_loader import isolated_githubtickets_modules
 
 COMMAND_SIGNATURES = {
-    "githubtickets channel set": "<channel>",
-    "githubtickets logchannel set": "<channel>",
+    "githubtickets channel": "[channel|clear]",
+    "githubtickets logchannel": "[channel|clear]",
     "githubtickets role add": "<role>",
     "githubtickets role remove": "<role>",
     "githubtickets category add": "<name>",
@@ -45,12 +45,16 @@ def _registered_command_tree(cog_type, root):
         return SimpleNamespace(
             name=command.name,
             qualified_name=command.qualified_name,
-            signature=COMMAND_SIGNATURES.get(command.qualified_name, ""),
+            signature=COMMAND_SIGNATURES.get(command.qualified_name, "")
+            or getattr(command, "usage", "")
+            or "",
+            hidden=getattr(command, "hidden", False),
             short_doc=docstring.strip().splitlines()[0] if docstring.strip() else "",
             commands=[
                 clone(child)
                 for child in commands
                 if getattr(child, "parent", None) is command
+                and not getattr(child, "hidden", False)
             ],
         )
 
@@ -163,6 +167,9 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
         for qualified_name in deep_names:
             self.assertNotIn(f"??{qualified_name}", rendered_commands)
         self.assertIn("??githubtickets maxpings <count>", rendered_commands)
+        self.assertIn("??githubtickets channel [channel|clear]", rendered_commands)
+        self.assertIn("??githubtickets logchannel [channel|clear]", rendered_commands)
+        self.assertNotIn("channel set", rendered_commands)
         self.assertIn("Run a category below", command_embed.description)
 
         for call in ctx.send.await_args_list:
@@ -208,8 +215,11 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 command
                 for command in commands
                 if command.qualified_name != "githubtickets"
+                and command.qualified_name
+                not in {"githubtickets channel", "githubtickets logchannel"}
                 and any(
                     getattr(child, "parent", None) is command
+                    and not getattr(child, "hidden", False)
                     for child in commands
                 )
             ]
@@ -353,7 +363,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                     ctx = FakeContext(private=False)
                     with self.assertRaisesRegex(
                         modules.githubtickets.commands.UserFeedbackCheckFailure,
-                        "channel hidden from @everyone",
+                        "channel hidden from `@everyone`",
                     ):
                         await getattr(cog, f"githubtickets_profile_pings_{name}")(ctx)
                     self.assertEqual(ctx.send.await_count, 0)
@@ -374,8 +384,8 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             channel = FakeTextChannel()
             role = SimpleNamespace(id=200, mention="@GT:NH Devs")
 
-            await cog.githubtickets_channel_set(ctx, channel)
-            await cog.githubtickets_logchannel_set(ctx, channel)
+            await cog.githubtickets_channel(ctx, channel)
+            await cog.githubtickets_logchannel(ctx, channel)
             await cog.githubtickets_role_add(ctx, role)
             await cog.githubtickets_category_add(ctx, name="Rendring")
             await cog.githubtickets_category_rename(
@@ -385,7 +395,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             )
             await cog.githubtickets_maxpings(ctx, count=5)
             await cog.githubtickets_timing_donotdisturb(ctx, duration="8h")
-            await cog.githubtickets_logchannel_clear(ctx)
+            await cog.githubtickets_logchannel(ctx, "clear")
 
             config = await cog.config.guild_from_id(42).all()
             categories = await cog.store.list_categories(42)
@@ -411,6 +421,53 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_profile_clear_accepts_mention_or_digits_and_rejects_letters(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            cog = modules.githubtickets.GitHubTickets(
+                SimpleNamespace(),
+                mock.Mock(
+                    report_operational_error=mock.AsyncMock(),
+                    report_global_error=mock.AsyncMock(),
+                    handle_command_error=mock.AsyncMock(),
+                ),
+            )
+            await cog.store.initialize()
+            ctx = FakeContext()
+            now = datetime.now(timezone.utc)
+            for user_id in (20, 21, 22):
+                await cog.store.save_profile(
+                    guild_id=42,
+                    user_id=user_id,
+                    github_username=f"dev{user_id}",
+                    category_ids=(),
+                    automatic_pings=False,
+                    updated_at=now,
+                )
+
+            await cog.githubtickets_profile_clear(ctx, "set")
+            await cog.githubtickets_profile_clear(ctx, "alice")
+            await cog.githubtickets_profile_clear(ctx, "0")
+            self.assertIsNotNone(await cog.store.get_profile(42, 20))
+
+            await cog.githubtickets_profile_clear(ctx, "<@20>")
+            await cog.githubtickets_profile_clear(ctx, "21")
+            await cog.githubtickets_profile_clear(ctx, "<@!22>")
+
+        self.assertIsNone(await cog.store.get_profile(42, 20))
+        self.assertIsNone(await cog.store.get_profile(42, 21))
+        self.assertIsNone(await cog.store.get_profile(42, 22))
+        self.assertEqual(
+            [call.args[0] for call in ctx.send.await_args_list],
+            [
+                "Invalid user ID",
+                "Invalid user ID",
+                "Invalid user ID",
+                "Profile cleared: 20",
+                "Profile cleared: 21",
+                "Profile cleared: 22",
+            ],
+        )
+
     async def test_channel_set_rejects_a_non_text_guild_channel_with_accepted_copy(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
@@ -421,6 +478,14 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 pass
 
             modules.githubtickets.discord.TextChannel = FakeTextChannel
+            self.assertEqual(
+                cog.githubtickets_channel.callback.__annotations__["channel"],
+                "discord.abc.GuildChannel | str | None",
+            )
+            await cog.githubtickets_channel(
+                ctx,
+                SimpleNamespace(id=100, mention="#voice"),
+            )
             await cog.githubtickets_channel_set(
                 ctx,
                 SimpleNamespace(id=100, mention="#voice"),
@@ -429,7 +494,13 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             config = await cog.config.guild_from_id(42).all()
 
         self.assertIsNone(config["ticket_channel_id"])
-        ctx.send.assert_awaited_once_with("Ticket channel must be a text channel")
+        self.assertEqual(
+            [call.args[0] for call in ctx.send.await_args_list],
+            [
+                "Ticket channel must be a text channel",
+                "Ticket channel must be a text channel",
+            ],
+        )
 
     async def test_configuration_errors_use_only_the_accepted_copy(self):
         with isolated_githubtickets_modules(self.data_path) as modules:

@@ -55,7 +55,7 @@ async def _reschedule_joinwatch_assignment_retry(
             cog,
             guild,
             data,
-            _("Failed: {reason}\nNo more automatic retries.").format(reason=failure),
+            _("Failed: {reason}\nNo more automatic retries").format(reason=failure),
         )
         return False
     retry_at = typing.cast(datetime, transition.retry_at)
@@ -63,7 +63,7 @@ async def _reschedule_joinwatch_assignment_retry(
         cog,
         guild,
         data,
-        _("Failed: {reason}\nRetrying {time} ({count}/{max}).").format(
+        _("Failed: {reason}\nRetrying {time} ({count}/{max})").format(
             reason=failure,
             time=discord.utils.format_dt(retry_at, style="R"),
             count=transition.attempts,
@@ -101,7 +101,7 @@ async def _reschedule_joinwatch_role_retry(
             cog,
             guild,
             data,
-            _("Failed: {reason}\nNo more automatic retries.").format(reason=failure),
+            _("Failed: {reason}\nNo more automatic retries").format(reason=failure),
         )
         return False
     retry_at = typing.cast(datetime, transition.retry_at)
@@ -109,7 +109,7 @@ async def _reschedule_joinwatch_role_retry(
         cog,
         guild,
         data,
-        _("Failed: {reason}\nRetrying {time} ({count}/{max}).").format(
+        _("Failed: {reason}\nRetrying {time} ({count}/{max})").format(
             reason=failure,
             time=discord.utils.format_dt(retry_at, style="R"),
             count=transition.attempts,
@@ -150,7 +150,7 @@ async def _execute_joinwatch_action(
                     settings.automated_kick_fail_warning
                 ):
                     return await cog._create_kick_fail_warning(guild, member_id)
-                return (_("The member is no longer in the server."), None)
+                return (_("The member is no longer in the server"), None)
             try:
                 await member.kick(reason=reason)
             except discord.NotFound:
@@ -267,7 +267,7 @@ async def _apply_joinwatch_assignment_actions(
                     joinwatch_channel,
                     member_id=member_id,
                     title=_("Joinwatch auto-role timer expired"),
-                    description=_("{mention} ({id}) left before the scheduled role could be applied.").format(
+                    description=_("{mention} ({id}) left before the scheduled role could be applied").format(
                         mention=f"<@{member_id}>",
                         id=member_id,
                     ),
@@ -320,7 +320,7 @@ async def _apply_joinwatch_assignment_actions(
                     member_id_str,
                     data,
                     now,
-                    failure=_("I couldn't apply the configured joinwatch auto-role."),
+                    failure=_("I couldn't apply the configured joinwatch auto-role"),
                 )
                 continue
         try:
@@ -428,7 +428,7 @@ async def _apply_joinwatch_role_actions(
                     joinwatch_channel,
                     member_id=member_id,
                     title=_("Joinwatch auto-role timer expired"),
-                    description=_("{mention} ({id}) left before the auto-role timer expired.").format(
+                    description=_("{mention} ({id}) left before the auto-role timer expired").format(
                         mention=f"<@{member_id}>",
                         id=member_id,
                     ),
@@ -500,7 +500,7 @@ async def _apply_joinwatch_role_actions(
                 joinwatch_channel,
                 member_id=member.id,
                 title=_("Joinwatch auto-role timer expired"),
-                description=_("{mention} ({id}) still had {role} when the timer expired.").format(
+                description=_("{mention} ({id}) still had {role} when the timer expired").format(
                     mention=member.mention,
                     id=member.id,
                     role=role.mention if role is not None else _("the auto-role"),
@@ -715,7 +715,7 @@ async def on_member_join(cog, member: discord.Member) -> None:
                             terminal=True,
                         )
                         status = _(
-                            "I couldn't apply the configured joinwatch auto-role."
+                            "I couldn't apply the configured joinwatch auto-role"
                         )
         destination = (
             channel
@@ -783,7 +783,7 @@ async def on_member_update(cog, before: discord.Member, after: discord.Member) -
         )
         if effect.status is EffectStatus.PLANNED:
             description = _(
-                "{mention} ({id}) took the bait role and would be {action} (dry run)."
+                "{mention} ({id}) took the bait role and would be {action} (dry run)"
             ).format(mention=after.mention, id=after.id, action=action)
         elif effect.status is EffectStatus.FAILED:
             await cog._record_operational_failure(
@@ -793,7 +793,7 @@ async def on_member_update(cog, before: discord.Member, after: discord.Member) -
                 terminal=True,
             )
             description = _(
-                "{mention} ({id}) took the bait role, but the configured action failed."
+                "{mention} ({id}) took the bait role, but the configured action failed"
             ).format(mention=after.mention, id=after.id)
         elif effect.status is EffectStatus.SUCCEEDED and effect.modlog_failed:
             await cog._record_operational_failure(
@@ -804,7 +804,7 @@ async def on_member_update(cog, before: discord.Member, after: discord.Member) -
             )
             action_past = _("banned") if action == "ban" else _("kicked")
             description = _(
-                "{mention} ({id}) took the bait role and was {action}, but the modlog case failed."
+                "{mention} ({id}) took the bait role and was {action}, but the modlog case failed"
             ).format(
                 mention=after.mention,
                 id=after.id,
@@ -813,14 +813,14 @@ async def on_member_update(cog, before: discord.Member, after: discord.Member) -
         elif effect.status is EffectStatus.SUCCEEDED:
             action_past = _("banned") if action == "ban" else _("kicked")
             description = _(
-                "{mention} ({id}) took the bait role and was {action}."
+                "{mention} ({id}) took the bait role and was {action}"
             ).format(
                 mention=after.mention,
                 id=after.id,
                 action=action_past,
             )
         else:
-            description = _("{mention} ({id}) took the bait role.").format(
+            description = _("{mention} ({id}) took the bait role").format(
                 mention=after.mention,
                 id=after.id,
             )

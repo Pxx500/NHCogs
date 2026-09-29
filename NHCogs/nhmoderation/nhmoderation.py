@@ -488,7 +488,7 @@ class NHModeration(commands.Cog):
     def _require_private_channel(self, ctx: commands.Context) -> None:
         if not channel_is_private(ctx.guild, ctx.channel):
             raise commands.UserFeedbackCheckFailure(
-                "Run this command in a channel hidden from @everyone"
+                "Run this command in a channel hidden from `@everyone`"
             )
 
     @commands.command(
@@ -498,7 +498,7 @@ class NHModeration(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
     async def banchart(self, ctx: commands.Context, *, arguments: str = "") -> None:
-        """Render bans by credited moderator from local history."""
+        """Render bans by credited moderator from local history"""
         state = await self.history.status(ctx.guild.id)
         if state.migration_state != "complete":
             message = (
@@ -530,7 +530,7 @@ class NHModeration(commands.Cog):
         )
         if data.total_count == 0:
             await ctx.send(
-                "No retained bans match this chart.",
+                "No retained bans match this chart",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             await self._mark_operational_recovered(ctx.guild, "banchart")
@@ -569,14 +569,14 @@ class NHModeration(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
     async def nhmod(self, ctx: commands.Context) -> None:
-        """Manage NHModeration history and synchronization."""
+        """Manage NHModeration history and synchronization"""
         self._require_private_channel(ctx)
         await send_group_overview(ctx, include_descendants=False)
         await self._mark_operational_recovered(ctx.guild, "nhmod")
 
     @nhmod.command(name="status")
     async def nhmod_status(self, ctx: commands.Context) -> None:
-        """Show migration and synchronization health."""
+        """Show migration and synchronization health"""
         self._require_private_channel(ctx)
         state = await self.history.status(ctx.guild.id)
         next_run = next_weekly_reconciliation(datetime.now(timezone.utc))
@@ -609,7 +609,7 @@ class NHModeration(commands.Cog):
 
     @nhmod.group(name="filter", invoke_without_command=True)
     async def nhmod_filter(self, ctx: commands.Context) -> None:
-        """Manage filter groups, their phrases, and channel rules."""
+        """Manage filter groups, their phrases, and channel rules"""
         self._require_private_channel(ctx)
         await send_group_overview(
             ctx,
@@ -619,7 +619,7 @@ class NHModeration(commands.Cog):
 
     @nhmod_filter.command(name="add")
     async def nhmod_filter_add(self, ctx: commands.Context, group: str, *, phrase: str) -> None:
-        """Add a case-insensitive substring to a filter group."""
+        """Add a case-insensitive substring to a filter group"""
         self._require_private_channel(ctx)
         normalized = phrase.strip().casefold()
         if not normalized:
@@ -640,7 +640,7 @@ class NHModeration(commands.Cog):
 
     @nhmod_filter.command(name="remove")
     async def nhmod_filter_remove(self, ctx: commands.Context, group: str, *, phrase: str) -> None:
-        """Remove a phrase from a filter group."""
+        """Remove a phrase from a filter group"""
         self._require_private_channel(ctx)
         normalized = phrase.strip().casefold()
         if not normalized:
@@ -661,7 +661,7 @@ class NHModeration(commands.Cog):
 
     @nhmod_filter.command(name="list")
     async def nhmod_filter_list(self, ctx: commands.Context) -> None:
-        """List filter groups, modes, and phrase counts."""
+        """List filter groups, modes, and phrase counts"""
         self._require_private_channel(ctx)
         await self._send_filter_groups(ctx)
         await self._mark_operational_recovered(ctx.guild, "nhmod filter list")
@@ -714,7 +714,7 @@ class NHModeration(commands.Cog):
 
     @nhmod_filter.command(name="create")
     async def nhmod_filter_create(self, ctx: commands.Context, group: str) -> None:
-        """Create an empty filter group that applies to all channels."""
+        """Create an empty filter group that applies to all channels"""
         self._require_private_channel(ctx)
         name = self._filter_group_name(group)
         async with self._message_filter_lock:
@@ -728,7 +728,7 @@ class NHModeration(commands.Cog):
 
     @nhmod_filter.command(name="delete")
     async def nhmod_filter_delete(self, ctx: commands.Context, group: str) -> None:
-        """Delete a group with all its phrases and channel settings."""
+        """Delete a group with all its phrases and channel settings"""
         self._require_private_channel(ctx)
         async with self._message_filter_lock:
             groups, name, _ = self._filter_group(ctx.guild.id, group)
@@ -739,7 +739,7 @@ class NHModeration(commands.Cog):
 
     @nhmod_filter.command(name="mode", usage="<group> <all|whitelist|blacklist>")
     async def nhmod_filter_mode(self, ctx: commands.Context, group: str, mode: str) -> None:
-        """Apply a group everywhere, only on listed channels, or except listed channels."""
+        """Apply a group everywhere, only on listed channels, or except listed channels"""
         self._require_private_channel(ctx)
         mode = mode.casefold()
         if mode not in {"all", "whitelist", "blacklist"}:
@@ -753,7 +753,7 @@ class NHModeration(commands.Cog):
 
     @nhmod_filter.command(name="show")
     async def nhmod_filter_show(self, ctx: commands.Context, group: str) -> None:
-        """Show a group's phrases, mode, and channels, including thread inheritance."""
+        """Show a group's phrases, mode, and channels, including thread inheritance"""
         self._require_private_channel(ctx)
         _, name, settings = self._filter_group(ctx.guild.id, group)
         channels = []
@@ -778,7 +778,7 @@ class NHModeration(commands.Cog):
 
     @nhmod_filter.group(name="channels", invoke_without_command=True)
     async def nhmod_filter_channels(self, ctx: commands.Context) -> None:
-        """Manage group channel lists. Parent channels include their threads and forum posts."""
+        """Manage group channel lists. Parent channels include their threads and forum posts"""
         self._require_private_channel(ctx)
         await send_group_overview(ctx, lambda: self._send_filter_groups(ctx))
         await self._mark_operational_recovered(ctx.guild, "nhmod filter channels")
@@ -787,14 +787,14 @@ class NHModeration(commands.Cog):
     async def nhmod_filter_channels_add(
         self, ctx: commands.Context, group: str, *channels: discord.abc.GuildChannel | discord.Thread
     ) -> None:
-        """Add channels to a group's whitelist or blacklist without changing its mode."""
+        """Add channels to a group's whitelist or blacklist without changing its mode"""
         await self._change_filter_channels(ctx, group, channels, add=True)
 
     @nhmod_filter_channels.command(name="remove", usage="<group> <channels...>")
     async def nhmod_filter_channels_remove(
         self, ctx: commands.Context, group: str, *channels: discord.abc.GuildChannel | discord.Thread
     ) -> None:
-        """Remove channels from a group's whitelist or blacklist."""
+        """Remove channels from a group's whitelist or blacklist"""
         await self._change_filter_channels(ctx, group, channels, add=False)
 
     async def _change_filter_channels(self, ctx, group, channels, *, add: bool) -> None:
@@ -827,14 +827,14 @@ class NHModeration(commands.Cog):
 
     @nhmod.group(name="migrate", invoke_without_command=True)
     async def nhmod_migrate(self, ctx: commands.Context) -> None:
-        """Plan or run the initial moderation history import."""
+        """Plan or run the initial moderation history import"""
         self._require_private_channel(ctx)
         await send_group_overview(ctx)
         await self._mark_operational_recovered(ctx.guild, "nhmod migrate")
 
     @nhmod_migrate.command(name="plan")
     async def nhmod_migrate_plan(self, ctx: commands.Context) -> None:
-        """Check readiness without importing Discord history."""
+        """Check readiness without importing Discord history"""
         self._require_private_channel(ctx)
         permissions = ctx.guild.me.guild_permissions
         state = await self.history.status(ctx.guild.id)
@@ -872,12 +872,12 @@ class NHModeration(commands.Cog):
 
     @nhmod_migrate.command(name="run")
     async def nhmod_migrate_run(self, ctx: commands.Context) -> None:
-        """Start or resume the initial moderation history import."""
+        """Start or resume the initial moderation history import"""
         self._require_private_channel(ctx)
         state = await self.history.status(ctx.guild.id)
         if state.migration_state == "complete":
             await ctx.send(
-                "Initial migration is already complete.",
+                "Initial migration is already complete",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             await self._mark_operational_recovered(ctx.guild, "nhmod migrate run")
@@ -901,7 +901,7 @@ class NHModeration(commands.Cog):
 
     @nhmod.command(name="sync")
     async def nhmod_sync(self, ctx: commands.Context) -> None:
-        """Run a low-cost incremental synchronization."""
+        """Run a low-cost incremental synchronization"""
         self._require_private_channel(ctx)
         report = await self._run_sync(ctx.guild, SyncMode.INCREMENTAL)
         await ctx.send(
@@ -914,7 +914,7 @@ class NHModeration(commands.Cog):
     async def nhmod_repair(
         self, ctx: commands.Context, confirmation: str | None = None
     ) -> None:
-        """Re-import available sources and rebuild local history."""
+        """Re-import available sources and rebuild local history"""
         self._require_private_channel(ctx)
         if confirmation != "confirm":
             raise commands.UserFeedbackCheckFailure(

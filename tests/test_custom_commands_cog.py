@@ -1059,7 +1059,7 @@ class CustomCommandsListTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(await view.interaction_check(denied))
         denied_response.send_message.assert_awaited_once_with(
-            "Only the person who ran this command can use these controls.",
+            "Only the person who ran this command can use these controls",
             ephemeral=True,
         )
         self.assertTrue(

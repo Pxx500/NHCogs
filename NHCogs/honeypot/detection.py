@@ -308,10 +308,10 @@ async def _send_config_dump(
 
 def _dry_run_label(cog, action: str) -> str:
     if action == "ban":
-        return _("Dry run: I would ban this member.")
+        return _("Dry run: I would ban this member")
     if action == "kick":
-        return _("Dry run: I would kick this member.")
-    return _("Dry run: I would not take action.")
+        return _("Dry run: I would kick this member")
+    return _("Dry run: I would not take action")
 
 
 def _ban_delete_message_seconds() -> int:
@@ -321,23 +321,23 @@ def _ban_delete_message_seconds() -> int:
 def _missing_action_permission(cog, guild: discord.Guild, action: str) -> str | None:
     me = guild.me
     if me is None:
-        return _("**Failed:** I couldn't find my server member.")
+        return _("**Failed:** I couldn't find my server member")
     permissions = me.guild_permissions
     if action == "kick" and not permissions.kick_members:
-        return _("**Failed:** I do not have the `Kick Members` permission.")
+        return _("**Failed:** I do not have the `Kick Members` permission")
     if action == "ban" and not permissions.ban_members:
-        return _("**Failed:** I do not have the `Ban Members` permission.")
+        return _("**Failed:** I do not have the `Ban Members` permission")
     return None
 
 
 def _missing_role_assignment_permission(cog, guild: discord.Guild, role: discord.Role) -> str | None:
     me = guild.me
     if me is None:
-        return _("I couldn't find my server member.")
+        return _("I couldn't find my server member")
     if not me.guild_permissions.manage_roles:
-        return _("I need `Manage Roles` permission to apply the joinwatch auto-role.")
+        return _("I need `Manage Roles` permission to apply the joinwatch auto-role")
     if me.top_role <= role:
-        return _("My top role must be above the joinwatch auto-role.")
+        return _("My top role must be above the joinwatch auto-role")
     return None
 
 
@@ -1019,8 +1019,6 @@ async def _collect_detection_signals(
                 guild_settings,
                 action_override=ActionIntent.NONE,
             )
-        else:
-            _remember_skipped_image_download(cog, message, guild_settings)
         signals.extend(
             await _honeypot_signals(
                 cog,
@@ -1042,19 +1040,7 @@ async def _collect_detection_signals(
             image = await cog._initial_image_signal(message, guild_settings)
             if image is not None:
                 signals.append(image)
-        else:
-            _remember_skipped_image_download(cog, message, guild_settings)
     return tuple(signals)
-
-
-def _remember_skipped_image_download(cog, message, guild_settings) -> None:
-    if not guild_settings.imagescan_detector_enabled:
-        return
-    skipped = getattr(cog, "_skipped_initial_image_scans", None)
-    if skipped is None:
-        skipped = set()
-        cog._skipped_initial_image_scans = skipped
-    skipped.add((message.guild.id, message.id))
 
 
 def _public_moderation_reason(
@@ -1971,7 +1957,7 @@ async def automated_kick_fail_warn(cog, ctx: commands.Context, value: bool = Non
 async def create(cog, ctx: commands.Context) -> None:
     me = ctx.guild.me
     if me is None:
-        raise commands.UserFeedbackCheckFailure(_("I couldn't find my server member."))
+        raise commands.UserFeedbackCheckFailure(_("I couldn't find my server member"))
     honeypot_channel = await ctx.guild.create_text_channel(
         name="honeypot",
         position=0,
@@ -1992,8 +1978,27 @@ async def create(cog, ctx: commands.Context) -> None:
     await ctx.send(_("✅ Honeypot channel added: {channel.mention}").format(channel=honeypot_channel))
 
 
-async def punishment_mute_role(cog, ctx: commands.Context, role: discord.Role = None) -> None:
+def _clear_role_word(role: object) -> bool:
+    if not isinstance(role, str):
+        return False
+    if role.casefold() == "clear":
+        return True
+    raise commands.UserFeedbackCheckFailure(_("Provide a role or use clear"))
+
+
+def _role_setting_is_visible(cog, ctx: commands.Context) -> bool:
+    return cog._channel_is_private(ctx.guild, ctx.channel)
+
+
+async def punishment_mute_role(cog, ctx: commands.Context, role: discord.Role | str | None = None) -> None:
+    if _clear_role_word(role):
+        await cog.config.guild(ctx.guild).mute_role.set(None)
+        await ctx.send(_("Mute role cleared"))
+        return
     if role is None:
+        if not _role_setting_is_visible(cog, ctx):
+            await ctx.send(_("Run this command in a private moderator channel"))
+            return
         v = await cog.config.guild(ctx.guild).mute_role()
         r = ctx.guild.get_role(v) if v else None
         await ctx.send(_("Mute role: {role}").format(role=r.mention if r else _("not set")))
@@ -2015,7 +2020,7 @@ async def purge_backward(cog, ctx: commands.Context, seconds: int = None) -> Non
         )
     elif seconds < PURGE_MIN_RETENTION_SECONDS or seconds > PURGE_BACKWARD_MAX_SECONDS:
         await ctx.send(
-            _("Backward purge must be between {minimum} and {maximum} seconds.").format(
+            _("Backward purge must be between {minimum} and {maximum} seconds").format(
                 minimum=PURGE_MIN_RETENTION_SECONDS,
                 maximum=PURGE_BACKWARD_MAX_SECONDS,
             )
@@ -2038,7 +2043,7 @@ async def purge_forward(cog, ctx: commands.Context, seconds: int = None) -> None
         )
     elif seconds < 0 or seconds > PURGE_FORWARD_MAX_SECONDS:
         await ctx.send(
-            _("Forward purge must be between 0 and {maximum} seconds.").format(
+            _("Forward purge must be between 0 and {maximum} seconds").format(
                 maximum=PURGE_FORWARD_MAX_SECONDS,
             )
         )
@@ -2083,7 +2088,7 @@ async def spam_window(cog, ctx: commands.Context, seconds: int = None) -> None:
         await ctx.send(_("Spam window: {seconds}s").format(seconds=v))
     elif seconds < SPAM_WINDOW_MIN_SECONDS or seconds > SPAM_WINDOW_MAX_SECONDS:
         await ctx.send(
-            _("Seconds must be between {minimum} and {maximum}.").format(
+            _("Seconds must be between {minimum} and {maximum}").format(
                 minimum=SPAM_WINDOW_MIN_SECONDS,
                 maximum=SPAM_WINDOW_MAX_SECONDS,
             )
@@ -2099,7 +2104,7 @@ async def spam_channels(cog, ctx: commands.Context, count: int = None) -> None:
         await ctx.send(_("Spam channel threshold: {count}").format(count=v))
     elif count < SPAM_CHANNEL_MIN or count > SPAM_CHANNEL_MAX:
         await ctx.send(
-            _("Channel count must be between {minimum} and {maximum}.").format(
+            _("Channel count must be between {minimum} and {maximum}").format(
                 minimum=SPAM_CHANNEL_MIN,
                 maximum=SPAM_CHANNEL_MAX,
             )
@@ -2192,7 +2197,7 @@ async def review_kick_fail_warn(cog, ctx: commands.Context, value: str = None) -
 async def roles_add(cog, ctx: commands.Context, role: discord.Role) -> None:
     async with cog.config.guild(ctx.guild).whitelisted_roles() as roles:
         if role.id in roles:
-            raise commands.UserFeedbackCheckFailure(_("That role is already whitelisted."))
+            raise commands.UserFeedbackCheckFailure(_("That role is already whitelisted"))
         roles.append(role.id)
     await ctx.send(_("✅ {role} added to the whitelist").format(role=role.mention))
 
@@ -2200,7 +2205,7 @@ async def roles_add(cog, ctx: commands.Context, role: discord.Role) -> None:
 async def roles_remove(cog, ctx: commands.Context, role: discord.Role) -> None:
     async with cog.config.guild(ctx.guild).whitelisted_roles() as roles:
         if role.id not in roles:
-            raise commands.UserFeedbackCheckFailure(_("That role is not in the whitelist."))
+            raise commands.UserFeedbackCheckFailure(_("That role is not in the whitelist"))
         roles.remove(role.id)
     await ctx.send(_("✅ {role} removed from the whitelist").format(role=role.mention))
 
@@ -2220,10 +2225,10 @@ async def roles_list(cog, ctx: commands.Context) -> None:
 async def keywords_add(cog, ctx: commands.Context, *, keyword: str) -> None:
     keyword = keyword.strip().lower()
     if not keyword:
-        raise commands.UserFeedbackCheckFailure(_("Keyword cannot be empty."))
+        raise commands.UserFeedbackCheckFailure(_("Keyword cannot be empty"))
     async with cog.config.guild(ctx.guild).scam_keywords() as keywords:
         if keyword in [kw.lower() for kw in keywords]:
-            raise commands.UserFeedbackCheckFailure(_("Keyword already exists."))
+            raise commands.UserFeedbackCheckFailure(_("Keyword already exists"))
         keywords.append(keyword)
     await ctx.send(_("✅ Keyword added: `{keyword}`").format(keyword=keyword))
 
@@ -2236,7 +2241,7 @@ async def keywords_remove(cog, ctx: commands.Context, *, keyword: str) -> None:
                 keywords.remove(existing)
                 await ctx.send(_("✅ Keyword removed: `{keyword}`").format(keyword=existing))
                 return
-    raise commands.UserFeedbackCheckFailure(_("Keyword not found."))
+    raise commands.UserFeedbackCheckFailure(_("Keyword not found"))
 
 
 async def keywords_list(cog, ctx: commands.Context) -> None:
@@ -2259,7 +2264,7 @@ async def keyword_attachments_add(cog, ctx: commands.Context, *, pattern: str) -
         raise commands.UserFeedbackCheckFailure(_("Invalid regex: {error}").format(error=exc)) from exc
     async with cog.config.guild(ctx.guild).attachment_patterns() as patterns:
         if pattern in patterns:
-            raise commands.UserFeedbackCheckFailure(_("Pattern already exists."))
+            raise commands.UserFeedbackCheckFailure(_("Pattern already exists"))
         patterns.append(pattern)
     await ctx.send(_("✅ Attachment pattern added: `{pattern}`").format(pattern=pattern))
 
@@ -2267,7 +2272,7 @@ async def keyword_attachments_add(cog, ctx: commands.Context, *, pattern: str) -
 async def keyword_attachments_remove(cog, ctx: commands.Context, *, pattern: str) -> None:
     async with cog.config.guild(ctx.guild).attachment_patterns() as patterns:
         if pattern not in patterns:
-            raise commands.UserFeedbackCheckFailure(_("Pattern not found."))
+            raise commands.UserFeedbackCheckFailure(_("Pattern not found"))
         patterns.remove(pattern)
     await ctx.send(_("✅ Attachment pattern removed: `{pattern}`").format(pattern=pattern))
 
@@ -2299,8 +2304,15 @@ async def bait_toggle(cog, ctx: commands.Context, value: bool = None) -> None:
         await ctx.send(_("✅ Bait role trap set to {value}").format(value=value))
 
 
-async def role(cog, ctx: commands.Context, role: discord.Role = None) -> None:
+async def role(cog, ctx: commands.Context, role: discord.Role | str | None = None) -> None:
+    if _clear_role_word(role):
+        await cog.config.guild(ctx.guild).baitrole_id.set(None)
+        await ctx.send(_("Bait role cleared"))
+        return
     if role is None:
+        if not _role_setting_is_visible(cog, ctx):
+            await ctx.send(_("Run this command in a private moderator channel"))
+            return
         v = await cog.config.guild(ctx.guild).baitrole_id()
         r = ctx.guild.get_role(v) if v else None
         await ctx.send(_("Bait role: {role}").format(role=r.mention if r else _("not set")))

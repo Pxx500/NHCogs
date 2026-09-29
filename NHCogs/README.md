@@ -9,20 +9,18 @@ error configuration.
 
 All commands below are moderator-only and require Manage Messages. Overview commands can
 show safe syntax in a public channel, but current values are shown only in a private
-moderator channel. The shared error configuration starts unset.
+moderator channel. The shared error configuration starts unset. Shared prefix-group
+rules are in [Command trees](../docs/command-trees.md).
 
 | Command | Description |
 |---|---|
 | `[p]nhcogs` | Show the shared command overview |
 | `[p]nhcogs errors` | Show the shared error configuration |
-| `[p]nhcogs errors channel` | Show the error channel configuration and commands |
-| `[p]nhcogs errors channel set <channel>` | Set the private error channel |
-| `[p]nhcogs errors channel clear` | Clear the private error channel |
-| `[p]nhcogs errors maintainer` | Show the error maintainer configuration and commands |
-| `[p]nhcogs errors maintainer set <member>` | Set the error maintainer |
-| `[p]nhcogs errors maintainer clear` | Clear the error maintainer |
+| `[p]nhcogs errors channel [channel|clear]` | Show, set, or clear the private error channel |
+| `[p]nhcogs errors maintainer [member|clear]` | Show, set, or clear the error maintainer |
 
-`set` and `clear` require a private invocation. The configured error channel must be hidden
+Showing or changing either value requires a private invocation. A public channel does not
+reveal the current value. The configured error channel must be hidden
 from `@everyone`, and the bot needs View Channel, Send Messages, and Attach Files there. The
 maintainer setting controls the only mention target for new technical failures.
 

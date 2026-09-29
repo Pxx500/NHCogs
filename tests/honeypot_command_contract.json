@@ -30,13 +30,16 @@
   "readme": {
     "leaf_count": 111,
     "row_count": 106,
-    "rows_without_command": [],
+    "rows_without_command": [
+      "honeypot gifdetector message"
+    ],
     "undocumented_commands": [
       "honeypot debug imagescan cleanup_events",
       "honeypot debug imagescan dump",
       "honeypot debug imagescan importtpzip",
       "honeypot debug resetstats",
-      "honeypot debug reviewdump"
+      "honeypot debug reviewdump",
+      "honeypot gifdetector message set"
     ]
   }
 }
