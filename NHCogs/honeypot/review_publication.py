@@ -40,6 +40,7 @@ from .detection_cases import (
     NewMessage,
     OperationStatus,
 )
+from .imagescan import is_image_attachment
 from .operations.moderator_decision import apply_moderator_ignore
 from .settings import GuildSettings
 from .views import (
@@ -397,7 +398,18 @@ async def _capture_case_attachments_unlocked(
     claim_tokens: dict[int, str] = {}
     attachment_sizes: dict[int, int] = {}
     captures_by_position = {}
+    skip_image_download = (message.guild.id, message.id) in getattr(
+        cog, "_skipped_initial_image_scans", ()
+    )
     for position, attachment in enumerate(message.attachments):
+        if skip_image_download and is_image_attachment(attachment):
+            captures_by_position[position] = detection_runtime.CaptureResult(
+                position,
+                detection_runtime.CaptureStatus.FAILED,
+                None,
+                "image download skipped after a decisive signal",
+            )
+            continue
         size = max(0, int(getattr(attachment, "size", 0) or 0))
         attachment_sizes[position] = size
         claimed_at = datetime.now(timezone.utc)

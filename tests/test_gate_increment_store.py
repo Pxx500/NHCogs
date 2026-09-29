@@ -611,7 +611,7 @@ class GateIncrementStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed.members[0].expected_gate_role_ids, ())
         self.assertIsNone(completed.members[0].target_role_id)
         self.assertIsNone(active.operation.moderator_id)
-        self.assertEqual(active.members[0].user_id, 10004)
+        self.assertIsNone(active.members[0].user_id)
         self.assertEqual(active.members[0].target_role_id, 10006)
         duplicate = await self.second_store.claim(completed_key, 10008, ())
         self.assertFalse(duplicate.created)

@@ -122,6 +122,17 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(support.report_global_error.await_count, 0)
                 self.assertEqual(support.report_operational_error.await_count, 0)
 
+                cog.store.get_ticket = mock.AsyncMock(
+                    side_effect=RuntimeError("store unavailable")
+                )
+                with self.assertLogs(module.githubtickets.log, level="ERROR"):
+                    await cog._report_deadline_error(
+                        1, RuntimeError("private ticket detail")
+                    )
+
+                self.assertEqual(support.report_global_error.await_count, 0)
+                self.assertEqual(support.report_operational_error.await_count, 0)
+
     def setUp(self):
         self.temporary_directory = TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)

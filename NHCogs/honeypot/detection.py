@@ -1019,6 +1019,8 @@ async def _collect_detection_signals(
                 guild_settings,
                 action_override=ActionIntent.NONE,
             )
+        else:
+            _remember_skipped_image_download(cog, message, guild_settings)
         signals.extend(
             await _honeypot_signals(
                 cog,
@@ -1040,7 +1042,19 @@ async def _collect_detection_signals(
             image = await cog._initial_image_signal(message, guild_settings)
             if image is not None:
                 signals.append(image)
+        else:
+            _remember_skipped_image_download(cog, message, guild_settings)
     return tuple(signals)
+
+
+def _remember_skipped_image_download(cog, message, guild_settings) -> None:
+    if not guild_settings.imagescan_detector_enabled:
+        return
+    skipped = getattr(cog, "_skipped_initial_image_scans", None)
+    if skipped is None:
+        skipped = set()
+        cog._skipped_initial_image_scans = skipped
+    skipped.add((message.guild.id, message.id))
 
 
 def _public_moderation_reason(

@@ -346,6 +346,8 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 automatic_pings=True,
                 updated_at=now,
             )
+            list_profiles = cog.store.list_profiles
+            cog.store.list_profiles = mock.AsyncMock(wraps=list_profiles)
             for name in ("summary", "enabled", "disabled"):
                 with self.subTest(command=name):
                     ctx = FakeContext(private=False)
@@ -355,7 +357,8 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                     ):
                         await getattr(cog, f"githubtickets_profile_pings_{name}")(ctx)
                     self.assertEqual(ctx.send.await_count, 0)
-                    profiles = await cog.store.list_profiles(42)
+                    cog.store.list_profiles.assert_not_awaited()
+                    profiles = await list_profiles(42)
                     self.assertEqual(tuple(profile.user_id for profile in profiles), (10,))
 
     async def test_resource_commands_store_values_and_use_accepted_confirmations(self):

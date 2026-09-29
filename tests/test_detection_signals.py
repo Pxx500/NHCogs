@@ -58,13 +58,16 @@ class DetectionSignalOutcomeTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(signals[0].action, honeypot.ActionIntent.BAN)
                 self.assertEqual(signals[1].action, honeypot.ActionIntent.REVIEW)
-                moderation = next(
+                moderation = [
                     operation
                     for operation in snapshot.operations
                     if operation.operation_type
                     is honeypot.OperationType.MODERATION_ACTION
+                ]
+                self.assertEqual(
+                    [operation.result for operation in moderation],
+                    ["planned_ban"],
                 )
-                self.assertEqual(moderation.result, "planned_ban")
                 stats = self._stats(cog)
                 for key in (
                     "detections",
@@ -424,6 +427,7 @@ class DetectionSignalOutcomeTests(unittest.IsolatedAsyncioTestCase):
                     spam_action="ban",
                 )
                 attachments = self._attachments(4, payloads=[b"known-bad", b"nope", b"nope", b"nope"])
+                attachments[0].read = mock.AsyncMock(wraps=attachments[0].read)
                 follow_up = self._message(
                     guild,
                     author,
@@ -454,6 +458,39 @@ class DetectionSignalOutcomeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(follow_signals[1].action, honeypot.ActionIntent.BAN)
                 self.assertEqual(follow_signals[2].action, honeypot.ActionIntent.KICK)
                 self.assertEqual(self._stats(cog).get("image_hits", 0), 0)
+                attachments[0].read.assert_not_awaited()
+                await self._finish(cog)
+
+    async def test_review_only_admission_stores_no_moderation_action(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog, guild, author = await self._open_cog(honeypot)
+                message = self._message(
+                    guild, author, content="free nitro", channel_id=30
+                )
+                await self._settings(
+                    cog,
+                    guild,
+                    spam_enabled=True,
+                    spam_action="review",
+                    dry_run=True,
+                )
+                await self._observe_duplicate(cog, honeypot, message)
+
+                await cog.on_message(message)
+
+                snapshot = await self._snapshot(cog, guild.id, author.id)
+                self.assertEqual(
+                    [signal.action for signal in self._signals(snapshot)],
+                    [honeypot.ActionIntent.REVIEW],
+                )
+                self.assertFalse(
+                    any(
+                        operation.operation_type
+                        is honeypot.OperationType.MODERATION_ACTION
+                        for operation in snapshot.operations
+                    )
+                )
                 await self._finish(cog)
 
     async def test_whitelist_bypass_during_forward_purge_stays_non_actionable(self):
@@ -666,6 +703,7 @@ class DetectionSignalOutcomeTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(self._stats(cog).get("image_hits", 0), 0)
                 self.assertGreaterEqual(self._stats(cog).get("spam_hits", 0), 1)
+                attachment.read.assert_not_awaited()
                 await self._finish(cog)
 
     async def _open_cog(self, honeypot, *, protected=False, young=False):

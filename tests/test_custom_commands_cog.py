@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.test_chatchart import _assert_decorator_payload_checks
+
 PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs" / "custom_commands"
 
 
@@ -34,13 +36,62 @@ class _Command:
         return lambda callback: _Command(callback, parent=self, **attrs)
 
     async def can_run(self, ctx):
-        required = (
-            getattr(self.callback, "direct_permissions", None)
-            or getattr(self.callback, "required_permissions", None)
-            or {}
-        )
-        permissions = ctx.author.guild_permissions
-        return all(getattr(permissions, name, False) for name in required)
+        return await _can_run(self, ctx)
+
+
+async def _can_run(command, ctx):
+    while command is not None:
+        callback = command.callback
+        direct_permissions = _installed_direct_permissions(callback)
+        if direct_permissions is not None and not _passes_permissions(
+            ctx, direct_permissions
+        ):
+            return False
+        mod_permissions = getattr(callback, "mod_or_permissions", None)
+        if mod_permissions is not None and not _passes_permissions(
+            ctx,
+            mod_permissions,
+            "is_red_mod",
+            "is_red_admin",
+        ):
+            return False
+        admin_permissions = getattr(callback, "admin_or_permissions", None)
+        if admin_permissions is not None and not _passes_permissions(
+            ctx,
+            admin_permissions,
+            "is_red_admin",
+        ):
+            return False
+        command = getattr(command, "parent", None)
+    return True
+
+
+def _installed_direct_permissions(callback):
+    for name in ("has_permissions", "direct_permissions", "required_permissions"):
+        payload = getattr(callback, name, None)
+        if payload is not None:
+            return payload
+    return None
+
+
+def _passes_permissions(ctx, permissions, *privilege_flags):
+    if any(getattr(ctx, flag, False) for flag in privilege_flags):
+        return True
+    guild_permissions = ctx.author.guild_permissions
+    return all(
+        getattr(guild_permissions, name, False) is required
+        for name, required in permissions.items()
+    )
+
+
+def _tag_permissions(*names, permissions):
+    def decorator(target):
+        callback = target.callback if isinstance(target, _Command) else target
+        for name in names:
+            setattr(callback, name, permissions)
+        return target
+
+    return decorator
 
 
 def _tag(name, value=True):
@@ -195,12 +246,17 @@ def load_cog_module():  # noqa: PLR0915
     commands.group = commands.command
     commands.guild_only = lambda: _tag("guild_only")
     commands.mod_or_permissions = lambda **permissions: _tag(
-        "required_permissions",
+        "mod_or_permissions",
         permissions,
     )
-    commands.has_permissions = lambda **permissions: _tag(
-        "direct_permissions",
+    commands.admin_or_permissions = lambda **permissions: _tag(
+        "admin_or_permissions",
         permissions,
+    )
+    commands.has_permissions = lambda **permissions: _tag_permissions(
+        "has_permissions",
+        "direct_permissions",
+        permissions=permissions,
     )
 
     core = types.ModuleType("redbot.core")
@@ -324,6 +380,25 @@ class CommandUsageChartTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await command.can_run(denied))
         self.assertTrue(await command.can_run(allowed))
         self.assertTrue(command.callback.guild_only)
+        listed = cog.CustomCommands.cc_list
+        self.assertIs(listed.parent, cog.CustomCommands.customcom)
+        self.assertFalse(hasattr(listed.callback, "has_permissions"))
+        self.assertTrue(await listed.can_run(denied))
+
+        def parent_callback(ctx):
+            return None
+
+        parent_callback.has_permissions = {"manage_messages": True}
+        parent_callback.direct_permissions = {"manage_messages": True}
+        parent = _Command(parent_callback, name="parent-only")
+
+        def parent_only_callback(ctx):
+            return None
+
+        parent_only = _Command(parent_only_callback, parent=parent)
+        self.assertFalse(await parent_only.can_run(denied))
+        self.assertTrue(await parent_only.can_run(allowed))
+        await _assert_decorator_payload_checks(self, _Command, denied)
 
     def context(self, *, private=True):
         channel = types.SimpleNamespace(

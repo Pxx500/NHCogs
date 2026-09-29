@@ -22,20 +22,128 @@ class UserFeedbackCheckFailure(Exception):
 
 
 class FakeCommand:
-    def __init__(self, callback, **attrs):
+    def __init__(self, callback, parent=None, **attrs):
         self.callback = callback
+        self.parent = parent
         self.attrs = attrs
 
     def command(self, **attrs):
-        return lambda callback: FakeCommand(callback, **attrs)
+        return lambda callback: FakeCommand(callback, parent=self, **attrs)
 
     def group(self, **attrs):
-        return lambda callback: FakeCommand(callback, **attrs)
+        return lambda callback: FakeCommand(callback, parent=self, **attrs)
 
     async def can_run(self, ctx):
-        required = getattr(self.callback, "required_permissions", None) or {}
-        permissions = ctx.author.guild_permissions
-        return all(getattr(permissions, name, False) for name in required)
+        return await _can_run(self, ctx)
+
+
+async def _can_run(command, ctx):
+    while command is not None:
+        callback = command.callback
+        direct_permissions = _installed_direct_permissions(callback)
+        if direct_permissions is not None and not _passes_permissions(
+            ctx, direct_permissions
+        ):
+            return False
+        mod_permissions = getattr(callback, "mod_or_permissions", None)
+        if mod_permissions is not None and not _passes_permissions(
+            ctx,
+            mod_permissions,
+            "is_red_mod",
+            "is_red_admin",
+        ):
+            return False
+        admin_permissions = getattr(callback, "admin_or_permissions", None)
+        if admin_permissions is not None and not _passes_permissions(
+            ctx,
+            admin_permissions,
+            "is_red_admin",
+        ):
+            return False
+        command = getattr(command, "parent", None)
+    return True
+
+
+def _installed_direct_permissions(callback):
+    for name in ("has_permissions", "direct_permissions", "required_permissions"):
+        payload = getattr(callback, name, None)
+        if payload is not None:
+            return payload
+    return None
+
+
+def _passes_permissions(ctx, permissions, *privilege_flags):
+    if any(getattr(ctx, flag, False) for flag in privilege_flags):
+        return True
+    guild_permissions = ctx.author.guild_permissions
+    return all(
+        getattr(guild_permissions, name, False) is required
+        for name, required in permissions.items()
+    )
+
+
+async def _assert_decorator_payload_checks(test, command_type, denied):
+    def parent_callback(ctx):
+        return None
+
+    parent_callback.has_permissions = {"manage_messages": True}
+    parent = command_type(parent_callback)
+
+    def child_callback(ctx):
+        return None
+
+    child = command_type(child_callback, parent=parent)
+    test.assertFalse(await child.can_run(denied))
+    allowed = types.SimpleNamespace(
+        author=types.SimpleNamespace(
+            guild_permissions=types.SimpleNamespace(manage_messages=True)
+        )
+    )
+    test.assertTrue(await child.can_run(allowed))
+
+    def mod_callback(ctx):
+        return None
+
+    mod_callback.mod_or_permissions = {"manage_messages": True}
+    moderator = types.SimpleNamespace(
+        is_red_mod=True,
+        author=types.SimpleNamespace(
+            guild_permissions=types.SimpleNamespace(manage_messages=False)
+        ),
+    )
+    test.assertTrue(await command_type(mod_callback).can_run(moderator))
+    test.assertFalse(await command_type(mod_callback).can_run(denied))
+
+    def admin_callback(ctx):
+        return None
+
+    admin_callback.admin_or_permissions = {"administrator": True}
+    admin = types.SimpleNamespace(
+        is_red_admin=True,
+        author=types.SimpleNamespace(
+            guild_permissions=types.SimpleNamespace(administrator=False)
+        ),
+    )
+    test.assertFalse(await command_type(admin_callback).can_run(moderator))
+    test.assertTrue(await command_type(admin_callback).can_run(admin))
+
+    def empty_callback(ctx):
+        return None
+
+    empty_callback.has_permissions = {}
+    empty_callback.direct_permissions = {}
+    empty_callback.required_permissions = {}
+    test.assertTrue(await command_type(empty_callback).can_run(denied))
+
+
+def _tag_permissions(*names, permissions):
+    def decorator(target):
+        callback = target.callback if isinstance(target, FakeCommand) else target
+        for name in names:
+            setattr(callback, name, permissions)
+        return target
+
+    return decorator
 
 
 def _tag(name, value=True):
@@ -115,8 +223,10 @@ def load_nhmisc_module():
     commands.mod_or_permissions = lambda **permissions: _tag(
         "mod_or_permissions", permissions
     )
-    commands.has_permissions = lambda **permissions: _tag(
-        "required_permissions", permissions
+    commands.has_permissions = lambda **permissions: _tag_permissions(
+        "has_permissions",
+        "required_permissions",
+        permissions=permissions,
     )
     commands.cooldown = lambda rate, per, bucket: _tag(
         "cooldown", (rate, per, bucket)
@@ -210,6 +320,12 @@ class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(await command.can_run(denied))
         self.assertTrue(await command.can_run(allowed))
+        child = nhmisc.NHMisc.nhmisc_vcjumping_seconds
+        self.assertIs(child.parent.callback, nhmisc.NHMisc.nhmisc_vcjumping.callback)
+        self.assertFalse(hasattr(child.callback, "has_permissions"))
+        self.assertFalse(await child.can_run(denied))
+        self.assertTrue(await child.can_run(allowed))
+        await _assert_decorator_payload_checks(self, FakeCommand, denied)
         self.assertEqual(
             command.attrs["usage"],
             "<days> [amount] | <channel_or_thread> <days> [amount]",

@@ -232,12 +232,14 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     guild_settings = honeypot.GuildSettings.from_mapping(
                         {
                             "spam_window_seconds": "invalid",
+                            "spam_min_channels": 7,
                             "action": "invalid",
                             "fallback_action": "invalid",
                         }
                     )
 
                 self.assertEqual(guild_settings.spam_window_seconds, 10)
+                self.assertEqual(guild_settings.spam_min_channels, 7)
                 self.assertIsNone(guild_settings.action)
                 self.assertIs(
                     guild_settings.fallback_action,

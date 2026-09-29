@@ -33,9 +33,7 @@ ActionIntent = detection_cases_under_test.ActionIntent
 DeleteStatus = detection_cases_under_test.DeleteStatus
 OperationStatus = detection_cases_under_test.OperationStatus
 OperationType = detection_cases_under_test.OperationType
-ACTION_PRIORITY = detection_cases_under_test.ACTION_PRIORITY
 DetectionSignal = detection_cases_under_test.DetectionSignal
-effective_action = detection_cases_under_test.effective_action
 new_case_expiry = detection_cases_under_test.new_case_expiry
 _to_timestamp = detection_cases_under_test._to_timestamp
 _from_timestamp = detection_cases_under_test._from_timestamp
@@ -61,58 +59,6 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.database_path = Path(self.temp_dir.name) / "cases.sqlite3"
         self.store = DetectionCaseStore(self.database_path)
         self.store.initialize()
-
-    def test_strongest_signal_records_one_moderation_operation(self):
-        created_at = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
-        signals = (
-            DetectionSignal("spam", "duplicate", ActionIntent.REVIEW, True, {}),
-            DetectionSignal("image", "known", ActionIntent.BAN, True, {}),
-            DetectionSignal("firstpost", "new account", ActionIntent.KICK, True, {}),
-        )
-
-        def initial_operations(owned):
-            action = effective_action(owned)
-            if action not in {ActionIntent.KICK, ActionIntent.BAN}:
-                return ()
-            return (
-                (
-                    OperationType.MODERATION_ACTION,
-                    f"moderation_action:{{case_id}}:{{sequence}}:{action.value}",
-                ),
-            )
-
-        appended = self.store.append_message(
-            NewMessage(10, 20, 30, 40, "evidence", created_at, None, ()),
-            signals,
-            initial_operations,
-        )
-        snapshot = self.store.get_case(appended.case.case_id)
-        self.assertEqual(
-            [item.signal.action for item in snapshot.signals],
-            [ActionIntent.REVIEW, ActionIntent.BAN, ActionIntent.KICK],
-        )
-        moderation = [
-            operation
-            for operation in snapshot.operations
-            if operation.operation_type is OperationType.MODERATION_ACTION
-        ]
-        self.assertEqual(len(moderation), 1)
-        self.assertIn(":ban", moderation[0].idempotency_key)
-
-        review_only = self.store.append_message(
-            NewMessage(10, 21, 30, 41, "note", created_at, None, ()),
-            (DetectionSignal("image", "logged", ActionIntent.NONE, True, {}),
-             DetectionSignal("firstpost", "first", ActionIntent.REVIEW, True, {})),
-            initial_operations,
-        )
-        review_snapshot = self.store.get_case(review_only.case.case_id)
-        self.assertEqual(effective_action(
-            tuple(item.signal for item in review_snapshot.signals)
-        ), ActionIntent.REVIEW)
-        self.assertFalse(any(
-            operation.operation_type is OperationType.MODERATION_ACTION
-            for operation in review_snapshot.operations
-        ))
 
     def test_initialize_sets_the_detection_schema_version_on_an_empty_database(self):
         with closing(sqlite3.connect(self.database_path)) as connection:

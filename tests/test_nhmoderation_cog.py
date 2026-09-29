@@ -683,6 +683,7 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
 
                     self.assertEqual(ctx.send.await_args.args[0], expected)
                     self.assertNotIn("file", ctx.send.await_args.kwargs)
+                    subject.history.get_ban_chart.assert_not_awaited()
 
     async def test_migrate_plan_reports_cached_source_and_command_readiness(self):
         with loaded_nhmoderation() as module:

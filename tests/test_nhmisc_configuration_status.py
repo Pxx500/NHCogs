@@ -4,7 +4,11 @@ import types
 import unittest
 from unittest import mock
 
-from tests.test_chatchart import load_nhmisc_module
+from tests.test_chatchart import (
+    FakeCommand,
+    _assert_decorator_payload_checks,
+    load_nhmisc_module,
+)
 from tests.test_forum_autopin import make_support
 
 nhmisc = load_nhmisc_module()
@@ -706,6 +710,14 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parameters["message_link"].annotation, "str")
         self.assertFalse(await command.can_run(denied))
         self.assertTrue(await command.can_run(allowed))
+        def parent_only_callback(ctx):
+            return None
+
+        parent_only = type(command)(parent_only_callback, parent=command.parent)
+        self.assertFalse(hasattr(parent_only.callback, "has_permissions"))
+        self.assertFalse(await parent_only.can_run(denied))
+        self.assertTrue(await parent_only.can_run(allowed))
+        await _assert_decorator_payload_checks(self, FakeCommand, denied)
 
     async def test_achievement_role_group_lists_its_direct_commands(self):
         self.ctx.command = types.SimpleNamespace(

@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import importlib.util
 import inspect
+import sqlite3
 import sys
 import types
 import unittest
@@ -10,6 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
+from tests.test_chatchart import _assert_decorator_payload_checks
 from tests.test_forum_autopin import make_support
 
 ROOT_PACKAGE_NAME = "nhmisc_role_analytics_commands_test_root"
@@ -23,20 +25,74 @@ class UserFeedbackCheckFailure(Exception):
 
 
 class FakeCommand:
-    def __init__(self, callback, **attrs):
+    def __init__(self, callback, parent=None, **attrs):
         self.callback = callback
+        self.parent = parent
         self.attrs = attrs
 
     def command(self, **attrs):
-        return lambda callback: FakeCommand(callback, **attrs)
+        return lambda callback: FakeCommand(callback, parent=self, **attrs)
 
     def group(self, **attrs):
-        return lambda callback: FakeCommand(callback, **attrs)
+        return lambda callback: FakeCommand(callback, parent=self, **attrs)
 
     async def can_run(self, ctx):
-        required = getattr(self.callback, "required_permissions", None) or {}
-        permissions = ctx.author.guild_permissions
-        return all(getattr(permissions, name, False) for name in required)
+        return await _can_run(self, ctx)
+
+
+async def _can_run(command, ctx):
+    while command is not None:
+        callback = command.callback
+        direct_permissions = _installed_direct_permissions(callback)
+        if direct_permissions is not None and not _passes_permissions(
+            ctx, direct_permissions
+        ):
+            return False
+        mod_permissions = getattr(callback, "mod_or_permissions", None)
+        if mod_permissions is not None and not _passes_permissions(
+            ctx,
+            mod_permissions,
+            "is_red_mod",
+            "is_red_admin",
+        ):
+            return False
+        admin_permissions = getattr(callback, "admin_or_permissions", None)
+        if admin_permissions is not None and not _passes_permissions(
+            ctx,
+            admin_permissions,
+            "is_red_admin",
+        ):
+            return False
+        command = getattr(command, "parent", None)
+    return True
+
+
+def _installed_direct_permissions(callback):
+    for name in ("has_permissions", "direct_permissions", "required_permissions"):
+        payload = getattr(callback, name, None)
+        if payload is not None:
+            return payload
+    return None
+
+
+def _passes_permissions(ctx, permissions, *privilege_flags):
+    if any(getattr(ctx, flag, False) for flag in privilege_flags):
+        return True
+    guild_permissions = ctx.author.guild_permissions
+    return all(
+        getattr(guild_permissions, name, False) is required
+        for name, required in permissions.items()
+    )
+
+
+def _tag_permissions(*names, permissions):
+    def decorator(target):
+        callback = target.callback if isinstance(target, FakeCommand) else target
+        for name in names:
+            setattr(callback, name, permissions)
+        return target
+
+    return decorator
 
 
 def _tag(name, value=True):
@@ -106,8 +162,10 @@ def load_nhmisc_module():
     commands.mod_or_permissions = lambda **permissions: _tag(
         "mod_or_permissions", permissions
     )
-    commands.has_permissions = lambda **permissions: _tag(
-        "required_permissions", permissions
+    commands.has_permissions = lambda **permissions: _tag_permissions(
+        "has_permissions",
+        "required_permissions",
+        permissions=permissions,
     )
     commands.cooldown = lambda rate, per, bucket: _tag(
         "cooldown", (rate, per, bucket)
@@ -330,6 +388,15 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(await command.can_run(denied))
                 self.assertTrue(await command.can_run(allowed))
                 self.assertTrue(command.callback.guild_only)
+        child = nhmisc.NHMisc.nhmisc_roleanalytics_disable
+        self.assertIs(
+            child.parent.callback,
+            nhmisc.NHMisc.nhmisc_roleanalytics.callback,
+        )
+        self.assertFalse(hasattr(child.callback, "has_permissions"))
+        self.assertFalse(await child.can_run(denied))
+        self.assertTrue(await child.can_run(allowed))
+        await _assert_decorator_payload_checks(self, FakeCommand, denied)
 
         self.assertEqual(nhmisc.NHMisc.rolestats.callback.cooldown, (1, 5, "user"))
         self.assertEqual(nhmisc.NHMisc.roleusers.callback.cooldown, (1, 10, "guild"))
@@ -997,7 +1064,7 @@ async def _seed_nhmisc_user(cog, user_id):
     await cog._gate_increment_store.claim(
         nhmisc.SourceMessageKey(10, 20, user_id),
         user_id,
-        (nhmisc.GateIncrementMemberPlan(7, (), 8),),
+        (nhmisc.GateIncrementMemberPlan(user_id, (), 8),),
     )
 
 
@@ -1016,6 +1083,8 @@ async def _assert_nhmisc_user_absent(test, cog, user_id):
         nhmisc.SourceMessageKey(10, 20, user_id)
     )
     test.assertIsNone(operation.operation.moderator_id)
+    test.assertIsNone(operation.members[0].user_id)
+    test.assertNotIn(user_id, _pending_stargate_user_ids(cog))
 
 
 async def _assert_nhmisc_user_present(test, cog, user_id):
@@ -1033,6 +1102,19 @@ async def _assert_nhmisc_user_present(test, cog, user_id):
         nhmisc.SourceMessageKey(10, 20, user_id)
     )
     test.assertEqual(operation.operation.moderator_id, user_id)
+    test.assertEqual(operation.members[0].user_id, user_id)
+    test.assertIn(user_id, _pending_stargate_user_ids(cog))
+
+
+def _pending_stargate_user_ids(cog):
+    with sqlite3.connect(cog._gate_increment_store._path) as connection:
+        rows = connection.execute(
+            """
+            SELECT user_id FROM achievement_awards
+            WHERE state = 'pending' AND achievement_key = 'stargate_completed'
+            """
+        ).fetchall()
+    return {row[0] for row in rows}
 
 
 if __name__ == "__main__":
