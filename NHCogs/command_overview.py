@@ -29,14 +29,37 @@ def group_overview_is_private(ctx: commands.Context) -> bool:
     )
 
 
+def _is_hidden(command: typing.Any) -> bool:
+    return bool(getattr(command, "hidden", False))
+
+
+def _visible_children(command: typing.Any) -> list[typing.Any]:
+    return [
+        child
+        for child in getattr(command, "commands", ())
+        if not _is_hidden(child)
+    ]
+
+
+def public_usage(command: typing.Any) -> str:
+    """Return the usage string shown to moderators. See docs/command-trees.md."""
+    usage = getattr(command, "usage", None)
+    if isinstance(usage, str) and usage.strip():
+        return usage.strip()
+    signature = getattr(command, "signature", "") or ""
+    return signature.strip() if isinstance(signature, str) else ""
+
+
 def descendant_leaf_commands(parent: commands.Group) -> typing.Iterator[typing.Any]:
-    for child in getattr(parent, "commands", ()):
-        if getattr(child, "hidden", False):
-            continue
-        descendants = getattr(child, "commands", ())
-        if descendants:
+    """Yield the command lines for a nested group. See docs/command-trees.md."""
+    for child in _visible_children(parent):
+        usage = public_usage(child)
+        visible_descendants = _visible_children(child)
+        if usage:
+            yield child
+        if visible_descendants:
             yield from descendant_leaf_commands(child)
-        else:
+        elif not usage:
             yield child
 
 
@@ -117,7 +140,7 @@ async def send_group_overview(
     for child in children:
         if getattr(child, "hidden", False):
             continue
-        signature = getattr(child, "signature", "") or getattr(child, "usage", "") or ""
+        signature = public_usage(child)
         short_doc = getattr(child, "short_doc", "") or ""
         usage = f"{ctx.clean_prefix}{child.qualified_name}"
         if isinstance(signature, str) and signature.strip():

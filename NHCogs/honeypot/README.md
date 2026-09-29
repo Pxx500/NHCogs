@@ -77,7 +77,7 @@ By default, three GIFs from one member inside a rolling 60-second window trigger
 | `!honeypot gifdetector channel list` | List monitored channels |
 | `!honeypot gifdetector debug toggle <true\|false>` | Enable or disable moderator-only shot diagnostics |
 | `!honeypot gifdetector debug channel [channel|clear]` | Show, set, or clear the shot diagnostics destination |
-| `!honeypot gifdetector message set <text>` | Set the static warning shown for additional GIFs |
+| `!honeypot gifdetector message [text]` | Show or set the static warning shown for additional GIFs |
 | `!honeypot gifdetector message reset` | Reset the static warning to `No gifs!` |
 
 ### channels

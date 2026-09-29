@@ -54,7 +54,7 @@ def _registered_command_tree(honeypot, root):
             qualified_name=command.qualified_name,
             signature=signature,
             short_doc=doc[0] if doc else "",
-            hidden=False,
+            hidden=bool(getattr(command, "hidden", False)),
             commands=children,
         )
 
@@ -985,6 +985,7 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                         for value in vars(honeypot.Honeypot).values()
                         if getattr(value, "kind", None) == "group"
                         and value is not honeypot.Honeypot.channels
+                        and value is not honeypot.Honeypot.gif_detector_message
                     ),
                     key=lambda group: group.qualified_name,
                 )
