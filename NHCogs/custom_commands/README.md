@@ -86,8 +86,8 @@ These commands require Manage Messages:
 [p]customcom edit <name> [replacement response]
 ```
 
-Run create or edit in a moderator channel hidden from `@everyone`. The bot opens a
-public thread attached to the moderator's message inside that private channel. Only that moderator
+Create and edit work in any channel where the moderator can run them. The bot opens a
+public thread attached to the moderator's message. Only that moderator
 can change the draft or use its controls. The same editor is used for creation and
 editing. It shows five responses per page and provides a response selector plus Previous,
 Next, Add, Edit, Delete, Weight, Move, View exact, Save, and Cancel controls. View exact
