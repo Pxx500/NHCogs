@@ -7,6 +7,7 @@ from io import BytesIO
 from typing import Any
 
 import discord
+from redbot.core import commands
 
 from .arguments import ArgumentSignatureError, argument_signature
 from .catalog import (
@@ -888,6 +889,8 @@ class WorkflowManager:
         ctx: Any,
         draft: WorkflowDraft,
     ) -> WorkflowSession:
+        if ctx.channel.type not in (discord.ChannelType.text, discord.ChannelType.news):
+            raise commands.UserFeedbackCheckFailure("Only allowed in standard text channels")
         thread = await ctx.message.create_thread(
             name=f"customcom-{draft.name}"[:100],
             auto_archive_duration=60,
