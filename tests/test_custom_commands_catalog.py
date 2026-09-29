@@ -188,6 +188,14 @@ class CustomCommandCatalogTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(catalog.InvalidCommand, expected):
                     catalog.CustomCommandCatalog.normalize_name(name)
 
+    def test_access_selection_has_a_hard_limit_of_25_per_kind(self):
+        ids = tuple(range(1, 27))
+        for field_name in ("user_ids", "role_ids", "channel_ids"):
+            with self.subTest(field=field_name):
+                self.assertEqual(len(getattr(catalog.AccessRules(**{field_name: ids[:25]}), field_name)), 25)
+                with self.assertRaisesRegex(catalog.InvalidCommand, "at most 25"):
+                    catalog.AccessRules(**{field_name: ids})
+
     async def test_create_normalizes_name_and_assigns_default_weight(self):
         created_at = datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc)
         with TemporaryDirectory() as directory:

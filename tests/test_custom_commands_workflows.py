@@ -11,6 +11,57 @@ from unittest import mock
 PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs" / "custom_commands"
 
 
+class EntitySelect:
+    def __init__(
+        self, *, placeholder=None, min_values=1, max_values=1,
+        default_values=None, row=None, disabled=False, channel_types=None,
+        required=True,
+    ):
+        self.placeholder = placeholder
+        self.min_values = min_values
+        self.max_values = max_values
+        self.default_values = default_values or []
+        self.row = row
+        self.disabled = disabled
+        self.channel_types = channel_types
+        self.required = required
+        self.values = []
+        self.callback = None
+
+
+class UserSelect(EntitySelect):
+    pass
+
+
+class RoleSelect(EntitySelect):
+    pass
+
+
+class ChannelSelect(EntitySelect):
+    pass
+
+
+class Label:
+    def __init__(self, *, text, component, description=None):
+        self.text = text
+        self.component = component
+        self.description = description
+
+
+class RadioGroupOption:
+    def __init__(self, *, label, value, default=False):
+        self.label = label
+        self.value = value
+        self.default = default
+
+
+class RadioGroup:
+    def __init__(self, *, options, required=True):
+        self.options = options
+        self.required = required
+        self.value = next((item.value for item in options if item.default), None)
+
+
 def load_workflow_modules():
     package_name = "custom_commands_workflow_subject"
     package = types.ModuleType(package_name)
@@ -99,10 +150,21 @@ def load_workflow_modules():
         View=View,
         Button=Button,
         Select=Select,
+        UserSelect=UserSelect,
+        RoleSelect=RoleSelect,
+        ChannelSelect=ChannelSelect,
+        RadioGroup=RadioGroup,
+        Label=Label,
         TextInput=TextInput,
         Modal=Modal,
     )
     discord.SelectOption = SelectOption
+    discord.RadioGroupOption = RadioGroupOption
+    discord.Object = SimpleNamespace
+    discord.ChannelType = types.SimpleNamespace(
+        text=0, voice=2, news=5, stage_voice=13,
+        public_thread=11, private_thread=12, news_thread=10,
+    )
     discord.TextStyle = types.SimpleNamespace(paragraph=1, short=2)
     discord.ButtonStyle = types.SimpleNamespace(
         green=1,
@@ -219,8 +281,8 @@ class WorkflowDraftTests(unittest.TestCase):
 
 
 class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
-    def test_large_access_list_fits_one_discord_embed_field(self):
-        ids = tuple(1_000_000_000_000_000_000 + value for value in range(50))
+    def test_maximum_access_list_fits_one_discord_embed_field(self):
+        ids = tuple(1_000_000_000_000_000_000 + value for value in range(25))
         session = workflows.WorkflowSession(
             SimpleNamespace(session_timeout_seconds=30 * 60),
             thread=SimpleNamespace(
@@ -240,7 +302,7 @@ class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(access_fields), 1)
         self.assertLessEqual(len(access_fields[0]), 1_024)
-        self.assertIn("+47 more", access_fields[0])
+        self.assertIn("+22 more", access_fields[0])
         self.assertIn("Private channels only", access_fields[0])
         self.assertIn("Hide preview: On", access_fields[0])
 
@@ -284,49 +346,52 @@ class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
         access_button = next(
             item for item in session.view.children if getattr(item, "label", None) == "Access"
         )
-        open_interaction = SimpleNamespace(response=SimpleNamespace(send_modal=mock.AsyncMock()))
+        open_interaction = SimpleNamespace(
+            response=SimpleNamespace(send_modal=mock.AsyncMock()),
+        )
         await access_button.callback(open_interaction)
         modal = open_interaction.response.send_modal.await_args.args[0]
-        modal.users.value = "<@200>"
-        modal.roles.value = "<@&300>"
-        modal.channels.value = "<#400>"
-        modal.private.value = "yes"
+        self.assertEqual(
+            [type(item.component).__name__ for item in modal.children],
+            ["UserSelect", "RoleSelect", "ChannelSelect", "RadioGroup", "RadioGroup"],
+        )
+        self.assertEqual(modal.users.max_values, 25)
+        self.assertEqual(modal.channels.max_values, 25)
+        self.assertIn(workflows.discord.ChannelType.voice, modal.channels.channel_types)
+        self.assertIn(workflows.discord.ChannelType.stage_voice, modal.channels.channel_types)
+        self.assertEqual([option.value for option in modal.private.options if option.default], ["off"])
+        self.assertEqual([option.value for option in modal.hide.options if option.default], ["off"])
+        modal.users.values = [SimpleNamespace(id=200), SimpleNamespace(id=201)]
+        modal.roles.values = [SimpleNamespace(id=300)]
+        modal.channels.values = [SimpleNamespace(id=400), SimpleNamespace(id=401)]
+        modal.private.value = "on"
         modal.hide.value = "on"
-        submit = SimpleNamespace(response=SimpleNamespace(defer=mock.AsyncMock()))
-        await modal.on_submit(submit)
+        await modal.on_submit(SimpleNamespace(response=SimpleNamespace(defer=mock.AsyncMock())))
         self.assertEqual(session.draft.access, catalog.AccessRules(
-            user_ids=(200,), role_ids=(300,), channel_ids=(400,),
+            user_ids=(200, 201), role_ids=(300,), channel_ids=(400, 401),
             private_only=True, hide_preview=True,
         ))
+        self.assertEqual(
+            [item.id for item in workflows.AccessModal(session).users.default_values],
+            [200, 201],
+        )
+        reopened = workflows.AccessModal(session)
+        self.assertEqual([item.id for item in reopened.channels.default_values], [400, 401])
+        self.assertEqual([option.value for option in reopened.private.options if option.default], ["on"])
+        self.assertEqual([option.value for option in reopened.hide.options if option.default], ["on"])
         await session.save(SimpleNamespace(
             response=SimpleNamespace(defer=mock.AsyncMock()),
             followup=SimpleNamespace(send=mock.AsyncMock()),
         ))
         self.assertEqual(stored.create.await_args.kwargs["access"], session.draft.access)
 
-    async def test_invalid_access_input_keeps_previous_draft(self):
-        manager = SimpleNamespace(
-            catalog=SimpleNamespace(), session_timeout_seconds=30 * 60,
-            remove=mock.Mock(),
-        )
-        thread = SimpleNamespace(
-            id=10,
-            guild=SimpleNamespace(get_role=lambda _: None, get_channel_or_thread=lambda _: None),
-        )
-        session = workflows.WorkflowSession(
-            manager, thread=thread, opener=SimpleNamespace(id=200),
-            draft=workflows.WorkflowDraft("hello"),
-        )
-        session.dashboard = SimpleNamespace(edit=mock.AsyncMock())
-        button = next(item for item in session.view.children if getattr(item, "label", None) == "Access")
-        opening = SimpleNamespace(response=SimpleNamespace(send_modal=mock.AsyncMock()))
-        await button.callback(opening)
-        modal = opening.response.send_modal.await_args.args[0]
-        modal.roles.value = "<@&300>"
-        submit = SimpleNamespace(response=SimpleNamespace(send_message=mock.AsyncMock()))
-        await modal.on_submit(submit)
+        reopened.users.values = []
+        reopened.roles.values = []
+        reopened.channels.values = []
+        reopened.private.value = "off"
+        reopened.hide.value = "off"
+        await reopened.on_submit(SimpleNamespace(response=SimpleNamespace(defer=mock.AsyncMock())))
         self.assertEqual(session.draft.access, catalog.AccessRules())
-        self.assertIn("not on this server", submit.response.send_message.await_args.args[0])
 
     async def test_add_modal_preserves_content_and_refreshes_the_dashboard(self):
         manager = SimpleNamespace(
