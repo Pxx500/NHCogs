@@ -212,7 +212,7 @@ class PunishmentActionView(discord.ui.View):
             return True
         await interaction.response.send_message(
             "Only the moderator who opened this panel can use it while they "
-            "have Manage Messages permission.",
+            "have Manage Messages permission",
             ephemeral=True,
         )
         return False
@@ -340,7 +340,7 @@ class ManualPunishmentController:
         )
         if not selection.capture_evidence and not selection.has_punishment:
             await interaction.response.send_message(
-                "Select a punishment or enable Add evidence.",
+                "Select a punishment or enable Add evidence",
                 ephemeral=True,
             )
             return
@@ -369,7 +369,7 @@ class ManualPunishmentController:
         permissions = interaction.permissions
         if guild is None or permissions is None or not permissions.manage_messages:
             await interaction.response.send_message(
-                "You need Manage Messages permission.",
+                "You need Manage Messages permission",
                 ephemeral=True,
             )
             return
@@ -383,19 +383,19 @@ class ManualPunishmentController:
         )
         if evidence_channel is None:
             await interaction.response.send_message(
-                "The manual evidence channel is not configured.",
+                "The manual evidence channel is not configured",
                 ephemeral=True,
             )
             return
         if evidence_channel.id == source_message.channel.id:
             await interaction.response.send_message(
-                "Messages in the manual evidence channel cannot be punished here.",
+                "Messages in the manual evidence channel cannot be punished here",
                 ephemeral=True,
             )
             return
         if not self.cog._channel_is_private(guild, evidence_channel):
             await interaction.response.send_message(
-                "The manual evidence channel must be private.",
+                "The manual evidence channel must be private",
                 ephemeral=True,
             )
             return
@@ -552,7 +552,7 @@ class ManualPunishmentController:
             role_error = _role_nt_role_error(self.cog, guild, selected[0])
             if role_error is not None:
                 await interaction.followup.send(
-                    f"{role_error} The source message was not deleted.",
+                    f"{role_error} The source message was not deleted",
                     ephemeral=True,
                 )
                 return None
@@ -1010,7 +1010,7 @@ def _role_nt_channel_limit_exceeded(
 async def role_nt_add(cog: Any, ctx: Any, role: Any, channels: list[Any]) -> None:
     channels = list(channels)
     if not channels:
-        raise commands.UserFeedbackCheckFailure("Provide at least one source channel.")
+        raise commands.UserFeedbackCheckFailure("Provide at least one source channel")
     role_error = _role_nt_role_error(cog, ctx.guild, role)
     if role_error is not None:
         raise commands.UserFeedbackCheckFailure(role_error)
@@ -1018,7 +1018,7 @@ async def role_nt_add(cog: Any, ctx: Any, role: Any, channels: list[Any]) -> Non
     channel_ids = {channel.id for channel in channels}
     if _role_nt_channel_limit_exceeded(configured, role.id, channel_ids):
         raise commands.UserFeedbackCheckFailure(
-            "A source channel cannot expose more than 25 Role n’t options."
+            "A source channel cannot expose more than 25 Role n’t options"
         )
     previous = configured.get(role.id)
     source_channel_ids = list(previous.source_channel_ids if previous else ())
@@ -1045,11 +1045,11 @@ async def role_nt_remove_channels(
 ) -> None:
     channels = list(channels)
     if not channels:
-        raise commands.UserFeedbackCheckFailure("Provide at least one source channel.")
+        raise commands.UserFeedbackCheckFailure("Provide at least one source channel")
     setting, configured = await _configured_role_nt(cog, ctx.guild)
     current = configured.get(role.id)
     if current is None:
-        raise commands.UserFeedbackCheckFailure("That Role n’t is not configured.")
+        raise commands.UserFeedbackCheckFailure("That Role n’t is not configured")
     remove_ids = {channel.id for channel in channels}
     remaining = tuple(
         channel_id
@@ -1080,7 +1080,7 @@ async def role_nt_notification(
     setting, configured = await _configured_role_nt(cog, ctx.guild)
     current = configured.get(role.id)
     if current is None:
-        raise commands.UserFeedbackCheckFailure("That Role n’t is not configured.")
+        raise commands.UserFeedbackCheckFailure("That Role n’t is not configured")
     if channel is None:
         configured_channel = (
             ctx.guild.get_channel(current.notification_channel_id)
@@ -1116,7 +1116,7 @@ async def role_nt_notification_clear(cog: Any, ctx: Any, role: Any) -> None:
     setting, configured = await _configured_role_nt(cog, ctx.guild)
     current = configured.get(role.id)
     if current is None:
-        raise commands.UserFeedbackCheckFailure("That Role n’t is not configured.")
+        raise commands.UserFeedbackCheckFailure("That Role n’t is not configured")
     configured[role.id] = ManualPunishmentRoleSettings(
         role_id=role.id,
         source_channel_ids=current.source_channel_ids,
@@ -1132,7 +1132,7 @@ async def role_nt_notification_clear(cog: Any, ctx: Any, role: Any) -> None:
 async def role_nt_remove(cog: Any, ctx: Any, role: Any) -> None:
     setting, configured = await _configured_role_nt(cog, ctx.guild)
     if configured.pop(role.id, None) is None:
-        raise commands.UserFeedbackCheckFailure("That Role n’t is not configured.")
+        raise commands.UserFeedbackCheckFailure("That Role n’t is not configured")
     await setting.set(_role_nt_payload(configured))
     await ctx.send(
         f"Removed Role n’t {role.name}",
@@ -1176,7 +1176,7 @@ async def role_nt_list(cog: Any, ctx: Any) -> None:
 
 async def show_status(cog: Any, ctx: Any) -> None:
     if not cog._group_overview_is_private(ctx):
-        await ctx.send("Run this command in a private staff channel.")
+        await ctx.send("Run this command in a private staff channel")
         return
     settings = GuildSettings.from_mapping(await cog.config.guild(ctx.guild).all())
     channel = ctx.guild.get_channel(settings.manual_evidence_channel)

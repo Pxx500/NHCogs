@@ -124,19 +124,19 @@ class SharedErrorConfigurationTests(unittest.IsolatedAsyncioTestCase):
             await module.OperationalSupport.errors.callback(support, ctx)
             rendered = rendered_messages(ctx)
             self.assertIn(
-                "`!nhcogs errors channel set <channel>` - Set the shared private error channel.",
+                "`!nhcogs errors channel set <channel>` - Set the shared private error channel",
                 rendered,
             )
             self.assertIn(
-                "`!nhcogs errors channel clear` - Stop sending technical failure alerts to Discord.",
+                "`!nhcogs errors channel clear` - Stop sending technical failure alerts to Discord",
                 rendered,
             )
             self.assertIn(
-                "`!nhcogs errors maintainer set <member>` - Set the maintainer notified by technical failure alerts.",
+                "`!nhcogs errors maintainer set <member>` - Set the maintainer notified by technical failure alerts",
                 rendered,
             )
             self.assertIn(
-                "`!nhcogs errors maintainer clear` - Stop pinging a maintainer in technical failure alerts.",
+                "`!nhcogs errors maintainer clear` - Stop pinging a maintainer in technical failure alerts",
                 rendered,
             )
 

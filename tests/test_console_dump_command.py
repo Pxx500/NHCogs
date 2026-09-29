@@ -108,7 +108,7 @@ class ConsoleDumpCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_command_rejects_unauthorized_public_and_non_text_destinations(self):
         cases = (
             ({"moderator": False}, "You need Manage Messages"),
-            ({"public": True}, "visible to @everyone"),
+            ({"public": True}, "visible to `@everyone`"),
             ({"text_channel": False}, "private text channel"),
         )
         with TemporaryDirectory() as directory:

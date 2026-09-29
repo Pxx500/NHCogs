@@ -244,7 +244,7 @@ async def _review_dump_update_progress(
 async def review_dump(cog, ctx: commands.Context) -> None:
     """Export banned review cases from the current channel."""
     if cog._review_dump_lock.locked():
-        await ctx.send(_("A review dump is already running."))
+        await ctx.send(_("A review dump is already running"))
         return
 
     async with cog._review_dump_lock:
@@ -1051,7 +1051,7 @@ async def honeypot_doctor(cog, ctx: commands.Context) -> None:
     )
     me = ctx.guild.me
     if me is None:
-        await ctx.send(_("**Honeypot doctor:**\n❌ I couldn't find my server member."))
+        await ctx.send(_("**Honeypot doctor:**\n❌ I couldn't find my server member"))
         return
 
     honeypot_channels = tuple(

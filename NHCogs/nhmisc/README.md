@@ -50,10 +50,12 @@ Move logs are sent immediately. If Discord audit logs later show that a moderato
 the member, the bot edits the move log and adds the moderator name and user ID.
 
 ```ini
+[p]nhmisc log voice
 [p]nhmisc log voice #voice-logs
+[p]nhmisc log voice clear
 ```
 
-Sets the text channel used for voice join, leave, and move logs.
+Shows, sets, or clears the text channel used for voice join, leave, and move logs. The same `clear` word works for `alert`, `maintenance`, and `moderation`.
 
 ```ini
 [p]nhmisc log alert #alerts
@@ -413,12 +415,15 @@ rows are retained only for the configured retention period.
 ### Daily Summary Channel
 
 ```ini
+[p]nhmisc activity channel
 [p]nhmisc activity channel #activity-reports
+[p]nhmisc activity channel clear
 ```
 
-Sets the channel where the bot posts automatic daily activity summaries. Summaries are
-closed on UTC day boundaries. If the bot was offline at midnight, it closes stale days on
-startup or on the next relevant activity command/message.
+Shows, sets, or clears the channel where the bot posts automatic daily activity summaries.
+Current values stay hidden in channels `@everyone` can see. Summaries are closed on UTC
+day boundaries. If the bot was offline at midnight, it closes stale days on startup or on
+the next relevant activity command/message.
 
 Daily summaries include:
 
@@ -514,10 +519,12 @@ for the main activity tables.
 ### Moderator Tools
 
 ```ini
+[p]nhmisc usermodstats
 [p]nhmisc usermodstats @User 7
+[p]nhmisc usermodstats user @User 7
 ```
 
-Shows moderator-only message stats for one user.
+With no arguments, lists the user, channel, and channels reports. Passing a user and a range still runs the user report directly. `user` is the same report when you want it listed beside the other two.
 
 You can also use a raw Discord user ID:
 

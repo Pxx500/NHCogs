@@ -117,7 +117,7 @@ async def send_group_overview(
     for child in children:
         if getattr(child, "hidden", False):
             continue
-        signature = getattr(child, "signature", "") or ""
+        signature = getattr(child, "signature", "") or getattr(child, "usage", "") or ""
         short_doc = getattr(child, "short_doc", "") or ""
         usage = f"{ctx.clean_prefix}{child.qualified_name}"
         if isinstance(signature, str) and signature.strip():

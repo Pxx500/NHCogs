@@ -302,7 +302,7 @@ class GatecountCommandTests(RoleAnalyticsCommandTestCase):
         with self.assertRaisesRegex(
             commands.UserFeedbackCheckFailure,
             rf"^Gatecount is misconfigured: Tier 2 role \({missing_role_id}\) "
-            r"was not found in this server\.$",
+            r"was not found in this server$",
         ):
             await nhmisc.NHMisc.gatecount(cog, ctx)
 
@@ -377,7 +377,7 @@ class TierDistributionCommandTests(RoleAnalyticsCommandTestCase):
         with self.assertRaisesRegex(
             commands.UserFeedbackCheckFailure,
             rf"^Tier distribution is misconfigured: Gate Tier 2 role "
-            rf"\({missing_role_id}\) was not found in this server\.$",
+            rf"\({missing_role_id}\) was not found in this server$",
         ):
             await nhmisc.NHMisc.tierdistribution(cog, ctx)
 

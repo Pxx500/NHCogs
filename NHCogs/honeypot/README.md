@@ -39,7 +39,7 @@ All punishments start unselected and saving evidence starts enabled. Kick and ba
 | Command | Description |
 |---|---|
 | `!honeypot evidence status` | Show the private manual evidence configuration |
-| `!honeypot evidence channel <channel>` | Set the private destination for manual evidence |
+| `!honeypot evidence channel [channel|clear]` | Show, set, or clear the private destination for manual evidence |
 | `!honeypot punishment role-nt add <role> <channel> [channels...]` | Add source channels to a Role n’t punishment |
 | `!honeypot punishment role-nt remove-channel <role> <channel> [channels...]` | Remove source channels from a Role n’t punishment |
 | `!honeypot punishment role-nt notification <role> [channel]` | Show or set its notification channel |
@@ -76,22 +76,22 @@ By default, three GIFs from one member inside a rolling 60-second window trigger
 | `!honeypot gifdetector channel remove [channel]` | Stop monitoring a channel, or the current channel when omitted |
 | `!honeypot gifdetector channel list` | List monitored channels |
 | `!honeypot gifdetector debug toggle <true\|false>` | Enable or disable moderator-only shot diagnostics |
-| `!honeypot gifdetector debug channel [channel]` | Show or set the shot diagnostics destination |
+| `!honeypot gifdetector debug channel [channel|clear]` | Show, set, or clear the shot diagnostics destination |
 | `!honeypot gifdetector message set <text>` | Set the static warning shown for additional GIFs |
 | `!honeypot gifdetector message reset` | Reset the static warning to `No gifs!` |
 
 ### channels
 
-`!honeypot channels` shows every destination and source/scope with its current value. Destination categories are independent. Setting one never changes another.
+`!honeypot channels` lists every channel command. In a private moderator channel it also shows the current destinations and scopes. In a channel `@everyone` can see, it shows command syntax only. Destination categories are independent. Setting one never changes another. Pass `clear` instead of a channel to remove a single destination. The older per-feature channel commands, such as `!honeypot review channel`, change the same destination and accept `clear` too.
 
 | Command | Description |
 |---------|-------------|
-| `!honeypot channels review [channel]` | Show or set the review destination |
-| `!honeypot channels daily-stats [channel]` | Show or set the public daily statistics destination |
-| `!honeypot channels manual-evidence [channel]` | Show or set the private manual evidence destination |
-| `!honeypot channels joinwatch [channel]` | Show or set the JoinWatch destination |
-| `!honeypot channels bait-role [channel]` | Show or set the bait-role destination |
-| `!honeypot channels gif-debug [channel]` | Show or set the GIF diagnostics destination |
+| `!honeypot channels review [channel|clear]` | Show, set, or clear the review destination |
+| `!honeypot channels daily-stats [channel|clear]` | Show, set, or clear the public daily statistics destination |
+| `!honeypot channels manual-evidence [channel|clear]` | Show, set, or clear the private manual evidence destination |
+| `!honeypot channels joinwatch [channel|clear]` | Show, set, or clear the JoinWatch destination |
+| `!honeypot channels bait-role [channel|clear]` | Show, set, or clear the bait-role destination |
+| `!honeypot channels gif-debug [channel|clear]` | Show, set, or clear the GIF diagnostics destination |
 | `!honeypot channels honeypot create` | Create and add a new `#honeypot` channel at position 0 |
 | `!honeypot channels honeypot add <channel>` | Add an existing honeypot source |
 | `!honeypot channels honeypot remove <channel>` | Remove a honeypot source |
@@ -104,7 +104,7 @@ By default, three GIFs from one member inside a rolling 60-second window trigger
 
 | Command | Description |
 |---------|-------------|
-| `!honeypot punishment mute_role <role>` | Temp mute role for users awaiting review |
+| `!honeypot punishment mute_role [role|clear]` | Show, set, or clear the temp mute role for users awaiting review |
 
 ### purge
 
@@ -135,7 +135,7 @@ By default, three GIFs from one member inside a rolling 60-second window trigger
 | Command | Description |
 |---------|-------------|
 | `!honeypot review toggle <bool>` | Send suspicious messages to moderator review instead of acting immediately |
-| `!honeypot review channel <channel>` | Channel for review requests |
+| `!honeypot review channel [channel|clear]` | Show, set, or clear the channel for review requests |
 | `!honeypot review kick_fail_warn <false\|true\|manual>` | How to handle a review kick when the target has already left |
 
 Detection cases expire 24 hours after the first detection. This lifetime is fixed.
@@ -180,10 +180,10 @@ Detection cases expire 24 hours after the first detection. This lifetime is fixe
 |---------|-------------|
 | `!honeypot joinwatch toggle <bool>` | Enable or disable the joinwatch module |
 | `!honeypot joinwatch alert toggle <bool>` | Enable or disable joinwatch alert messages |
-| `!honeypot joinwatch channel <channel>` | Channel for join alerts |
+| `!honeypot joinwatch channel [channel|clear]` | Show, set, or clear the channel for join alerts |
 | `!honeypot joinwatch max_age <1-1000000>` | Max account age in hours to trigger alert |
 | `!honeypot joinwatch autorole toggle <bool>` | Enable or disable automatic role assignment for young accounts |
-| `!honeypot joinwatch autorole role <role>` | Role to apply to young accounts |
+| `!honeypot joinwatch autorole role [role|clear]` | Show, set, or clear the role applied to young accounts |
 | `!honeypot joinwatch autorole timer <1-10080>` | Minutes before punishment if the role remains |
 | `!honeypot joinwatch autorole action <none\|kick\|ban>` | Action when the auto-role is not removed in time |
 | `[p]honeypot joinwatch bantimers` | List active punishment timers and shadowban role holders without a JoinWatch timer. Requires Manage Messages and a private moderator channel. Uses the local member cache without fetching members and reports when the cache is incomplete. Does not create timers for manually assigned roles |
@@ -196,9 +196,9 @@ Detection cases expire 24 hours after the first detection. This lifetime is fixe
 | Command | Description |
 |---------|-------------|
 | `!honeypot bait_role toggle <bool>` | Enable or disable the bait role trap |
-| `!honeypot bait_role role <role>` | Set the bait role |
+| `!honeypot bait_role role [role|clear]` | Show, set, or clear the bait role |
 | `!honeypot bait_role action <kick\|ban>` | Action to take when users take the bait role |
-| `!honeypot bait_role channel [channel]` | Show or set the bait-role destination |
+| `!honeypot bait_role channel [channel|clear]` | Show, set, or clear the bait-role destination |
 
 ### Operational errors
 
@@ -225,7 +225,7 @@ detection outcomes and normal command feedback aren't reported as operational er
 | `!honeypot config bait_role` | Show bait role settings |
 | `!honeypot config stats` | Show stored stats, detection-case operations, and pending timer counts |
 | `!honeypot stats show` | Show public-facing stats |
-| `!honeypot stats channel [channel]` | Show or set the public daily statistics destination |
+| `!honeypot stats channel [channel|clear]` | Show, set, or clear the public daily statistics destination |
 | `!honeypot modstats` | Show detailed moderator statistics |
 | `!honeypot doctor` | Check config, channels, and permissions |
 ## Action & Fallback Logic
