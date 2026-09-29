@@ -291,7 +291,18 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         await nhmisc.NHMisc.nhmisc_log_alert.callback(self.cog, self.ctx, channel)
 
         self.assertEqual(await self.cog.config.guild(self.guild).alert_channel(), 73)
-        self.ctx.send.assert_awaited_once_with("Alert channel set to <#73>.")
+        self.ctx.send.assert_awaited_once_with("Alert channel set to <#73>")
+
+    async def test_log_child_clear_removes_the_destination(self):
+        self.cog._support.log_config = self.cog.config = FakeConfig({"alert_channel": 73})
+
+        await nhmisc.NHMisc.nhmisc_log_alert.callback(self.cog, self.ctx, "clear")
+
+        self.assertIsNone(await self.cog.config.guild(self.guild).alert_channel())
+        self.ctx.send.assert_awaited_once_with(
+            "Alert channel cleared",
+            allowed_mentions=nhmisc.discord.AllowedMentions.none(),
+        )
 
     async def test_private_log_destinations_reject_public_channels(self):
         self.guild.me = object()
@@ -731,14 +742,10 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             commands.splitlines(),
             [
-                "`!achievement role bind <role>`",
-                "Bind an existing Discord role to an achievement",
-                "`!achievement role unbind <role>`",
-                "Stop tracking an achievement role",
-                "`!achievement role replace <old_role> <new_role>`",
-                "Replace an achievement role binding",
-                "`!achievement role list`",
-                "List active achievement role bindings",
+                "`!achievement role bind <role>` - Bind an existing Discord role to an achievement",
+                "`!achievement role unbind <role>` - Stop tracking an achievement role",
+                "`!achievement role replace <old_role> <new_role>` - Replace an achievement role binding",
+                "`!achievement role list` - List active achievement role bindings",
             ],
         )
         self.assertEqual(

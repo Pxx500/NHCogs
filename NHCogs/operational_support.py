@@ -115,12 +115,12 @@ class OperationalSupport(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
     async def nhcogs(self, ctx: commands.Context) -> None:
-        """Configure shared NHCogs settings."""
+        """Configure shared NHCogs settings"""
         await send_group_overview(ctx, title="NHCogs", include_descendants=False)
 
     @nhcogs.group(name="errors", invoke_without_command=True)
     async def errors(self, ctx: commands.Context) -> None:
-        """Configure technical error reports and the maintainer notification."""
+        """Configure technical error reports and the maintainer notification"""
         await send_group_overview(
             ctx, lambda: self._show_error_configuration(ctx), title="Technical errors"
         )
@@ -151,7 +151,7 @@ class OperationalSupport(commands.Cog):
 
     @errors.group(name="channel", invoke_without_command=True)
     async def error_channel(self, ctx: commands.Context) -> None:
-        """Configure the shared private error channel."""
+        """Configure the shared private error channel"""
         await send_group_overview(
             ctx, lambda: self._show_error_configuration(ctx, field="channel"), title="Error channel"
         )
@@ -160,7 +160,7 @@ class OperationalSupport(commands.Cog):
     async def error_channel_set(
         self, ctx: commands.Context, channel: discord.TextChannel
     ) -> None:
-        """Set the shared private error channel."""
+        """Set the shared private error channel"""
         self._require_private_configuration(ctx)
         if not channel_is_private(ctx.guild, channel):
             raise commands.UserFeedbackCheckFailure("The error channel must be hidden from @everyone")
@@ -172,14 +172,14 @@ class OperationalSupport(commands.Cog):
 
     @error_channel.command(name="clear")
     async def error_channel_clear(self, ctx: commands.Context) -> None:
-        """Stop sending technical failure alerts to Discord."""
+        """Stop sending technical failure alerts to Discord"""
         self._require_private_configuration(ctx)
         await self.config.guild(ctx.guild).error_channel.clear()
         await ctx.send("Error channel cleared", allowed_mentions=discord.AllowedMentions.none())
 
     @errors.group(name="maintainer", invoke_without_command=True)
     async def error_maintainer(self, ctx: commands.Context) -> None:
-        """Configure the maintainer notified by technical failure alerts."""
+        """Configure the maintainer notified by technical failure alerts"""
         await send_group_overview(
             ctx, lambda: self._show_error_configuration(ctx, field="maintainer"),
             title="Error maintainer",
@@ -189,14 +189,14 @@ class OperationalSupport(commands.Cog):
     async def error_maintainer_set(
         self, ctx: commands.Context, member: discord.Member
     ) -> None:
-        """Set the maintainer notified by technical failure alerts."""
+        """Set the maintainer notified by technical failure alerts"""
         self._require_private_configuration(ctx)
         await self.config.guild(ctx.guild).error_maintainer_id.set(member.id)
         await ctx.send("Error maintainer updated", allowed_mentions=discord.AllowedMentions.none())
 
     @error_maintainer.command(name="clear")
     async def error_maintainer_clear(self, ctx: commands.Context) -> None:
-        """Stop pinging a maintainer in technical failure alerts."""
+        """Stop pinging a maintainer in technical failure alerts"""
         self._require_private_configuration(ctx)
         await self.config.guild(ctx.guild).error_maintainer_id.clear()
         await ctx.send("Error maintainer cleared", allowed_mentions=discord.AllowedMentions.none())
@@ -255,11 +255,11 @@ class OperationalSupport(commands.Cog):
         me = guild.me
         permissions = channel.permissions_for(me)
         if not permissions.view_channel:
-            return f"I need permission to view {channel.mention}."
+            return f"I need permission to view {channel.mention}"
         if not permissions.send_messages:
-            return f"I need permission to send messages in {channel.mention}."
+            return f"I need permission to send messages in {channel.mention}"
         if require_attach_files and not permissions.attach_files:
-            return f"I need permission to attach files in {channel.mention}."
+            return f"I need permission to attach files in {channel.mention}"
         return None
 
     async def require_private_log_channel(

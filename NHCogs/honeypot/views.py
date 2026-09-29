@@ -281,7 +281,7 @@ class DetectionIndividualView(discord.ui.View):
                 option.default = option.value == selected_value
             replace_action_buttons(selected_item)
             await interaction.response.edit_message(
-                content=_("Choose the result for the selected image."), view=self
+                content=_("Choose the result for the selected image"), view=self
             )
 
         selector.callback = select_callback

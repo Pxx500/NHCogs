@@ -84,18 +84,18 @@ class CustomCommandsMigration(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
     async def nhcustomcom(self, ctx: commands.Context) -> None:
-        """Run the one-time official CustomCom migration."""
+        """Run the one-time official CustomCom migration"""
         state = await self.state_store.get()
         await ctx.send(f"Custom Commands migration state: {state.phase.value}")
 
     @nhcustomcom.group(name="migrate", hidden=True, invoke_without_command=True)
     async def nhcustomcom_migrate(self, ctx: commands.Context) -> None:
-        """Plan or apply the one-time migration."""
+        """Plan or apply the one-time migration"""
         await self.nhcustomcom(ctx)
 
     @nhcustomcom_migrate.command(name="plan", hidden=True)
     async def nhcustomcom_migrate_plan(self, ctx: commands.Context) -> None:
-        """Validate legacy data and upload a complete migration plan."""
+        """Validate legacy data and upload a complete migration plan"""
         await self._require_private_migration_context(ctx)
         state = await self.state_store.get()
         if state.phase is MigrationPhase.COMPLETE:
@@ -119,7 +119,7 @@ class CustomCommandsMigration(commands.Cog):
         ctx: commands.Context,
         confirmation: str,
     ) -> None:
-        """Import the reviewed plan and cut over to the replacement."""
+        """Import the reviewed plan and cut over to the replacement"""
         await self._require_private_migration_context(ctx)
         if confirmation.casefold() != APPLY_CONFIRMATION:
             raise commands.UserFeedbackCheckFailure(
@@ -135,7 +135,7 @@ class CustomCommandsMigration(commands.Cog):
         guild_id: int,
         confirmation: str,
     ) -> None:
-        """Delete legacy CustomCom data for a guild the bot has left."""
+        """Delete legacy CustomCom data for a guild the bot has left"""
         await self._require_private_migration_context(ctx)
         if confirmation.casefold() != APPLY_CONFIRMATION:
             raise commands.UserFeedbackCheckFailure(
@@ -212,7 +212,7 @@ class CustomCommandsMigration(commands.Cog):
             raise commands.UserFeedbackCheckFailure(
                 "Migration failed. Review the private operational error alert."
             ) from error
-        await ctx.send("Custom Commands migration completed.")
+        await ctx.send("Custom Commands migration completed")
         try:
             await self.bot.remove_cog(self.qualified_name)
         except Exception as error:

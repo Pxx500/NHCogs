@@ -38,14 +38,14 @@ class Cleanup(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
     async def cleanup(self, ctx: commands.Context) -> None:
-        """Delete recently observed messages without fetching channel history."""
+        """Delete recently observed messages without fetching channel history"""
         await send_group_overview(ctx, title="Cleanup")
 
     @cleanup.command(name="messages", usage="<count>")
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
     async def cleanup_messages(self, ctx: commands.Context, count: int) -> None:
-        """Delete recently observed messages from the current channel."""
+        """Delete recently observed messages from the current channel"""
         await self._run_cleanup(
             ctx,
             "clean up observed channel messages",
@@ -61,7 +61,7 @@ class Cleanup(commands.Cog):
         target: discord.Member | RawUserIdConverter,
         count: int,
     ) -> None:
-        """Delete recently observed messages from a user across this server."""
+        """Delete recently observed messages from a user across this server"""
         user_id = int(getattr(target, "id", target))
         await self._run_cleanup(
             ctx,
@@ -78,7 +78,7 @@ class Cleanup(commands.Cog):
         message_id: RawMessageId | None = None,
         delete_pinned: bool = False,
     ) -> None:
-        """Delete retained messages after a retained message in this channel."""
+        """Delete retained messages after a retained message in this channel"""
         boundary_id = self._resolve_boundary_id(ctx, message_id)
         await self._run_cleanup(
             ctx,
@@ -102,7 +102,7 @@ class Cleanup(commands.Cog):
         *,
         arguments: str,
     ) -> None:
-        """Delete retained messages before a retained message in this channel."""
+        """Delete retained messages before a retained message in this channel"""
         boundary_id, count, delete_pinned = self._parse_before_arguments(ctx, arguments)
         await self._run_cleanup(
             ctx,
@@ -178,7 +178,7 @@ class Cleanup(commands.Cog):
         newer_id: RawMessageId,
         delete_pinned: bool = False,
     ) -> None:
-        """Delete retained messages between two retained messages in this channel."""
+        """Delete retained messages between two retained messages in this channel"""
         await self._run_cleanup(
             ctx,
             "clean up observed messages between boundaries",

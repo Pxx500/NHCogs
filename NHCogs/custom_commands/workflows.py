@@ -424,7 +424,7 @@ class WorkflowView(discord.ui.View):
             self._session.touch()
             return True
         await interaction.response.send_message(
-            "Only the moderator who opened this session can use these controls.",
+            "Only the moderator who opened this session can use these controls",
             ephemeral=True,
         )
         return False

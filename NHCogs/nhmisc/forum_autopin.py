@@ -328,7 +328,7 @@ class ForumAutopinService:
             guild,
             (
                 f"Forum autopin is no longer configured for deleted forum "
-                f"`{channel.name}` (`{channel.id}`)."
+                f"`{channel.name}` (`{channel.id}`)"
             ),
         )
         return True
