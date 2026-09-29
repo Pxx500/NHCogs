@@ -908,7 +908,6 @@ class CustomCommands(commands.Cog):
         command: str,
         text: str | None,
     ) -> None:
-        self._require_private_workflow_channel(ctx)
         try:
             normalized = self.catalog.normalize_name(command)
         except CatalogError as error:
@@ -937,7 +936,6 @@ class CustomCommands(commands.Cog):
         text: str | None = None,
     ) -> None:
         """Open a thread to edit an existing custom command."""
-        self._require_private_workflow_channel(ctx)
         stored = await self.catalog.get(ctx.guild.id, command)
         if stored is None:
             await ctx.send(COMMAND_NOT_FOUND_MESSAGE)
@@ -947,13 +945,6 @@ class CustomCommands(commands.Cog):
             response_id = stored.responses[0].response_id if stored.responses else None
             draft.responses = [ResponseDraft(text, response_id=response_id)]
         await self.workflows.open(ctx, draft)
-
-    @staticmethod
-    def _require_private_workflow_channel(ctx: commands.Context) -> None:
-        if ctx.channel.permissions_for(ctx.guild.default_role).view_channel:
-            raise commands.UserFeedbackCheckFailure(
-                "Open custom command editors in a private moderator channel"
-            )
 
     @customcom.command(name="cooldown")
     @commands.has_permissions(manage_messages=True)
