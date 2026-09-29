@@ -263,7 +263,7 @@ class CustomCommandsMigration(commands.Cog):
     async def _require_private_migration_context(self, ctx: commands.Context) -> None:
         if ctx.channel.permissions_for(ctx.guild.default_role).view_channel:
             raise commands.UserFeedbackCheckFailure(
-                "Run migration in a channel hidden from @everyone"
+                "Run migration in a channel hidden from `@everyone`"
             )
         await self.support.require_private_error_channel(ctx.guild)
 

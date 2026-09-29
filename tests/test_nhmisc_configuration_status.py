@@ -325,7 +325,7 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
 
                 with self.assertRaisesRegex(
                     nhmisc.commands.UserFeedbackCheckFailure,
-                    "private from @everyone",
+                    "private from `@everyone`",
                 ):
                     await command.callback(self.cog, self.ctx, channel)
 

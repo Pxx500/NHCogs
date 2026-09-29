@@ -1144,7 +1144,7 @@ class GitHubTickets(commands.Cog):
     ) -> None:
         if not command_overview.channel_is_private(ctx.guild, ctx.channel):
             raise commands.UserFeedbackCheckFailure(
-                "Run this command in a channel hidden from @everyone"
+                "Run this command in a channel hidden from `@everyone`"
             )
         profiles = await self.store.list_profiles(ctx.guild.id)
         pages: tuple[str, ...]

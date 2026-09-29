@@ -488,7 +488,7 @@ class NHModeration(commands.Cog):
     def _require_private_channel(self, ctx: commands.Context) -> None:
         if not channel_is_private(ctx.guild, ctx.channel):
             raise commands.UserFeedbackCheckFailure(
-                "Run this command in a channel hidden from @everyone"
+                "Run this command in a channel hidden from `@everyone`"
             )
 
     @commands.command(

@@ -163,7 +163,7 @@ class OperationalSupport(commands.Cog):
         """Set the shared private error channel"""
         self._require_private_configuration(ctx)
         if not channel_is_private(ctx.guild, channel):
-            raise commands.UserFeedbackCheckFailure("The error channel must be hidden from @everyone")
+            raise commands.UserFeedbackCheckFailure("The error channel must be hidden from `@everyone`")
         missing = self.missing_log_permissions(ctx.guild, channel, require_attach_files=True)
         if missing is not None:
             raise commands.UserFeedbackCheckFailure(missing)
@@ -282,7 +282,7 @@ class OperationalSupport(commands.Cog):
             )
         if channel.permissions_for(guild.default_role).view_channel:
             raise commands.UserFeedbackCheckFailure(
-                f"The {label} channel must be hidden from @everyone"
+                f"The {label} channel must be hidden from `@everyone`"
             )
         if self.missing_log_permissions(guild, channel) is not None:
             raise commands.UserFeedbackCheckFailure(

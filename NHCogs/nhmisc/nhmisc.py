@@ -4273,7 +4273,7 @@ class NHMisc(commands.Cog):
             return
         if self._channel_allows_everyone(channel, ctx.guild):
             raise commands.UserFeedbackCheckFailure(
-                "Configure a channel that is private from @everyone"
+                "Configure a channel that is private from `@everyone`"
             )
         permissions = channel.permissions_for(ctx.guild.me)
         required = (
@@ -4386,8 +4386,8 @@ class NHMisc(commands.Cog):
         channel_id = await getattr(self.config.guild(ctx.guild), config_key)()
         embed = discord.Embed(title=title)
         current = (
-            "Run this command in a channel hidden from @everyone "
-            "to view the current configuration."
+            "Run this command in a channel hidden from `@everyone` "
+            "to view the current configuration"
             if self._channel_is_public(ctx)
             else f"Channel: {self._configured_channel_label(ctx.guild, channel_id)}"
         )
@@ -4480,7 +4480,7 @@ class NHMisc(commands.Cog):
             raise commands.UserFeedbackCheckFailure(missing_permissions)
         if self._channel_allows_everyone(channel, ctx.guild):
             raise commands.UserFeedbackCheckFailure(
-                "Configure a channel that is private from @everyone"
+                "Configure a channel that is private from `@everyone`"
             )
 
         await self.config.guild(ctx.guild).maintenance_channel.set(channel.id)
@@ -4507,7 +4507,7 @@ class NHMisc(commands.Cog):
             raise commands.UserFeedbackCheckFailure(missing_permissions)
         if self._channel_allows_everyone(channel, ctx.guild):
             raise commands.UserFeedbackCheckFailure(
-                "Configure a channel that is private from @everyone"
+                "Configure a channel that is private from `@everyone`"
             )
 
         await self.config.guild(ctx.guild).moderation_log_channel.set(channel.id)
@@ -7127,7 +7127,7 @@ class NHMisc(commands.Cog):
                 )
             if role_id == guild.default_role.id or role.is_default():
                 raise commands.UserFeedbackCheckFailure(
-                    "The @everyone role cannot be used in role expressions"
+                    "The `@everyone` role cannot be used in role expressions"
                 )
 
         predicate_sql, parameters = compile_role_expression(parsed)

@@ -65,7 +65,7 @@ class ConsoleDump(commands.Cog):
             await ctx.send(_("You need Manage Messages to use this command"))
             return
         if channel.permissions_for(ctx.guild.default_role).view_channel:
-            await ctx.send(_("Console dumps cannot be sent to a channel visible to @everyone"))
+            await ctx.send(_("Console dumps cannot be sent to a channel visible to `@everyone`"))
             return
 
         missing_permissions = self._missing_channel_permissions(ctx.guild, channel)
