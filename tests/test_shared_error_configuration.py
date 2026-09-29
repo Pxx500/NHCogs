@@ -107,7 +107,7 @@ class SharedErrorConfigurationTests(unittest.IsolatedAsyncioTestCase):
             ctx, member = context(module)
             support = module.OperationalSupport(ctx.bot)
             await module.OperationalSupport.error_channel_set.callback(support, ctx, ctx.channel)
-            await module.OperationalSupport.error_maintainer_set.callback(support, ctx, member)
+            await module.OperationalSupport.error_maintainer_set.callback(support, ctx, "<@30>")
             self.assertEqual(await support.config.guild(ctx.guild).error_channel(), 20)
             self.assertEqual(await support.config.guild(ctx.guild).error_maintainer_id(), 30)
             ctx.send.reset_mock()
@@ -147,7 +147,7 @@ class SharedErrorConfigurationTests(unittest.IsolatedAsyncioTestCase):
 
             with self.assertRaisesRegex(
                 module.commands.UserFeedbackCheckFailure,
-                "Provide a member or use clear",
+                "Provide a user mention or user ID",
             ):
                 await module.OperationalSupport.error_maintainer.callback(
                     support, ctx, "nope"
@@ -157,15 +157,55 @@ class SharedErrorConfigurationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await support.config.guild(ctx.guild).error_maintainer_id())
             self.assertEqual(member.display_name, "Maintainer")
 
+    async def test_maintainer_accepts_mention_or_digits_and_rejects_letters(self):
+        with shared_reporting() as module:
+            ctx, _member = context(module)
+            support = module.OperationalSupport(ctx.bot)
+            guild_config = support.config.guild(ctx.guild)
+            for token in ("set", "Maintainer", "12a", "<@set>"):
+                with self.subTest(token=token):
+                    with self.assertRaisesRegex(
+                        module.commands.UserFeedbackCheckFailure,
+                        "Provide a user mention or user ID",
+                    ):
+                        await module.OperationalSupport.error_maintainer.callback(
+                            support, ctx, token
+                        )
+                    self.assertIsNone(await guild_config.error_maintainer_id())
+
+            await module.OperationalSupport.error_maintainer.callback(support, ctx, "30")
+            self.assertEqual(await guild_config.error_maintainer_id(), 30)
+            await module.OperationalSupport.error_maintainer.callback(support, ctx, "<@!30>")
+            self.assertEqual(await guild_config.error_maintainer_id(), 30)
+            await module.OperationalSupport.error_maintainer_set.callback(
+                support, ctx, "<@30>"
+            )
+            self.assertEqual(await guild_config.error_maintainer_id(), 30)
+            with self.assertRaisesRegex(
+                module.commands.UserFeedbackCheckFailure,
+                "Provide a user mention or user ID",
+            ):
+                await module.OperationalSupport.error_maintainer_set.callback(
+                    support, ctx, "set"
+                )
+            self.assertEqual(await guild_config.error_maintainer_id(), 30)
+            await module.OperationalSupport.error_maintainer_set.callback(support, ctx, "clear")
+            self.assertIsNone(await guild_config.error_maintainer_id())
+
     async def test_public_overview_does_not_read_settings_and_cannot_change_them(self):
         with shared_reporting() as module:
-            ctx, member = context(module, public=True)
+            ctx, _member = context(module, public=True)
             support = module.OperationalSupport(ctx.bot)
             support.config = SimpleNamespace(guild=mock.Mock(side_effect=AssertionError("private read")))
             await module.OperationalSupport.errors.callback(support, ctx)
             support.config.guild.assert_not_called()
-            with self.assertRaises(module.commands.UserFeedbackCheckFailure):
-                await module.OperationalSupport.error_maintainer_set.callback(support, ctx, member)
+            with self.assertRaisesRegex(
+                module.commands.UserFeedbackCheckFailure,
+                "Run this command in a private moderator channel",
+            ):
+                await module.OperationalSupport.error_maintainer_set.callback(
+                    support, ctx, "<@30>"
+                )
             await module.OperationalSupport.error_channel.callback(support, ctx)
             support.config.guild.assert_not_called()
             self.assertEqual(
@@ -193,7 +233,7 @@ class SharedErrorConfigurationTests(unittest.IsolatedAsyncioTestCase):
             ctx, member = context(module)
             support = module.OperationalSupport(ctx.bot)
             await module.OperationalSupport.error_channel_set.callback(support, ctx, ctx.channel)
-            await module.OperationalSupport.error_maintainer_set.callback(support, ctx, member)
+            await module.OperationalSupport.error_maintainer_set.callback(support, ctx, "30")
             await support.send_technical_alert(ctx.guild.id, "Honeypot operation failed")
             self.assertEqual(ctx.channel.send.await_count, 1)
             sent = ctx.channel.send.await_args

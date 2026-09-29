@@ -200,7 +200,7 @@ ticket. When the ping limit is exhausted, the ticket remains open for a manual c
 | `[p]githubtickets profile pings enabled` | List developer profiles with automatic pings enabled |
 | `[p]githubtickets profile pings disabled` | List developer profiles with automatic pings disabled |
 
-The `profile clear` command accepts a positive Discord user ID. Participants clear their own profile from
+The `profile clear` command accepts a user mention or a digits-only Discord user ID. Participants clear their own profile from
 the `/developerprofile` dashboard. Leaving the server removes the member's profile and
 profile categories, but does not rewrite or remove their existing ticket history.
 

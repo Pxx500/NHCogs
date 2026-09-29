@@ -26,6 +26,10 @@ If that command also has a real sibling, such as `reset`, the overview lists the
 
 An argument-free group is only a category. The overview lists its visible descendants instead of the group itself.
 
+## Stored users
+
+A command that stores a user accepts a mention or a digits-only ID. A token that contains a letter is rejected. `clear` still removes a nullable user setting.
+
 ## What stays nested
 
 Toggles stay their own nested command. Do not fold `toggle` into the parent.

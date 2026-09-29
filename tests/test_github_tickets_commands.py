@@ -465,6 +465,53 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_profile_clear_accepts_mention_or_digits_and_rejects_letters(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            cog = modules.githubtickets.GitHubTickets(
+                SimpleNamespace(),
+                mock.Mock(
+                    report_operational_error=mock.AsyncMock(),
+                    report_global_error=mock.AsyncMock(),
+                    handle_command_error=mock.AsyncMock(),
+                ),
+            )
+            await cog.store.initialize()
+            ctx = FakeContext()
+            now = datetime.now(timezone.utc)
+            for user_id in (20, 21, 22):
+                await cog.store.save_profile(
+                    guild_id=42,
+                    user_id=user_id,
+                    github_username=f"dev{user_id}",
+                    category_ids=(),
+                    automatic_pings=False,
+                    updated_at=now,
+                )
+
+            await cog.githubtickets_profile_clear(ctx, "set")
+            await cog.githubtickets_profile_clear(ctx, "alice")
+            await cog.githubtickets_profile_clear(ctx, "0")
+            self.assertIsNotNone(await cog.store.get_profile(42, 20))
+
+            await cog.githubtickets_profile_clear(ctx, "<@20>")
+            await cog.githubtickets_profile_clear(ctx, "21")
+            await cog.githubtickets_profile_clear(ctx, "<@!22>")
+
+        self.assertIsNone(await cog.store.get_profile(42, 20))
+        self.assertIsNone(await cog.store.get_profile(42, 21))
+        self.assertIsNone(await cog.store.get_profile(42, 22))
+        self.assertEqual(
+            [call.args[0] for call in ctx.send.await_args_list],
+            [
+                "Invalid user ID",
+                "Invalid user ID",
+                "Invalid user ID",
+                "Profile cleared: 20",
+                "Profile cleared: 21",
+                "Profile cleared: 22",
+            ],
+        )
+
     async def test_channel_set_rejects_a_non_text_guild_channel_with_accepted_copy(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             cog = modules.githubtickets.GitHubTickets(SimpleNamespace(), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))

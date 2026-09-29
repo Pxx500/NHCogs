@@ -16,6 +16,19 @@ from .operational_errors import OperationalErrorReporter, OperationalFailure
 log = logging.getLogger("red.NHCogs.NHMisc")
 NHMISC_CONFIG_IDENTIFIER = 8597423150612235807
 ERROR_CONFIG_IDENTIFIER = 8597423150612235808
+USER_MENTION_OR_ID = "Provide a user mention or user ID"
+
+
+def stored_user_id(value: str) -> int:
+    """Return a user id from a mention or a digits-only token."""
+    token = value.strip()
+    if token.startswith("<@") and token.endswith(">"):
+        token = token[2:-1]
+        if token.startswith("!"):
+            token = token[1:]
+    if not token.isdigit():
+        raise commands.UserFeedbackCheckFailure(USER_MENTION_OR_ID)
+    return int(token)
 
 
 class OperationalSupport(commands.Cog):
@@ -176,24 +189,18 @@ class OperationalSupport(commands.Cog):
     async def error_maintainer(
         self,
         ctx: commands.Context,
-        member: discord.Member | str | None = None,
+        member: str | None = None,
     ) -> None:
         """Show, set, or clear the error maintainer"""
         if member is None:
             await self._show_nullable_setting(ctx, field="maintainer")
             return
-        if isinstance(member, str):
-            self._require_clear_word(member, noun="member")
-            await self._clear_error_maintainer(ctx)
-            return
-        await self._set_error_maintainer(ctx, member)
+        await self._store_or_clear_maintainer(ctx, member)
 
     @error_maintainer.command(name="set", hidden=True)
-    async def error_maintainer_set(
-        self, ctx: commands.Context, member: discord.Member
-    ) -> None:
+    async def error_maintainer_set(self, ctx: commands.Context, member: str) -> None:
         """Set the maintainer notified by technical failure alerts"""
-        await self._set_error_maintainer(ctx, member)
+        await self._store_or_clear_maintainer(ctx, member)
 
     async def _show_nullable_setting(self, ctx: commands.Context, *, field: str) -> None:
         if not channel_is_private(ctx.guild, ctx.channel):
@@ -224,9 +231,15 @@ class OperationalSupport(commands.Cog):
         await self.config.guild(ctx.guild).error_channel.clear()
         await ctx.send("Error channel cleared", allowed_mentions=discord.AllowedMentions.none())
 
-    async def _set_error_maintainer(self, ctx: commands.Context, member: discord.Member) -> None:
+    async def _store_or_clear_maintainer(self, ctx: commands.Context, member: str) -> None:
+        if member.strip().casefold() == "clear":
+            await self._clear_error_maintainer(ctx)
+            return
+        await self._set_error_maintainer(ctx, stored_user_id(member))
+
+    async def _set_error_maintainer(self, ctx: commands.Context, user_id: int) -> None:
         self._require_private_configuration(ctx)
-        await self.config.guild(ctx.guild).error_maintainer_id.set(member.id)
+        await self.config.guild(ctx.guild).error_maintainer_id.set(user_id)
         await ctx.send("Error maintainer updated", allowed_mentions=discord.AllowedMentions.none())
 
     async def _clear_error_maintainer(self, ctx: commands.Context) -> None:

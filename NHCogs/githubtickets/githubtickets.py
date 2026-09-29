@@ -35,6 +35,21 @@ from .ticket_views import TicketControls
 log = logging.getLogger(__name__)
 
 
+def profile_user_id(value: str) -> int | None:
+    """Return a positive user id from a mention or a digits-only token."""
+    token = value.strip()
+    if token.startswith("<@") and token.endswith(">"):
+        token = token[2:-1]
+        if token.startswith("!"):
+            token = token[1:]
+    if not token.isdigit():
+        return None
+    parsed = int(token)
+    if parsed <= 0:
+        return None
+    return parsed
+
+
 class GitHubTickets(commands.Cog):
     """Configure GitHub Tickets"""
 
@@ -1199,11 +1214,8 @@ class GitHubTickets(commands.Cog):
         user_id: str,
     ) -> None:
         """Clear a developer profile"""
-        try:
-            parsed_user_id = int(user_id)
-        except (TypeError, ValueError):
-            parsed_user_id = 0
-        if parsed_user_id <= 0:
+        parsed_user_id = profile_user_id(user_id)
+        if parsed_user_id is None:
             await ctx.send(presentation.INVALID_USER_ID)
             return
         await self.store.save_profile(
