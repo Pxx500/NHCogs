@@ -1447,6 +1447,9 @@ class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_root_group_shows_leaf_commands_without_section_rows(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                self.assertTrue(honeypot.Honeypot.gif_detector_message_set.hidden)
+                self.assertFalse(honeypot.Honeypot.gif_detector_message_reset.hidden)
+                self.assertEqual(honeypot.Honeypot.gif_detector_message.usage, "[text]")
                 cog = object.__new__(honeypot.Honeypot)
                 configure = mock.AsyncMock()
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
@@ -1473,18 +1476,22 @@ class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
                 message_group = SimpleNamespace(
                     qualified_name="honeypot gifdetector message",
                     signature="",
-                    short_doc="Configure static warning text.",
+                    usage="[text]",
+                    short_doc="Show or set the static GIF warning",
+                    hidden=False,
                     commands=[
                         SimpleNamespace(
                             qualified_name="honeypot gifdetector message set",
                             signature="<text>",
                             short_doc="Set the message.",
+                            hidden=True,
                             commands=[],
                         ),
                         SimpleNamespace(
                             qualified_name="honeypot gifdetector message reset",
                             signature="",
                             short_doc="Reset the message.",
+                            hidden=False,
                             commands=[],
                         ),
                     ],
@@ -1520,8 +1527,12 @@ class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
                 rendered = "\n".join(field.value for field in embed.fields)
                 self.assertIn("?honeypot gifdetector channel add [channel]", rendered)
                 self.assertIn("?honeypot gifdetector channel remove [channel]", rendered)
-                self.assertIn("?honeypot gifdetector message set <text>", rendered)
+                self.assertIn(
+                    "`?honeypot gifdetector message [text]` - Show or set the static GIF warning",
+                    rendered,
+                )
                 self.assertIn("?honeypot gifdetector message reset", rendered)
+                self.assertNotIn("message set", rendered)
                 self.assertNotIn("`?honeypot gifdetector channel` —", rendered)
                 self.assertNotIn("`?honeypot gifdetector message` —", rendered)
 

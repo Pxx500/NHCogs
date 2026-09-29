@@ -35,6 +35,21 @@ from .ticket_views import TicketControls
 log = logging.getLogger(__name__)
 
 
+def profile_user_id(value: str) -> int | None:
+    """Return a positive user id from a mention or a digits-only token."""
+    token = value.strip()
+    if token.startswith("<@") and token.endswith(">"):
+        token = token[2:-1]
+        if token.startswith("!"):
+            token = token[1:]
+    if not token.isdigit():
+        return None
+    parsed = int(token)
+    if parsed <= 0:
+        return None
+    return parsed
+
+
 class GitHubTickets(commands.Cog):
     """Configure GitHub Tickets"""
 
@@ -798,12 +813,27 @@ class GitHubTickets(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
 
-    @githubtickets.group(name="channel", invoke_without_command=True)
-    async def githubtickets_channel(self, ctx: commands.Context) -> None:
-        """Configure the ticket channel"""
-        await self._send_group_overview(ctx)
+    @githubtickets.group(
+        name="channel",
+        invoke_without_command=True,
+        usage="[channel|clear]",
+    )
+    async def githubtickets_channel(
+        self,
+        ctx: commands.Context,
+        channel: discord.abc.GuildChannel | str | None = None,
+    ) -> None:
+        """Show, set, or clear the ticket channel"""
+        await self._configure_text_channel(
+            ctx,
+            channel,
+            raw_key="ticket_channel_id",
+            label="Ticket channel",
+            missing="Ticket channel is not configured",
+            require_text=True,
+        )
 
-    @githubtickets_channel.command(name="set")
+    @githubtickets_channel.command(name="set", hidden=True)
     async def githubtickets_channel_set(
         self,
         ctx: commands.Context,
@@ -813,41 +843,123 @@ class GitHubTickets(commands.Cog):
         if not isinstance(channel, discord.TextChannel):
             await ctx.send(presentation.TICKET_CHANNEL_MUST_BE_TEXT)
             return
-        await self.config.guild(ctx.guild).set_raw("ticket_channel_id", value=channel.id)
-        await ctx.send(
-            presentation.ticket_channel_set(channel.mention),
-            allowed_mentions=discord.AllowedMentions.none(),
+        await self._store_text_channel(
+            ctx,
+            channel,
+            raw_key="ticket_channel_id",
+            label="Ticket channel",
         )
 
-    @githubtickets_channel.command(name="clear")
-    async def githubtickets_channel_clear(self, ctx: commands.Context) -> None:
-        """Clear the ticket channel"""
-        await self.config.guild(ctx.guild).clear_raw("ticket_channel_id")
-        await ctx.send(presentation.TICKET_CHANNEL_CLEARED)
+    @githubtickets.group(
+        name="logchannel",
+        invoke_without_command=True,
+        usage="[channel|clear]",
+    )
+    async def githubtickets_logchannel(
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel | str | None = None,
+    ) -> None:
+        """Show, set, or clear the log channel"""
+        await self._configure_text_channel(
+            ctx,
+            channel,
+            raw_key="log_channel_id",
+            label="Log channel",
+            missing="Log channel is not configured",
+            require_text=False,
+        )
 
-    @githubtickets.group(name="logchannel", invoke_without_command=True)
-    async def githubtickets_logchannel(self, ctx: commands.Context) -> None:
-        """Configure the log channel"""
-        await self._send_group_overview(ctx)
-
-    @githubtickets_logchannel.command(name="set")
+    @githubtickets_logchannel.command(name="set", hidden=True)
     async def githubtickets_logchannel_set(
         self,
         ctx: commands.Context,
         channel: discord.TextChannel,
     ) -> None:
         """Set the log channel"""
-        await self.config.guild(ctx.guild).set_raw("log_channel_id", value=channel.id)
+        await self._store_text_channel(
+            ctx,
+            channel,
+            raw_key="log_channel_id",
+            label="Log channel",
+        )
+
+    async def _configure_text_channel(
+        self,
+        ctx: commands.Context,
+        channel: discord.abc.GuildChannel | str | None,
+        *,
+        raw_key: str,
+        label: str,
+        missing: str,
+        require_text: bool,
+    ) -> None:
+        if channel is None:
+            await self._show_text_channel(
+                ctx,
+                raw_key=raw_key,
+                label=label,
+                missing=missing,
+            )
+            return
+        if isinstance(channel, str):
+            if channel.casefold() != "clear":
+                raise commands.UserFeedbackCheckFailure("Provide a channel or use clear")
+            await self.config.guild(ctx.guild).clear_raw(raw_key)
+            cleared = (
+                presentation.TICKET_CHANNEL_CLEARED
+                if raw_key == "ticket_channel_id"
+                else presentation.LOG_CHANNEL_CLEARED
+            )
+            await ctx.send(cleared)
+            return
+        if require_text and not isinstance(channel, discord.TextChannel):
+            await ctx.send(presentation.TICKET_CHANNEL_MUST_BE_TEXT)
+            return
+        await self._store_text_channel(ctx, channel, raw_key=raw_key, label=label)
+
+    async def _show_text_channel(
+        self,
+        ctx: commands.Context,
+        *,
+        raw_key: str,
+        label: str,
+        missing: str,
+    ) -> None:
+        if not command_overview.group_overview_is_private(ctx):
+            await ctx.send(
+                "Run this command in a private moderator channel",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        guild_settings = settings.GuildSettings.from_mapping(
+            await self.config.guild(ctx.guild).all()
+        )
+        channel_id = getattr(guild_settings, raw_key)
+        text = missing if channel_id is None else f"{label}: <#{channel_id}>"
         await ctx.send(
-            presentation.log_channel_set(channel.mention),
+            text,
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    @githubtickets_logchannel.command(name="clear")
-    async def githubtickets_logchannel_clear(self, ctx: commands.Context) -> None:
-        """Clear the log channel"""
-        await self.config.guild(ctx.guild).clear_raw("log_channel_id")
-        await ctx.send(presentation.LOG_CHANNEL_CLEARED)
+    async def _store_text_channel(
+        self,
+        ctx: commands.Context,
+        channel: discord.abc.GuildChannel,
+        *,
+        raw_key: str,
+        label: str,
+    ) -> None:
+        await self.config.guild(ctx.guild).set_raw(raw_key, value=channel.id)
+        confirmation = (
+            presentation.ticket_channel_set(channel.mention)
+            if label == "Ticket channel"
+            else presentation.log_channel_set(channel.mention)
+        )
+        await ctx.send(
+            confirmation,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @githubtickets.group(name="role", invoke_without_command=True)
     async def githubtickets_role(self, ctx: commands.Context) -> None:
@@ -1102,11 +1214,8 @@ class GitHubTickets(commands.Cog):
         user_id: str,
     ) -> None:
         """Clear a developer profile"""
-        try:
-            parsed_user_id = int(user_id)
-        except (TypeError, ValueError):
-            parsed_user_id = 0
-        if parsed_user_id <= 0:
+        parsed_user_id = profile_user_id(user_id)
+        if parsed_user_id is None:
             await ctx.send(presentation.INVALID_USER_ID)
             return
         await self.store.save_profile(
