@@ -149,18 +149,67 @@ class OperationalSupport(commands.Cog):
                 "Run this command in a private moderator channel"
             )
 
-    @errors.group(name="channel", invoke_without_command=True)
-    async def error_channel(self, ctx: commands.Context) -> None:
-        """Configure the shared private error channel"""
-        await send_group_overview(
-            ctx, lambda: self._show_error_configuration(ctx, field="channel"), title="Error channel"
-        )
+    @errors.group(name="channel", invoke_without_command=True, usage="[channel|clear]")
+    async def error_channel(
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel | str | None = None,
+    ) -> None:
+        """Show, set, or clear the shared private error channel"""
+        if channel is None:
+            await self._show_nullable_setting(ctx, field="channel")
+            return
+        if isinstance(channel, str):
+            self._require_clear_word(channel, noun="channel")
+            await self._clear_error_channel(ctx)
+            return
+        await self._set_error_channel(ctx, channel)
 
-    @error_channel.command(name="set")
+    @error_channel.command(name="set", hidden=True)
     async def error_channel_set(
         self, ctx: commands.Context, channel: discord.TextChannel
     ) -> None:
         """Set the shared private error channel"""
+        await self._set_error_channel(ctx, channel)
+
+    @errors.group(name="maintainer", invoke_without_command=True, usage="[member|clear]")
+    async def error_maintainer(
+        self,
+        ctx: commands.Context,
+        member: discord.Member | str | None = None,
+    ) -> None:
+        """Show, set, or clear the error maintainer"""
+        if member is None:
+            await self._show_nullable_setting(ctx, field="maintainer")
+            return
+        if isinstance(member, str):
+            self._require_clear_word(member, noun="member")
+            await self._clear_error_maintainer(ctx)
+            return
+        await self._set_error_maintainer(ctx, member)
+
+    @error_maintainer.command(name="set", hidden=True)
+    async def error_maintainer_set(
+        self, ctx: commands.Context, member: discord.Member
+    ) -> None:
+        """Set the maintainer notified by technical failure alerts"""
+        await self._set_error_maintainer(ctx, member)
+
+    async def _show_nullable_setting(self, ctx: commands.Context, *, field: str) -> None:
+        if not channel_is_private(ctx.guild, ctx.channel):
+            await ctx.send(
+                "Run this command in a private moderator channel",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        await self._show_error_configuration(ctx, field=field)
+
+    @staticmethod
+    def _require_clear_word(value: str, *, noun: str) -> None:
+        if value.casefold() != "clear":
+            raise commands.UserFeedbackCheckFailure(f"Provide a {noun} or use clear")
+
+    async def _set_error_channel(self, ctx: commands.Context, channel: discord.TextChannel) -> None:
         self._require_private_configuration(ctx)
         if not channel_is_private(ctx.guild, channel):
             raise commands.UserFeedbackCheckFailure("The error channel must be hidden from `@everyone`")
@@ -170,33 +219,17 @@ class OperationalSupport(commands.Cog):
         await self.config.guild(ctx.guild).error_channel.set(channel.id)
         await ctx.send("Error channel updated", allowed_mentions=discord.AllowedMentions.none())
 
-    @error_channel.command(name="clear")
-    async def error_channel_clear(self, ctx: commands.Context) -> None:
-        """Stop sending technical failure alerts to Discord"""
+    async def _clear_error_channel(self, ctx: commands.Context) -> None:
         self._require_private_configuration(ctx)
         await self.config.guild(ctx.guild).error_channel.clear()
         await ctx.send("Error channel cleared", allowed_mentions=discord.AllowedMentions.none())
 
-    @errors.group(name="maintainer", invoke_without_command=True)
-    async def error_maintainer(self, ctx: commands.Context) -> None:
-        """Configure the maintainer notified by technical failure alerts"""
-        await send_group_overview(
-            ctx, lambda: self._show_error_configuration(ctx, field="maintainer"),
-            title="Error maintainer",
-        )
-
-    @error_maintainer.command(name="set")
-    async def error_maintainer_set(
-        self, ctx: commands.Context, member: discord.Member
-    ) -> None:
-        """Set the maintainer notified by technical failure alerts"""
+    async def _set_error_maintainer(self, ctx: commands.Context, member: discord.Member) -> None:
         self._require_private_configuration(ctx)
         await self.config.guild(ctx.guild).error_maintainer_id.set(member.id)
         await ctx.send("Error maintainer updated", allowed_mentions=discord.AllowedMentions.none())
 
-    @error_maintainer.command(name="clear")
-    async def error_maintainer_clear(self, ctx: commands.Context) -> None:
-        """Stop pinging a maintainer in technical failure alerts"""
+    async def _clear_error_maintainer(self, ctx: commands.Context) -> None:
         self._require_private_configuration(ctx)
         await self.config.guild(ctx.guild).error_maintainer_id.clear()
         await ctx.send("Error maintainer cleared", allowed_mentions=discord.AllowedMentions.none())

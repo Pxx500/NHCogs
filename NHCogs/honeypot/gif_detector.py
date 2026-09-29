@@ -1199,6 +1199,14 @@ async def gif_detector_mute_duration(
     )
 
 
+async def gif_detector_message_show(cog: Any, ctx: commands.Context) -> None:
+    message = await cog.config.guild(ctx.guild).gif_detector_secondary_message()
+    await ctx.send(
+        _("Secondary GIF warning: {message}").format(message=message),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
 async def gif_detector_message_set(
     cog: Any, ctx: commands.Context, *, text: str
 ) -> None:

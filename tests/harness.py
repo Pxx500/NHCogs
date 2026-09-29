@@ -393,6 +393,7 @@ def _command_decorator(kind, *, parent=None, **options):
             invoke_without_command=options.get("invoke_without_command", False),
         )
         command.usage = options.get("usage")
+        command.hidden = bool(options.get("hidden", False))
         if parent is not None:
             parent.commands.append(command)
         return command

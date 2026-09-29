@@ -29,14 +29,56 @@ def group_overview_is_private(ctx: commands.Context) -> bool:
     )
 
 
+def _is_hidden(command: typing.Any) -> bool:
+    return bool(getattr(command, "hidden", False))
+
+
+def _visible_children(command: typing.Any) -> list[typing.Any]:
+    return [
+        child
+        for child in getattr(command, "commands", ())
+        if not _is_hidden(child)
+    ]
+
+
+def public_usage(command: typing.Any) -> str:
+    """Usage mods should see.
+
+    ``usage`` is the public form. A nullable setting documents
+    ``[channel|clear]`` there even when the callback parameter is only named
+    ``channel``. Hidden ``set`` aliases are not part of that form.
+    """
+    usage = getattr(command, "usage", None)
+    if isinstance(usage, str) and usage.strip():
+        return usage.strip()
+    signature = getattr(command, "signature", "") or ""
+    return signature.strip() if isinstance(signature, str) else ""
+
+
 def descendant_leaf_commands(parent: commands.Group) -> typing.Iterator[typing.Any]:
-    for child in getattr(parent, "commands", ()):
-        if getattr(child, "hidden", False):
-            continue
-        descendants = getattr(child, "commands", ())
-        if descendants:
+    """Visible command lines under a nested group.
+
+    A group with a usage string is itself a public command. That keeps a
+    nullable value on one leaf: omit the argument to show it, pass the value
+    to store it, and pass ``clear`` to remove it. A hidden ``set`` child can
+    keep the old longer path working without appearing here. Visible leaves
+    such as ``reset`` are still listed. An argument-free group is only a
+    category, so the overview lists its visible descendants instead.
+
+    Toggles stay a separate nested command. Collections stay add/remove
+    (and rename where it exists) under an argument-free group. A scalar that
+    is only assigned stays a required-argument leaf; its parent overview is
+    the show screen. A show-or-set leaf stays optional when checking that one
+    setting is the normal action.
+    """
+    for child in _visible_children(parent):
+        usage = public_usage(child)
+        visible_descendants = _visible_children(child)
+        if usage:
+            yield child
+        if visible_descendants:
             yield from descendant_leaf_commands(child)
-        else:
+        elif not usage:
             yield child
 
 
@@ -117,7 +159,7 @@ async def send_group_overview(
     for child in children:
         if getattr(child, "hidden", False):
             continue
-        signature = getattr(child, "signature", "") or getattr(child, "usage", "") or ""
+        signature = public_usage(child)
         short_doc = getattr(child, "short_doc", "") or ""
         usage = f"{ctx.clean_prefix}{child.qualified_name}"
         if isinstance(signature, str) and signature.strip():

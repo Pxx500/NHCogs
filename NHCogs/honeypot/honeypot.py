@@ -1672,12 +1672,19 @@ class Honeypot(Cog):
         """Show, set, or clear the GIF diagnostics channel"""
         return await channel_routing.configure_single(self, ctx, "gif_debug", target)
 
-    @gif_detector.group(name="message", invoke_without_command=True)
-    async def gif_detector_message(self, ctx: commands.Context) -> None:
-        """Configure the static warning shown for additional GIFs"""
-        return await self._send_group_overview(ctx, gif_detector.config_gif_detector)
+    @gif_detector.group(name="message", invoke_without_command=True, usage="[text]")
+    async def gif_detector_message(
+        self,
+        ctx: commands.Context,
+        *,
+        text: str | None = None,
+    ) -> None:
+        """Show or set the static GIF warning"""
+        if text is None:
+            return await gif_detector.gif_detector_message_show(self, ctx)
+        return await gif_detector.gif_detector_message_set(self, ctx, text=text)
 
-    @gif_detector_message.command(name="set")
+    @gif_detector_message.command(name="set", hidden=True)
     async def gif_detector_message_set(
         self, ctx: commands.Context, *, text: str
     ) -> None:

@@ -92,10 +92,15 @@ class SharedErrorConfigurationTests(unittest.IsolatedAsyncioTestCase):
             }
         self.assertEqual(names, {
             "nhcogs", "nhcogs errors", "nhcogs errors channel",
-            "nhcogs errors channel set", "nhcogs errors channel clear",
+            "nhcogs errors channel set",
             "nhcogs errors maintainer", "nhcogs errors maintainer set",
-            "nhcogs errors maintainer clear",
         })
+        self.assertTrue(module.OperationalSupport.error_channel_set.hidden)
+        self.assertTrue(module.OperationalSupport.error_maintainer_set.hidden)
+        self.assertEqual(module.OperationalSupport.error_channel.usage, "[channel|clear]")
+        self.assertEqual(
+            module.OperationalSupport.error_maintainer.usage, "[member|clear]"
+        )
 
     async def test_set_commands_store_values_and_bare_groups_show_them(self):
         with shared_reporting() as module:
@@ -116,45 +121,41 @@ class SharedErrorConfigurationTests(unittest.IsolatedAsyncioTestCase):
             maintainer_embed = ctx.send.await_args_list[0].kwargs["embed"]
             self.assertEqual(maintainer_embed.fields[0].value, "Maintainer")
 
-    async def test_errors_overview_lists_set_and_clear(self):
+    async def test_errors_overview_lists_nullable_leaves_without_set(self):
         with shared_reporting() as module:
             restore_command_help(module)
-            ctx, _member = context(module)
+            ctx, member = context(module)
             support = module.OperationalSupport(ctx.bot)
             await module.OperationalSupport.errors.callback(support, ctx)
             rendered = rendered_messages(ctx)
             self.assertIn(
-                "`!nhcogs errors channel set <channel>` - Set the shared private error channel",
+                "`!nhcogs errors channel [channel|clear]` - Show, set, or clear the shared private error channel",
                 rendered,
             )
             self.assertIn(
-                "`!nhcogs errors channel clear` - Stop sending technical failure alerts to Discord",
+                "`!nhcogs errors maintainer [member|clear]` - Show, set, or clear the error maintainer",
                 rendered,
             )
-            self.assertIn(
-                "`!nhcogs errors maintainer set <member>` - Set the maintainer notified by technical failure alerts",
-                rendered,
-            )
-            self.assertIn(
-                "`!nhcogs errors maintainer clear` - Stop pinging a maintainer in technical failure alerts",
-                rendered,
-            )
+            self.assertNotIn("channel set", rendered)
+            self.assertNotIn("maintainer set", rendered)
 
             ctx.send.reset_mock()
             ctx.command = module.OperationalSupport.error_channel
-            await module.OperationalSupport.error_channel.callback(support, ctx)
-            channel_rendered = rendered_messages(ctx)
-            self.assertIn("`!nhcogs errors channel set <channel>`", channel_rendered)
-            self.assertIn("`!nhcogs errors channel clear`", channel_rendered)
-            self.assertNotIn("nhcogs errors maintainer", channel_rendered)
+            await module.OperationalSupport.error_channel.callback(support, ctx, "clear")
+            self.assertIsNone(await support.config.guild(ctx.guild).error_channel())
+            self.assertEqual(ctx.send.await_args.args[0], "Error channel cleared")
 
-            ctx.send.reset_mock()
-            ctx.command = module.OperationalSupport.error_maintainer
-            await module.OperationalSupport.error_maintainer.callback(support, ctx)
-            maintainer_rendered = rendered_messages(ctx)
-            self.assertIn("`!nhcogs errors maintainer set <member>`", maintainer_rendered)
-            self.assertIn("`!nhcogs errors maintainer clear`", maintainer_rendered)
-            self.assertNotIn("nhcogs errors channel", maintainer_rendered)
+            with self.assertRaisesRegex(
+                module.commands.UserFeedbackCheckFailure,
+                "Provide a member or use clear",
+            ):
+                await module.OperationalSupport.error_maintainer.callback(
+                    support, ctx, "nope"
+                )
+
+            await module.OperationalSupport.error_maintainer.callback(support, ctx, "clear")
+            self.assertIsNone(await support.config.guild(ctx.guild).error_maintainer_id())
+            self.assertEqual(member.display_name, "Maintainer")
 
     async def test_public_overview_does_not_read_settings_and_cannot_change_them(self):
         with shared_reporting() as module:
@@ -165,7 +166,12 @@ class SharedErrorConfigurationTests(unittest.IsolatedAsyncioTestCase):
             support.config.guild.assert_not_called()
             with self.assertRaises(module.commands.UserFeedbackCheckFailure):
                 await module.OperationalSupport.error_maintainer_set.callback(support, ctx, member)
+            await module.OperationalSupport.error_channel.callback(support, ctx)
             support.config.guild.assert_not_called()
+            self.assertEqual(
+                ctx.send.await_args.args[0],
+                "Run this command in a private moderator channel",
+            )
 
     async def test_private_commands_require_manage_messages(self):
         with shared_reporting() as module:
@@ -177,10 +183,8 @@ class SharedErrorConfigurationTests(unittest.IsolatedAsyncioTestCase):
                 for command in (
                     module.OperationalSupport.error_channel,
                     module.OperationalSupport.error_channel_set,
-                    module.OperationalSupport.error_channel_clear,
                     module.OperationalSupport.error_maintainer,
                     module.OperationalSupport.error_maintainer_set,
-                    module.OperationalSupport.error_maintainer_clear,
                 ):
                     self.assertEqual(await command.can_run(ctx), allowed)
 

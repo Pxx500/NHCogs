@@ -8,8 +8,8 @@ from unittest import mock
 from tests.githubtickets_loader import isolated_githubtickets_modules
 
 COMMAND_SIGNATURES = {
-    "githubtickets channel set": "<channel>",
-    "githubtickets logchannel set": "<channel>",
+    "githubtickets channel": "[channel|clear]",
+    "githubtickets logchannel": "[channel|clear]",
     "githubtickets role add": "<role>",
     "githubtickets role remove": "<role>",
     "githubtickets category add": "<name>",
@@ -45,12 +45,16 @@ def _registered_command_tree(cog_type, root):
         return SimpleNamespace(
             name=command.name,
             qualified_name=command.qualified_name,
-            signature=COMMAND_SIGNATURES.get(command.qualified_name, ""),
+            signature=COMMAND_SIGNATURES.get(command.qualified_name, "")
+            or getattr(command, "usage", "")
+            or "",
+            hidden=getattr(command, "hidden", False),
             short_doc=docstring.strip().splitlines()[0] if docstring.strip() else "",
             commands=[
                 clone(child)
                 for child in commands
                 if getattr(child, "parent", None) is command
+                and not getattr(child, "hidden", False)
             ],
         )
 
@@ -107,10 +111,8 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 "githubtickets",
                 "githubtickets channel",
                 "githubtickets channel set",
-                "githubtickets channel clear",
                 "githubtickets logchannel",
                 "githubtickets logchannel set",
-                "githubtickets logchannel clear",
                 "githubtickets role",
                 "githubtickets role add",
                 "githubtickets role remove",
@@ -143,6 +145,10 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             commands["githubtickets timing donotdisturb"].callback.__doc__,
             "Set the Do Not Disturb response time",
         )
+        self.assertTrue(commands["githubtickets channel set"].hidden)
+        self.assertTrue(commands["githubtickets logchannel set"].hidden)
+        self.assertEqual(commands["githubtickets channel"].usage, "[channel|clear]")
+        self.assertEqual(commands["githubtickets logchannel"].usage, "[channel|clear]")
 
     async def test_cog_check_guards_every_prefix_command_in_guilds(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
@@ -213,6 +219,9 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
         for qualified_name in deep_names:
             self.assertNotIn(f"??{qualified_name}", rendered_commands)
         self.assertIn("??githubtickets maxpings <count>", rendered_commands)
+        self.assertIn("??githubtickets channel [channel|clear]", rendered_commands)
+        self.assertIn("??githubtickets logchannel [channel|clear]", rendered_commands)
+        self.assertNotIn("channel set", rendered_commands)
         self.assertIn("Run a category below", command_embed.description)
 
         for call in ctx.send.await_args_list:
@@ -261,8 +270,11 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 command
                 for command in commands
                 if command.qualified_name != "githubtickets"
+                and command.qualified_name
+                not in {"githubtickets channel", "githubtickets logchannel"}
                 and any(
                     getattr(child, "parent", None) is command
+                    and not getattr(child, "hidden", False)
                     for child in commands
                 )
             ]
@@ -416,8 +428,8 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             channel = FakeTextChannel()
             role = SimpleNamespace(id=200, mention="@GT:NH Devs")
 
-            await cog.githubtickets_channel_set(ctx, channel)
-            await cog.githubtickets_logchannel_set(ctx, channel)
+            await cog.githubtickets_channel(ctx, channel)
+            await cog.githubtickets_logchannel(ctx, channel)
             await cog.githubtickets_role_add(ctx, role)
             await cog.githubtickets_category_add(ctx, name="Rendring")
             await cog.githubtickets_category_rename(
@@ -427,7 +439,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             )
             await cog.githubtickets_maxpings(ctx, count=5)
             await cog.githubtickets_timing_donotdisturb(ctx, duration="8h")
-            await cog.githubtickets_logchannel_clear(ctx)
+            await cog.githubtickets_logchannel(ctx, "clear")
 
             config = await cog.config.guild_from_id(42).all()
             categories = await cog.store.list_categories(42)
