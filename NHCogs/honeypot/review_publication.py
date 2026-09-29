@@ -1794,7 +1794,7 @@ async def _case_review_bulk_interaction(
     expected_keys: tuple[AttachmentKey, ...] = (),
 ) -> bool:
     if not _case_review_has_permission(interaction):
-        await _case_review_error(interaction, _("You do not have permission to review this case."))
+        await _case_review_error(interaction, _("You do not have permission to review this case"))
         return False
     snapshot = await asyncio.to_thread(cog._case_store.get_case, case_id)
     pending_feedback = _pending_feedback_items(
@@ -1815,7 +1815,7 @@ async def _case_review_bulk_interaction(
         return False
     if action in {"tp", "fp"} and not confirmed:
         await interaction.response.send_message(
-            _("Confirm this bulk image decision."),
+            _("Confirm this bulk image decision"),
             view=DetectionBulkConfirmationView(
                 cog,
                 case_id,
@@ -1860,7 +1860,7 @@ async def _case_review_message_bulk_interaction(
 ) -> bool:
     if not _case_review_has_permission(interaction):
         await _case_review_error(
-            interaction, _("You do not have permission to review this case.")
+            interaction, _("You do not have permission to review this case")
         )
         return False
     snapshot = await asyncio.to_thread(cog._case_store.get_case, case_id)
@@ -1883,7 +1883,7 @@ async def _case_review_message_bulk_interaction(
         return False
     if action in {"tp", "fp"} and not confirmed:
         await interaction.response.send_message(
-            _("Confirm this message's image decision."),
+            _("Confirm this message's image decision"),
             view=DetectionBulkConfirmationView(
                 cog,
                 case_id,
@@ -1926,7 +1926,7 @@ async def _case_review_moderation_interaction(
 ) -> bool:
     if not _case_review_has_action_permission(interaction, action):
         await _case_review_error(
-            interaction, _("You do not have permission to review this case.")
+            interaction, _("You do not have permission to review this case")
         )
         return False
     await _case_review_defer(interaction)
@@ -1991,7 +1991,7 @@ async def _case_review_attachment_interaction(
     cog, interaction: discord.Interaction, key: AttachmentKey, action: str
 ) -> None:
     if not _case_review_has_permission(interaction):
-        await _case_review_error(interaction, _("You do not have permission to review this case."))
+        await _case_review_error(interaction, _("You do not have permission to review this case"))
         return
     await _case_review_defer(interaction)
     try:
@@ -2014,7 +2014,7 @@ async def _case_review_individual_prompt(
     message_sequence: int | None = None,
 ) -> None:
     if not _case_review_has_permission(interaction):
-        await _case_review_error(interaction, _("You do not have permission to review this case."))
+        await _case_review_error(interaction, _("You do not have permission to review this case"))
         return
     snapshot = await asyncio.to_thread(cog._case_store.get_case, case_id)
     feedback_items = tuple(
@@ -2032,7 +2032,7 @@ async def _case_review_individual_prompt(
         )
         return
     await interaction.response.send_message(
-        _("Choose an image to review."),
+        _("Choose an image to review"),
         view=DetectionIndividualView(cog, feedback_items),
         ephemeral=True,
     )

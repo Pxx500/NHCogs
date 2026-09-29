@@ -87,7 +87,7 @@ async def max_age(cog, ctx: commands.Context, hours: int = None) -> None:
         await ctx.send(_("Joinwatch max age: {value} hours").format(value=current))
     elif hours < 1 or hours > JOINWATCH_MAX_ACCOUNT_AGE_HOURS:
         await ctx.send(
-            _("Hours must be between 1 and {maximum}.").format(
+            _("Hours must be between 1 and {maximum}").format(
                 maximum=JOINWATCH_MAX_ACCOUNT_AGE_HOURS
             )
         )
@@ -113,9 +113,18 @@ async def joinwatch_autorole_toggle(
 
 
 async def joinwatch_autorole_role(
-    cog, ctx: commands.Context, role: discord.Role = None
+    cog, ctx: commands.Context, role: discord.Role | str | None = None
 ) -> None:
+    if isinstance(role, str):
+        if role.casefold() != "clear":
+            raise commands.UserFeedbackCheckFailure(_("Provide a role or use clear"))
+        await cog.config.guild(ctx.guild).joinwatch_auto_role_id.set(None)
+        await ctx.send(_("Joinwatch auto-role cleared"))
+        return
     if role is None:
+        if not cog._channel_is_private(ctx.guild, ctx.channel):
+            await ctx.send(_("Run this command in a private moderator channel"))
+            return
         role_id = await cog.config.guild(ctx.guild).joinwatch_auto_role_id()
         configured_role = ctx.guild.get_role(role_id) if role_id else None
         await ctx.send(
@@ -140,7 +149,7 @@ async def joinwatch_autorole_timer(
             _("Joinwatch auto-role timer: {value} minutes").format(value=current)
         )
     elif minutes < 1 or minutes > JOINWATCH_MAX_TIMER_MINUTES:
-        await ctx.send(_("Timer must be between 1 and 10080 minutes."))
+        await ctx.send(_("Timer must be between 1 and 10080 minutes"))
     else:
         old_minutes = await cog.config.guild(ctx.guild).joinwatch_auto_role_timer_minutes()
         await cog.config.guild(ctx.guild).joinwatch_auto_role_timer_minutes.set(minutes)
@@ -302,7 +311,7 @@ async def joinwatch_autorole_randomize_min_time(
             )
         )
     elif minutes < 1 or minutes > JOINWATCH_MAX_TIMER_MINUTES:
-        await ctx.send(_("Minimum delay must be between 1 and 10080 minutes."))
+        await ctx.send(_("Minimum delay must be between 1 and 10080 minutes"))
     else:
         current_max = (
             await cog.config.guild(ctx.guild).joinwatch_auto_role_random_delay_max_minutes()
@@ -340,7 +349,7 @@ async def joinwatch_autorole_randomize_max_time(
             )
         )
     elif minutes < 1 or minutes > JOINWATCH_MAX_TIMER_MINUTES:
-        await ctx.send(_("Maximum delay must be between 1 and 10080 minutes."))
+        await ctx.send(_("Maximum delay must be between 1 and 10080 minutes"))
     else:
         current_min = (
             await cog.config.guild(ctx.guild).joinwatch_auto_role_random_delay_min_minutes()
@@ -348,7 +357,7 @@ async def joinwatch_autorole_randomize_max_time(
         if minutes < current_min:
             await ctx.send(
                 _(
-                    "Maximum delay must be greater than or equal to the current minimum ({value} minutes)."
+                    "Maximum delay must be greater than or equal to the current minimum ({value} minutes)"
                 ).format(value=current_min)
             )
             return

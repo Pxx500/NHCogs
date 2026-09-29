@@ -764,14 +764,14 @@ async def _scan_case_message_images(
 async def imagescan_add(cog, ctx: commands.Context) -> None:
     reference = getattr(ctx.message, "reference", None)
     if reference is None or reference.message_id is None:
-        await ctx.send(_("Please reply to an offending message."))
+        await ctx.send(_("Please reply to an offending message"))
         return
     target = reference.resolved
     if not isinstance(target, discord.Message):
         try:
             target = await ctx.channel.fetch_message(reference.message_id)
         except (discord.HTTPException, discord.NotFound, discord.Forbidden):
-            await ctx.send(_("I couldn't fetch the replied message."))
+            await ctx.send(_("I couldn't fetch the replied message"))
             return
     attachments = [
         attachment
@@ -816,7 +816,7 @@ async def imagescan_add(cog, ctx: commands.Context) -> None:
             ctx.guild.id,
             guild_settings.imagescan_detector_threshold,
         )
-        await ctx.send(_("Rejected: TP/FP overlap.\nModel unchanged."))
+        await ctx.send(_("Rejected: TP/FP overlap.\nModel unchanged"))
         return
     parts = []
     if inserted:
@@ -842,19 +842,19 @@ async def imagescan_dropfile(cog, ctx: commands.Context, identifier: str) -> Non
     rows = await _imagescan_sample_rows(cog, ctx.guild.id)
     sample = match_imagescan_sample_identifier(rows, identifier)
     if sample is None:
-        await ctx.send(_("No unique active image sample matched `{identifier}`.").format(identifier=identifier))
+        await ctx.send(_("No unique active image sample matched `{identifier}`").format(identifier=identifier))
         return
     file_path = sample.get("file_path")
     deleted = False
     if file_path:
         path = Path(str(file_path))
         if not is_imagescan_sample_path_safe(cog._imagescan_files_path, path):
-            await ctx.send(_("Refused to touch a file outside image scan storage."))
+            await ctx.send(_("Refused to touch a file outside image scan storage"))
             return
         try:
             deleted = await asyncio.to_thread(_delete_imagescan_sample_file, path)
         except OSError:
-            await ctx.send(_("Failed to delete sample file."))
+            await ctx.send(_("Failed to delete sample file"))
             return
     await _imagescan_update_sample_file(cog, ctx.guild.id, str(sample["sample_id"]), None, 0)
     await ctx.send(
@@ -870,19 +870,19 @@ async def imagescan_remove(cog, ctx: commands.Context, identifier: str) -> None:
     rows = await _imagescan_sample_rows(cog, ctx.guild.id)
     sample = match_imagescan_sample_identifier(rows, identifier)
     if sample is None:
-        await ctx.send(_("No unique active image sample matched `{identifier}`.").format(identifier=identifier))
+        await ctx.send(_("No unique active image sample matched `{identifier}`").format(identifier=identifier))
         return
     file_path = sample.get("file_path")
     deleted_file = False
     if file_path:
         path = Path(str(file_path))
         if not is_imagescan_sample_path_safe(cog._imagescan_files_path, path):
-            await ctx.send(_("Refused to touch a file outside image scan storage."))
+            await ctx.send(_("Refused to touch a file outside image scan storage"))
             return
         try:
             deleted_file = await asyncio.to_thread(_delete_imagescan_sample_file, path)
         except OSError:
-            await ctx.send(_("Failed to delete sample file."))
+            await ctx.send(_("Failed to delete sample file"))
             return
     await _imagescan_delete_sample(cog, ctx.guild.id, str(sample["sample_id"]))
     raw_config = await cog.config.guild(ctx.guild).all()
@@ -955,7 +955,7 @@ async def imagescan_detector_threshold(cog, ctx: commands.Context, value: int = 
         )
         return
     if value < 0 or value > 100:
-        await ctx.send(_("Threshold must be between 0 and 100."))
+        await ctx.send(_("Threshold must be between 0 and 100"))
         return
     await cog.config.guild(ctx.guild).imagescan_detector_threshold.set(value)
     await cog._imagescan_model_state(ctx.guild.id, value)
@@ -970,7 +970,7 @@ async def imagescan_model_rebuild(cog, ctx: commands.Context) -> None:
         guild_settings.imagescan_detector_threshold,
     )
     if not state["valid"]:
-        await ctx.send(_("Rejected: TP/FP overlap.\nModel unchanged."))
+        await ctx.send(_("Rejected: TP/FP overlap.\nModel unchanged"))
         return
     await ctx.send(
         _("Model rebuilt. Effective threshold: {threshold}").format(
@@ -1057,7 +1057,7 @@ async def imagescan_import_tp_zip(cog, ctx: commands.Context) -> None:
         if (attachment.filename or "").lower().endswith(".zip")
     ]
     if not zip_attachments:
-        await ctx.send(_("Attach a .zip file or reply to a message with a .zip file."))
+        await ctx.send(_("Attach a .zip file or reply to a message with a .zip file"))
         return
     progress = await ctx.send(_("Importing zip file(s)..."))
     inserted = duplicates = conflicts = errors = skipped = 0

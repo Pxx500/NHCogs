@@ -168,7 +168,7 @@ def _require_guild_role(
     if role is None:
         raise commands.UserFeedbackCheckFailure(
             f"{report_name} is misconfigured: {role_label} role "
-            f"({role_id}) was not found in this server."
+            f"({role_id}) was not found in this server"
         )
     return role
 
@@ -2569,7 +2569,7 @@ class NHMisc(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
     async def achievement(self, ctx: commands.Context) -> None:
-        """Manage member achievements."""
+        """Manage member achievements"""
         embed = discord.Embed(
             title="Achievements",
             description=(
@@ -2599,7 +2599,7 @@ class NHMisc(commands.Cog):
         ctx: commands.Context,
         message_link: str,
     ) -> None:
-        """Open a review for attaching the linked message as a Gate proof."""
+        """Open a review for attaching the linked message as a Gate proof"""
         self._require_private_achievement_channel(ctx)
         if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
             raise commands.UserFeedbackCheckFailure(
@@ -2686,7 +2686,7 @@ class NHMisc(commands.Cog):
     async def achievement_create(
         self, ctx: commands.Context, *, display_name: str
     ) -> None:
-        """Create a boolean achievement without a Discord role."""
+        """Create a boolean achievement without a Discord role"""
         if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
             raise commands.UserFeedbackCheckFailure(
                 "Achievement data is still initializing. Run `!rolesync discord` first"
@@ -2717,7 +2717,7 @@ class NHMisc(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
     async def achievement_list(self, ctx: commands.Context) -> None:
-        """List achievement names, stable keys, and optional role bindings."""
+        """List achievement names, stable keys, and optional role bindings"""
         self._require_private_achievement_channel(ctx)
         if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
             raise commands.UserFeedbackCheckFailure(
@@ -2748,7 +2748,7 @@ class NHMisc(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
     async def achievement_missingproofs(self, ctx: commands.Context) -> None:
-        """Export current Gate holders whose recorded Gates lack proof links."""
+        """Export current Gate holders whose recorded Gates lack proof links"""
         self._require_private_achievement_export_channel(ctx)
         if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
             raise commands.UserFeedbackCheckFailure(
@@ -2834,7 +2834,7 @@ class NHMisc(commands.Cog):
         *,
         display_name: str,
     ) -> None:
-        """Change an achievement's display name without changing its key."""
+        """Change an achievement's display name without changing its key"""
         self._require_private_achievement_channel(ctx)
         if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
             raise commands.UserFeedbackCheckFailure(
@@ -2867,7 +2867,7 @@ class NHMisc(commands.Cog):
         ctx: commands.Context,
         achievement_key: str,
     ) -> None:
-        """Permanently delete an unbound achievement and all of its awards."""
+        """Permanently delete an unbound achievement and all of its awards"""
         self._require_private_achievement_channel(ctx)
         if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
             raise commands.UserFeedbackCheckFailure(
@@ -2929,7 +2929,7 @@ class NHMisc(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
     async def achievement_role(self, ctx: commands.Context) -> None:
-        """Manage optional Discord role bindings for achievements."""
+        """Manage optional Discord role bindings for achievements"""
         embed = discord.Embed(
             title="Achievement roles",
             description="Manage optional Discord role bindings for achievements",
@@ -2939,7 +2939,6 @@ class NHMisc(commands.Cog):
             value=self._format_direct_commands(
                 ctx,
                 preferred_order=("bind", "unbind", "replace", "list"),
-                include_descriptions=True,
             ),
             inline=False,
         )
@@ -2954,7 +2953,7 @@ class NHMisc(commands.Cog):
     async def achievement_role_bind(
         self, ctx: commands.Context, role: discord.Role
     ) -> None:
-        """Choose an achievement and bind it to an existing Discord role."""
+        """Choose an achievement and bind it to an existing Discord role"""
         if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
             raise commands.UserFeedbackCheckFailure(
                 "Achievement data is still initializing. Run `!rolesync discord` first"
@@ -3156,7 +3155,7 @@ class NHMisc(commands.Cog):
     async def achievement_role_unbind(
         self, ctx: commands.Context, role: discord.Role
     ) -> None:
-        """Stop tracking a Discord role without deleting achievement history."""
+        """Stop tracking a Discord role without deleting achievement history"""
         if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
             raise commands.UserFeedbackCheckFailure(
                 "Achievement data is still initializing. Run `!rolesync discord` first"
@@ -3191,7 +3190,7 @@ class NHMisc(commands.Cog):
         old_role: discord.Role,
         new_role: discord.Role,
     ) -> None:
-        """Move an achievement binding to another Discord role."""
+        """Move an achievement binding to another Discord role"""
         if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
             raise commands.UserFeedbackCheckFailure(
                 "Achievement data is still initializing. Run `!rolesync discord` first"
@@ -3417,7 +3416,7 @@ class NHMisc(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
     async def achievement_role_list(self, ctx: commands.Context) -> None:
-        """List all active achievement role bindings."""
+        """List all active achievement role bindings"""
         if not await self._achievement_store.is_bootstrapped(ctx.guild.id):
             raise commands.UserFeedbackCheckFailure(
                 "Achievement data is still initializing. Run `!rolesync discord` first"
@@ -3441,7 +3440,7 @@ class NHMisc(commands.Cog):
         ctx: commands.Context,
         *members: discord.Member,
     ) -> None:
-        """Review and revoke achievements shared by all selected members."""
+        """Review and revoke achievements shared by all selected members"""
         unique_members = tuple({member.id: member for member in members}.values())
         if not unique_members:
             raise commands.UserFeedbackCheckFailure("Mention at least one user")
@@ -3658,7 +3657,7 @@ class NHMisc(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
     async def rolesync(self, ctx: commands.Context) -> None:
-        """Initialize or reconcile the role analytics database."""
+        """Initialize or reconcile the role analytics database"""
         if self._role_analytics.is_syncing(ctx.guild.id):
             raise commands.UserFeedbackCheckFailure(
                 "Role synchronization is already running"
@@ -3857,7 +3856,7 @@ class NHMisc(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
     async def rolesync_discord(self, ctx: commands.Context) -> None:
-        """Replace achievement state with the current Discord role snapshot."""
+        """Replace achievement state with the current Discord role snapshot"""
         guild_id = ctx.guild.id
         if guild_id in self._achievement_syncing_guilds:
             raise commands.UserFeedbackCheckFailure(
@@ -3964,7 +3963,7 @@ class NHMisc(commands.Cog):
     @commands.has_permissions(manage_messages=True)
     @commands.cooldown(1, 5, commands.BucketType.user)
     async def rolestats(self, ctx: commands.Context, *, expression: str) -> None:
-        """Count members matching a boolean role expression."""
+        """Count members matching a boolean role expression"""
         parsed, predicate_sql, parameters = self._prepare_role_expression(
             ctx.guild, expression
         )
@@ -3987,7 +3986,7 @@ class NHMisc(commands.Cog):
     @commands.has_permissions(manage_messages=True)
     @commands.cooldown(1, 10, commands.BucketType.guild)
     async def roleusers(self, ctx: commands.Context, *, expression: str) -> None:
-        """Export members matching a boolean role expression."""
+        """Export members matching a boolean role expression"""
         self._require_private_role_export_channel(ctx)
         parsed, predicate_sql, parameters = self._prepare_role_expression(
             ctx.guild, expression
@@ -4077,7 +4076,6 @@ class NHMisc(commands.Cog):
         *,
         preferred_order: tuple[str, ...] = (),
         expand_singletons: bool = False,
-        include_descriptions: bool = False,
     ) -> str:
         order = {name: index for index, name in enumerate(preferred_order)}
         commands_to_render = sorted(
@@ -4112,12 +4110,12 @@ class NHMisc(commands.Cog):
             usage = f"{ctx.clean_prefix}{rendered_command.qualified_name}"
             if signature:
                 usage = f"{usage} {signature}"
-            lines.append(f"`{usage}`")
-            if include_descriptions:
-                description = rendered_command.short_doc.strip()
-                if description:
-                    lines.append(description)
-        return "\n".join(lines) or "No subcommands available."
+            description = rendered_command.short_doc.strip()
+            line = f"`{usage}`"
+            if description:
+                line = f"{line} - {description}"
+            lines.append(line)
+        return "\n".join(lines) or "No subcommands available"
 
     @staticmethod
     def _configured_channel_label(
@@ -4134,12 +4132,12 @@ class NHMisc(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
     async def botproxy(self, ctx: commands.Context) -> None:
-        """Create and configure private Bot Proxy sessions."""
+        """Create and configure private Bot Proxy sessions"""
         from .bot_proxy_workflow import BOT_PROXY_WORKFLOW_BUTTONS
 
         embed = discord.Embed(
             title="Bot Proxy",
-            description="Private moderator workflows for messages sent by the bot.",
+            description="Private moderator workflows for messages sent by the bot",
         )
         embed.add_field(
             name="Commands",
@@ -4165,7 +4163,7 @@ class NHMisc(commands.Cog):
         ctx: commands.Context,
         enabled: bool | None = None,
     ) -> None:
-        """Show or set whether Bot Proxy is enabled for this server."""
+        """Show or set whether Bot Proxy is enabled for this server"""
         if self._channel_allows_everyone(ctx.channel, ctx.guild):
             raise commands.UserFeedbackCheckFailure(
                 "Run this command in a private moderator channel"
@@ -4182,7 +4180,7 @@ class NHMisc(commands.Cog):
 
     @botproxy.command(name="create")
     async def botproxy_create(self, ctx: commands.Context) -> None:
-        """Create an additional empty Bot Proxy session."""
+        """Create an additional empty Bot Proxy session"""
         if self._channel_allows_everyone(ctx.channel, ctx.guild):
             raise commands.UserFeedbackCheckFailure(
                 "Run this command in a private moderator channel"
@@ -4252,7 +4250,7 @@ class NHMisc(commands.Cog):
         ctx: commands.Context,
         channel: discord.TextChannel | str | None = None,
     ) -> None:
-        """Show, set, or clear the private Bot Proxy session channel."""
+        """Show, set, or clear the private Bot Proxy session channel"""
         if self._channel_allows_everyone(ctx.channel, ctx.guild):
             raise commands.UserFeedbackCheckFailure(
                 "Run this command in a private moderator channel"
@@ -4275,7 +4273,7 @@ class NHMisc(commands.Cog):
             return
         if self._channel_allows_everyone(channel, ctx.guild):
             raise commands.UserFeedbackCheckFailure(
-                "Configure a channel that is private from @everyone"
+                "Configure a channel that is private from `@everyone`"
             )
         permissions = channel.permissions_for(ctx.guild.me)
         required = (
@@ -4304,7 +4302,7 @@ class NHMisc(commands.Cog):
         ctx: commands.Context,
         enabled: bool | None = None,
     ) -> None:
-        """Show or set whether closing a Bot Proxy session deletes its thread."""
+        """Show or set whether closing a Bot Proxy session deletes its thread"""
         if self._channel_allows_everyone(ctx.channel, ctx.guild):
             raise commands.UserFeedbackCheckFailure(
                 "Run this command in a private moderator channel"
@@ -4333,7 +4331,7 @@ class NHMisc(commands.Cog):
     @nhmisc.group(name="roleanalytics", invoke_without_command=True)
     @commands.has_permissions(manage_messages=True)
     async def nhmisc_roleanalytics(self, ctx: commands.Context) -> None:
-        """Configure role analytics."""
+        """Configure role analytics"""
         state = await self._role_analytics_store.get_state(ctx.guild.id)
         member_count = (
             f"{state.source_member_count:,}"
@@ -4352,14 +4350,14 @@ class NHMisc(commands.Cog):
 
     @nhmisc_roleanalytics.command(name="disable")
     async def nhmisc_roleanalytics_disable(self, ctx: commands.Context) -> None:
-        """Disable role analytics and delete this guild's analytics database."""
+        """Disable role analytics and delete this guild's analytics database"""
         await self._role_analytics.disable_guild(ctx.guild.id)
         await ctx.send("Role analytics disabled")
 
     @nhmisc.group(name="log", invoke_without_command=True)
     @commands.has_permissions(manage_messages=True)
     async def nhmisc_log(self, ctx: commands.Context) -> None:
-        """Configure NHMisc logging destinations."""
+        """Configure NHMisc logging destinations"""
         config = await self.config.guild(ctx.guild).all()
         await self._send_nhmisc_overview(
             ctx,
@@ -4388,60 +4386,89 @@ class NHMisc(commands.Cog):
         channel_id = await getattr(self.config.guild(ctx.guild), config_key)()
         embed = discord.Embed(title=title)
         current = (
-            "Run this command in a channel hidden from @everyone "
-            "to view the current configuration."
+            "Run this command in a channel hidden from `@everyone` "
+            "to view the current configuration"
             if self._channel_is_public(ctx)
             else f"Channel: {self._configured_channel_label(ctx.guild, channel_id)}"
         )
         embed.add_field(name="Current configuration", value=current, inline=False)
         await ctx.send(embed=embed)
 
-    @nhmisc_log.command(name="voice")
+    async def _handle_log_channel_word_or_show(
+        self,
+        ctx: commands.Context,
+        channel: str | None,
+        *,
+        title: str,
+        config_key: str,
+        cleared: str,
+    ) -> None:
+        if isinstance(channel, str):
+            if channel.casefold() != "clear":
+                raise commands.UserFeedbackCheckFailure("Provide a channel or use clear")
+            await getattr(self.config.guild(ctx.guild), config_key).set(None)
+            await ctx.send(cleared, allowed_mentions=discord.AllowedMentions.none())
+            return
+        await self._show_log_destination(ctx, title=title, config_key=config_key)
+
+    @nhmisc_log.command(name="voice", usage="[channel|clear]")
     async def nhmisc_log_voice(
         self,
         ctx: commands.Context,
-        channel: discord.TextChannel | None = None,
+        channel: discord.TextChannel | str | None = None,
     ) -> None:
-        """Show or set the text channel used for voice event logs."""
-        if channel is None:
-            await self._show_log_destination(
-                ctx, title="Voice logging", config_key="voice_log_channel"
+        """Show, set, or clear the text channel used for voice event logs"""
+        if channel is None or isinstance(channel, str):
+            await self._handle_log_channel_word_or_show(
+                ctx,
+                channel,
+                title="Voice logging",
+                config_key="voice_log_channel",
+                cleared="Voice log channel cleared",
             )
             return
         missing_permissions = self._support.missing_log_permissions(ctx.guild, channel)
         if missing_permissions is not None:
             raise commands.UserFeedbackCheckFailure(missing_permissions)
         await self.config.guild(ctx.guild).voice_log_channel.set(channel.id)
-        await ctx.send(f"Voice log channel set to {channel.mention}.")
+        await ctx.send(f"Voice log channel set to {channel.mention}")
 
-    @nhmisc_log.command(name="alert")
+    @nhmisc_log.command(name="alert", usage="[channel|clear]")
     async def nhmisc_log_alert(
         self,
         ctx: commands.Context,
-        channel: discord.TextChannel | None = None,
+        channel: discord.TextChannel | str | None = None,
     ) -> None:
-        """Show or set the text channel used for alert logs."""
-        if channel is None:
-            await self._show_log_destination(
-                ctx, title="Alert logging", config_key="alert_channel"
+        """Show, set, or clear the text channel used for alert logs"""
+        if channel is None or isinstance(channel, str):
+            await self._handle_log_channel_word_or_show(
+                ctx,
+                channel,
+                title="Alert logging",
+                config_key="alert_channel",
+                cleared="Alert channel cleared",
             )
             return
         missing_permissions = self._support.missing_log_permissions(ctx.guild, channel)
         if missing_permissions is not None:
             raise commands.UserFeedbackCheckFailure(missing_permissions)
         await self.config.guild(ctx.guild).alert_channel.set(channel.id)
-        await ctx.send(f"Alert channel set to {channel.mention}.")
+        await ctx.send(f"Alert channel set to {channel.mention}")
 
-    @nhmisc_log.command(name="maintenance")
+    @nhmisc_log.command(name="maintenance", usage="[channel|clear]")
     async def nhmisc_log_maintenance(
         self,
         ctx: commands.Context,
-        channel: discord.TextChannel | None = None,
+        channel: discord.TextChannel | str | None = None,
     ) -> None:
-        """Show or set the private channel used for maintenance logs."""
-        if channel is None:
-            await self._show_log_destination(
-                ctx, title="Maintenance logging", config_key="maintenance_channel"
+        """Show, set, or clear the private channel used for maintenance logs"""
+        if channel is None or isinstance(channel, str):
+            await self._handle_log_channel_word_or_show(
+                ctx,
+                channel,
+                title="Maintenance logging",
+                config_key="maintenance_channel",
+                cleared="Maintenance channel cleared",
             )
             return
         missing_permissions = self._support.missing_log_permissions(
@@ -4453,24 +4480,26 @@ class NHMisc(commands.Cog):
             raise commands.UserFeedbackCheckFailure(missing_permissions)
         if self._channel_allows_everyone(channel, ctx.guild):
             raise commands.UserFeedbackCheckFailure(
-                "Configure a channel that is private from @everyone"
+                "Configure a channel that is private from `@everyone`"
             )
 
         await self.config.guild(ctx.guild).maintenance_channel.set(channel.id)
-        await ctx.send(f"Maintenance channel set to {channel.mention}.")
+        await ctx.send(f"Maintenance channel set to {channel.mention}")
 
-    @nhmisc_log.command(name="moderation")
+    @nhmisc_log.command(name="moderation", usage="[channel|clear]")
     async def nhmisc_log_moderation(
         self,
         ctx: commands.Context,
-        channel: discord.TextChannel | None = None,
+        channel: discord.TextChannel | str | None = None,
     ) -> None:
-        """Show or set the private channel used for moderator action logs."""
-        if channel is None:
-            await self._show_log_destination(
+        """Show, set, or clear the private channel used for moderator action logs"""
+        if channel is None or isinstance(channel, str):
+            await self._handle_log_channel_word_or_show(
                 ctx,
+                channel,
                 title="Moderator action logging",
                 config_key="moderation_log_channel",
+                cleared="Moderator action channel cleared",
             )
             return
         missing_permissions = self._support.missing_log_permissions(ctx.guild, channel)
@@ -4478,16 +4507,16 @@ class NHMisc(commands.Cog):
             raise commands.UserFeedbackCheckFailure(missing_permissions)
         if self._channel_allows_everyone(channel, ctx.guild):
             raise commands.UserFeedbackCheckFailure(
-                "Configure a channel that is private from @everyone"
+                "Configure a channel that is private from `@everyone`"
             )
 
         await self.config.guild(ctx.guild).moderation_log_channel.set(channel.id)
-        await ctx.send(f"Moderator action channel set to {channel.mention}.")
+        await ctx.send(f"Moderator action channel set to {channel.mention}")
 
     @nhmisc.group(name="vcjumping", invoke_without_command=True)
     @commands.has_permissions(manage_messages=True)
     async def nhmisc_vcjumping(self, ctx: commands.Context) -> None:
-        """Configure voice channel jumping detection."""
+        """Configure voice channel jumping detection"""
         config = await self.config.guild(ctx.guild).all()
         await self._send_nhmisc_overview(
             ctx,
@@ -4500,26 +4529,26 @@ class NHMisc(commands.Cog):
 
     @nhmisc_vcjumping.command(name="visits")
     async def nhmisc_vcjumping_visits(self, ctx: commands.Context, count: int) -> None:
-        """Set how many voice channel entries trigger VC jumping alerts."""
+        """Set how many voice channel entries trigger VC jumping alerts"""
         if count < 2:
-            raise commands.UserFeedbackCheckFailure("VC jumping visit count must be at least 2.")
+            raise commands.UserFeedbackCheckFailure("VC jumping visit count must be at least 2")
 
         await self.config.guild(ctx.guild).vcjumping_visit_count.set(count)
-        await ctx.send(f"VC jumping alerts will trigger after {count} channel entries.")
+        await ctx.send(f"VC jumping alerts will trigger after {count} channel entries")
 
     @nhmisc_vcjumping.command(name="seconds")
     async def nhmisc_vcjumping_seconds(self, ctx: commands.Context, seconds: int) -> None:
-        """Set the VC jumping detection time window in seconds."""
+        """Set the VC jumping detection time window in seconds"""
         if seconds < 1:
-            raise commands.UserFeedbackCheckFailure("VC jumping window must be at least 1 second.")
+            raise commands.UserFeedbackCheckFailure("VC jumping window must be at least 1 second")
 
         await self.config.guild(ctx.guild).vcjumping_window_seconds.set(seconds)
-        await ctx.send(f"VC jumping window set to {seconds} seconds.")
+        await ctx.send(f"VC jumping window set to {seconds} seconds")
 
     @nhmisc.group(name="forumautopin", invoke_without_command=True)
     @commands.has_permissions(manage_messages=True)
     async def nhmisc_forumautopin(self, ctx: commands.Context) -> None:
-        """Configure automatic pinning for new forum post starter messages."""
+        """Configure automatic pinning for new forum post starter messages"""
         configured = await self._forum_autopin.get_forum_ids(ctx.guild)
         forum_lines = [f"Configured forums: {len(configured)}"]
         for channel_id in configured[:10]:
@@ -4542,7 +4571,7 @@ class NHMisc(commands.Cog):
         ctx: commands.Context,
         channel: ForumChannelConverter,
     ) -> None:
-        """Enable starter-message autopinning in a forum."""
+        """Enable starter-message autopinning in a forum"""
         missing_permission = self._forum_autopin.missing_permissions(ctx.guild, channel)
         if missing_permission is not None:
             raise commands.UserFeedbackCheckFailure(missing_permission)
@@ -4560,7 +4589,7 @@ class NHMisc(commands.Cog):
         ctx: commands.Context,
         channel: ForumChannelConverter,
     ) -> None:
-        """Disable starter-message autopinning in a forum."""
+        """Disable starter-message autopinning in a forum"""
         disabled = await self._forum_autopin.disable(ctx.guild, channel.id)
         state = "is disabled" if disabled else "is not enabled"
         await ctx.send(
@@ -4570,7 +4599,7 @@ class NHMisc(commands.Cog):
 
     @nhmisc_forumautopin.command(name="list")
     async def nhmisc_forumautopin_list(self, ctx: commands.Context) -> None:
-        """List forums configured for starter-message autopinning."""
+        """List forums configured for starter-message autopinning"""
         configured = await self._forum_autopin.get_forum_ids(ctx.guild)
         if not configured:
             await ctx.send(
@@ -4590,7 +4619,7 @@ class NHMisc(commands.Cog):
     @commands.command(name="gatecount")
     @commands.guild_only()
     async def gatecount(self, ctx: commands.Context) -> None:
-        """Show member counts for the current Gate roles."""
+        """Show member counts for the current Gate roles"""
         _require_guild_role(
             ctx.guild,
             SINGLEPLAYER_GATE_COMPLETED_ROLE_ID,
@@ -5726,7 +5755,7 @@ class NHMisc(commands.Cog):
     @commands.command(name="tierdistribution")
     @commands.guild_only()
     async def tierdistribution(self, ctx: commands.Context) -> None:
-        """Show the current distribution of progression and Gate player roles."""
+        """Show the current distribution of progression and Gate player roles"""
         resolved_tiers = []
         for label, emoji_name, emoji_id, role_id in TIER_DISTRIBUTION_ROLES:
             role = _require_guild_role(
@@ -5786,7 +5815,7 @@ class NHMisc(commands.Cog):
 
     @nhmisc.group(name="stickyroles", invoke_without_command=True)
     async def nhmisc_stickyroles(self, ctx: commands.Context) -> None:
-        """Configure sticky role persistence."""
+        """Configure sticky role persistence"""
         await self._require_manage_guild(ctx)
         role_ids = sorted(await self._sticky_roles.get_sticky_roles(ctx.guild.id))
         role_lines = [f"Configured roles: {len(role_ids)}"]
@@ -5806,12 +5835,12 @@ class NHMisc(commands.Cog):
 
     @nhmisc_stickyroles.command(name="add")
     async def nhmisc_stickyroles_add(self, ctx: commands.Context, role: str) -> None:
-        """Mark a role as sticky by role mention or raw role ID."""
+        """Mark a role as sticky by role mention or raw role ID"""
         await self._require_manage_guild(ctx)
         role_id = self._parse_role_id(role)
         discord_role = ctx.guild.get_role(role_id)
         if discord_role is None:
-            raise commands.UserFeedbackCheckFailure("That role does not exist on this server.")
+            raise commands.UserFeedbackCheckFailure("That role does not exist on this server")
         if not self._can_restore_role(ctx.guild, discord_role):
             raise commands.UserFeedbackCheckFailure(
                 "I cannot restore that role. Check Manage Roles and role hierarchy."
@@ -5820,18 +5849,18 @@ class NHMisc(commands.Cog):
         added = await self._sticky_roles.add_sticky_role(ctx.guild.id, role_id)
         if added:
             await ctx.send(
-                f"{discord_role.mention} is now sticky.",
+                f"{discord_role.mention} is now sticky",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         else:
             await ctx.send(
-                f"{discord_role.mention} is already sticky.",
+                f"{discord_role.mention} is already sticky",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
 
     @nhmisc_stickyroles.command(name="remove")
     async def nhmisc_stickyroles_remove(self, ctx: commands.Context, role: str) -> None:
-        """Remove a sticky role by role mention or raw role ID."""
+        """Remove a sticky role by role mention or raw role ID"""
         await self._require_manage_guild(ctx)
         role_id = self._parse_role_id(role)
         config_exists, saved_rows = await self._sticky_roles.get_role_state(
@@ -5839,7 +5868,7 @@ class NHMisc(commands.Cog):
         )
         if not config_exists and saved_rows == 0:
             await ctx.send(
-                f"{self._format_role_reference(ctx.guild, role_id)} is not present in the sticky role DB.",
+                f"{self._format_role_reference(ctx.guild, role_id)} is not present in the sticky role DB",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
@@ -5857,11 +5886,11 @@ class NHMisc(commands.Cog):
 
     @nhmisc_stickyroles.command(name="list")
     async def nhmisc_stickyroles_list(self, ctx: commands.Context) -> None:
-        """List sticky roles configured for this server."""
+        """List sticky roles configured for this server"""
         await self._require_manage_guild(ctx)
         role_ids = await self._sticky_roles.get_sticky_roles(ctx.guild.id)
         if not role_ids:
-            await ctx.send("No sticky roles are configured on this server.")
+            await ctx.send("No sticky roles are configured on this server")
             return
 
         lines = ["Sticky roles:"]
@@ -5871,14 +5900,14 @@ class NHMisc(commands.Cog):
 
     @nhmisc_stickyroles.command(name="scan")
     async def nhmisc_stickyroles_scan(self, ctx: commands.Context) -> None:
-        """Scan sticky role DB for role IDs missing from Discord."""
+        """Scan sticky role DB for role IDs missing from Discord"""
         await self._require_manage_guild(ctx)
         existing_role_ids = {role.id for role in ctx.guild.roles}
         orphaned_roles = await self._sticky_roles.get_orphaned_roles(
             ctx.guild.id, existing_role_ids
         )
         if not orphaned_roles:
-            await ctx.send("No sticky role DB entries need review.")
+            await ctx.send("No sticky role DB entries need review")
             return
 
         await ctx.send(
@@ -5899,7 +5928,7 @@ class NHMisc(commands.Cog):
 
     @nhmisc_stickyroles.group(name="debuglogging", invoke_without_command=True)
     async def nhmisc_stickyroles_debuglogging(self, ctx: commands.Context) -> None:
-        """Configure sticky role debug logging."""
+        """Configure sticky role debug logging"""
         await self._require_manage_guild(ctx)
         config = await self.config.guild(ctx.guild).all()
         await self._send_nhmisc_overview(
@@ -5920,15 +5949,15 @@ class NHMisc(commands.Cog):
     async def nhmisc_stickyroles_debuglogging_toggle(
         self, ctx: commands.Context, enabled: bool
     ) -> None:
-        """Enable or disable sticky role debug logging."""
+        """Enable or disable sticky role debug logging"""
         await self._require_manage_guild(ctx)
         await self.config.guild(ctx.guild).sticky_debug_logging_enabled.set(enabled)
         state = "enabled" if enabled else "disabled"
-        await ctx.send(f"Sticky role debug logging {state}.")
+        await ctx.send(f"Sticky role debug logging {state}")
 
     @nhmisc.group(name="activity", invoke_without_command=True)
     async def nhmisc_activity(self, ctx: commands.Context) -> None:
-        """Configure and inspect passive message activity summaries."""
+        """Configure and inspect passive message activity summaries"""
         await self._require_activity_staff(ctx)
         config = await self.config.guild(ctx.guild).all()
         history_days = config["activity_history_retention_days"]
@@ -5950,22 +5979,37 @@ class NHMisc(commands.Cog):
             ),
         )
 
-    @nhmisc_activity.command(name="channel")
+    @nhmisc_activity.command(name="channel", usage="[channel|clear]")
     async def nhmisc_activity_channel(
-        self, ctx: commands.Context, channel: discord.TextChannel
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel | str | None = None,
     ) -> None:
-        """Set the channel used for automatic daily activity summaries."""
+        """Show, set, or clear the channel used for automatic daily activity summaries"""
+        if isinstance(channel, str):
+            await self._require_manage_guild(ctx)
+            if channel.casefold() != "clear":
+                raise commands.UserFeedbackCheckFailure("Provide a channel or use clear")
+            await self.config.guild(ctx.guild).activity_channel.set(None)
+            await ctx.send("Activity summary channel cleared")
+            return
+        if channel is None:
+            await self._require_activity_staff(ctx)
+            await self._show_log_destination(
+                ctx, title="Activity summary", config_key="activity_channel"
+            )
+            return
         await self._require_manage_guild(ctx)
         missing_permissions = self._support.missing_log_permissions(ctx.guild, channel)
         if missing_permissions is not None:
             raise commands.UserFeedbackCheckFailure(missing_permissions)
 
         await self.config.guild(ctx.guild).activity_channel.set(channel.id)
-        await ctx.send(f"Activity summary channel set to {channel.mention}.")
+        await ctx.send(f"Activity summary channel set to {channel.mention}")
 
     @nhmisc_activity.command(name="current")
     async def nhmisc_activity_current(self, ctx: commands.Context) -> None:
-        """Preview the current UTC day's activity without closing it."""
+        """Preview the current UTC day's activity without closing it"""
         await self._require_activity_staff(ctx)
         await self._close_stale_activity_days_for_guild(ctx.guild, send_reports=True)
         today = self._utc_today()
@@ -5973,35 +6017,35 @@ class NHMisc(commands.Cog):
             ctx.guild.id, today, ctx.guild.member_count or 0
         )
         if summary is None:
-            await ctx.send("No activity data has been collected for the current UTC day.")
+            await ctx.send("No activity data has been collected for the current UTC day")
             return
 
         await ctx.send(embed=self._build_daily_summary_embed(summary, title_prefix="Current day"))
 
     @nhmisc_activity.command(name="latest")
     async def nhmisc_activity_latest(self, ctx: commands.Context) -> None:
-        """Repost the latest retained closed daily activity summary."""
+        """Repost the latest retained closed daily activity summary"""
         await self._require_activity_staff(ctx)
         await self._close_stale_activity_days_for_guild(ctx.guild, send_reports=True)
         summary = await self._activity_store.get_latest_summary(ctx.guild.id)
         if summary is None:
-            await ctx.send("No retained daily activity summary is available.")
+            await ctx.send("No retained daily activity summary is available")
             return
 
         await ctx.send(embed=self._build_daily_summary_embed(summary, title_prefix="Latest day"))
 
     @nhmisc_activity.command(name="timeline")
     async def nhmisc_activity_timeline(self, ctx: commands.Context, days: int) -> None:
-        """Show a compact timeline for retained closed daily summaries."""
+        """Show a compact timeline for retained closed daily summaries"""
         await self._require_activity_staff(ctx)
         await self._close_stale_activity_days_for_guild(ctx.guild, send_reports=True)
         if days < 1:
-            raise commands.UserFeedbackCheckFailure("Days must be at least 1.")
+            raise commands.UserFeedbackCheckFailure("Days must be at least 1")
 
         config = await self.config.guild(ctx.guild).all()
         history_retention = int(config["activity_history_retention_days"])
         if history_retention == 0:
-            await ctx.send("Historical activity summaries are not retained on this server.")
+            await ctx.send("Historical activity summaries are not retained on this server")
             return
         if history_retention > 0 and days > history_retention:
             days = history_retention
@@ -6017,11 +6061,11 @@ class NHMisc(commands.Cog):
     async def nhmisc_activity_channelstats(
         self, ctx: commands.Context, channel: discord.TextChannel, days: int
     ) -> None:
-        """Show message activity for a channel day by day."""
+        """Show message activity for a channel day by day"""
         await self._require_activity_staff(ctx)
         await self._close_stale_activity_days_for_guild(ctx.guild, send_reports=True)
         if days < 1:
-            raise commands.UserFeedbackCheckFailure("Days must be at least 1.")
+            raise commands.UserFeedbackCheckFailure("Days must be at least 1")
 
         config = await self.config.guild(ctx.guild).all()
         history_retention = int(config["activity_history_retention_days"])
@@ -6042,7 +6086,7 @@ class NHMisc(commands.Cog):
 
     @nhmisc_activity.command(name="verify")
     async def nhmisc_activity_verify(self, ctx: commands.Context) -> None:
-        """Verify today's aggregate activity cache consistency."""
+        """Verify today's aggregate activity cache consistency"""
         await self._require_activity_staff(ctx)
         today = self._utc_today()
         report = await self._activity_store.verify_open_day_consistency(ctx.guild.id, today)
@@ -6050,17 +6094,17 @@ class NHMisc(commands.Cog):
 
     @nhmisc_activity.command(name="dbsize")
     async def nhmisc_activity_dbsize(self, ctx: commands.Context) -> None:
-        """Show activity SQLite database size and row counts."""
+        """Show activity SQLite database size and row counts"""
         await self._require_activity_staff(ctx)
         stats = await self._activity_store.get_database_stats()
         await ctx.send(embed=self._build_activity_database_stats_embed(stats))
 
     @nhmisc_activity.command(name="retention")
     async def nhmisc_activity_retention(self, ctx: commands.Context, days: int) -> None:
-        """Set how many days of per-user/channel detail rows are retained."""
+        """Set how many days of per-user/channel detail rows are retained"""
         await self._require_manage_guild(ctx)
         if days < 1:
-            raise commands.UserFeedbackCheckFailure("Detail retention must be at least 1 day.")
+            raise commands.UserFeedbackCheckFailure("Detail retention must be at least 1 day")
 
         cutoff = self._utc_today() - timedelta(days=days - 1)
         rows_to_delete = await self._activity_store.count_detail_rows_older_than(
@@ -6078,18 +6122,18 @@ class NHMisc(commands.Cog):
             if not confirmed:
                 return
             deleted = await self._activity_store.prune_detail_rows_older_than(ctx.guild.id, cutoff)
-            await ctx.send(f"Deleted {deleted} detail rows.")
+            await ctx.send(f"Deleted {deleted} detail rows")
 
         await self.config.guild(ctx.guild).activity_detail_retention_days.set(days)
-        await ctx.send(f"Activity detail retention set to {days} days.")
+        await ctx.send(f"Activity detail retention set to {days} days")
 
     @nhmisc_activity.command(name="historyretention")
     async def nhmisc_activity_history_retention(self, ctx: commands.Context, days: int) -> None:
-        """Set how many closed daily aggregate summaries are retained."""
+        """Set how many closed daily aggregate summaries are retained"""
         await self._require_manage_guild(ctx)
         if days < -1:
             raise commands.UserFeedbackCheckFailure(
-                "History retention must be -1, 0, or a positive number of days."
+                "History retention must be -1, 0, or a positive number of days"
             )
 
         cutoff = self._history_retention_cutoff(days)
@@ -6120,17 +6164,42 @@ class NHMisc(commands.Cog):
             ) = await self._activity_store.prune_history_rows_older_than(ctx.guild.id, cutoff)
             await ctx.send(
                 f"Deleted {deleted_summary} daily summary rows, {deleted_top} top-channel rows, "
-                f"and {deleted_channel} channel summary rows."
+                f"and {deleted_channel} channel summary rows"
             )
 
         await self.config.guild(ctx.guild).activity_history_retention_days.set(days)
-        await ctx.send(f"Activity history retention set to {days}.")
+        await ctx.send(f"Activity history retention set to {days}")
 
-    @nhmisc.group(name="usermodstats", invoke_without_command=True)
+    @nhmisc.group(
+        name="usermodstats",
+        invoke_without_command=True,
+        usage="[target] [range]",
+    )
     async def nhmisc_usermodstats(
+        self,
+        ctx: commands.Context,
+        target: str | None = None,
+        range_text: str | None = None,
+    ) -> None:
+        """Show user activity reports, or run one when a user and range are given"""
+        await self._require_activity_staff(ctx)
+        if target is None and range_text is None:
+            await self._send_nhmisc_overview(ctx, title="User activity reports")
+            return
+        if target is None or range_text is None:
+            raise commands.UserFeedbackCheckFailure("Pass a user and a range")
+        await self._report_user_modstats(ctx, target, range_text)
+
+    @nhmisc_usermodstats.command(name="user", usage="<target> <range>")
+    async def nhmisc_usermodstats_user(
         self, ctx: commands.Context, target: str, range_text: str
     ) -> None:
-        """Show moderator-only message activity stats for a user."""
+        """Show moderator-only message activity stats for a user"""
+        await self._report_user_modstats(ctx, target, range_text)
+
+    async def _report_user_modstats(
+        self, ctx: commands.Context, target: str, range_text: str
+    ) -> None:
         await self._require_activity_staff(ctx)
         await self._close_stale_activity_days_for_guild(ctx.guild, send_reports=True)
         user_id = self._parse_user_id(target)
@@ -6150,7 +6219,7 @@ class NHMisc(commands.Cog):
         channel_text: str,
         range_text: str,
     ) -> None:
-        """Show moderator-only message activity stats for a user in one channel."""
+        """Show moderator-only message activity stats for a user in one channel"""
         await self._require_activity_staff(ctx)
         await self._close_stale_activity_days_for_guild(ctx.guild, send_reports=True)
         user_id = self._parse_user_id(target)
@@ -6180,7 +6249,7 @@ class NHMisc(commands.Cog):
     async def nhmisc_usermodstats_channels(
         self, ctx: commands.Context, target: str, range_text: str
     ) -> None:
-        """Show how a user's activity is distributed across channels."""
+        """Show how a user's activity is distributed across channels"""
         await self._require_activity_staff(ctx)
         await self._close_stale_activity_days_for_guild(ctx.guild, send_reports=True)
         user_id = self._parse_user_id(target)
@@ -6209,7 +6278,7 @@ class NHMisc(commands.Cog):
         days_or_amount: int | None = None,
         amount: int | None = None,
     ) -> None:
-        """Render a chart of user activity in the selected or current channel."""
+        """Render a chart of user activity in the selected or current channel"""
         if target_or_days is None:
             await ctx.send_help(ctx.command)
             return
@@ -6222,14 +6291,14 @@ class NHMisc(commands.Cog):
         )
         if target is not ctx.channel and not target.permissions_for(ctx.author).view_channel:
             raise commands.UserFeedbackCheckFailure(
-                "You cannot view that channel or thread."
+                "You cannot view that channel or thread"
             )
         await self._close_stale_activity_days_for_guild(ctx.guild, send_reports=True)
         if days < 1:
-            raise commands.UserFeedbackCheckFailure("Days must be at least 1.")
+            raise commands.UserFeedbackCheckFailure("Days must be at least 1")
         if not 1 <= amount <= MAX_CHATCHART_USER_COUNT:
             raise commands.UserFeedbackCheckFailure(
-                f"Amount must be between 1 and {MAX_CHATCHART_USER_COUNT}."
+                f"Amount must be between 1 and {MAX_CHATCHART_USER_COUNT}"
             )
 
         days = await self._cap_detail_days(ctx.guild, days)
@@ -6242,7 +6311,7 @@ class NHMisc(commands.Cog):
             days,
         )
         if not counts:
-            await ctx.send(f"No retained activity data for this channel in the last {days} days.")
+            await ctx.send(f"No retained activity data for this channel in the last {days} days")
             return
 
         file = self._build_chatchart_file(
@@ -6263,13 +6332,13 @@ class NHMisc(commands.Cog):
     async def nhmisc_topyapper(
         self, ctx: commands.Context, days: int, amount: int
     ) -> None:
-        """Show the most active users across this server."""
+        """Show the most active users across this server"""
         await self._send_yapper_ranking(ctx, days, amount)
 
     @commands.command(name="selfchart")
     @commands.guild_only()
     async def selfchart(self, ctx: commands.Context) -> None:
-        """Show your own simplified activity stats for the last 7 retained days."""
+        """Show your own simplified activity stats for the last 7 retained days"""
         days = await self._cap_detail_days(ctx.guild, 7)
         stats = await self._activity_store.get_user_stats(
             ctx.guild.id, ctx.author.id, self._utc_today(), days
@@ -7027,7 +7096,7 @@ class NHMisc(commands.Cog):
         has_permission = bool(permissions and permissions.manage_guild)
         if has_permission or await self.bot.is_admin(ctx.author):
             return
-        raise commands.UserFeedbackCheckFailure("You need Manage Server permission.")
+        raise commands.UserFeedbackCheckFailure("You need Manage Server permission")
 
     async def _require_activity_staff(self, ctx: commands.Context) -> None:
         permissions = getattr(ctx.author, "guild_permissions", None)
@@ -7037,7 +7106,7 @@ class NHMisc(commands.Cog):
         if has_permission or await self.bot.is_admin(ctx.author):
             return
         raise commands.UserFeedbackCheckFailure(
-            "You need Manage Messages or Manage Server permission."
+            "You need Manage Messages or Manage Server permission"
         )
 
     def _prepare_role_expression(
@@ -7058,7 +7127,7 @@ class NHMisc(commands.Cog):
                 )
             if role_id == guild.default_role.id or role.is_default():
                 raise commands.UserFeedbackCheckFailure(
-                    "The @everyone role cannot be used in role expressions"
+                    "The `@everyone` role cannot be used in role expressions"
                 )
 
         predicate_sql, parameters = compile_role_expression(parsed)
@@ -7159,7 +7228,7 @@ class NHMisc(commands.Cog):
         if stripped.startswith("<@&") and stripped.endswith(">"):
             stripped = stripped[3:-1]
         if not stripped.isdigit():
-            raise commands.UserFeedbackCheckFailure("Pass a role mention or raw Discord role ID.")
+            raise commands.UserFeedbackCheckFailure("Pass a role mention or raw Discord role ID")
         return int(stripped)
 
     def _can_restore_role(self, guild: discord.Guild, role: discord.Role) -> bool:
@@ -7304,7 +7373,7 @@ class NHMisc(commands.Cog):
         try:
             new_role_id = self._parse_role_id(role_argument)
         except commands.UserFeedbackCheckFailure as exc:
-            await channel.send(f"{exc} No changes were made.")
+            await channel.send(f"{exc} No changes were made")
             return
 
         if new_role_id == old_role_id:
@@ -7360,10 +7429,10 @@ class NHMisc(commands.Cog):
     ) -> None:
         await self._require_activity_staff(ctx)
         if days < 1:
-            raise commands.UserFeedbackCheckFailure("Days must be at least 1.")
+            raise commands.UserFeedbackCheckFailure("Days must be at least 1")
         if not 1 <= amount <= 20:
             raise commands.UserFeedbackCheckFailure(
-                "Amount must be between 1 and 20."
+                "Amount must be between 1 and 20"
             )
 
         await self._close_stale_activity_days_for_guild(ctx.guild, send_reports=True)
@@ -7379,7 +7448,7 @@ class NHMisc(commands.Cog):
 
         if not counts:
             await ctx.send(
-                f"No retained activity data for this {scope} in the last {days} days.",
+                f"No retained activity data for this {scope} in the last {days} days",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
@@ -7408,7 +7477,7 @@ class NHMisc(commands.Cog):
         try:
             await self.bot.wait_for("message", check=check, timeout=60)
         except asyncio.TimeoutError:
-            await ctx.send("Retention change cancelled.")
+            await ctx.send("Retention change cancelled")
             return False
         return True
 
@@ -7430,10 +7499,10 @@ class NHMisc(commands.Cog):
     def _parse_range_days(self, value: str) -> int:
         normalized = value.strip().lower()
         if not normalized.isdigit():
-            raise commands.UserFeedbackCheckFailure("Range must be a positive number of days.")
+            raise commands.UserFeedbackCheckFailure("Range must be a positive number of days")
         days = int(normalized)
         if days < 1:
-            raise commands.UserFeedbackCheckFailure("Range must be at least 1 day.")
+            raise commands.UserFeedbackCheckFailure("Range must be at least 1 day")
         return days
 
     def _parse_user_id(self, value: str) -> int:
@@ -7443,7 +7512,7 @@ class NHMisc(commands.Cog):
             if stripped.startswith("!"):
                 stripped = stripped[1:]
         if not stripped.isdigit():
-            raise commands.UserFeedbackCheckFailure("Pass a user mention or raw Discord user ID.")
+            raise commands.UserFeedbackCheckFailure("Pass a user mention or raw Discord user ID")
         return int(stripped)
 
     def _resolve_text_channel_or_thread(
@@ -7453,13 +7522,13 @@ class NHMisc(commands.Cog):
         if stripped.startswith("<#") and stripped.endswith(">"):
             stripped = stripped[2:-1]
         if not stripped.isdigit():
-            raise commands.UserFeedbackCheckFailure("Pass a channel/thread mention or raw channel ID.")
+            raise commands.UserFeedbackCheckFailure("Pass a channel/thread mention or raw channel ID")
 
         channel_id = int(stripped)
         channel = guild.get_channel_or_thread(channel_id)
         if isinstance(channel, (discord.TextChannel, discord.Thread)):
             return channel
-        raise commands.UserFeedbackCheckFailure("Channel or thread was not found in this server.")
+        raise commands.UserFeedbackCheckFailure("Channel or thread was not found in this server")
 
     def _resolve_chatchart_request(
         self,
@@ -7482,7 +7551,7 @@ class NHMisc(commands.Cog):
             target = self._resolve_text_channel_or_thread(ctx.guild, token)
             if days_or_amount is None:
                 raise commands.UserFeedbackCheckFailure(
-                    "Days must follow the channel or thread."
+                    "Days must follow the channel or thread"
                 )
             return (
                 target,
@@ -7492,11 +7561,11 @@ class NHMisc(commands.Cog):
 
         if not token.isdigit():
             raise commands.UserFeedbackCheckFailure(
-                "Pass a channel/thread mention, raw channel ID, or number of days."
+                "Pass a channel/thread mention, raw channel ID, or number of days"
             )
         if amount is not None:
             raise commands.UserFeedbackCheckFailure(
-                "Too many arguments for current-channel chatchart."
+                "Too many arguments for current-channel chatchart"
             )
         return (
             ctx.channel,
@@ -7984,5 +8053,5 @@ class NHMisc(commands.Cog):
             )
         except ImportError as exc:
             raise commands.UserFeedbackCheckFailure(
-                "Matplotlib is required for chatchart but is not installed."
+                "Matplotlib is required for chatchart but is not installed"
             ) from exc

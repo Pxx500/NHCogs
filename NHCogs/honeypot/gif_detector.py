@@ -1148,7 +1148,7 @@ async def _configure_bounded_integer(
         return
     if not minimum <= value <= maximum:
         raise commands.UserFeedbackCheckFailure(
-            _("Value must be between {minimum} and {maximum}.").format(
+            _("Value must be between {minimum} and {maximum}").format(
                 minimum=minimum,
                 maximum=maximum,
             )
@@ -1205,7 +1205,7 @@ async def gif_detector_message_set(
     text = text.strip()
     if not text or len(text) > MAX_SECONDARY_MESSAGE_LENGTH:
         raise commands.UserFeedbackCheckFailure(
-            _("Message must contain between 1 and {limit} characters.").format(
+            _("Message must contain between 1 and {limit} characters").format(
                 limit=MAX_SECONDARY_MESSAGE_LENGTH
             )
         )

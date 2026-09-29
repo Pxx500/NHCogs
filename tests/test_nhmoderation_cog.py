@@ -786,7 +786,7 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
             subject._run_sync.assert_not_awaited()
             self.assertEqual(
                 ctx.send.await_args.args[0],
-                "Initial migration is already complete.",
+                "Initial migration is already complete",
             )
             subject._mark_operational_recovered.assert_awaited_once_with(
                 ctx.guild,

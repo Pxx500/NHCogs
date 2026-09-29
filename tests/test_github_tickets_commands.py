@@ -397,7 +397,7 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                     ctx = FakeContext(private=False)
                     with self.assertRaisesRegex(
                         modules.githubtickets.commands.UserFeedbackCheckFailure,
-                        "channel hidden from @everyone",
+                        "channel hidden from `@everyone`",
                     ):
                         await getattr(cog, f"githubtickets_profile_pings_{name}")(ctx)
                     cog.store.list_profiles.assert_not_awaited()

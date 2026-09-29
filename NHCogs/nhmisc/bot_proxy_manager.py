@@ -221,7 +221,7 @@ class BotProxyWorkflowManager:
         if not isinstance(channel, discord.TextChannel):
             raise WorkflowInputError("Configured Bot Proxy channel is unavailable")
         if channel.permissions_for(guild.default_role).view_channel:
-            raise WorkflowInputError("Configured Bot Proxy channel is visible to @everyone")
+            raise WorkflowInputError("Configured Bot Proxy channel is visible to `@everyone`")
         permissions = channel.permissions_for(guild.me)
         required = (
             ("view_channel", "View Channel"),

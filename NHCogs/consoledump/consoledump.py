@@ -56,16 +56,16 @@ class ConsoleDump(commands.Cog):
         hours: str | None = None,
         level: str | None = None,
     ) -> None:
-        """Export recent sanitized Python logs to a private text channel."""
+        """Export recent sanitized Python logs to a private text channel"""
         channel = ctx.channel
         if not isinstance(channel, discord.TextChannel):
-            await ctx.send(_("Console dumps require a private text channel."))
+            await ctx.send(_("Console dumps require a private text channel"))
             return
         if not channel.permissions_for(ctx.author).manage_messages:
-            await ctx.send(_("You need Manage Messages to use this command."))
+            await ctx.send(_("You need Manage Messages to use this command"))
             return
         if channel.permissions_for(ctx.guild.default_role).view_channel:
-            await ctx.send(_("Console dumps cannot be sent to a channel visible to @everyone."))
+            await ctx.send(_("Console dumps cannot be sent to a channel visible to `@everyone`"))
             return
 
         missing_permissions = self._missing_channel_permissions(ctx.guild, channel)
@@ -115,12 +115,12 @@ class ConsoleDump(commands.Cog):
     ) -> str | None:
         me = guild.me
         if me is None:
-            return _("I couldn't find my server member.")
+            return _("I couldn't find my server member")
         permissions = channel.permissions_for(me)
         if not permissions.view_channel:
-            return _("I need `View Channel` in {channel}.").format(channel=channel.mention)
+            return _("I need `View Channel` in {channel}").format(channel=channel.mention)
         if not permissions.send_messages:
-            return _("I need `Send Messages` in {channel}.").format(channel=channel.mention)
+            return _("I need `Send Messages` in {channel}").format(channel=channel.mention)
         if not permissions.attach_files:
-            return _("I need `Attach Files` in {channel}.").format(channel=channel.mention)
+            return _("I need `Attach Files` in {channel}").format(channel=channel.mention)
         return None

@@ -395,7 +395,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
 
                 interaction.delete_original_response.assert_awaited_once_with()
                 interaction.followup.send.assert_awaited_once_with(
-                    "You do not have permission to review this case.",
+                    "You do not have permission to review this case",
                     ephemeral=True,
                 )
 
