@@ -522,6 +522,14 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 pass
 
             modules.githubtickets.discord.TextChannel = FakeTextChannel
+            self.assertEqual(
+                cog.githubtickets_channel.callback.__annotations__["channel"],
+                "discord.abc.GuildChannel | str | None",
+            )
+            await cog.githubtickets_channel(
+                ctx,
+                SimpleNamespace(id=100, mention="#voice"),
+            )
             await cog.githubtickets_channel_set(
                 ctx,
                 SimpleNamespace(id=100, mention="#voice"),
@@ -530,7 +538,13 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
             config = await cog.config.guild_from_id(42).all()
 
         self.assertIsNone(config["ticket_channel_id"])
-        ctx.send.assert_awaited_once_with("Ticket channel must be a text channel")
+        self.assertEqual(
+            [call.args[0] for call in ctx.send.await_args_list],
+            [
+                "Ticket channel must be a text channel",
+                "Ticket channel must be a text channel",
+            ],
+        )
 
     async def test_configuration_errors_use_only_the_accepted_copy(self):
         with isolated_githubtickets_modules(self.data_path) as modules:

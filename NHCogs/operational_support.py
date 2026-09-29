@@ -150,9 +150,13 @@ class OperationalSupport(commands.Cog):
         if field in (None, "maintainer"):
             maintainer_id = await settings.error_maintainer_id()
             member = ctx.guild.get_member(maintainer_id) if maintainer_id is not None else None
-            embed.add_field(
-                name="Maintainer", value=member.display_name if member else "Not configured", inline=False
-            )
+            if member is not None:
+                maintainer_value = member.display_name
+            elif maintainer_id is not None:
+                maintainer_value = f"<@{maintainer_id}>"
+            else:
+                maintainer_value = "Not configured"
+            embed.add_field(name="Maintainer", value=maintainer_value, inline=False)
         await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
     @staticmethod

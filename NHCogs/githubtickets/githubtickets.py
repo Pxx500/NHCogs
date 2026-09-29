@@ -821,7 +821,7 @@ class GitHubTickets(commands.Cog):
     async def githubtickets_channel(
         self,
         ctx: commands.Context,
-        channel: discord.TextChannel | str | None = None,
+        channel: discord.abc.GuildChannel | str | None = None,
     ) -> None:
         """Show, set, or clear the ticket channel"""
         await self._configure_text_channel(

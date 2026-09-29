@@ -175,6 +175,19 @@ class SharedErrorConfigurationTests(unittest.IsolatedAsyncioTestCase):
 
             await module.OperationalSupport.error_maintainer.callback(support, ctx, "30")
             self.assertEqual(await guild_config.error_maintainer_id(), 30)
+            ctx.send.reset_mock()
+            await module.OperationalSupport.error_maintainer.callback(support, ctx, "99")
+            ctx.send.reset_mock()
+            await module.OperationalSupport.error_maintainer.callback(support, ctx)
+            self.assertEqual(ctx.send.await_args.kwargs["embed"].fields[0].value, "<@99>")
+            await module.OperationalSupport.error_maintainer.callback(support, ctx, "clear")
+            ctx.send.reset_mock()
+            await module.OperationalSupport.error_maintainer.callback(support, ctx)
+            self.assertEqual(
+                ctx.send.await_args.kwargs["embed"].fields[0].value, "Not configured"
+            )
+            await module.OperationalSupport.error_maintainer.callback(support, ctx, "30")
+            self.assertEqual(await guild_config.error_maintainer_id(), 30)
             await module.OperationalSupport.error_maintainer.callback(support, ctx, "<@!30>")
             self.assertEqual(await guild_config.error_maintainer_id(), 30)
             await module.OperationalSupport.error_maintainer_set.callback(
