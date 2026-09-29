@@ -185,7 +185,9 @@ class AccessModal(discord.ui.Modal):
             required=False,
             channel_types=[
                 discord.ChannelType.text,
+                discord.ChannelType.voice,
                 discord.ChannelType.news,
+                discord.ChannelType.stage_voice,
                 discord.ChannelType.public_thread,
                 discord.ChannelType.private_thread,
                 discord.ChannelType.news_thread,

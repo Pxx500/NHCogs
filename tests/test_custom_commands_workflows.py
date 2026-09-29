@@ -162,7 +162,8 @@ def load_workflow_modules():
     discord.RadioGroupOption = RadioGroupOption
     discord.Object = SimpleNamespace
     discord.ChannelType = types.SimpleNamespace(
-        text=0, news=5, public_thread=11, private_thread=12, news_thread=10,
+        text=0, voice=2, news=5, stage_voice=13,
+        public_thread=11, private_thread=12, news_thread=10,
     )
     discord.TextStyle = types.SimpleNamespace(paragraph=1, short=2)
     discord.ButtonStyle = types.SimpleNamespace(
@@ -356,6 +357,8 @@ class WorkflowSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(modal.users.max_values, 25)
         self.assertEqual(modal.channels.max_values, 25)
+        self.assertIn(workflows.discord.ChannelType.voice, modal.channels.channel_types)
+        self.assertIn(workflows.discord.ChannelType.stage_voice, modal.channels.channel_types)
         self.assertEqual([option.value for option in modal.private.options if option.default], ["off"])
         self.assertEqual([option.value for option in modal.hide.options if option.default], ["off"])
         modal.users.values = [SimpleNamespace(id=200), SimpleNamespace(id=201)]
