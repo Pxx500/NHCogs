@@ -15,15 +15,15 @@ moderator channel. The shared error configuration starts unset.
 |---|---|
 | `[p]nhcogs` | Show the shared command overview |
 | `[p]nhcogs errors` | Show the shared error configuration |
-| `[p]nhcogs errors channel [channel]` | Show the configured private error channel, or change it when a channel is provided |
+| `[p]nhcogs errors channel` | Show the error channel configuration and commands |
+| `[p]nhcogs errors channel set <channel>` | Set the private error channel |
 | `[p]nhcogs errors channel clear` | Clear the private error channel |
-| `[p]nhcogs errors maintainer [member]` | Show the configured error maintainer, or change it when a member is provided |
+| `[p]nhcogs errors maintainer` | Show the error maintainer configuration and commands |
+| `[p]nhcogs errors maintainer set <member>` | Set the error maintainer |
 | `[p]nhcogs errors maintainer clear` | Clear the error maintainer |
 
-Commands that change or clear settings require a private invocation. With the optional
-`[channel]` or `[member]` argument omitted, the command shows the current value. Providing
-an argument changes the setting. The configured error channel must be hidden from
-`@everyone`, and the bot needs View Channel, Send Messages, and Attach Files there. The
+`set` and `clear` require a private invocation. The configured error channel must be hidden
+from `@everyone`, and the bot needs View Channel, Send Messages, and Attach Files there. The
 maintainer setting controls the only mention target for new technical failures.
 
 Technical failures are stored with their retry and recovery state. Expected command,

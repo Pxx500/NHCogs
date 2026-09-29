@@ -150,15 +150,17 @@ class OperationalSupport(commands.Cog):
             )
 
     @errors.group(name="channel", invoke_without_command=True)
-    async def error_channel(
-        self, ctx: commands.Context, channel: discord.TextChannel | None = None
+    async def error_channel(self, ctx: commands.Context) -> None:
+        """Configure the shared private error channel."""
+        await send_group_overview(
+            ctx, lambda: self._show_error_configuration(ctx, field="channel"), title="Error channel"
+        )
+
+    @error_channel.command(name="set")
+    async def error_channel_set(
+        self, ctx: commands.Context, channel: discord.TextChannel
     ) -> None:
-        """Show or set the shared private error channel."""
-        if channel is None:
-            await send_group_overview(
-                ctx, lambda: self._show_error_configuration(ctx, field="channel"), title="Error channel"
-            )
-            return
+        """Set the shared private error channel."""
         self._require_private_configuration(ctx)
         if not channel_is_private(ctx.guild, channel):
             raise commands.UserFeedbackCheckFailure("The error channel must be hidden from @everyone")
@@ -166,36 +168,38 @@ class OperationalSupport(commands.Cog):
         if missing is not None:
             raise commands.UserFeedbackCheckFailure(missing)
         await self.config.guild(ctx.guild).error_channel.set(channel.id)
-        await ctx.send("Error channel updated.", allowed_mentions=discord.AllowedMentions.none())
+        await ctx.send("Error channel updated", allowed_mentions=discord.AllowedMentions.none())
 
     @error_channel.command(name="clear")
     async def error_channel_clear(self, ctx: commands.Context) -> None:
         """Stop sending technical failure alerts to Discord."""
         self._require_private_configuration(ctx)
         await self.config.guild(ctx.guild).error_channel.clear()
-        await ctx.send("Error channel cleared.", allowed_mentions=discord.AllowedMentions.none())
+        await ctx.send("Error channel cleared", allowed_mentions=discord.AllowedMentions.none())
 
     @errors.group(name="maintainer", invoke_without_command=True)
-    async def error_maintainer(
-        self, ctx: commands.Context, member: discord.Member | None = None
+    async def error_maintainer(self, ctx: commands.Context) -> None:
+        """Configure the maintainer notified by technical failure alerts."""
+        await send_group_overview(
+            ctx, lambda: self._show_error_configuration(ctx, field="maintainer"),
+            title="Error maintainer",
+        )
+
+    @error_maintainer.command(name="set")
+    async def error_maintainer_set(
+        self, ctx: commands.Context, member: discord.Member
     ) -> None:
-        """Show or set the maintainer notified by technical failure alerts."""
-        if member is None:
-            await send_group_overview(
-                ctx, lambda: self._show_error_configuration(ctx, field="maintainer"),
-                title="Error maintainer",
-            )
-            return
+        """Set the maintainer notified by technical failure alerts."""
         self._require_private_configuration(ctx)
         await self.config.guild(ctx.guild).error_maintainer_id.set(member.id)
-        await ctx.send("Error maintainer updated.", allowed_mentions=discord.AllowedMentions.none())
+        await ctx.send("Error maintainer updated", allowed_mentions=discord.AllowedMentions.none())
 
     @error_maintainer.command(name="clear")
     async def error_maintainer_clear(self, ctx: commands.Context) -> None:
         """Stop pinging a maintainer in technical failure alerts."""
         self._require_private_configuration(ctx)
         await self.config.guild(ctx.guild).error_maintainer_id.clear()
-        await ctx.send("Error maintainer cleared.", allowed_mentions=discord.AllowedMentions.none())
+        await ctx.send("Error maintainer cleared", allowed_mentions=discord.AllowedMentions.none())
 
     async def red_delete_data_for_user(self, *, requester, user_id: int) -> None:
         for guild_id, guild_data in (await self.config.all_guilds()).items():
