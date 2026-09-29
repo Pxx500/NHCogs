@@ -28,11 +28,12 @@ and closes the list with the red X button. Temporary list, raw, and delete contr
 after 30 seconds.
 
 A moderator can set each command's access from the **Access** button in its create or
-edit thread. The modal accepts user IDs or mentions, role IDs or mentions, and channel
-or thread IDs or mentions. Multiple values can be separated by commas or spaces.
+edit thread. The modal has multi-select menus for users, roles, and channels or threads,
+plus Off/On choices for **Private channels only** and **Hide response preview**. Each
+menu supports up to 25 selections. Existing selections are preselected when reopened.
 Selected users and roles are alternatives: a matching user **or** role may use the
 command. A channel restriction and **Private channels only** must also match when set.
-A long access list is summarized on the dashboard. Reopen **Access** to see every ID.
+A long access list is summarized on the dashboard. Each type is limited to 25 entries.
 A private channel is hidden from `@everyone`, and private threads qualify. Channel IDs
 match the exact channel or thread where the command is invoked.
 
