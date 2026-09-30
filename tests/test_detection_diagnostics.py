@@ -712,6 +712,114 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("Active operational failures: 1", report)
                 self.assertIn("honeypot errors", report)
 
+    @staticmethod
+    def _errors_context(*, private: bool):
+        channel = SimpleNamespace(
+            permissions_for=lambda _role: SimpleNamespace(view_channel=not private)
+        )
+        guild = SimpleNamespace(id=10, default_role=object())
+        return SimpleNamespace(guild=guild, channel=channel, send=mock.AsyncMock())
+
+    async def test_errors_command_is_a_visible_honeypot_command(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                command = honeypot.Honeypot.honeypot_errors
+
+                self.assertEqual(command.qualified_name, "honeypot errors")
+                self.assertEqual(command.kind, "command")
+                self.assertFalse(command.hidden)
+                self.assertIs(command.parent, honeypot.Honeypot.honeypot)
+                self.assertIn(command, honeypot.Honeypot.honeypot.commands)
+                self.assertEqual(
+                    command.callback.__doc__.splitlines()[0],
+                    "List active honeypot operational failures",
+                )
+
+    async def test_honeypot_errors_lists_active_failures_in_a_private_channel(self):
+        occurred_at = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
+                cog._case_store.initialize()
+                cog._case_store.record_operational_failure(
+                    guild_id=10,
+                    source="review_publish",
+                    summary="Could not create the case thread",
+                    occurred_at=occurred_at,
+                    case_id="case-1",
+                    operation_id="op-1",
+                )
+                cog._case_store.record_operational_failure(
+                    guild_id=10,
+                    source="review_publish",
+                    summary="Could not create the case thread",
+                    occurred_at=occurred_at + timedelta(minutes=2),
+                    case_id="case-1",
+                    operation_id="op-1",
+                )
+                cog._case_store.record_operational_failure(
+                    guild_id=10,
+                    source="joinwatch_role_action",
+                    summary="resolved failure text",
+                    occurred_at=occurred_at,
+                    operation_id="op-resolved",
+                )
+                cog._case_store.resolve_operational_failure("op-resolved", occurred_at)
+                cog._case_store.record_operational_failure(
+                    guild_id=99,
+                    source="review_publish",
+                    summary="other guild failure",
+                    occurred_at=occurred_at,
+                )
+                ctx = self._errors_context(private=True)
+
+                await cog.honeypot_errors(ctx)
+
+                report = "\n".join(call.args[0] for call in ctx.send.await_args_list)
+                self.assertIn("**Honeypot operational failures:** 1", report)
+                self.assertIn("review_publish (2) - Could not create the case thread", report)
+                self.assertIn(f"<t:{int(occurred_at.timestamp())}:R>", report)
+                self.assertIn("Case `case-1`", report)
+                self.assertIn("Operation `op-1`", report)
+                self.assertNotIn("resolved failure text", report)
+                self.assertNotIn("other guild failure", report)
+                self.assertNotIn("Honeypot config summary", report)
+                self.assertIsNotNone(ctx.send.await_args.kwargs.get("allowed_mentions"))
+
+    async def test_honeypot_errors_hides_failure_text_in_a_public_channel(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
+                cog._case_store.initialize()
+                cog._case_store.record_operational_failure(
+                    guild_id=10,
+                    source="review_publish",
+                    summary="Could not create the case thread",
+                    occurred_at=datetime(2026, 7, 13, 12, tzinfo=timezone.utc),
+                )
+                ctx = self._errors_context(private=False)
+
+                await cog.honeypot_errors(ctx)
+
+                report = ctx.send.await_args.args[0]
+                self.assertIn("**Honeypot operational failures:** 1", report)
+                self.assertIn("private moderator channel", report)
+                self.assertNotIn("Could not create the case thread", report)
+                self.assertNotIn("Honeypot config summary", report)
+
+    async def test_honeypot_errors_reports_when_none_are_active(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
+                cog._case_store.initialize()
+                ctx = self._errors_context(private=False)
+
+                await cog.honeypot_errors(ctx)
+
+                report = ctx.send.await_args.args[0]
+                self.assertIn("No active operational failures.", report)
+                self.assertNotIn("Honeypot config summary", report)
+
     async def test_doctor_checks_evidence_directory_off_event_loop_thread(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:

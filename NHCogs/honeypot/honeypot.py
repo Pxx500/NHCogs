@@ -2377,3 +2377,8 @@ class Honeypot(Cog):
     async def honeypot_doctor(self, ctx: commands.Context) -> None:
         """Check honeypot configuration and required permissions"""
         return await diagnostics.honeypot_doctor(self, ctx)
+
+    @honeypot.command(name="errors")
+    async def honeypot_errors(self, ctx: commands.Context) -> None:
+        """List active honeypot operational failures"""
+        return await diagnostics.honeypot_errors(self, ctx)

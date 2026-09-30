@@ -202,9 +202,14 @@ Detection cases expire 24 hours after the first detection. This lifetime is fixe
 
 ### Operational errors
 
-Technical failures from Honeypot use the shared `[p]nhcogs errors` configuration. See the
-[shared command catalog](../README.md) for the setup commands and privacy rules. Expected
-detection outcomes and normal command feedback aren't reported as operational errors.
+`!honeypot errors` lists the active operational failures counted by `!honeypot doctor`.
+It uses the same Manage Messages permission as the rest of `!honeypot`. The failure text
+is shown only in a private moderator channel.
+
+Technical failure alerts from Honeypot are delivered through the shared `[p]nhcogs errors`
+configuration. See the [shared command catalog](../README.md) for the setup commands and
+privacy rules. Expected detection outcomes and normal command feedback aren't reported as
+operational errors.
 
 ### other
 
@@ -228,6 +233,7 @@ detection outcomes and normal command feedback aren't reported as operational er
 | `!honeypot stats channel [channel|clear]` | Show, set, or clear the public daily statistics destination |
 | `!honeypot modstats` | Show detailed moderator statistics |
 | `!honeypot doctor` | Check config, channels, and permissions |
+| `!honeypot errors` | List active operational failures |
 ## Action & Fallback Logic
 
 ```
