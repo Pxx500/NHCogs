@@ -710,8 +710,12 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
 
                 report = "\n".join(call.args[0] for call in ctx.send.await_args_list)
                 self.assertIn("Active operational failures: 1", report)
-                self.assertIn("nhcogs errors list", report)
+                self.assertRegex(
+                    report,
+                    r"Active operational failures: 1 - Oldest: <t:\d+:R>\.",
+                )
                 self.assertNotIn("honeypot errors", report)
+                self.assertNotIn("nhcogs errors", report)
 
     async def test_doctor_checks_evidence_directory_off_event_loop_thread(self):
         with TemporaryDirectory() as directory:

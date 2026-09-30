@@ -556,7 +556,7 @@ async def _doctor_runtime_checks(cog, guild_id: int) -> tuple[DoctorResult, ...]
             DoctorResult(
                 f"Active operational failures: {len(operational_failures)}",
                 "failed",
-                f"Oldest: <t:{int(oldest.timestamp())}:R>. Run `nhcogs errors list`.",
+                f"Oldest: <t:{int(oldest.timestamp())}:R>.",
             )
         )
     else:

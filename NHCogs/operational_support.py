@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
-from pathlib import Path
 
 import discord
 from redbot.core import Config, commands
@@ -19,64 +17,6 @@ log = logging.getLogger("red.NHCogs.NHMisc")
 NHMISC_CONFIG_IDENTIFIER = 8597423150612235807
 ERROR_CONFIG_IDENTIFIER = 8597423150612235808
 USER_MENTION_OR_ID = "Provide a user mention or user ID"
-
-
-def _failure_source_name(source) -> str:
-    value = getattr(source, "value", None)
-    if isinstance(value, str):
-        return value
-    return str(source)
-
-
-def _format_seen_span(failure) -> str:
-    first = int(failure.first_seen_at.timestamp())
-    last = int(failure.last_seen_at.timestamp())
-    return f"First <t:{first}:R>. Last <t:{last}:R>."
-
-
-def _format_shared_failure(failure) -> str:
-    summary = failure.summary
-    exception_type = getattr(failure, "exception_type", "") or ""
-    if exception_type and exception_type not in summary:
-        summary = f"{exception_type}: {summary}"
-    return "\n".join(
-        (
-            f"{failure.source} / {failure.action} ({failure.occurrences}) - {summary}",
-            _format_seen_span(failure),
-        )
-    )
-
-
-def _format_honeypot_failure(failure) -> str:
-    lines = [
-        (
-            f"Honeypot / {_failure_source_name(failure.source)} "
-            f"({failure.occurrences}) - {failure.summary}"
-        ),
-        _format_seen_span(failure),
-    ]
-    references = []
-    if getattr(failure, "case_id", None):
-        references.append(f"Case `{failure.case_id}`")
-    if getattr(failure, "operation_id", None):
-        references.append(f"Operation `{failure.operation_id}`")
-    if references:
-        lines.append(" | ".join(references))
-    return "\n".join(lines)
-
-
-def _message_pages(text: str, page_length: int) -> list[str]:
-    pages: list[str] = []
-    start = 0
-    while start < len(text):
-        end = min(start + page_length, len(text))
-        if end < len(text):
-            boundary = text.rfind("\n", start, end)
-            if boundary > start:
-                end = boundary + 1
-        pages.append(text[start:end])
-        start = end
-    return pages
 
 
 def stored_user_id(value: str) -> int:
@@ -266,11 +206,6 @@ class OperationalSupport(commands.Cog):
         """Set the maintainer notified by technical failure alerts"""
         await self._store_or_clear_maintainer(ctx, member)
 
-    @errors.command(name="list")
-    async def error_list(self, ctx: commands.Context) -> None:
-        """List active operational failures"""
-        await self._list_operational_failures(ctx)
-
     async def _show_nullable_setting(self, ctx: commands.Context, *, field: str) -> None:
         if not channel_is_private(ctx.guild, ctx.channel):
             await ctx.send(
@@ -315,80 +250,6 @@ class OperationalSupport(commands.Cog):
         self._require_private_configuration(ctx)
         await self.config.guild(ctx.guild).error_maintainer_id.clear()
         await ctx.send("Error maintainer cleared", allowed_mentions=discord.AllowedMentions.none())
-
-    async def _list_operational_failures(self, ctx: commands.Context) -> None:
-        failures = await self._collect_operational_failures(ctx.guild.id)
-        header = "**Operational failures:**"
-        if not failures:
-            await ctx.send(
-                f"{header}\nNo active operational failures.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-        if not channel_is_private(ctx.guild, ctx.channel):
-            await ctx.send(
-                f"{header} {len(failures)}\n"
-                "Run this command in a private moderator channel to view them.",
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-            return
-        body = "\n\n".join(text for _seen_at, text in failures)
-        page_header = f"{header} {len(failures)}\n"
-        for page in _message_pages(body, 2000 - len(page_header)):
-            await ctx.send(
-                page_header + page,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-
-    async def _collect_operational_failures(
-        self, guild_id: int
-    ) -> list[tuple[datetime, str]]:
-        await self.operational_errors.initialize()
-        rows: list[tuple[datetime, str]] = []
-        for failure in await self.operational_errors.list_active(guild_id):
-            rows.append((failure.last_seen_at, _format_shared_failure(failure)))
-        for failure in await self._moderation_failures(guild_id):
-            rows.append((failure.last_seen_at, _format_shared_failure(failure)))
-        for failure in await self._honeypot_failures(guild_id):
-            rows.append((failure.last_seen_at, _format_honeypot_failure(failure)))
-        rows.sort(key=lambda item: item[0], reverse=True)
-        return rows
-
-    async def _moderation_failures(self, guild_id: int) -> tuple:
-        reporter = self._cog_attribute("NHModeration", "_operational_errors")
-        if reporter is None or reporter is self.operational_errors:
-            return ()
-        reporter_path = getattr(reporter, "_database_path", None)
-        if reporter_path is not None and Path(reporter_path) == Path(
-            self.operational_errors._database_path
-        ):
-            return ()
-        list_active = getattr(reporter, "list_active", None)
-        if not callable(list_active):
-            return ()
-        try:
-            return tuple(await list_active(guild_id))
-        except Exception:
-            log.exception("Could not read NHModeration operational failures")
-            return ()
-
-    async def _honeypot_failures(self, guild_id: int) -> tuple:
-        store = self._cog_attribute("Honeypot", "_case_store")
-        list_failures = getattr(store, "list_operational_failures", None)
-        if not callable(list_failures):
-            return ()
-        try:
-            return tuple(await asyncio.to_thread(list_failures, guild_id))
-        except Exception:
-            log.exception("Could not read Honeypot operational failures")
-            return ()
-
-    def _cog_attribute(self, cog_name: str, attribute: str):
-        get_cog = getattr(self.bot, "get_cog", None)
-        if not callable(get_cog):
-            return None
-        cog = get_cog(cog_name)
-        return getattr(cog, attribute, None)
 
     async def red_delete_data_for_user(self, *, requester, user_id: int) -> None:
         for guild_id, guild_data in (await self.config.all_guilds()).items():
