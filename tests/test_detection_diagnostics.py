@@ -713,7 +713,7 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertRegex(
                     report,
                     r"Active operational failures: 1 - Oldest: <t:\d+:R>\. "
-                    r"Run `nhcogs errors list`\.",
+                    r"Run `nhcogs errors`\.",
                 )
                 self.assertNotIn("honeypot errors", report)
 
