@@ -791,6 +791,82 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertEqual(reclaimed.status, "claimed")
         self.assertNotEqual(reclaimed.claim_token, first.claim_token)
 
+    def test_fail_pending_attachment_captures_keeps_a_fresh_claim(self):
+        created_at = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
+        attachments = (
+            NewAttachment(0, "stale.png", 10, "image/png", 1, 1, "https://cdn/stale"),
+            NewAttachment(1, "fresh.png", 10, "image/png", 1, 1, "https://cdn/fresh"),
+            NewAttachment(2, "open.png", 10, "image/png", 1, 1, "https://cdn/open"),
+        )
+        appended = self.store.append_message(
+            self.message(40, created_at, attachments=attachments), ()
+        )
+        case_id = appended.case.case_id
+        sequence = appended.message.sequence
+        fresh_at = created_at + timedelta(minutes=5)
+        stale = self.store.reserve_attachment_capture(
+            case_id,
+            sequence,
+            0,
+            10,
+            created_at,
+            stale_before=created_at - timedelta(microseconds=1),
+            max_attachment_bytes=10,
+            max_case_bytes=30,
+        )
+        fresh = self.store.reserve_attachment_capture(
+            case_id,
+            sequence,
+            1,
+            10,
+            fresh_at,
+            stale_before=fresh_at - timedelta(microseconds=1),
+            max_attachment_bytes=10,
+            max_case_bytes=30,
+        )
+
+        failed = self.store.fail_pending_attachment_captures(
+            case_id,
+            sequence,
+            "source message is gone before attachment capture completed",
+            stale_before=fresh_at - timedelta(minutes=5),
+        )
+
+        snapshot = self.store.get_case(case_id)
+        by_position = {item.position: item for item in snapshot.attachments}
+        self.assertEqual(failed, 2)
+        self.assertEqual(by_position[0].capture_status, "capture_failed")
+        self.assertEqual(by_position[2].capture_status, "capture_failed")
+        self.assertEqual(by_position[1].capture_status, "pending")
+        self.assertIsNone(by_position[1].error)
+        self.assertIsNone(
+            self.store.complete_attachment_capture(
+                case_id,
+                sequence,
+                0,
+                stale.claim_token,
+                10,
+                evidence_path="stale.png",
+                now=fresh_at,
+                max_attachment_bytes=10,
+                max_case_bytes=30,
+            )
+        )
+        self.assertEqual(
+            self.store.complete_attachment_capture(
+                case_id,
+                sequence,
+                1,
+                fresh.claim_token,
+                10,
+                evidence_path="fresh.png",
+                now=fresh_at,
+                max_attachment_bytes=10,
+                max_case_bytes=30,
+            ),
+            "captured",
+        )
+
     def test_wrong_token_cannot_complete_evidence_reservation(self):
         created_at = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
         attachment = NewAttachment(
