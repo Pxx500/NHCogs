@@ -598,6 +598,169 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 self.assertEqual(operation.status.value, "succeeded")
                 self.assertIsNone(operation.retry_at)
 
+    async def test_missed_capture_start_is_retried_once_before_delete(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
+                await asyncio.to_thread(cog._case_store.initialize)
+                message = self._message(honeypot, attachment_count=1)
+                attempts = 0
+                events = []
+                real_capture = cog._capture_case_attachments
+
+                async def capture(message, case_id, sequence, *, started_event=None):
+                    nonlocal attempts
+                    attempts += 1
+                    events.append("capture")
+                    if attempts == 1:
+                        await asyncio.Event().wait()
+                    return await real_capture(
+                        message,
+                        case_id,
+                        sequence,
+                        started_event=started_event,
+                    )
+
+                async def delete():
+                    events.append("delete")
+
+                message.delete = mock.AsyncMock(side_effect=delete)
+                self._configure_public_boundary(
+                    cog,
+                    {
+                        "enabled": True,
+                        "dry_run": False,
+                        "review_channel": None,
+                        "spam_enabled": False,
+                        "firstpost_enabled": False,
+                        "firstpost_collect_enabled": False,
+                    },
+                )
+                cog._scan_all_case_message_images = mock.AsyncMock()
+                cog._publish_detection_case = mock.AsyncMock()
+                cog._capture_case_attachments = capture
+                message_process = import_module(
+                    "NHCogs.honeypot.operations.message_process"
+                )
+
+                with mock.patch.object(
+                    message_process,
+                    "DETECTION_CAPTURE_START_TIMEOUT_SECONDS",
+                    0.05,
+                ):
+                    await cog.on_message(message)
+
+                snapshot = await asyncio.to_thread(
+                    active_case, cog._case_store,
+                    message.guild.id,
+                    message.author.id,
+                )
+                self.assertEqual(events, ["capture", "capture", "delete"])
+                self.assertEqual(attempts, 2)
+                message.attachments[0].read.assert_awaited_once()
+                message.delete.assert_awaited_once()
+                self.assertEqual(
+                    snapshot.attachments[0].capture_status, "captured"
+                )
+
+    async def test_second_missed_capture_start_deletes_without_another_retry(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
+                await asyncio.to_thread(cog._case_store.initialize)
+                message = self._message(honeypot, attachment_count=1)
+                attempts = 0
+
+                async def capture(*args, **kwargs):
+                    nonlocal attempts
+                    attempts += 1
+                    await asyncio.Event().wait()
+
+                self._configure_public_boundary(
+                    cog,
+                    {
+                        "enabled": True,
+                        "dry_run": False,
+                        "review_channel": None,
+                        "spam_enabled": False,
+                        "firstpost_enabled": False,
+                        "firstpost_collect_enabled": False,
+                    },
+                )
+                cog._scan_all_case_message_images = mock.AsyncMock()
+                cog._publish_detection_case = mock.AsyncMock()
+                cog._capture_case_attachments = capture
+                message_process = import_module(
+                    "NHCogs.honeypot.operations.message_process"
+                )
+
+                with mock.patch.object(
+                    message_process,
+                    "DETECTION_CAPTURE_START_TIMEOUT_SECONDS",
+                    0.05,
+                ):
+                    await cog.on_message(message)
+
+                snapshot = await asyncio.to_thread(
+                    active_case, cog._case_store,
+                    message.guild.id,
+                    message.author.id,
+                )
+                operation = next(
+                    item
+                    for item in snapshot.operations
+                    if item.operation_type == "message_process"
+                )
+                self.assertEqual(attempts, 2)
+                message.delete.assert_awaited_once()
+                message.attachments[0].read.assert_not_awaited()
+                self.assertEqual(
+                    snapshot.attachments[0].capture_status, "capture_failed"
+                )
+                self.assertEqual(operation.status.value, "succeeded")
+                self.assertIsNone(operation.retry_at)
+
+    async def test_dry_run_does_not_retry_a_capture_that_did_not_start(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
+                await asyncio.to_thread(cog._case_store.initialize)
+                message = self._message(honeypot, attachment_count=1)
+                attempts = 0
+
+                async def capture(*args, **kwargs):
+                    nonlocal attempts
+                    attempts += 1
+                    await asyncio.Event().wait()
+
+                self._configure_public_boundary(
+                    cog,
+                    {
+                        "enabled": True,
+                        "dry_run": True,
+                        "review_channel": None,
+                        "spam_enabled": False,
+                        "firstpost_enabled": False,
+                        "firstpost_collect_enabled": False,
+                    },
+                )
+                cog._scan_all_case_message_images = mock.AsyncMock()
+                cog._publish_detection_case = mock.AsyncMock()
+                cog._capture_case_attachments = capture
+                message_process = import_module(
+                    "NHCogs.honeypot.operations.message_process"
+                )
+
+                with mock.patch.object(
+                    message_process,
+                    "DETECTION_CAPTURE_START_TIMEOUT_SECONDS",
+                    0.05,
+                ):
+                    await cog.on_message(message)
+
+                self.assertEqual(attempts, 1)
+                message.delete.assert_not_awaited()
+
     async def test_unavailable_attachment_reservation_keeps_message_process_retryable(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:

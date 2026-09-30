@@ -1783,26 +1783,66 @@ class DetectionCaseStore:
             return True
 
     def fail_pending_attachment_captures(
-        self, case_id: str, message_sequence: int, error: str
+        self,
+        case_id: str,
+        message_sequence: int,
+        error: str,
+        *,
+        stale_before: datetime | None = None,
     ) -> int:
-        """Terminalize attachment capture when no reader could be started."""
+        """Terminalize attachment capture when no reader could be started.
+
+        A fresh claim is a live writer that may still commit bytes it already
+        read. Pass stale_before to leave those rows pending. Claims at or
+        before stale_before are abandoned, matching reserve_attachment_capture.
+        """
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
-            failed = connection.execute(
-                """UPDATE detection_attachments
-                   SET capture_status = 'capture_failed', evidence_path = NULL, error = ?
-                   WHERE case_id = ? AND message_sequence = ?
-                     AND capture_status = 'pending'""",
-                (error, case_id, message_sequence),
-            )
-            connection.execute(
-                """UPDATE detection_evidence_reservations
-                   SET state = 'pending', claim_token = NULL, reserved_bytes = 0,
-                       actual_bytes = NULL, claimed_at = NULL
-                   WHERE case_id = ? AND message_sequence = ?
-                     AND state = 'claimed'""",
-                (case_id, message_sequence),
-            )
+            if stale_before is None:
+                failed = connection.execute(
+                    """UPDATE detection_attachments
+                       SET capture_status = 'capture_failed', evidence_path = NULL, error = ?
+                       WHERE case_id = ? AND message_sequence = ?
+                         AND capture_status = 'pending'""",
+                    (error, case_id, message_sequence),
+                )
+                connection.execute(
+                    """UPDATE detection_evidence_reservations
+                       SET state = 'pending', claim_token = NULL, reserved_bytes = 0,
+                           actual_bytes = NULL, claimed_at = NULL
+                       WHERE case_id = ? AND message_sequence = ?
+                         AND state = 'claimed'""",
+                    (case_id, message_sequence),
+                )
+            else:
+                stale_timestamp = _to_timestamp(stale_before)
+                failed = connection.execute(
+                    """UPDATE detection_attachments
+                       SET capture_status = 'capture_failed', evidence_path = NULL, error = ?
+                       WHERE case_id = ? AND message_sequence = ?
+                         AND capture_status = 'pending'
+                         AND NOT EXISTS (
+                           SELECT 1 FROM detection_evidence_reservations
+                           WHERE detection_evidence_reservations.case_id
+                                 = detection_attachments.case_id
+                             AND detection_evidence_reservations.message_sequence
+                                 = detection_attachments.message_sequence
+                             AND detection_evidence_reservations.position
+                                 = detection_attachments.position
+                             AND detection_evidence_reservations.state = 'claimed'
+                             AND detection_evidence_reservations.claimed_at > ?
+                         )""",
+                    (error, case_id, message_sequence, stale_timestamp),
+                )
+                connection.execute(
+                    """UPDATE detection_evidence_reservations
+                       SET state = 'pending', claim_token = NULL, reserved_bytes = 0,
+                           actual_bytes = NULL, claimed_at = NULL
+                       WHERE case_id = ? AND message_sequence = ?
+                         AND state = 'claimed'
+                         AND claimed_at <= ?""",
+                    (case_id, message_sequence, stale_timestamp),
+                )
             connection.execute(
                 """UPDATE detection_messages SET capture_status = 'capture_incomplete'
                    WHERE case_id = ? AND sequence = ?""",

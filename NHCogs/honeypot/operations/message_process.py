@@ -25,6 +25,7 @@ from ..detection_cases import (
 )
 from ..settings import GuildSettings
 from .context import (
+    DETECTION_EVIDENCE_RESERVATION_STALE_SECONDS,
     DETECTION_FAST_RETRY_SECONDS,
     OperationContext,
     OperationOutcome,
@@ -36,6 +37,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("red.Honeypot")
 DETECTION_CAPTURE_START_TIMEOUT_SECONDS = 1.0
+_GONE_SOURCE_CAPTURE_ERROR = (
+    "source message is gone before attachment capture completed"
+)
 
 
 @dataclass(frozen=True)
@@ -74,6 +78,77 @@ async def message_process_handler(
     return OperationOutcome(result=await _process_active_message(cog, context))
 
 
+def _deletes_live_source(state: _MessageProcessState) -> bool:
+    return (
+        state.containment_required
+        and not state.guild_settings.dry_run
+        and state.live_message is not None
+        and state.source.delete_status is DeleteStatus.PENDING
+    )
+
+
+def _launch_attachment_capture(
+    cog: Honeypot,
+    context: OperationContext,
+    state: _MessageProcessState,
+    persisted: tuple[detection_runtime.CaptureResult, ...],
+    message_attachments: tuple[AttachmentRecord, ...],
+) -> tuple[asyncio.Task, asyncio.Event]:
+    capture_started = asyncio.Event()
+    if (
+        state.live_message is not None
+        and len(persisted) < len(message_attachments)
+    ):
+        capture_task = asyncio.create_task(
+            cog._capture_case_attachments(
+                state.live_message,
+                context.operation.case_id,
+                state.source.sequence,
+                started_event=capture_started,
+            )
+        )
+    else:
+        capture_started.set()
+        capture_task = asyncio.create_task(asyncio.sleep(0, result=persisted))
+    return capture_task, capture_started
+
+
+async def _capture_start_signaled(
+    capture_task: asyncio.Task, capture_started: asyncio.Event
+) -> bool:
+    """True once this attempt has begun downloading.
+
+    The capture task finishing without that signal is an early miss. Waiting
+    out the timeout would only delay the delete.
+    """
+    if capture_started.is_set():
+        return True
+    start_wait = asyncio.create_task(capture_started.wait())
+    await asyncio.wait(
+        {start_wait, capture_task},
+        timeout=DETECTION_CAPTURE_START_TIMEOUT_SECONDS,
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    signaled = capture_started.is_set()
+    if not start_wait.done():
+        start_wait.cancel()
+    await asyncio.gather(start_wait, return_exceptions=True)
+    return signaled
+
+
+async def _stop_capture_task(capture_task: asyncio.Task) -> None:
+    if not capture_task.done():
+        capture_task.cancel()
+    await asyncio.gather(capture_task, return_exceptions=True)
+
+
+async def _load_persisted_captures(cog: Honeypot, case_id: str, sequence: int):
+    refreshed = await asyncio.to_thread(cog._case_store.get_case, case_id)
+    if refreshed is None:
+        return ()
+    return cog._persisted_capture_results(refreshed, sequence)
+
+
 async def _reserve_attachment_capture(
     cog: Honeypot,
     context: OperationContext,
@@ -94,45 +169,40 @@ async def _reserve_attachment_capture(
         if attachment.message_sequence == state.source.sequence
     )
     evidence_started = perf_counter()
-    capture_started = asyncio.Event()
-    if (
-        state.live_message is not None
-        and len(persisted) < len(message_attachments)
-    ):
-        capture_task = asyncio.create_task(
-            cog._capture_case_attachments(
-                state.live_message,
-                operation.case_id,
-                state.source.sequence,
-                started_event=capture_started,
-            )
-        )
-    else:
-        capture_started.set()
-        capture_task = asyncio.create_task(asyncio.sleep(0, result=persisted))
-
+    capture_task, capture_started = _launch_attachment_capture(
+        cog, context, state, persisted, message_attachments
+    )
     containment_started = perf_counter()
     try:
         if message_attachments and not persisted:
-            try:
-                await asyncio.wait_for(
-                    capture_started.wait(),
-                    timeout=DETECTION_CAPTURE_START_TIMEOUT_SECONDS,
+            started = await _capture_start_signaled(
+                capture_task, capture_started
+            )
+            # One short retry only when this run is about to delete the
+            # message. A download that never started can still succeed if
+            # the next attempt gets a capture slot before the purge.
+            if not started and _deletes_live_source(state):
+                await _stop_capture_task(capture_task)
+                reloaded = await _load_persisted_captures(
+                    cog, operation.case_id, state.source.sequence
                 )
-            except asyncio.TimeoutError:
+                if not reloaded:
+                    capture_task, capture_started = _launch_attachment_capture(
+                        cog, context, state, reloaded, message_attachments
+                    )
+                    started = await _capture_start_signaled(
+                        capture_task, capture_started
+                    )
+            if not started:
                 await asyncio.to_thread(
                     cog._case_store.fail_pending_attachment_captures,
                     operation.case_id,
                     state.source.sequence,
                     "attachment capture could not start before containment",
                 )
-                capture_task.cancel()
-                await asyncio.gather(capture_task, return_exceptions=True)
-                refreshed = await asyncio.to_thread(
-                    cog._case_store.get_case, operation.case_id
-                )
-                persisted = cog._persisted_capture_results(
-                    refreshed, state.source.sequence
+                await _stop_capture_task(capture_task)
+                persisted = await _load_persisted_captures(
+                    cog, operation.case_id, state.source.sequence
                 )
                 capture_task = asyncio.create_task(
                     asyncio.sleep(0, result=persisted)
@@ -178,6 +248,25 @@ async def _complete_attachment_capture(
     captures = cog._persisted_capture_results(
         refreshed, state.source.sequence
     )
+    if len(captures) < len(message_attachments) and state.live_message is None:
+        # NotFound means the bytes are gone. A fresh claim may still commit
+        # a download that already finished locally, so only abandon the rest.
+        await asyncio.to_thread(
+            cog._case_store.fail_pending_attachment_captures,
+            context.operation.case_id,
+            state.source.sequence,
+            _GONE_SOURCE_CAPTURE_ERROR,
+            stale_before=context.now
+            - timedelta(seconds=DETECTION_EVIDENCE_RESERVATION_STALE_SECONDS),
+        )
+        refreshed = await asyncio.to_thread(
+            cog._case_store.get_case, context.operation.case_id
+        )
+        if refreshed is None:
+            return None, ()
+        captures = cog._persisted_capture_results(
+            refreshed, state.source.sequence
+        )
     if len(captures) < len(message_attachments):
         raise RuntimeError(
             "attachment evidence is not terminal; retry after reservation expiry"
