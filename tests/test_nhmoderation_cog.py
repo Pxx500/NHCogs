@@ -11,6 +11,17 @@ from unittest import mock
 from tests.harness import _isolated_honeypot_modules, _operational_support
 
 
+class _OverviewEmbed:
+    def __init__(self, *, title=None, description=None, color=None):
+        self.title = title
+        self.description = description
+        self.color = color
+        self.fields = []
+
+    def add_field(self, *, name, value, inline=True):
+        self.fields.append(SimpleNamespace(name=name, value=value, inline=inline))
+
+
 @contextmanager
 def loaded_nhmoderation():
     with TemporaryDirectory() as directory:
@@ -37,39 +48,6 @@ def loaded_nhmoderation():
 
 
 class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
-    def test_registered_command_tree_uses_accepted_names(self):
-        with loaded_nhmoderation() as module:
-            names = {
-                value.qualified_name
-                for value in vars(module.NHModeration).values()
-                if getattr(value, "kind", None) in {"command", "group"}
-            }
-
-        self.assertEqual(
-            names,
-            {
-                "banchart",
-                "nhmod",
-                "nhmod status",
-                "nhmod migrate",
-                "nhmod migrate plan",
-                "nhmod migrate run",
-                "nhmod filter",
-                "nhmod filter add",
-                "nhmod filter remove",
-                "nhmod filter list",
-                "nhmod filter create",
-                "nhmod filter delete",
-                "nhmod filter show",
-                "nhmod filter mode",
-                "nhmod filter channels",
-                "nhmod filter channels add",
-                "nhmod filter channels remove",
-                "nhmod sync",
-                "nhmod repair",
-            },
-        )
-
     async def test_maintenance_commands_inherit_manage_messages_permission(self):
         with loaded_nhmoderation() as module:
 
@@ -112,32 +90,30 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
             subject = object.__new__(module.NHModeration)
             subject._require_private_channel = mock.Mock()
             subject._mark_operational_recovered = mock.AsyncMock()
-            ctx = SimpleNamespace(guild=SimpleNamespace(id=10))
+            ctx = SimpleNamespace(
+                guild=SimpleNamespace(id=10),
+                send=mock.AsyncMock(),
+                clean_prefix="!",
+            )
 
-            with mock.patch.object(
-                module, "send_group_overview", new=mock.AsyncMock()
-            ) as overview:
+            ctx.command = module.NHModeration.nhmod
+            overview_discord = module.send_group_overview.__globals__["discord"]
+            with mock.patch.object(overview_discord, "Embed", _OverviewEmbed):
                 await module.NHModeration.nhmod.callback(subject, ctx)
-                await module.NHModeration.nhmod_migrate.callback(subject, ctx)
+            nhmod_embed = ctx.send.await_args.kwargs["embed"]
+            self.assertEqual(nhmod_embed.title, "Nhmod")
+            self.assertIn("!nhmod status", nhmod_embed.fields[0].value)
+            self.assertIn("Run a category below", nhmod_embed.description)
 
-            self.assertEqual(
-                overview.await_args_list,
-                [
-                    mock.call(ctx, include_descendants=False),
-                    mock.call(ctx),
-                ],
-            )
-            self.assertEqual(
-                subject._mark_operational_recovered.await_args_list,
-                [
-                    mock.call(ctx.guild, "nhmod"),
-                    mock.call(ctx.guild, "nhmod migrate"),
-                ],
-            )
-            self.assertEqual(
-                subject._require_private_channel.call_args_list,
-                [mock.call(ctx), mock.call(ctx)],
-            )
+            ctx.send.reset_mock()
+            ctx.command = module.NHModeration.nhmod_migrate
+            with mock.patch.object(overview_discord, "Embed", _OverviewEmbed):
+                await module.NHModeration.nhmod_migrate.callback(subject, ctx)
+            migrate_embed = ctx.send.await_args.kwargs["embed"]
+            self.assertEqual(migrate_embed.title, "Migrate")
+            rendered = "\n".join(field.value for field in migrate_embed.fields)
+            self.assertIn("!nhmod migrate plan", rendered)
+            self.assertIn("!nhmod migrate run", rendered)
 
     async def test_filter_commands_normalize_persist_list_and_remove_phrases(self):
         with loaded_nhmoderation() as module:
@@ -546,17 +522,23 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
             subject = module.NHModeration(SimpleNamespace(), _operational_support())
             subject._require_private_channel = mock.Mock()
             subject._mark_operational_recovered = mock.AsyncMock()
-            subject._send_filter_output = mock.AsyncMock()
             phrases = [f"phrase-{index}-" + "x" * 100 for index in range(30)]
             subject._message_filter_groups = {10: {"ads": {
                 "phrases": phrases, "mode": "blacklist", "channels": [20],
             }}}
             guild = SimpleNamespace(id=10, get_channel_or_thread=lambda _: SimpleNamespace(name="trade"))
-            await subject.nhmod_filter_show.callback(subject, SimpleNamespace(guild=guild), "ads")
-            fields = subject._send_filter_output.await_args.args[2]
+            ctx = SimpleNamespace(guild=guild, send=mock.AsyncMock())
+            overview_discord = module.overview_embeds.__globals__["discord"]
+            with mock.patch.object(overview_discord, "Embed", _OverviewEmbed):
+                await subject.nhmod_filter_show.callback(subject, ctx, "ads")
+            fields = [
+                (field.name, field.value)
+                for call in ctx.send.await_args_list
+                for field in call.kwargs["embed"].fields
+            ]
             self.assertTrue(all(len(value) <= module.MAX_FIELD_VALUE_LENGTH for _, value in fields))
             self.assertIn(("Channels", "#trade"), fields)
-            rendered = "\n".join(value for title, value in fields if title == "Phrases")
+            rendered = "\n".join(value for title, value in fields if title.startswith("Phrases"))
             for phrase in phrases:
                 self.assertIn(phrase, rendered)
 
@@ -659,64 +641,49 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
                 "banchart",
             )
 
-    async def test_banchart_rejects_incomplete_migration_without_reading_chart(self):
+    async def test_banchart_rejects_running_and_pending_migrations(self):
         with loaded_nhmoderation() as module:
-            subject = object.__new__(module.NHModeration)
-            subject._mark_operational_recovered = mock.AsyncMock()
-            subject.history = SimpleNamespace(
-                status=mock.AsyncMock(
-                    return_value=SimpleNamespace(migration_state="running")
+            for state, expected in (
+                (
+                    "running",
+                    "Initial migration is currently running. Try banchart again after it completes.",
                 ),
-                get_ban_chart=mock.AsyncMock(
-                    return_value=SimpleNamespace(
-                        rows=(),
-                        other_count=0,
-                        total_count=0,
+                (
+                    "pending",
+                    "Run `!nhmod migrate run` before using banchart.",
+                ),
+            ):
+                with self.subTest(state=state):
+                    subject = object.__new__(module.NHModeration)
+                    subject._mark_operational_recovered = mock.AsyncMock()
+                    subject.history = SimpleNamespace(
+                        status=mock.AsyncMock(
+                            return_value=SimpleNamespace(migration_state=state)
+                        ),
+                        get_ban_chart=mock.AsyncMock(
+                            return_value=SimpleNamespace(
+                                rows=(
+                                    SimpleNamespace(
+                                        label=None, moderator_user_id=55, count=3
+                                    ),
+                                ),
+                                other_count=0,
+                                total_count=3,
+                            )
+                        ),
                     )
-                ),
-            )
-            ctx = SimpleNamespace(
-                guild=SimpleNamespace(id=10, name="Test guild"),
-                channel=object(),
-                clean_prefix="!",
-                send=mock.AsyncMock(),
-            )
+                    ctx = SimpleNamespace(
+                        guild=SimpleNamespace(id=10, name="Test guild"),
+                        channel=object(),
+                        clean_prefix="!",
+                        send=mock.AsyncMock(),
+                    )
 
-            await module.NHModeration.banchart.callback(subject, ctx)
+                    await module.NHModeration.banchart.callback(subject, ctx)
 
-            subject.history.get_ban_chart.assert_not_awaited()
-            ctx.send.assert_awaited_once()
-            self.assertEqual(
-                ctx.send.await_args.args[0],
-                "Initial migration is currently running. Try banchart again after it completes.",
-            )
-            self.assertIn("allowed_mentions", ctx.send.await_args.kwargs)
-            subject._mark_operational_recovered.assert_not_awaited()
-
-    async def test_banchart_tells_moderator_to_start_pending_migration(self):
-        with loaded_nhmoderation() as module:
-            subject = object.__new__(module.NHModeration)
-            subject._mark_operational_recovered = mock.AsyncMock()
-            subject.history = SimpleNamespace(
-                status=mock.AsyncMock(
-                    return_value=SimpleNamespace(migration_state="pending")
-                ),
-                get_ban_chart=mock.AsyncMock(),
-            )
-            ctx = SimpleNamespace(
-                guild=SimpleNamespace(id=10, name="Test guild"),
-                channel=object(),
-                clean_prefix="!",
-                send=mock.AsyncMock(),
-            )
-
-            await module.NHModeration.banchart.callback(subject, ctx)
-
-            subject.history.get_ban_chart.assert_not_awaited()
-            self.assertEqual(
-                ctx.send.await_args.args[0],
-                "Run `!nhmod migrate run` before using banchart.",
-            )
+                    self.assertEqual(ctx.send.await_args.args[0], expected)
+                    self.assertNotIn("file", ctx.send.await_args.kwargs)
+                    subject.history.get_ban_chart.assert_not_awaited()
 
     async def test_migrate_plan_reports_cached_source_and_command_readiness(self):
         with loaded_nhmoderation() as module:

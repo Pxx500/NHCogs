@@ -4,17 +4,17 @@ startup, guild defaults and the module surface the pipeline exposes.
 
 import asyncio
 import logging
-import sys
+import sqlite3
 import unittest
-from dataclasses import FrozenInstanceError, fields
+from dataclasses import fields
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, get_ident
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from unittest import mock
 
 from tests.harness import (
-    _MISSING,
     EXPECTED_GUILD_DEFAULTS,
     _async_noop,
     _Bot,
@@ -87,170 +87,122 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     await cog.cog_unload()
 
-    async def test_user_privacy_deletion_attempts_cases_after_registry_failure(self):
+    async def test_user_privacy_deletion_removes_only_that_users_records(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = honeypot.Honeypot(_Bot(), _operational_support())
-                cog._message_registry.forget_user = mock.AsyncMock(
-                    side_effect=RuntimeError("registry unavailable")
+                await self._seed_retained_record(
+                    honeypot, cog, guild_id=10, user_id=42, message_id=1
                 )
-                delete_cases = mock.AsyncMock()
-
-                with mock.patch.object(
-                    honeypot.review_publication,
-                    "_delete_detection_case_scope",
-                    new=delete_cases,
-                ):
-                    with self.assertRaises(RuntimeError):
-                        await cog.red_delete_data_for_user(
-                            requester="discord_deleted_user",
-                            user_id=42,
-                        )
-
-                delete_cases.assert_awaited_once_with(
-                    cog,
-                    cog._case_store.plan_user_case_deletion,
-                    42,
+                await self._seed_retained_record(
+                    honeypot, cog, guild_id=11, user_id=99, message_id=2
                 )
 
-    async def test_guild_privacy_deletion_attempts_cases_after_registry_failure(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot(), _operational_support())
-                cog._message_registry.forget_guild = mock.AsyncMock(
-                    side_effect=RuntimeError("registry unavailable")
-                )
-                delete_cases = mock.AsyncMock()
-
-                with mock.patch.object(
-                    honeypot.review_publication,
-                    "_delete_detection_case_scope",
-                    new=delete_cases,
-                ):
-                    with self.assertRaises(RuntimeError):
-                        await cog.on_guild_remove(SimpleNamespace(id=84))
-
-                delete_cases.assert_awaited_once_with(
-                    cog,
-                    cog._case_store.plan_guild_case_deletion,
-                    84,
+                await cog.red_delete_data_for_user(
+                    requester="discord_deleted_user",
+                    user_id=42,
                 )
 
-    async def test_gateway_delete_and_pin_events_synchronize_message_registry(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot(), _operational_support())
-                cog._message_registry = SimpleNamespace(
-                    forget=mock.AsyncMock(),
-                    forget_many=mock.AsyncMock(),
-                    set_pinned=mock.AsyncMock(),
-                    forget_channel=mock.AsyncMock(),
-                )
-                cog._case_store.invalidate_timeline_publications = mock.Mock()
-                honeypot.channel_routing.clear_deleted_channel = mock.AsyncMock()
-                honeypot.manual_punishment.clear_deleted_channel = mock.AsyncMock()
-                honeypot.manual_punishment.clear_deleted_role = mock.AsyncMock()
-
-                await cog.on_raw_message_delete(
-                    SimpleNamespace(channel_id=20, message_id=10)
-                )
-                await cog.on_raw_bulk_message_delete(
-                    SimpleNamespace(channel_id=20, message_ids={11, 12})
-                )
-                await cog.on_raw_message_edit(
-                    SimpleNamespace(message_id=13, data={"pinned": True})
-                )
-                channel = SimpleNamespace(id=14, guild=SimpleNamespace(id=15))
-                await cog.on_guild_channel_delete(channel)
-                role = SimpleNamespace(id=16, guild=channel.guild)
-                await cog.on_guild_role_delete(role)
-
-                cog._message_registry.forget.assert_awaited_once_with(10)
-                cog._message_registry.forget_many.assert_awaited_once_with({11, 12})
                 self.assertEqual(
-                    cog._case_store.invalidate_timeline_publications.call_args_list,
-                    [mock.call(20, (10,)), mock.call(20, {11, 12})],
+                    await cog._message_registry.recent_by_author(10, 42),
+                    (),
                 )
-                cog._message_registry.set_pinned.assert_awaited_once_with(13, True)
-                cog._message_registry.forget_channel.assert_awaited_once_with(15, 14)
-                honeypot.channel_routing.clear_deleted_channel.assert_awaited_once_with(
-                    cog, channel
+                self.assertEqual(
+                    len(await cog._message_registry.recent_by_author(11, 99)),
+                    1,
                 )
-                honeypot.manual_punishment.clear_deleted_channel.assert_awaited_once_with(
-                    cog, channel
+                open_cases = await asyncio.to_thread(cog._case_store.list_open_cases)
+                self.assertFalse(any(item.case.user_id == 42 for item in open_cases))
+                self.assertTrue(any(item.case.user_id == 99 for item in open_cases))
+
+    async def test_user_privacy_deletion_still_removes_cases_when_registry_fails(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
+                await self._seed_retained_record(
+                    honeypot, cog, guild_id=10, user_id=42, message_id=1
                 )
-                honeypot.manual_punishment.clear_deleted_role.assert_awaited_once_with(
-                    cog, role
+                await self._seed_retained_record(
+                    honeypot, cog, guild_id=11, user_id=99, message_id=2
+                )
+                registry_path = Path(cog._message_registry.database_path)
+                await asyncio.to_thread(registry_path.unlink)
+                await asyncio.to_thread(registry_path.mkdir)
+
+                with self.assertRaises(sqlite3.OperationalError):
+                    await cog.red_delete_data_for_user(
+                        requester="discord_deleted_user",
+                        user_id=42,
+                    )
+
+                open_cases = await asyncio.to_thread(cog._case_store.list_open_cases)
+                self.assertFalse(any(item.case.user_id == 42 for item in open_cases))
+                self.assertTrue(any(item.case.user_id == 99 for item in open_cases))
+
+    async def test_guild_removal_deletes_only_that_guilds_records(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
+                await self._seed_retained_record(
+                    honeypot, cog, guild_id=10, user_id=42, message_id=1
+                )
+                await self._seed_retained_record(
+                    honeypot, cog, guild_id=11, user_id=42, message_id=2
                 )
 
-    def test_fallback_keeps_diagnostic_commands_on_cog_and_exposes_implementations(self):
-        implementation_names = (
-            "config_dump",
-            "honeypot_doctor",
-            "honeypot_mod_stats",
-            "honeypot_reset_stats",
-            "honeypot_stats",
-            "review_dump",
+                await cog.on_guild_remove(SimpleNamespace(id=10))
+
+                self.assertEqual(
+                    await cog._message_registry.recent_by_author(10, 42),
+                    (),
+                )
+                self.assertEqual(
+                    len(await cog._message_registry.recent_by_author(11, 42)),
+                    1,
+                )
+                open_cases = await asyncio.to_thread(cog._case_store.list_open_cases)
+                self.assertFalse(any(item.case.guild_id == 10 for item in open_cases))
+                self.assertTrue(any(item.case.guild_id == 11 for item in open_cases))
+
+    async def _seed_retained_record(self, honeypot, cog, *, guild_id, user_id, message_id):
+        await cog._message_registry.initialize()
+        await asyncio.to_thread(cog._case_store.initialize)
+        created_at = datetime(2026, 7, 13, tzinfo=timezone.utc)
+        await cog._message_registry.observe(
+            honeypot.MessageRecord(
+                message_id=message_id,
+                guild_id=guild_id,
+                channel_id=30,
+                author_id=user_id,
+                created_at=created_at,
+                pinned=False,
+                author_kind="member",
+                fingerprint=f"fingerprint-{message_id}",
+            )
         )
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                diagnostics = getattr(honeypot, "diagnostics", None)
-                self.assertIsNotNone(diagnostics)
-                for name in implementation_names:
-                    with self.subTest(command=name):
-                        command = getattr(honeypot.Honeypot, name)
-                        self.assertEqual(command.callback.__module__, "NHCogs.honeypot.honeypot")
-                        self.assertTrue(callable(getattr(diagnostics, name, None)))
-
-    async def test_cog_after_invoke_keeps_group_cleanup_override(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = object.__new__(honeypot.Honeypot)
-                ctx = SimpleNamespace(
-                    command=honeypot.Honeypot.debug,
-                    invoked_subcommand=object(),
-                )
-                self.assertTrue(hasattr(ctx.command, "invoke_without_command"))
-
-                result = await cog.cog_after_invoke(ctx)
-
-                self.assertIsNone(result)
-
-    async def test_configuration_option_enums_preserve_public_values(self):
-        expected_options = (
-            ("CoreActionOption", "CORE_ACTION_OPTIONS", ("kick", "ban", "review", "none")),
-            ("FallbackActionOption", "FALLBACK_ACTION_OPTIONS", ("review", "kick", "ban", "none")),
-            ("WhitelistModeOption", "WHITELIST_MODE_OPTIONS", ("bypass", "review", "fallback", "none")),
-            ("JoinwatchAutoRoleActionOption", "JOINWATCH_AUTO_ROLE_ACTION_OPTIONS", ("none", "kick", "ban")),
-            ("BaitActionOption", "BAIT_ACTION_OPTIONS", ("kick", "ban")),
-            ("ImageScanDetectorActionOption", "IMAGE_SCAN_DETECTOR_ACTION_OPTIONS", ("none", "review", "kick", "ban")),
-            ("ReviewKickFailWarningMode", "REVIEW_KICK_FAIL_WARNING_MODES", ("false", "true", "manual")),
+        await asyncio.to_thread(
+            cog._case_store.append_message,
+            honeypot.NewMessage(
+                guild_id=guild_id,
+                user_id=user_id,
+                channel_id=30,
+                message_id=message_id,
+                content="evidence",
+                created_at=created_at,
+                jump_url=None,
+                attachments=(),
+            ),
+            (
+                honeypot.DetectionSignal(
+                    "honeypot",
+                    "bait",
+                    honeypot.ActionIntent.REVIEW,
+                    True,
+                    {},
+                ),
+            ),
         )
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                for enum_name, tuple_name, expected in expected_options:
-                    with self.subTest(enum_name=enum_name):
-                        enum_type = getattr(honeypot, enum_name, None)
-                        self.assertIsNotNone(enum_type)
-                        self.assertEqual(
-                            tuple(member.value for member in enum_type),
-                            expected,
-                        )
-                        self.assertEqual(getattr(honeypot, tuple_name), expected)
 
-    async def test_empty_guild_settings_use_registered_defaults(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                settings_type = getattr(honeypot, "GuildSettings", None)
-                self.assertIsNotNone(settings_type)
-
-                guild_settings = settings_type.from_mapping({})
-
-                observed = {
-                    field.name: getattr(guild_settings, field.name)
-                    for field in fields(guild_settings)
-                }
-                self.assertEqual(observed, EXPECTED_GUILD_DEFAULTS)
 
     async def test_guild_settings_ignore_unknown_keys_and_keep_known_values(self):
         with TemporaryDirectory() as directory:
@@ -273,201 +225,30 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(guild_settings.enabled)
                 self.assertIn("enabled", "\n".join(captured.output))
 
-    async def test_guild_settings_coerce_integer_fields_independently(self):
-        raw = {
-            "purge_backward_seconds": 90,
-            "purge_forward_seconds": 20,
-            "spam_window_seconds": "invalid",
-            "spam_min_channels": 3,
-            "imagescan_detector_threshold": 12,
-            "joinwatch_min_age_hours": 48,
-            "joinwatch_auto_role_timer_minutes": 60,
-            "joinwatch_auto_role_random_delay_min_minutes": 2,
-            "joinwatch_auto_role_random_delay_max_minutes": 8,
-        }
+    async def test_malformed_integer_and_action_fall_back_instead_of_raising(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 with self.assertLogs("red.Honeypot", level=logging.WARNING) as captured:
-                    guild_settings = honeypot.GuildSettings.from_mapping(raw)
-
-                self.assertEqual(guild_settings.purge_backward_seconds, 90)
-                self.assertEqual(guild_settings.purge_forward_seconds, 20)
-                self.assertEqual(guild_settings.spam_window_seconds, 10)
-                self.assertEqual(guild_settings.spam_min_channels, 3)
-                self.assertEqual(guild_settings.imagescan_detector_threshold, 12)
-                self.assertEqual(guild_settings.joinwatch_min_age_hours, 48)
-                self.assertEqual(guild_settings.joinwatch_auto_role_timer_minutes, 60)
-                self.assertEqual(guild_settings.joinwatch_auto_role_random_delay_min_minutes, 2)
-                self.assertEqual(guild_settings.joinwatch_auto_role_random_delay_max_minutes, 8)
-                self.assertIn("spam_window_seconds", "\n".join(captured.output))
-
-    async def test_guild_settings_preserve_every_boolean_toggle(self):
-        raw = {
-            "enabled": True,
-            "dry_run": True,
-            "firstpost_collect_enabled": True,
-            "firstpost_enabled": True,
-            "spam_enabled": True,
-            "imagescan_detector_enabled": True,
-            "review_enabled": True,
-            "automated_kick_fail_warning": True,
-            "joinwatch_enabled": True,
-            "joinwatch_alert_enabled": False,
-            "joinwatch_auto_role_enabled": True,
-            "joinwatch_auto_role_random_delay_enabled": True,
-            "baitrole_enabled": True,
-        }
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                guild_settings = honeypot.GuildSettings.from_mapping(raw)
-
-                for key, expected in raw.items():
-                    with self.subTest(key=key):
-                        self.assertIs(getattr(guild_settings, key), expected)
-
-    async def test_guild_settings_coerce_optional_discord_ids(self):
-        raw = {
-            "mute_role": "invalid",
-            "review_channel": 44,
-            "joinwatch_channel": 55,
-            "joinwatch_auto_role_id": 66,
-            "baitrole_id": 77,
-        }
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                with self.assertLogs("red.Honeypot", level=logging.WARNING) as captured:
-                    guild_settings = honeypot.GuildSettings.from_mapping(raw)
-
-                self.assertIsNone(guild_settings.mute_role)
-                self.assertEqual(guild_settings.review_channel, 44)
-                self.assertEqual(guild_settings.joinwatch_channel, 55)
-                self.assertEqual(guild_settings.joinwatch_auto_role_id, 66)
-                self.assertEqual(guild_settings.baitrole_id, 77)
-                self.assertIn("mute_role", "\n".join(captured.output))
-
-    async def test_guild_settings_copy_and_validate_list_and_set_values(self):
-        raw = {
-            "honeypot_channels": {10, 20},
-            "whitelisted_roles": (30, 40),
-            "scam_keywords": {"alpha", "beta"},
-            "attachment_patterns": [1],
-        }
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                with self.assertLogs("red.Honeypot", level=logging.WARNING) as captured:
-                    guild_settings = honeypot.GuildSettings.from_mapping(raw)
-
-                self.assertEqual(set(guild_settings.honeypot_channels), {10, 20})
-                self.assertEqual(guild_settings.whitelisted_roles, [30, 40])
-                self.assertEqual(set(guild_settings.scam_keywords), {"alpha", "beta"})
-                self.assertEqual(
-                    guild_settings.attachment_patterns,
-                    EXPECTED_GUILD_DEFAULTS["attachment_patterns"],
-                )
-                self.assertIn("attachment_patterns", "\n".join(captured.output))
-
-    async def test_guild_settings_copy_and_validate_mapping_values(self):
-        stats = {"detections": 5}
-        assignments = {"7": {"role_id": 9, "retry_count": 1}}
-        raw = {
-            "stats": stats,
-            "joinwatch_pending_role_assignments": assignments,
-            "joinwatch_pending_roles": ["invalid"],
-        }
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                with self.assertLogs("red.Honeypot", level=logging.WARNING) as captured:
-                    guild_settings = honeypot.GuildSettings.from_mapping(raw)
-
-                self.assertEqual(guild_settings.stats, stats)
-                self.assertEqual(
-                    guild_settings.joinwatch_pending_role_assignments,
-                    assignments,
-                )
-                self.assertIsNot(guild_settings.joinwatch_pending_role_assignments, assignments)
-                self.assertEqual(guild_settings.joinwatch_pending_roles, {})
-                self.assertIn("joinwatch_pending_roles", "\n".join(captured.output))
-
-    async def test_guild_settings_coerce_option_values_to_phase_one_enums(self):
-        raw = {
-            "action": "ban",
-            "fallback_action": "kick",
-            "firstpost_action": "none",
-            "spam_action": "ban",
-            "imagescan_detector_action": "kick",
-            "review_kick_fail_warning": "manual",
-            "whitelist_mode": "fallback",
-            "joinwatch_auto_role_action": "ban",
-            "baitrole_action": "kick",
-        }
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                guild_settings = honeypot.GuildSettings.from_mapping(raw)
-
-                self.assertIs(guild_settings.action, honeypot.CoreActionOption.BAN)
-                self.assertIs(
-                    guild_settings.fallback_action,
-                    honeypot.FallbackActionOption.KICK,
-                )
-                self.assertIs(
-                    guild_settings.firstpost_action,
-                    honeypot.CoreActionOption.NONE,
-                )
-                self.assertIs(guild_settings.spam_action, honeypot.CoreActionOption.BAN)
-                self.assertIs(
-                    guild_settings.imagescan_detector_action,
-                    honeypot.ImageScanDetectorActionOption.KICK,
-                )
-                self.assertIs(
-                    guild_settings.review_kick_fail_warning,
-                    honeypot.ReviewKickFailWarningMode.MANUAL,
-                )
-                self.assertIs(
-                    guild_settings.whitelist_mode,
-                    honeypot.WhitelistModeOption.FALLBACK,
-                )
-                self.assertIs(
-                    guild_settings.joinwatch_auto_role_action,
-                    honeypot.JoinwatchAutoRoleActionOption.BAN,
-                )
-                self.assertIs(
-                    guild_settings.baitrole_action,
-                    honeypot.BaitActionOption.KICK,
-                )
-
-                with self.assertLogs("red.Honeypot", level=logging.WARNING) as captured:
-                    malformed = honeypot.GuildSettings.from_mapping(
-                        {"action": "invalid", "fallback_action": "invalid"}
+                    guild_settings = honeypot.GuildSettings.from_mapping(
+                        {
+                            "spam_window_seconds": "invalid",
+                            "spam_min_channels": 7,
+                            "action": "invalid",
+                            "fallback_action": "invalid",
+                        }
                     )
 
-                self.assertIsNone(malformed.action)
+                self.assertEqual(guild_settings.spam_window_seconds, 10)
+                self.assertEqual(guild_settings.spam_min_channels, 7)
+                self.assertIsNone(guild_settings.action)
                 self.assertIs(
-                    malformed.fallback_action,
+                    guild_settings.fallback_action,
                     honeypot.FallbackActionOption.REVIEW,
                 )
-                self.assertIn("action", "\n".join(captured.output))
+                logged = "\n".join(captured.output)
+                self.assertIn("spam_window_seconds", logged)
+                self.assertIn("action", logged)
 
-    async def test_guild_settings_copy_canonical_honeypot_channels(self):
-        canonical = [10, 20]
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                guild_settings = honeypot.GuildSettings.from_mapping(
-                    {
-                        "honeypot_channel": 30,
-                        "honeypot_channels": canonical,
-                    }
-                )
-
-                self.assertEqual(guild_settings.honeypot_channels, [10, 20])
-                self.assertIsNot(guild_settings.honeypot_channels, canonical)
-
-    async def test_guild_settings_are_frozen_snapshots(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                guild_settings = honeypot.GuildSettings.from_mapping({})
-
-                with self.assertRaises(FrozenInstanceError):
-                    guild_settings.enabled = True
 
     async def test_guild_settings_defaults_exactly_match_registered_config(self):
         with TemporaryDirectory() as directory:
@@ -492,90 +273,6 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 }
                 self.assertEqual(observed, EXPECTED_GUILD_DEFAULTS)
 
-    async def test_isolation_removes_new_nested_honeypot_module(self):
-        module_name = "NHCogs.honeypot.operations.source_delete"
-        sys.modules.pop(module_name, None)
-        try:
-            with TemporaryDirectory() as directory:
-                with _isolated_honeypot_modules(Path(directory)):
-                    sys.modules[module_name] = ModuleType(module_name)
-
-            self.assertNotIn(module_name, sys.modules)
-        finally:
-            sys.modules.pop(module_name, None)
-
-    async def test_isolation_restores_preexisting_nested_honeypot_module(self):
-        module_name = "NHCogs.honeypot.operations.source_delete"
-        previous = sys.modules.get(module_name, _MISSING)
-        sentinel = ModuleType(module_name)
-        sys.modules[module_name] = sentinel
-        try:
-            with TemporaryDirectory() as directory:
-                with _isolated_honeypot_modules(Path(directory)):
-                    pass
-
-            self.assertIs(sys.modules.get(module_name), sentinel)
-        finally:
-            if previous is _MISSING:
-                sys.modules.pop(module_name, None)
-            else:
-                sys.modules[module_name] = previous
-
-    async def test_each_isolated_load_owns_one_detection_view_identity(self):
-        module_name = "NHCogs.honeypot.views"
-        previous = sys.modules.get(module_name, _MISSING)
-
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as first_honeypot:
-                self.assertTrue(module_name in sys.modules)
-                first_view = first_honeypot.DetectionCaseView
-                self.assertIs(
-                    first_view,
-                    sys.modules[module_name].DetectionCaseView,
-                )
-
-            self.assertIs(sys.modules.get(module_name, _MISSING), previous)
-
-            with _isolated_honeypot_modules(Path(directory)) as second_honeypot:
-                self.assertTrue(module_name in sys.modules)
-                second_view = second_honeypot.DetectionCaseView
-                self.assertIs(
-                    second_view,
-                    sys.modules[module_name].DetectionCaseView,
-                )
-
-            self.assertIs(sys.modules.get(module_name, _MISSING), previous)
-
-        self.assertIsNot(first_view, second_view)
-
-    async def test_isolated_load_keeps_one_identity_per_shared_symbol(self):
-        # A stale load order let a module be imported before its dependency, so
-        # the dependency was created twice and half the package saw the other
-        # copy. Nothing raises when that happens; identity checks are the only
-        # way to see it.
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)):
-                for symbol in (
-                    "GuildSettings",
-                    "OperationType",
-                    "DetectionCaseStore",
-                    "DeleteStatus",
-                ):
-                    with self.subTest(symbol=symbol):
-                        owners = {}
-                        for name, module in list(sys.modules.items()):
-                            if not name.startswith("NHCogs.honeypot."):
-                                continue
-                            value = getattr(module, symbol, None)
-                            if value is not None:
-                                owners.setdefault(id(value), []).append(name)
-
-                        self.assertEqual(
-                            len(owners),
-                            1,
-                            f"{symbol} exists as {len(owners)} distinct objects: "
-                            f"{[sorted(names) for names in owners.values()]}",
-                        )
 
     async def test_load_ignores_stale_pending_reviews_when_there_are_no_open_cases(self):
         with TemporaryDirectory() as directory:

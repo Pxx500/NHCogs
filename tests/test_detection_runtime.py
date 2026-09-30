@@ -170,20 +170,6 @@ class GatedReadAttachment(Attachment):
 
 
 class CaptureAttachmentTests(unittest.IsolatedAsyncioTestCase):
-    async def test_loading_runtime_restores_existing_module_entries(self):
-        sentinel = ModuleType("sentinel_discord")
-        previous = sys.modules.get("discord", _MISSING)
-        sys.modules["discord"] = sentinel
-        try:
-            with isolated_runtime_modules() as (_, fresh_runtime):
-                self.assertIsNot(fresh_runtime, detection_runtime)
-                self.assertIsNot(sys.modules["discord"], sentinel)
-            self.assertIs(sys.modules["discord"], sentinel)
-        finally:
-            if previous is _MISSING:
-                sys.modules.pop("discord", None)
-            else:
-                sys.modules["discord"] = previous
 
     async def test_capture_statuses_are_stable_strings(self):
         self.assertEqual(

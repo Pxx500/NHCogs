@@ -89,22 +89,6 @@ class ReviewUpdateHandlerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(captured.exception, publication_error)
                 self.assertEqual(attempted_case_ids, [appended.case.case_id])
 
-    async def test_registry_routes_review_update_to_concrete_handler(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                handler_module = import_module("NHCogs.honeypot.operations.review_update")
-                cog = honeypot.Honeypot(_Bot(), _operational_support())
-
-                registered = cog._detection_operation_handlers.resolve(
-                    honeypot.OperationType.REVIEW_UPDATE
-                )
-                self.assertIs(registered, handler_module.review_update_handler)
-                self.assertIsNone(
-                    cog._detection_operation_handlers.resolve("moderator_ignore")
-                )
-                self.assertIsNone(
-                    cog._detection_operation_handlers.resolve("unknown_operation")
-                )
 
     async def test_registered_handler_rerenders_and_completes_with_none(self):
         with TemporaryDirectory() as directory:

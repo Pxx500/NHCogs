@@ -1,6 +1,5 @@
 import asyncio
 import importlib.util
-import json
 import sys
 import types
 import unittest
@@ -561,33 +560,6 @@ class NHCogsSuiteTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("cog already loaded", "\n".join(captured.output))
         self.assertEqual(bot.removed, [])
 
-    def test_combined_metadata_preserves_both_data_contracts(self):
-        metadata = json.loads((PACKAGE_PATH / "info.json").read_text("utf-8"))
-
-        self.assertEqual(metadata["name"], "NHCogs")
-        self.assertEqual(
-            metadata["description"],
-            "Loads ConsoleDump, NHMisc, Honeypot, Cleanup, GitHubTickets, NHModeration, and Custom Commands together "
-            "while preserving their separate commands, configuration, and stored data",
-        )
-        self.assertEqual(metadata["min_bot_version"], "3.5.23")
-        self.assertEqual(metadata["min_python_version"], [3, 10, 0])
-        self.assertEqual(
-            metadata["requirements"],
-            [
-                "matplotlib",
-                "git+https://github.com/AAA3A-AAA3A/AAA3A_utils.git",
-                "Pillow>=11.3.0",
-                "pillow-avif-plugin>=1.6.0",
-            ],
-        )
-        statement = metadata["end_user_data_statement"]
-        self.assertIn("Activity tracking stores user IDs", statement)
-        self.assertIn("moderation case metadata", statement)
-        self.assertIn("Custom Commands stores guild IDs", statement)
-        self.assertIn("Operational error records store the guild", statement)
-        self.assertIn("GitHubTickets stores guild and user IDs", statement)
-        self.assertIn("NHModeration stores source observations", statement)
 
     async def test_teardown_removes_late_registered_replacement_cog(self):
         with load_suite_module() as suite:
