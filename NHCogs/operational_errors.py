@@ -323,9 +323,6 @@ class OperationalErrorReporter:
     async def active_count(self, guild_id: int) -> int:
         return await asyncio.to_thread(self._active_count_sync, guild_id)
 
-    async def list_active(self, guild_id: int) -> tuple[OperationalFailure, ...]:
-        return await asyncio.to_thread(self._list_active_sync, guild_id)
-
     async def delete_guild(self, guild_id: int) -> None:
         await asyncio.to_thread(self._delete_guild_sync, guild_id)
 
@@ -343,16 +340,6 @@ class OperationalErrorReporter:
                 (guild_id,),
             ).fetchone()
         return int(row["count"]) if row is not None else 0
-
-    def _list_active_sync(self, guild_id: int) -> tuple[OperationalFailure, ...]:
-        with closing(self._connect()) as connection:
-            rows = connection.execute(
-                """SELECT * FROM operational_failures
-                   WHERE guild_id = ? AND recovered_at IS NULL
-                   ORDER BY last_seen_at DESC""",
-                (guild_id,),
-            ).fetchall()
-        return tuple(self._from_row(row) for row in rows)
 
     def _mark_recovered_sync(
         self,
