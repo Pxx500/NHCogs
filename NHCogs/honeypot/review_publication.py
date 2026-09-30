@@ -40,6 +40,7 @@ from .detection_cases import (
     NewMessage,
     OperationStatus,
 )
+from .operations.context import DETECTION_EVIDENCE_RESERVATION_STALE_SECONDS
 from .operations.moderator_decision import apply_moderator_ignore
 from .settings import GuildSettings
 from .views import (
@@ -53,7 +54,6 @@ log = logging.getLogger("red.Honeypot")
 
 DETECTION_CAPTURE_DEADLINE_SECONDS = 20.0
 DETECTION_CAPTURE_CONCURRENCY = 4
-DETECTION_EVIDENCE_RESERVATION_STALE_SECONDS = 5 * 60
 _TIMELINE_VIEW_UNSET = object()
 
 
