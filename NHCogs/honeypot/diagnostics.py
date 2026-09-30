@@ -546,21 +546,6 @@ async def _doctor_runtime_checks(cog, guild_id: int) -> tuple[DoctorResult, ...]
         return tuple(results)
 
     now = datetime.now(timezone.utc)
-    operational_failures = await asyncio.to_thread(
-        cog._case_store.list_operational_failures,
-        guild_id,
-    )
-    if operational_failures:
-        oldest = min(item.first_seen_at for item in operational_failures)
-        results.append(
-            DoctorResult(
-                f"Active operational failures: {len(operational_failures)}",
-                "failed",
-                f"Oldest: <t:{int(oldest.timestamp())}:R>.",
-            )
-        )
-    else:
-        results.append(DoctorResult("Active operational failures: 0", "healthy"))
     case_counts = await asyncio.to_thread(
         cog._case_store.operational_counts,
         guild_id,
