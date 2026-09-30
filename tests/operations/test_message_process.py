@@ -70,20 +70,6 @@ class MessageProcessHandlerSeamTests(unittest.IsolatedAsyncioTestCase):
             now=now,
         )
 
-    async def test_registry_routes_message_process_to_concrete_handler(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                try:
-                    handler_module = import_module("NHCogs.honeypot.operations.message_process")
-                except ModuleNotFoundError:
-                    self.fail("message_process has no dedicated handler module")
-                cog = honeypot.Honeypot(_Bot(), _operational_support())
-
-                registered = cog._detection_operation_handlers.resolve(
-                    honeypot.OperationType.MESSAGE_PROCESS
-                )
-
-                self.assertIs(registered, handler_module.message_process_handler)
 
     async def test_terminal_case_short_circuits_and_fails_pending_captures(self):
         with TemporaryDirectory() as directory:

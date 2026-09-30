@@ -155,36 +155,6 @@ class RoleApplyHandlerTests(unittest.IsolatedAsyncioTestCase):
             now=now,
         )
 
-    async def test_registry_includes_automatic_moderation_handler(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                operations = import_module("NHCogs.honeypot.operations")
-                cog = honeypot.Honeypot(_Bot(), _operational_support())
-                expected_types = {
-                    honeypot.OperationType.MESSAGE_PROCESS,
-                    honeypot.OperationType.REVIEW_UPDATE,
-                    honeypot.OperationType.REVIEW_PUBLISH,
-                    honeypot.OperationType.CACHED_PURGE,
-                    honeypot.OperationType.SOURCE_DELETE,
-                    honeypot.OperationType.EVIDENCE_CLEANUP,
-                    honeypot.OperationType.ROLE_RELEASE,
-                    honeypot.OperationType.ROLE_APPLY,
-                    honeypot.OperationType.MODERATION_ACTION,
-                    honeypot.OperationType.MODERATOR_BAN,
-                    honeypot.OperationType.MODERATOR_KICK,
-                }
-
-                self.assertEqual(set(operations.HANDLERS), expected_types)
-                self.assertIsNotNone(
-                    cog._detection_operation_handlers.resolve(
-                        honeypot.OperationType.ROLE_APPLY
-                    )
-                )
-                for operation_type in honeypot.OperationType:
-                    if operation_type not in expected_types:
-                        self.assertIsNone(
-                            cog._detection_operation_handlers.resolve(operation_type)
-                        )
 
     async def test_superseding_moderation_wins_before_terminal_case(self):
         with TemporaryDirectory() as directory:

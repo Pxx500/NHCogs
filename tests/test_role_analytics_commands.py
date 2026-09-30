@@ -2,12 +2,16 @@ import asyncio
 import hashlib
 import importlib.util
 import inspect
+import sqlite3
 import sys
 import types
 import unittest
+from datetime import date, datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import mock
 
+from tests.test_chatchart import _assert_decorator_payload_checks
 from tests.test_forum_autopin import make_support
 
 ROOT_PACKAGE_NAME = "nhmisc_role_analytics_commands_test_root"
@@ -21,15 +25,74 @@ class UserFeedbackCheckFailure(Exception):
 
 
 class FakeCommand:
-    def __init__(self, callback, **attrs):
+    def __init__(self, callback, parent=None, **attrs):
         self.callback = callback
+        self.parent = parent
         self.attrs = attrs
 
     def command(self, **attrs):
-        return lambda callback: FakeCommand(callback, **attrs)
+        return lambda callback: FakeCommand(callback, parent=self, **attrs)
 
     def group(self, **attrs):
-        return lambda callback: FakeCommand(callback, **attrs)
+        return lambda callback: FakeCommand(callback, parent=self, **attrs)
+
+    async def can_run(self, ctx):
+        return await _can_run(self, ctx)
+
+
+async def _can_run(command, ctx):
+    while command is not None:
+        callback = command.callback
+        direct_permissions = _installed_direct_permissions(callback)
+        if direct_permissions is not None and not _passes_permissions(
+            ctx, direct_permissions
+        ):
+            return False
+        mod_permissions = getattr(callback, "mod_or_permissions", None)
+        if mod_permissions is not None and not _passes_permissions(
+            ctx,
+            mod_permissions,
+            "is_red_mod",
+            "is_red_admin",
+        ):
+            return False
+        admin_permissions = getattr(callback, "admin_or_permissions", None)
+        if admin_permissions is not None and not _passes_permissions(
+            ctx,
+            admin_permissions,
+            "is_red_admin",
+        ):
+            return False
+        command = getattr(command, "parent", None)
+    return True
+
+
+def _installed_direct_permissions(callback):
+    for name in ("has_permissions", "direct_permissions", "required_permissions"):
+        payload = getattr(callback, name, None)
+        if payload is not None:
+            return payload
+    return None
+
+
+def _passes_permissions(ctx, permissions, *privilege_flags):
+    if any(getattr(ctx, flag, False) for flag in privilege_flags):
+        return True
+    guild_permissions = ctx.author.guild_permissions
+    return all(
+        getattr(guild_permissions, name, False) is required
+        for name, required in permissions.items()
+    )
+
+
+def _tag_permissions(*names, permissions):
+    def decorator(target):
+        callback = target.callback if isinstance(target, FakeCommand) else target
+        for name in names:
+            setattr(callback, name, permissions)
+        return target
+
+    return decorator
 
 
 def _tag(name, value=True):
@@ -99,8 +162,10 @@ def load_nhmisc_module():
     commands.mod_or_permissions = lambda **permissions: _tag(
         "mod_or_permissions", permissions
     )
-    commands.has_permissions = lambda **permissions: _tag(
-        "required_permissions", permissions
+    commands.has_permissions = lambda **permissions: _tag_permissions(
+        "has_permissions",
+        "required_permissions",
+        permissions=permissions,
     )
     commands.cooldown = lambda rate, per, bucket: _tag(
         "cooldown", (rate, per, bucket)
@@ -293,7 +358,17 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
                 writer_task.cancel()
                 await asyncio.gather(writer_task, return_exceptions=True)
 
-    def test_commands_require_manage_messages_and_expected_cooldowns(self):
+    async def test_commands_reject_members_without_manage_messages(self):
+        denied = types.SimpleNamespace(
+            author=types.SimpleNamespace(
+                guild_permissions=types.SimpleNamespace(manage_messages=False)
+            )
+        )
+        allowed = types.SimpleNamespace(
+            author=types.SimpleNamespace(
+                guild_permissions=types.SimpleNamespace(manage_messages=True)
+            )
+        )
         for command_name in (
             "rolesync",
             "rolesync_discord",
@@ -309,19 +384,22 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
             "achievement_revoke",
         ):
             with self.subTest(command=command_name):
-                callback = getattr(nhmisc.NHMisc, command_name).callback
-                self.assertEqual(
-                    callback.required_permissions,
-                    {"manage_messages": True},
-                )
-                self.assertTrue(callback.guild_only)
+                command = getattr(nhmisc.NHMisc, command_name)
+                self.assertFalse(await command.can_run(denied))
+                self.assertTrue(await command.can_run(allowed))
+                self.assertTrue(command.callback.guild_only)
+        child = nhmisc.NHMisc.nhmisc_roleanalytics_disable
+        self.assertIs(
+            child.parent.callback,
+            nhmisc.NHMisc.nhmisc_roleanalytics.callback,
+        )
+        self.assertFalse(hasattr(child.callback, "has_permissions"))
+        self.assertFalse(await child.can_run(denied))
+        self.assertTrue(await child.can_run(allowed))
+        await _assert_decorator_payload_checks(self, FakeCommand, denied)
 
-        self.assertEqual(
-            nhmisc.NHMisc.rolestats.callback.cooldown, (1, 5, "user")
-        )
-        self.assertEqual(
-            nhmisc.NHMisc.roleusers.callback.cooldown, (1, 10, "guild")
-        )
+        self.assertEqual(nhmisc.NHMisc.rolestats.callback.cooldown, (1, 5, "user"))
+        self.assertEqual(nhmisc.NHMisc.roleusers.callback.cooldown, (1, 10, "guild"))
 
     async def test_rolestats_allows_public_channel_and_never_pings_roles(self):
         cog = self.make_cog()
@@ -910,16 +988,133 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_data_deletion_removes_user_from_all_guilds(self):
-        cog = self.make_cog()
-        cog._support.log_config = cog.config = types.SimpleNamespace(all_guilds=mock.AsyncMock(return_value={}))
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            cog = object.__new__(nhmisc.NHMisc)
+            cog._activity_store = nhmisc.ActivityStore(root / "activity.sqlite")
+            cog._sticky_roles = nhmisc.StickyRoleStore(root / "sticky.sqlite")
+            cog._role_analytics_store = nhmisc.RoleAnalyticsStore(root / "roles.sqlite")
+            cog._achievement_store = nhmisc.AchievementStore(root / "achievements.sqlite")
+            cog._gate_increment_store = nhmisc.GateIncrementStore(root / "achievements.sqlite")
+            for store in (
+                cog._activity_store,
+                cog._sticky_roles,
+                cog._role_analytics_store,
+                cog._achievement_store,
+                cog._gate_increment_store,
+            ):
+                await store.initialize()
+            await _seed_nhmisc_user(cog, 42)
+            await _seed_nhmisc_user(cog, 99)
 
-        await cog.red_delete_data_for_user(requester="discord_deleted_user", user_id=42)
+            await cog.red_delete_data_for_user(
+                requester="discord_deleted_user",
+                user_id=42,
+            )
 
-        cog._activity_store.delete_user_everywhere.assert_awaited_once_with(42)
-        cog._sticky_roles.delete_user_everywhere.assert_awaited_once_with(42)
-        cog._role_analytics_store.delete_user_everywhere.assert_awaited_once_with(42)
-        cog._achievement_store.delete_user_everywhere.assert_awaited_once_with(42)
-        cog._gate_increment_store.redact_user_data.assert_awaited_once_with(42)
+            await _assert_nhmisc_user_absent(self, cog, 42)
+            await _assert_nhmisc_user_present(self, cog, 99)
+
+
+def _achievement_kind():
+    return sys.modules[nhmisc.AchievementStore.__module__].AchievementKind
+
+
+def _member_snapshot():
+    return sys.modules[nhmisc.RoleAnalyticsStore.__module__].MemberSnapshot
+
+
+async def _seed_nhmisc_user(cog, user_id):
+    moment = datetime(2026, 7, 26, 12, tzinfo=timezone.utc)
+    for guild_id, channel_id, role_id in ((10, 100, 1000), (11, 101, 1001)):
+        await cog._activity_store.record_message(
+            guild_id=guild_id,
+            date_utc=date(2026, 7, 26),
+            hour_utc=12,
+            user_id=user_id,
+            channel_id=channel_id,
+            thread_id=None,
+            now_utc=moment,
+        )
+        await cog._sticky_roles.replace_member_roles(guild_id, user_id, {role_id})
+        snapshot = _member_snapshot()(user_id, False, (role_id,))
+        state = await cog._role_analytics_store.get_state(guild_id)
+        if state.active_generation is None:
+            generation = await cog._role_analytics_store.next_generation(guild_id)
+            await cog._role_analytics_store.write_generation(
+                guild_id, generation, [snapshot]
+            )
+            await cog._role_analytics_store.activate_generation(guild_id, generation, 1)
+        else:
+            await cog._role_analytics_store.replace_member(guild_id, snapshot)
+        if not await cog._achievement_store.is_bootstrapped(guild_id):
+            definition = nhmisc.AchievementDefinition(
+                key="badge",
+                display_name="Badge",
+                kind=_achievement_kind().BOOLEAN,
+                display_order=0,
+            )
+            await cog._achievement_store.bootstrap_guild(
+                guild_id,
+                gate_tiers={},
+                boolean_definitions=(definition,),
+                boolean_users={},
+            )
+        await cog._achievement_store.grant_boolean(guild_id, user_id, "badge")
+    await cog._gate_increment_store.claim(
+        nhmisc.SourceMessageKey(10, 20, user_id),
+        user_id,
+        (nhmisc.GateIncrementMemberPlan(user_id, (), 8),),
+    )
+
+
+async def _assert_nhmisc_user_absent(test, cog, user_id):
+    for guild_id in (10, 11):
+        stats = await cog._activity_store.get_user_stats(
+            guild_id, user_id, date(2026, 7, 26), 7
+        )
+        test.assertEqual(stats.total_messages, 0)
+        test.assertEqual(await cog._sticky_roles.get_member_roles(guild_id, user_id), set())
+        visible = await cog._role_analytics_store.matching_user_ids(guild_id, "1", ())
+        test.assertNotIn(user_id, visible)
+        profile = await cog._achievement_store.get_profile(guild_id, user_id)
+        test.assertEqual(profile.boolean_keys, ())
+    operation = await cog._gate_increment_store.get_operation(
+        nhmisc.SourceMessageKey(10, 20, user_id)
+    )
+    test.assertIsNone(operation.operation.moderator_id)
+    test.assertIsNone(operation.members[0].user_id)
+    test.assertNotIn(user_id, _pending_stargate_user_ids(cog))
+
+
+async def _assert_nhmisc_user_present(test, cog, user_id):
+    for guild_id in (10, 11):
+        stats = await cog._activity_store.get_user_stats(
+            guild_id, user_id, date(2026, 7, 26), 7
+        )
+        test.assertGreaterEqual(stats.total_messages, 1)
+        test.assertTrue(await cog._sticky_roles.get_member_roles(guild_id, user_id))
+        visible = await cog._role_analytics_store.matching_user_ids(guild_id, "1", ())
+        test.assertIn(user_id, visible)
+        profile = await cog._achievement_store.get_profile(guild_id, user_id)
+        test.assertIn("badge", profile.boolean_keys)
+    operation = await cog._gate_increment_store.get_operation(
+        nhmisc.SourceMessageKey(10, 20, user_id)
+    )
+    test.assertEqual(operation.operation.moderator_id, user_id)
+    test.assertEqual(operation.members[0].user_id, user_id)
+    test.assertIn(user_id, _pending_stargate_user_ids(cog))
+
+
+def _pending_stargate_user_ids(cog):
+    with sqlite3.connect(cog._gate_increment_store._path) as connection:
+        rows = connection.execute(
+            """
+            SELECT user_id FROM achievement_awards
+            WHERE state = 'pending' AND achievement_key = 'stargate_completed'
+            """
+        ).fetchall()
+    return {row[0] for row in rows}
 
 
 if __name__ == "__main__":

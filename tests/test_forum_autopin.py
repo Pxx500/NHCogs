@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.test_chatchart import _assert_decorator_payload_checks
+
 ROOT_PACKAGE_NAME = "nhmisc_forum_autopin_test_root"
 PACKAGE_NAME = f"{ROOT_PACKAGE_NAME}.nhmisc"
 ROOT_PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs"
@@ -16,15 +18,74 @@ class UserFeedbackCheckFailure(Exception):
 
 
 class FakeCommand:
-    def __init__(self, callback, **attrs):
+    def __init__(self, callback, parent=None, **attrs):
         self.callback = callback
+        self.parent = parent
         self.attrs = attrs
 
     def command(self, **attrs):
-        return lambda callback: FakeCommand(callback, **attrs)
+        return lambda callback: FakeCommand(callback, parent=self, **attrs)
 
     def group(self, **attrs):
-        return lambda callback: FakeCommand(callback, **attrs)
+        return lambda callback: FakeCommand(callback, parent=self, **attrs)
+
+    async def can_run(self, ctx):
+        return await _can_run(self, ctx)
+
+
+async def _can_run(command, ctx):
+    while command is not None:
+        callback = command.callback
+        direct_permissions = _installed_direct_permissions(callback)
+        if direct_permissions is not None and not _passes_permissions(
+            ctx, direct_permissions
+        ):
+            return False
+        mod_permissions = getattr(callback, "mod_or_permissions", None)
+        if mod_permissions is not None and not _passes_permissions(
+            ctx,
+            mod_permissions,
+            "is_red_mod",
+            "is_red_admin",
+        ):
+            return False
+        admin_permissions = getattr(callback, "admin_or_permissions", None)
+        if admin_permissions is not None and not _passes_permissions(
+            ctx,
+            admin_permissions,
+            "is_red_admin",
+        ):
+            return False
+        command = getattr(command, "parent", None)
+    return True
+
+
+def _installed_direct_permissions(callback):
+    for name in ("has_permissions", "direct_permissions", "required_permissions"):
+        payload = getattr(callback, name, None)
+        if payload is not None:
+            return payload
+    return None
+
+
+def _passes_permissions(ctx, permissions, *privilege_flags):
+    if any(getattr(ctx, flag, False) for flag in privilege_flags):
+        return True
+    guild_permissions = ctx.author.guild_permissions
+    return all(
+        getattr(guild_permissions, name, False) is required
+        for name, required in permissions.items()
+    )
+
+
+def _tag_permissions(*names, permissions):
+    def decorator(target):
+        callback = target.callback if isinstance(target, FakeCommand) else target
+        for name in names:
+            setattr(callback, name, permissions)
+        return target
+
+    return decorator
 
 
 def _tag(name, value=True):
@@ -110,8 +171,10 @@ def load_nhmisc_modules():
     commands.mod_or_permissions = lambda **permissions: _tag(
         "mod_or_permissions", permissions
     )
-    commands.has_permissions = lambda **permissions: _tag(
-        "required_permissions", permissions
+    commands.has_permissions = lambda **permissions: _tag_permissions(
+        "has_permissions",
+        "required_permissions",
+        permissions=permissions,
     )
     commands.cooldown = lambda rate, per, bucket: _tag(
         "cooldown", (rate, per, bucket)
@@ -328,9 +391,27 @@ class ForumAutopinCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         return cog
 
-    def test_group_requires_manage_messages_via_decorator(self):
-        callback = nhmisc.NHMisc.nhmisc_forumautopin.callback
-        self.assertEqual(callback.required_permissions, {"manage_messages": True})
+    async def test_group_rejects_members_without_manage_messages(self):
+        command = nhmisc.NHMisc.nhmisc_forumautopin
+        denied = types.SimpleNamespace(
+            author=types.SimpleNamespace(
+                guild_permissions=types.SimpleNamespace(manage_messages=False)
+            )
+        )
+        allowed = types.SimpleNamespace(
+            author=types.SimpleNamespace(
+                guild_permissions=types.SimpleNamespace(manage_messages=True)
+            )
+        )
+
+        self.assertFalse(await command.can_run(denied))
+        self.assertTrue(await command.can_run(allowed))
+        child = nhmisc.NHMisc.nhmisc_forumautopin_add
+        self.assertIs(child.parent, command)
+        self.assertFalse(hasattr(child.callback, "has_permissions"))
+        self.assertFalse(await child.can_run(denied))
+        self.assertTrue(await child.can_run(allowed))
+        await _assert_decorator_payload_checks(self, FakeCommand, denied)
 
     async def test_add_rejects_forum_without_pin_messages_permission(self):
         cog = self.make_cog()

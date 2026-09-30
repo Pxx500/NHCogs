@@ -1066,6 +1066,21 @@ class GateIncrementStore:
                 """,
                 (user_id,),
             )
+            connection.execute(
+                """
+                UPDATE gate_increment_members
+                SET user_id = NULL
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            )
+            connection.execute(
+                """
+                DELETE FROM achievement_awards
+                WHERE user_id = ? AND state = 'pending'
+                """,
+                (user_id,),
+            )
             connection.commit()
 
     @staticmethod

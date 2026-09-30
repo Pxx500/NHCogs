@@ -4,7 +4,11 @@ import types
 import unittest
 from unittest import mock
 
-from tests.test_chatchart import load_nhmisc_module
+from tests.test_chatchart import (
+    FakeCommand,
+    _assert_decorator_payload_checks,
+    load_nhmisc_module,
+)
 from tests.test_forum_autopin import make_support
 
 nhmisc = load_nhmisc_module()
@@ -699,13 +703,32 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         )
         self.ctx.send_help.assert_not_awaited()
 
-    def test_achievement_proof_command_keeps_its_permission_and_link_contract(self):
-        callback = nhmisc.NHMisc.achievement_proof.callback
-        parameters = inspect.signature(callback).parameters
+    async def test_achievement_proof_rejects_members_without_manage_messages(self):
+        command = nhmisc.NHMisc.achievement_proof
+        parameters = inspect.signature(command.callback).parameters
+        denied = types.SimpleNamespace(
+            author=types.SimpleNamespace(
+                guild_permissions=types.SimpleNamespace(manage_messages=False)
+            )
+        )
+        allowed = types.SimpleNamespace(
+            author=types.SimpleNamespace(
+                guild_permissions=types.SimpleNamespace(manage_messages=True)
+            )
+        )
 
         self.assertIn("message_link", parameters)
         self.assertEqual(parameters["message_link"].annotation, "str")
-        self.assertEqual(callback.required_permissions, {"manage_messages": True})
+        self.assertFalse(await command.can_run(denied))
+        self.assertTrue(await command.can_run(allowed))
+        def parent_only_callback(ctx):
+            return None
+
+        parent_only = type(command)(parent_only_callback, parent=command.parent)
+        self.assertFalse(hasattr(parent_only.callback, "has_permissions"))
+        self.assertFalse(await parent_only.can_run(denied))
+        self.assertTrue(await parent_only.can_run(allowed))
+        await _assert_decorator_payload_checks(self, FakeCommand, denied)
 
     async def test_achievement_role_group_lists_its_direct_commands(self):
         self.ctx.command = types.SimpleNamespace(

@@ -105,20 +105,33 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_ticket_error_without_guild_is_not_broadcast(self):
         with TemporaryDirectory() as directory:
             with isolated_githubtickets_modules(Path(directory)) as module:
-                cog = object.__new__(module.githubtickets.GitHubTickets)
-                cog.support = SimpleNamespace(
+                support = SimpleNamespace(
                     report_global_error=mock.AsyncMock(),
                     report_operational_error=mock.AsyncMock(),
+                    handle_command_error=mock.AsyncMock(),
                 )
-                for result in (None, RuntimeError("database unavailable")):
-                    cog.store = SimpleNamespace(get_ticket=mock.AsyncMock())
-                    if isinstance(result, Exception):
-                        cog.store.get_ticket.side_effect = result
-                    else:
-                        cog.store.get_ticket.return_value = result
-                    await cog._report_deadline_error(1, RuntimeError("private ticket detail"))
-                cog.support.report_global_error.assert_not_awaited()
-                cog.support.report_operational_error.assert_not_awaited()
+                cog = module.githubtickets.GitHubTickets(FakeBot(ready=False), support)
+                await cog.store.initialize()
+
+                with self.assertLogs(module.githubtickets.log, level="ERROR") as logs:
+                    await cog._report_deadline_error(
+                        1, RuntimeError("private ticket detail")
+                    )
+
+                self.assertTrue(any("Removed ticket 1" in message for message in logs.output))
+                self.assertEqual(support.report_global_error.await_count, 0)
+                self.assertEqual(support.report_operational_error.await_count, 0)
+
+                cog.store.get_ticket = mock.AsyncMock(
+                    side_effect=RuntimeError("store unavailable")
+                )
+                with self.assertLogs(module.githubtickets.log, level="ERROR"):
+                    await cog._report_deadline_error(
+                        1, RuntimeError("private ticket detail")
+                    )
+
+                self.assertEqual(support.report_global_error.await_count, 0)
+                self.assertEqual(support.report_operational_error.await_count, 0)
 
     def setUp(self):
         self.temporary_directory = TemporaryDirectory()
@@ -578,27 +591,33 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_member_remove_deletes_only_the_departed_guild_profile(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
-            cog = modules.githubtickets.GitHubTickets(FakeBot(ready=False), mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
-            delete_profile = mock.AsyncMock(
-                side_effect=[None, RuntimeError("database unavailable")]
+            support = mock.Mock(
+                report_operational_error=mock.AsyncMock(),
+                report_global_error=mock.AsyncMock(),
+                handle_command_error=mock.AsyncMock(),
             )
-            cog.store.delete_profile = delete_profile
+            cog = modules.githubtickets.GitHubTickets(FakeBot(ready=False), support)
+            await cog.store.initialize()
+            now = datetime.now(timezone.utc)
+            for guild_id, user_id in ((10, 200), (11, 300), (11, 200)):
+                category = await cog.store.add_category(guild_id, f"work-{user_id}", now)
+                await cog.store.save_profile(
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    github_username=f"dev{user_id}",
+                    category_ids=(category.category_id,),
+                    automatic_pings=True,
+                    updated_at=now,
+                )
 
             await cog.on_member_remove(
                 SimpleNamespace(id=200, guild=SimpleNamespace(id=10))
             )
-            with self.assertLogs(modules.githubtickets.log, level="ERROR") as logs:
-                await cog.on_member_remove(
-                    SimpleNamespace(id=300, guild=SimpleNamespace(id=11))
-                )
 
-            self.assertEqual(
-                delete_profile.await_args_list,
-                [mock.call(10, 200), mock.call(11, 300)],
-            )
-            self.assertTrue(
-                any("member profile deletion failed" in message for message in logs.output)
-            )
+            self.assertIsNone(await cog.store.get_profile(10, 200))
+            self.assertIsNotNone(await cog.store.get_profile(11, 200))
+            self.assertIsNotNone(await cog.store.get_profile(11, 300))
+            self.assertEqual(support.report_operational_error.await_count, 0)
 
     async def test_channel_role_and_guild_deletions_cleanup_only_their_scopes(self):
         with isolated_githubtickets_modules(self.data_path) as modules:

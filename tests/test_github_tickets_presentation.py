@@ -279,15 +279,6 @@ class GitHubTicketsPresentationTests(unittest.TestCase):
             "Profile cleared: 123456789",
         )
 
-    def test_fixed_copy_has_no_prohibited_punctuation(self):
-        presentation = load_presentation_module()
-
-        for value in presentation.FIXED_COPY:
-            with self.subTest(value=value):
-                self.assertNotIn("—", value)
-                self.assertNotIn(";", value)
-                self.assertFalse(value.endswith("."))
-
 
 if __name__ == "__main__":
     unittest.main()

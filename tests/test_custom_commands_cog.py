@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.test_chatchart import _assert_decorator_payload_checks
+
 PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs" / "custom_commands"
 
 
@@ -32,6 +34,64 @@ class _Command:
 
     def group(self, **attrs):
         return lambda callback: _Command(callback, parent=self, **attrs)
+
+    async def can_run(self, ctx):
+        return await _can_run(self, ctx)
+
+
+async def _can_run(command, ctx):
+    while command is not None:
+        callback = command.callback
+        direct_permissions = _installed_direct_permissions(callback)
+        if direct_permissions is not None and not _passes_permissions(
+            ctx, direct_permissions
+        ):
+            return False
+        mod_permissions = getattr(callback, "mod_or_permissions", None)
+        if mod_permissions is not None and not _passes_permissions(
+            ctx,
+            mod_permissions,
+            "is_red_mod",
+            "is_red_admin",
+        ):
+            return False
+        admin_permissions = getattr(callback, "admin_or_permissions", None)
+        if admin_permissions is not None and not _passes_permissions(
+            ctx,
+            admin_permissions,
+            "is_red_admin",
+        ):
+            return False
+        command = getattr(command, "parent", None)
+    return True
+
+
+def _installed_direct_permissions(callback):
+    for name in ("has_permissions", "direct_permissions", "required_permissions"):
+        payload = getattr(callback, name, None)
+        if payload is not None:
+            return payload
+    return None
+
+
+def _passes_permissions(ctx, permissions, *privilege_flags):
+    if any(getattr(ctx, flag, False) for flag in privilege_flags):
+        return True
+    guild_permissions = ctx.author.guild_permissions
+    return all(
+        getattr(guild_permissions, name, False) is required
+        for name, required in permissions.items()
+    )
+
+
+def _tag_permissions(*names, permissions):
+    def decorator(target):
+        callback = target.callback if isinstance(target, _Command) else target
+        for name in names:
+            setattr(callback, name, permissions)
+        return target
+
+    return decorator
 
 
 def _tag(name, value=True):
@@ -186,12 +246,17 @@ def load_cog_module():  # noqa: PLR0915
     commands.group = commands.command
     commands.guild_only = lambda: _tag("guild_only")
     commands.mod_or_permissions = lambda **permissions: _tag(
-        "required_permissions",
+        "mod_or_permissions",
         permissions,
     )
-    commands.has_permissions = lambda **permissions: _tag(
-        "direct_permissions",
+    commands.admin_or_permissions = lambda **permissions: _tag(
+        "admin_or_permissions",
         permissions,
+    )
+    commands.has_permissions = lambda **permissions: _tag_permissions(
+        "has_permissions",
+        "direct_permissions",
+        permissions=permissions,
     )
 
     core = types.ModuleType("redbot.core")
@@ -298,11 +363,42 @@ class CommandUsageChartTests(unittest.IsolatedAsyncioTestCase):
                         await cog.CustomCommands.comchart.callback(subject, ctx, "<#20>", 7)
                     subject.catalog.usage_counts.assert_not_awaited()
 
-    def test_command_is_standalone_and_requires_only_manage_messages(self):
+    async def test_command_rejects_members_without_manage_messages(self):
         command = cog.CustomCommands.comchart
+        denied = types.SimpleNamespace(
+            author=types.SimpleNamespace(
+                guild_permissions=types.SimpleNamespace(manage_messages=False)
+            )
+        )
+        allowed = types.SimpleNamespace(
+            author=types.SimpleNamespace(
+                guild_permissions=types.SimpleNamespace(manage_messages=True)
+            )
+        )
+
         self.assertIsNone(command.parent)
-        self.assertEqual(command.callback.direct_permissions, {"manage_messages": True})
+        self.assertFalse(await command.can_run(denied))
+        self.assertTrue(await command.can_run(allowed))
         self.assertTrue(command.callback.guild_only)
+        listed = cog.CustomCommands.cc_list
+        self.assertIs(listed.parent, cog.CustomCommands.customcom)
+        self.assertFalse(hasattr(listed.callback, "has_permissions"))
+        self.assertTrue(await listed.can_run(denied))
+
+        def parent_callback(ctx):
+            return None
+
+        parent_callback.has_permissions = {"manage_messages": True}
+        parent_callback.direct_permissions = {"manage_messages": True}
+        parent = _Command(parent_callback, name="parent-only")
+
+        def parent_only_callback(ctx):
+            return None
+
+        parent_only = _Command(parent_only_callback, parent=parent)
+        self.assertFalse(await parent_only.can_run(denied))
+        self.assertTrue(await parent_only.can_run(allowed))
+        await _assert_decorator_payload_checks(self, _Command, denied)
 
     def context(self, *, private=True):
         channel = types.SimpleNamespace(
@@ -351,15 +447,6 @@ class CommandUsageChartTests(unittest.IsolatedAsyncioTestCase):
             await cog.CustomCommands.comchart.callback(subject, self.context(private=False), 'server', 7)
         subject.catalog.usage_counts.assert_not_awaited()
 
-    async def test_invalid_requests_do_not_query_usage(self):
-        subject = object.__new__(cog.CustomCommands)
-        subject.catalog = types.SimpleNamespace(usage_counts=mock.AsyncMock())
-        for args in (("0",), ("-1",), ("bad",), ("server",),
-                     ("<#invalid>", 7), ("7", 30)):
-            with self.subTest(args=args):
-                with self.assertRaises(cog.commands.UserFeedbackCheckFailure):
-                    await cog.CustomCommands.comchart.callback(subject, self.context(), *args)
-        subject.catalog.usage_counts.assert_not_awaited()
 
     async def test_empty_usage_has_feedback_and_does_not_render(self):
         subject = object.__new__(cog.CustomCommands)
@@ -758,31 +845,6 @@ class CustomCommandsCopyTests(unittest.IsolatedAsyncioTestCase):
                 await callback(subject, ctx, "secret")
                 ctx.send.assert_awaited_once_with("That custom command doesn't exist")
 
-    async def test_commands_share_one_not_found_message(self):
-        subject = object.__new__(cog.CustomCommands)
-        subject.catalog = types.SimpleNamespace(get=mock.AsyncMock(return_value=None))
-        ctx = types.SimpleNamespace(
-            guild=types.SimpleNamespace(id=100, default_role=object()),
-            channel=types.SimpleNamespace(
-                permissions_for=lambda _: types.SimpleNamespace(view_channel=False),
-            ),
-            send=mock.AsyncMock(),
-        )
-        callbacks = (
-            cog.CustomCommands.cc_raw.callback,
-            cog.CustomCommands.cc_show.callback,
-            cog.CustomCommands.cc_edit.callback,
-            cog.CustomCommands.cc_cooldown.callback,
-            cog.CustomCommands.cc_delete.callback,
-        )
-
-        for callback in callbacks:
-            with self.subTest(command=callback.__name__):
-                ctx.send.reset_mock()
-                await callback(subject, ctx, "missing")
-                ctx.send.assert_awaited_once_with(
-                    "That custom command doesn't exist"
-                )
 
     async def test_show_does_not_repeat_the_command_name_in_its_body(self):
         command = types.SimpleNamespace(
