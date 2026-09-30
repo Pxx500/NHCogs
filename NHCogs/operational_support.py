@@ -166,6 +166,36 @@ class OperationalSupport(commands.Cog):
                 "Run this command in a private moderator channel"
             )
 
+    @errors.command(name="list")
+    async def error_list(self, ctx: commands.Context) -> None:
+        """List active technical failures"""
+        if not channel_is_private(ctx.guild, ctx.channel):
+            await ctx.send(
+                "Run this command in a private moderator channel",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        failures = await self.operational_errors.list_active(ctx.guild.id)
+        if not failures:
+            await ctx.send(
+                "No active technical failures",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        lines = [
+            (
+                f"**{failure.source}** {failure.action}\n"
+                f"{failure.exception_type}: {' '.join(failure.summary.split())}\n"
+                f"Occurrences: {failure.occurrences}. "
+                f"Last seen: <t:{int(failure.last_seen_at.timestamp())}:R>."
+            )
+            for failure in failures
+        ]
+        from redbot.core.utils.chat_formatting import pagify  # noqa: PLC0415
+
+        for page in pagify("\n\n".join(lines)):
+            await ctx.send(page, allowed_mentions=discord.AllowedMentions.none())
+
     @errors.group(name="channel", invoke_without_command=True, usage="[channel|clear]")
     async def error_channel(
         self,

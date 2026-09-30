@@ -111,6 +111,10 @@ class SharedErrorConfigurationTests(unittest.IsolatedAsyncioTestCase):
             await module.OperationalSupport.errors.callback(support, ctx)
             rendered = rendered_messages(ctx)
             self.assertIn(
+                "`!nhcogs errors list` - List active technical failures",
+                rendered,
+            )
+            self.assertIn(
                 "`!nhcogs errors channel [channel|clear]` - Show, set, or clear the shared private error channel",
                 rendered,
             )
@@ -216,6 +220,7 @@ class SharedErrorConfigurationTests(unittest.IsolatedAsyncioTestCase):
             for allowed in (False, True):
                 ctx.author.guild_permissions.manage_messages = allowed
                 for command in (
+                    module.OperationalSupport.error_list,
                     module.OperationalSupport.error_channel,
                     module.OperationalSupport.error_channel_set,
                     module.OperationalSupport.error_maintainer,
@@ -239,3 +244,49 @@ class SharedErrorConfigurationTests(unittest.IsolatedAsyncioTestCase):
             ctx.channel.permissions_for = lambda _role: SimpleNamespace(view_channel=True)
             await support.send_technical_alert(ctx.guild.id, "Must remain private")
             self.assertEqual(ctx.channel.send.await_count, 1)
+
+    async def test_errors_list_shows_active_shared_failures_only_in_private(self):
+        with shared_reporting() as module:
+            ctx, _member = context(module)
+            support = module.OperationalSupport(ctx.bot)
+            await support.cog_load()
+            await support.operational_errors.report(
+                guild_id=ctx.guild.id,
+                source="Honeypot",
+                action="review publish",
+                error=RuntimeError("Could not create the case thread"),
+            )
+            recovered = await support.operational_errors.report(
+                guild_id=ctx.guild.id,
+                source="Cleanup",
+                action="purge",
+                error=RuntimeError("already recovered"),
+            )
+            await support.operational_errors.mark_recovered(
+                guild_id=ctx.guild.id,
+                fingerprint=recovered.fingerprint,
+            )
+            ctx.send.reset_mock()
+            await module.OperationalSupport.error_list.callback(support, ctx)
+            listed = "\n".join(call.args[0] for call in ctx.send.await_args_list)
+            self.assertIn("**Honeypot** review publish", listed)
+            self.assertIn("RuntimeError: Could not create the case thread", listed)
+            self.assertIn("Occurrences: 1.", listed)
+            self.assertNotIn("already recovered", listed)
+            self.assertNotIn("honeypot errors", listed)
+
+            active = await support.operational_errors.list_active(ctx.guild.id)
+            await support.operational_errors.mark_recovered(
+                guild_id=ctx.guild.id,
+                fingerprint=active[0].fingerprint,
+            )
+            ctx.send.reset_mock()
+            await module.OperationalSupport.error_list.callback(support, ctx)
+            self.assertEqual(ctx.send.await_args.args[0], "No active technical failures")
+
+            public_ctx, _member = context(module, public=True)
+            await module.OperationalSupport.error_list.callback(support, public_ctx)
+            self.assertEqual(
+                public_ctx.send.await_args.args[0],
+                "Run this command in a private moderator channel",
+            )

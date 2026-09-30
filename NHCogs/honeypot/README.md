@@ -202,9 +202,10 @@ Detection cases expire 24 hours after the first detection. This lifetime is fixe
 
 ### Operational errors
 
-Technical failures from Honeypot use the shared `[p]nhcogs errors` configuration. See the
-[shared command catalog](../README.md) for the setup commands and privacy rules. Expected
-detection outcomes and normal command feedback aren't reported as operational errors.
+Technical failures from Honeypot use the shared `[p]nhcogs errors` configuration. Active
+failures are listed with `[p]nhcogs errors list`. See the [shared command catalog](../README.md)
+for the setup commands and privacy rules. Expected detection outcomes and normal command
+feedback aren't reported as operational errors.
 
 ### other
 
