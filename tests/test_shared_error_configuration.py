@@ -3,6 +3,7 @@ import inspect
 import sys
 import unittest
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -118,6 +119,10 @@ class SharedErrorConfigurationTests(unittest.IsolatedAsyncioTestCase):
                 "`!nhcogs errors maintainer [member|clear]` - Show, set, or clear the error maintainer",
                 rendered,
             )
+            self.assertIn(
+                "`!nhcogs errors list` - List active operational failures",
+                rendered,
+            )
             self.assertNotIn("channel set", rendered)
             self.assertNotIn("maintainer set", rendered)
 
@@ -220,6 +225,7 @@ class SharedErrorConfigurationTests(unittest.IsolatedAsyncioTestCase):
                     module.OperationalSupport.error_channel_set,
                     module.OperationalSupport.error_maintainer,
                     module.OperationalSupport.error_maintainer_set,
+                    module.OperationalSupport.error_list,
                 ):
                     self.assertEqual(await command.can_run(ctx), allowed)
 
@@ -239,3 +245,100 @@ class SharedErrorConfigurationTests(unittest.IsolatedAsyncioTestCase):
             ctx.channel.permissions_for = lambda _role: SimpleNamespace(view_channel=True)
             await support.send_technical_alert(ctx.guild.id, "Must remain private")
             self.assertEqual(ctx.channel.send.await_count, 1)
+
+    async def test_errors_list_combines_shared_honeypot_and_moderation_failures(self):
+        seen = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)
+        with shared_reporting() as module:
+            ctx, _member = context(module)
+            support = module.OperationalSupport(ctx.bot)
+            await support.operational_errors.initialize()
+            await support.operational_errors.report(
+                guild_id=ctx.guild.id,
+                source="Cleanup",
+                action="purge",
+                error=RuntimeError("missing permissions"),
+            )
+            case = SimpleNamespace(
+                source=SimpleNamespace(value="review_publish"),
+                summary="Could not create the case thread",
+                occurrences=2,
+                first_seen_at=seen,
+                last_seen_at=seen,
+                case_id="case-1",
+                operation_id="op-1",
+            )
+            honeypot = SimpleNamespace(
+                _case_store=SimpleNamespace(
+                    list_operational_failures=lambda guild_id: (case,) if guild_id == 10 else ()
+                )
+            )
+            moderation_path = Path(support.operational_errors._database_path).parent / "moderation.sqlite"
+            moderation_reporter = module.OperationalErrorReporter(
+                ctx.bot,
+                support.config,
+                moderation_path,
+                logger=module.log,
+            )
+            await moderation_reporter.initialize()
+            await moderation_reporter.report(
+                guild_id=ctx.guild.id,
+                source="NHModeration",
+                action="ban chart",
+                error=RuntimeError("chart render failed"),
+            )
+            cogs = {
+                "Honeypot": honeypot,
+                "NHModeration": SimpleNamespace(_operational_errors=moderation_reporter),
+            }
+            ctx.bot.get_cog = cogs.get
+
+            await module.OperationalSupport.error_list.callback(support, ctx)
+
+            report = "\n".join(call.args[0] for call in ctx.send.await_args_list)
+            self.assertIn("**Operational failures:** 3", report)
+            self.assertIn("Cleanup / purge (1) - RuntimeError: missing permissions", report)
+            self.assertIn(
+                "Honeypot / review_publish (2) - Could not create the case thread",
+                report,
+            )
+            self.assertIn("Case `case-1`", report)
+            self.assertIn("Operation `op-1`", report)
+            self.assertIn("NHModeration / ban chart (1) - RuntimeError: chart render failed", report)
+            self.assertNotIn("Honeypot config summary", report)
+
+            ctx.send.reset_mock()
+            ctx.bot.get_cog = lambda _name: SimpleNamespace(
+                _operational_errors=support.operational_errors
+            )
+            await module.OperationalSupport.error_list.callback(support, ctx)
+            repeated = ctx.send.await_args.args[0]
+            self.assertIn("**Operational failures:** 1", repeated)
+            self.assertEqual(repeated.count("Cleanup / purge"), 1)
+
+    async def test_errors_list_hides_text_in_public_and_reports_an_empty_store(self):
+        with shared_reporting() as module:
+            ctx, _member = context(module, public=True)
+            support = module.OperationalSupport(ctx.bot)
+            await support.operational_errors.initialize()
+            await support.operational_errors.report(
+                guild_id=ctx.guild.id,
+                source="Cleanup",
+                action="purge",
+                error=RuntimeError("missing permissions"),
+            )
+
+            await module.OperationalSupport.error_list.callback(support, ctx)
+
+            report = ctx.send.await_args.args[0]
+            self.assertIn("**Operational failures:** 1", report)
+            self.assertIn("private moderator channel", report)
+            self.assertNotIn("missing permissions", report)
+
+            ctx.send.reset_mock()
+            await support.operational_errors.mark_action_recovered(
+                guild_id=ctx.guild.id,
+                source="Cleanup",
+                action="purge",
+            )
+            await module.OperationalSupport.error_list.callback(support, ctx)
+            self.assertIn("No active operational failures.", ctx.send.await_args.args[0])

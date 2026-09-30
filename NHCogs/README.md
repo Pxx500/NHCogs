@@ -15,14 +15,20 @@ rules are in [Command trees](../docs/command-trees.md).
 | Command | Description |
 |---|---|
 | `[p]nhcogs` | Show the shared command overview |
-| `[p]nhcogs errors` | Show the shared error configuration |
+| `[p]nhcogs errors` | Show the shared error configuration and its commands |
 | `[p]nhcogs errors channel [channel|clear]` | Show, set, or clear the private error channel |
 | `[p]nhcogs errors maintainer [member|clear]` | Show, set, or clear the error maintainer |
+| `[p]nhcogs errors list` | List active operational failures |
 
 Showing or changing either value requires a private invocation. A public channel does not
 reveal the current value. The configured error channel must be hidden
 from `@everyone`, and the bot needs View Channel, Send Messages, and Attach Files there. The
 maintainer setting controls the only mention target for new technical failures.
+
+`[p]nhcogs errors` shows the alert destination. `[p]nhcogs errors list` shows the active
+failures themselves, including Honeypot detection failures and failures stored by the
+other cogs. Failure text is shown only in a private moderator channel. A public channel
+shows the count.
 
 Technical failures are stored with their retry and recovery state. Expected command,
 permission, validation, and normal operational outcomes are not reported as errors.

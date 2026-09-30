@@ -174,6 +174,51 @@ class OperationalErrorReporterTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             self.assertEqual(await reporter.active_count(guild_id), 0)
+            self.assertEqual(await reporter.list_active(guild_id), ())
+
+    async def test_list_active_returns_only_open_failures_newest_first(self):
+        guild_id = 100
+        channel = _Channel(200)
+        with TemporaryDirectory() as directory:
+            reporter = operational_errors.OperationalErrorReporter(
+                _Bot(guild_id, _Guild(channel, None)),
+                _Config(channel_id=None, maintainer_id=None),
+                Path(directory) / "operational_errors.sqlite",
+                logger=logging.getLogger("test.operational-errors"),
+            )
+            await reporter.initialize()
+            older = await reporter.report(
+                guild_id=guild_id,
+                source="Cleanup",
+                action="older",
+                error=RuntimeError("older failure"),
+            )
+            newer = await reporter.report(
+                guild_id=guild_id,
+                source="GitHubTickets",
+                action="newer",
+                error=RuntimeError("newer failure"),
+            )
+            await reporter.report(
+                guild_id=99,
+                source="Cleanup",
+                action="other guild",
+                error=RuntimeError("other guild"),
+            )
+
+            listed = await reporter.list_active(guild_id)
+
+            self.assertEqual(
+                tuple(item.action for item in listed),
+                ("newer", "older"),
+            )
+            self.assertEqual(listed[0].fingerprint, newer.fingerprint)
+            self.assertEqual(listed[1].fingerprint, older.fingerprint)
+            await reporter.mark_recovered(guild_id=guild_id, fingerprint=newer.fingerprint)
+            self.assertEqual(
+                tuple(item.fingerprint for item in await reporter.list_active(guild_id)),
+                (older.fingerprint,),
+            )
 
     async def test_action_recovery_closes_all_active_fingerprints(self):
         guild_id = 100

@@ -22,7 +22,6 @@ from redbot.core import commands
 from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import box, pagify
 
-from ..command_overview import channel_is_private
 from . import channel_routing
 from .remote_media import media_decoder_support
 from .settings import (
@@ -557,7 +556,7 @@ async def _doctor_runtime_checks(cog, guild_id: int) -> tuple[DoctorResult, ...]
             DoctorResult(
                 f"Active operational failures: {len(operational_failures)}",
                 "failed",
-                f"Oldest: <t:{int(oldest.timestamp())}:R>. Run `honeypot errors`.",
+                f"Oldest: <t:{int(oldest.timestamp())}:R>. Run `nhcogs errors list`.",
             )
         )
     else:
@@ -1041,67 +1040,6 @@ def _render_doctor_results(
     findings = failed + warnings
     body = "\n".join(findings) if findings else "✅ No configuration or runtime problems found."
     return tuple(header + page for page in pagify(body, page_length=2000 - len(header)))
-
-
-def _operational_failure_source(failure) -> str:
-    source = failure.source
-    value = getattr(source, "value", None)
-    if isinstance(value, str):
-        return value
-    return str(source)
-
-
-def _format_operational_failure(failure) -> str:
-    lines = [
-        _("{source} ({count}) - {summary}").format(
-            source=_operational_failure_source(failure),
-            count=failure.occurrences,
-            summary=failure.summary,
-        ),
-        _("First {first}. Last {last}.").format(
-            first=f"<t:{int(failure.first_seen_at.timestamp())}:R>",
-            last=f"<t:{int(failure.last_seen_at.timestamp())}:R>",
-        ),
-    ]
-    references = []
-    if failure.case_id:
-        references.append(_("Case `{case_id}`").format(case_id=failure.case_id))
-    if failure.operation_id:
-        references.append(
-            _("Operation `{operation_id}`").format(operation_id=failure.operation_id)
-        )
-    if references:
-        lines.append(" | ".join(references))
-    return "\n".join(lines)
-
-
-async def honeypot_errors(cog, ctx: commands.Context) -> None:
-    """List the active operational failures reported by honeypot doctor."""
-    failures = await asyncio.to_thread(
-        cog._case_store.list_operational_failures,
-        ctx.guild.id,
-    )
-    header = _("**Honeypot operational failures:**")
-    if not failures:
-        await ctx.send(
-            f"{header}\n" + _("No active operational failures."),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-        return
-    if not channel_is_private(ctx.guild, getattr(ctx, "channel", None)):
-        await ctx.send(
-            f"{header} {len(failures)}\n"
-            + _("Run this command in a private moderator channel to view them."),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-        return
-    body = "\n\n".join(_format_operational_failure(failure) for failure in failures)
-    page_header = f"{header} {len(failures)}\n"
-    for page in pagify(body, page_length=2000 - len(page_header)):
-        await ctx.send(
-            page_header + page,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
 
 
 async def honeypot_doctor(cog, ctx: commands.Context) -> None:
