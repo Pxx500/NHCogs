@@ -1472,6 +1472,14 @@ class GateIncrementPrivacyTests(unittest.IsolatedAsyncioTestCase):
                 thread_id=None,
                 now_utc=datetime(2026, 7, 26, 12, tzinfo=timezone.utc),
             )
+            pending_before = _pending_stargate_user_ids(root / "achievements.sqlite")
+            self.assertIn(42, pending_before)
+            self.assertIn(99, pending_before)
+
+            async def _leave_achievement_rows(_user_id):
+                return None
+
+            cog._achievement_store.delete_user_everywhere = _leave_achievement_rows
 
             await cog.red_delete_data_for_user(
                 requester="discord_deleted_user", user_id=42
