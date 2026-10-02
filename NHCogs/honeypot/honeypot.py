@@ -2,6 +2,7 @@ import asyncio
 import logging
 import typing
 from collections import defaultdict, deque
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -16,7 +17,6 @@ from redbot.core.i18n import Translator, cog_i18n
 
 from .. import command_overview
 from . import (
-    ban_research,
     channel_routing,
     cleanup,
     daily_stats,
@@ -31,6 +31,9 @@ from . import (
     manual_punishment,
     review_publication,
     settings,
+)
+from . import (
+    research_dump as research_export,
 )
 from .case_review import (
     CaseFeedbackItem,  # noqa: F401 - public module re-export
@@ -107,10 +110,25 @@ IMAGE_SCAN_EXTENSIONS = imagescan.IMAGE_SCAN_EXTENSIONS
 IMAGE_SCAN_MAX_ATTACHMENTS = imagescan.IMAGE_SCAN_MAX_ATTACHMENTS
 DETECTION_ATTACHMENT_TIMEOUT_SECONDS = detection_runtime.DETECTION_ATTACHMENT_TIMEOUT_SECONDS
 DETECTION_HEARTBEAT_INTERVAL_SECONDS = 60.0
+RESEARCH_DUMP_PROGRESS_INTERVAL_SECONDS = 30.0
 
 
 DoctorResult = diagnostics.DoctorResult
 DoctorCheck = diagnostics.DoctorCheck
+
+
+@dataclass
+class _ResearchDumpRun:
+    task: asyncio.Task
+    progress: research_export.DumpProgress
+    cancellation_requested: bool = False
+
+    def cancel(self) -> bool:
+        if self.cancellation_requested or self.task.done():
+            return False
+        self.cancellation_requested = True
+        self.task.cancel()
+        return True
 
 
 KICK_FAIL_WARNING_REASON = "Suspicious activity: target left before the kick could be applied."
@@ -187,7 +205,7 @@ class Honeypot(Cog):
         self._firstpost_dirty_seen_authors: dict[int, set[int]] = defaultdict(set)
         self._firstpost_loaded_guilds: set[int] = set()
         self._review_dump_lock: asyncio.Lock = asyncio.Lock()
-        self._ban_research_guilds: set[int] = set()
+        self._research_dump_jobs: dict[int, _ResearchDumpRun] = {}
         self._imagescan_db_path = cog_data_path(self) / "imagescan.sqlite"
         self._imagescan_files_path = cog_data_path(self) / "imagescan_files"
         self._imagescan_store = ImageScanStore(
@@ -1031,7 +1049,14 @@ class Honeypot(Cog):
             # The done callback observes and logs task failures.
             pass
 
+    async def _stop_research_dumps(self) -> None:
+        dump_runs = tuple(self._research_dump_jobs.values())
+        for run in dump_runs:
+            run.cancel()
+        await asyncio.gather(*(run.task for run in dump_runs), return_exceptions=True)
+
     async def cog_unload(self) -> None:
+        await self._stop_research_dumps()
         loops = (
             self.joinwatch_auto_role_loop,
             self.purge_cache_cleanup_loop,
@@ -1463,17 +1488,66 @@ class Honeypot(Cog):
 
     @honeypot.group(name="research", invoke_without_command=True)
     async def research(self, ctx: commands.Context) -> None:
-        """Export historical logs for scam-account research"""
+        """Dump channel history for offline research"""
         return await self._send_group_overview(ctx)
 
-    @research.command(name="bans", usage="<moderation_channel> <member_channel>")
-    async def research_bans(
+    def _research_dump_status(self, progress, started: float, status: str = "running") -> str:
+        elapsed = int(asyncio.get_running_loop().time() - started)
+        hours, remainder = divmod(elapsed, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        phases = {
+            "moderation": "Reading punishment logs",
+            "members": "Reading member logs",
+            "packaging": "Packing ZIP files",
+            "uploading": "Uploading ZIP files",
+        }
+        current = progress.latest_message_at.strftime("%Y-%m-%d %H:%M UTC") if progress.latest_message_at else "starting"
+        text = (
+            f"**Research dump: {status}**\n"
+            f"Stage: {phases[progress.phase]}\n"
+            f"Punishment messages read: {progress.counts['moderation']:,}\n"
+            f"Member messages read: {progress.counts['members']:,}\n"
+            f"Current log date: {current}\n"
+            f"Elapsed: {hours:02}:{minutes:02}:{seconds:02}"
+        )
+        if progress.retry_until is not None:
+            remaining = max(0, int(progress.retry_until - asyncio.get_running_loop().time()))
+            text += f"\nWaiting for Discord, retry in {remaining}s"
+        if status == "incomplete":
+            text += "\nSome history couldn't be read. The ZIP contains the fetched data and error metadata"
+        return text
+
+    async def _research_dump_update_status(self, ctx, message, progress, started, status="running") -> bool:
+        if not self._channel_is_private(ctx.guild, ctx.channel):
+            return False
+        try:
+            await message.edit(
+                content=self._research_dump_status(progress, started, status),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException as error:
+            await self._support.report_operational_error(
+                guild_id=ctx.guild.id, source="Honeypot", action="Research dump status update",
+                error=error, channel_id=ctx.channel.id,
+            )
+            return False
+        return True
+
+    async def _research_dump_heartbeat(self, ctx, message, progress, started) -> None:
+        while True:
+            await asyncio.sleep(RESEARCH_DUMP_PROGRESS_INTERVAL_SECONDS)
+            if not await self._research_dump_update_status(ctx, message, progress, started):
+                return
+
+    @research.command(name="dump", usage="<channel_1> <channel_2> [progress]")
+    async def research_dump(
         self,
         ctx: commands.Context,
         moderation_channel: discord.TextChannel,
         member_channel: discord.TextChannel,
+        progress: bool = True,
     ) -> None:
-        """Export historical ban and member logs to a private moderator channel"""
+        """Dump both channels without parsing logs, with optional progress updates"""
         mentions = discord.AllowedMentions.none()
         if not self._channel_is_private(ctx.guild, ctx.channel):
             await ctx.send(
@@ -1500,34 +1574,49 @@ class Honeypot(Cog):
                 _("I need Attach Files in this channel"), allowed_mentions=mentions
             )
             return
-        if ctx.guild.id in self._ban_research_guilds:
+        if moderation_channel.id == member_channel.id:
+            await ctx.send(_("Choose two different source channels"), allowed_mentions=mentions)
+            return
+        if ctx.guild.id in self._research_dump_jobs:
             await ctx.send(
-                _("A research export is already running for this server"),
+                _("A research dump is already running for this server"),
                 allowed_mentions=mentions,
             )
             return
 
-        self._ban_research_guilds.add(ctx.guild.id)
+        await self._run_research_dump(ctx, moderation_channel, member_channel, progress)
+
+    async def _run_research_dump(self, ctx, moderation_channel, member_channel, show_progress) -> None:
+        mentions = discord.AllowedMentions.none()
+        run = _ResearchDumpRun(asyncio.current_task(), research_export.DumpProgress())
+        self._research_dump_jobs[ctx.guild.id] = run
         cutoff = datetime.now(timezone.utc)
+        started = asyncio.get_running_loop().time()
         temporary = None
+        heartbeat = None
+        status_message = None
+        status = "failed"
         try:
-            await ctx.send(
-                _("Reading historical ban and member logs. This may take a while"),
+            status_message = await ctx.send(
+                self._research_dump_status(run.progress, started),
                 allowed_mentions=mentions,
             )
-            temporary = TemporaryDirectory(prefix="ban-research-", dir=cog_data_path(self))
-            result = await ban_research.export_ban_research(
+            if show_progress:
+                heartbeat = asyncio.create_task(self._research_dump_heartbeat(ctx, status_message, run.progress, started))
+            temporary = TemporaryDirectory(prefix="research-dump-", dir=cog_data_path(self))
+            result = await research_export.dump_channels(
                 moderation_channel,
                 member_channel,
                 Path(temporary.name),
                 bot_id=self.bot.user.id,
                 upload_limit=ctx.guild.filesize_limit,
                 cutoff=cutoff,
+                progress=run.progress,
             )
             for archive in result.archives:
                 if not self._channel_is_private(ctx.guild, ctx.channel):
                     await ctx.send(
-                        _("This channel is no longer private. The remaining export wasn't sent"),
+                        _("This channel is no longer private. The remaining dump wasn't sent"),
                         allowed_mentions=mentions,
                     )
                     return
@@ -1535,21 +1624,40 @@ class Honeypot(Cog):
                     file=discord.File(str(archive), filename=archive.name),
                     allowed_mentions=mentions,
                 )
-            await ctx.send(
-                _(
-                    "Export complete: {accounts} accounts, {bans} bans, {events} member observations\n"
-                    "Role lists contain observed changes only and may be incomplete"
-                ).format(
-                    accounts=result.account_count,
-                    bans=result.ban_count,
-                    events=result.member_event_count,
-                ),
-                allowed_mentions=mentions,
-            )
+            status = "complete" if result.complete else "incomplete"
+            for channel_id, error in result.failures:
+                await self._support.report_operational_error(
+                    guild_id=ctx.guild.id, source="Honeypot", action="Research dump channel read",
+                    error=error, channel_id=channel_id,
+                )
+        except asyncio.CancelledError:
+            status = "cancelled"
         finally:
-            self._ban_research_guilds.discard(ctx.guild.id)
-            if temporary is not None:
-                await asyncio.to_thread(temporary.cleanup)
+            if heartbeat is not None:
+                heartbeat.cancel()
+                await asyncio.gather(heartbeat, return_exceptions=True)
+            try:
+                if temporary is not None:
+                    await asyncio.to_thread(temporary.cleanup)
+            finally:
+                self._research_dump_jobs.pop(ctx.guild.id, None)
+            if status_message is not None:
+                await self._research_dump_update_status(ctx, status_message, run.progress, started, status)
+
+    @research.command(name="cancel")
+    async def research_cancel(self, ctx: commands.Context) -> None:
+        """Cancel the active research dump on this server"""
+        mentions = discord.AllowedMentions.none()
+        if not self._channel_is_private(ctx.guild, ctx.channel):
+            await ctx.send(_("Run this command in a private moderator channel"), allowed_mentions=mentions)
+            return
+        run = self._research_dump_jobs.get(ctx.guild.id)
+        if run is None:
+            await ctx.send(_("No research dump is running for this server"), allowed_mentions=mentions)
+        elif run.cancel():
+            await ctx.send(_("Cancellation requested. Waiting for file cleanup"), allowed_mentions=mentions)
+        else:
+            await ctx.send(_("Cancellation is already in progress"), allowed_mentions=mentions)
 
     @honeypot.group(name="evidence", invoke_without_command=True)
     async def manual_evidence_settings(self, ctx: commands.Context) -> None:
