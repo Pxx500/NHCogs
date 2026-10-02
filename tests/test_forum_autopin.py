@@ -320,10 +320,12 @@ class AlertRecorder:
 
     def __init__(self, *, delivered=True):
         self.messages = []
+        self.pings = []
         self.delivered = delivered
 
-    async def __call__(self, guild, content):
+    async def __call__(self, guild, content, *, ping=False):
         self.messages.append(content)
+        self.pings.append(ping)
         return self.delivered
 
 
@@ -822,6 +824,7 @@ class ForumAutopinServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(alerts.messages), 1)
         self.assertIn("Read Message History", alerts.messages[0])
+        self.assertEqual(alerts.pings, [True])
 
     async def test_undelivered_alert_is_retried_on_the_next_failure(self):
         alerts = AlertRecorder(delivered=False)
@@ -870,6 +873,7 @@ class ForumAutopinChannelDeleteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config.store_for(guild)["forum_autopin_channel_ids"], [11])
         self.assertEqual(len(alerts.messages), 1)
         self.assertIn("announcements", alerts.messages[0])
+        self.assertEqual(alerts.pings, [False])
 
     async def test_unconfigured_channel_delete_is_ignored(self):
         service, config, alerts = make_service()

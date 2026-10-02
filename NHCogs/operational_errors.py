@@ -16,6 +16,14 @@ import discord
 MAX_SUMMARY_LENGTH = 1_000
 
 
+def _channel_is_public(channel, guild) -> bool:
+    permissions_for = getattr(channel, "permissions_for", None)
+    default_role = getattr(guild, "default_role", None)
+    if permissions_for is None or default_role is None:
+        return False
+    return bool(permissions_for(default_role).view_channel)
+
+
 @dataclass(frozen=True)
 class OperationalFailure:
     guild_id: int
@@ -244,44 +252,72 @@ class OperationalErrorReporter:
             ),
         )
 
+    def _configured_error_channel(self, guild, channel_id: int | None):
+        """Resolve the error channel from the guild cache, then the bot cache."""
+        if channel_id is None:
+            return None
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            getter = getattr(self._bot, "get_channel", None)
+            if getter is not None:
+                channel = getter(channel_id)
+        if channel is None:
+            return None
+        text_channel_type = getattr(discord, "TextChannel", None)
+        if text_channel_type is not None and not isinstance(channel, text_channel_type):
+            return None
+        return channel
+
     async def send_alert(
-        self, guild_id: int, content: str, *, file: discord.File | None = None
-    ) -> None:
-        """Publish technical failure details only to the shared private destination."""
+        self,
+        guild_id: int,
+        content: str,
+        *,
+        file: discord.File | None = None,
+        ping: bool = True,
+        channel=None,
+    ) -> discord.Message | None:
+        """Publish to the shared private error channel.
+
+        Operational failures ping the configured maintainer. Other notices pass
+        ``ping=False`` and are posted without a mention. A caller that already
+        resolved the channel can pass it so a guild-cache miss does not drop it.
+        """
         guild = self._bot.get_guild(guild_id)
         if guild is None:
             self._logger.error(
                 "Cannot publish NH operational error because guild %s is unavailable", guild_id
             )
-            return
+            return None
         guild_config = self._config.guild_from_id(guild_id)
         channel_id = await guild_config.error_channel()
         maintainer_id = await guild_config.error_maintainer_id()
-        channel = guild.get_channel(channel_id) if channel_id is not None else None
+        if channel is None:
+            channel = self._configured_error_channel(guild, channel_id)
         if channel is None:
             self._logger.error(
                 "Cannot publish NH operational error because its channel is not configured"
             )
-            return
-        if channel.permissions_for(guild.default_role).view_channel:
+            return None
+        if _channel_is_public(channel, guild):
             self._logger.error(
                 "Cannot publish NH operational error because channel %s is public", channel.id
             )
-            return
-        maintainer = guild.get_member(maintainer_id) if maintainer_id is not None else None
-        if maintainer_id is not None:
+            return None
+        if ping and maintainer_id is not None:
+            maintainer = guild.get_member(maintainer_id)
             mention = maintainer.mention if maintainer is not None else f"<@{maintainer_id}>"
             target = maintainer if maintainer is not None else discord.Object(id=maintainer_id)
             content = f"{mention}\n{content}"
+            allowed_mentions = discord.AllowedMentions(
+                everyone=False,
+                users=[target],
+                roles=False,
+                replied_user=False,
+            )
         else:
-            target = None
-        allowed_mentions = discord.AllowedMentions(
-            everyone=False,
-            users=[target] if target is not None else False,
-            roles=False,
-            replied_user=False,
-        )
-        await channel.send(content, file=file, allowed_mentions=allowed_mentions)
+            allowed_mentions = discord.AllowedMentions.none()
+        return await channel.send(content, file=file, allowed_mentions=allowed_mentions)
 
     @staticmethod
     def _format_context(failure: OperationalFailure) -> str | None:

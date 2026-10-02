@@ -460,17 +460,18 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             reconcile_enabled_guilds=mock.AsyncMock()
         )
         cog._achievement_store = store
-        cog._send_maintenance_log = mock.AsyncMock(return_value=True)
+        cog._send_error_notice = mock.AsyncMock(return_value=True)
 
         await cog._role_analytics_startup_reconcile()
 
         store.bootstrap_guild.assert_not_awaited()
-        cog._send_maintenance_log.assert_awaited_once_with(
+        cog._send_error_notice.assert_awaited_once_with(
             guild,
             "Achievement initialization is required\n\n"
             "The achievement database has not been initialized from the current "
             "Discord roles.\n"
             "Run `!rolesync discord`.",
+            ping=False,
         )
 
     async def test_resume_refreshes_analytics_then_restores_database_roles(self):
@@ -1280,7 +1281,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 )
                 cog._edit_achievement_roles = mock.AsyncMock()
                 cog._send_moderation_log = mock.AsyncMock(return_value=True)
-                cog._send_maintenance_log = mock.AsyncMock(return_value=True)
+                cog._send_error_notice = mock.AsyncMock(return_value=True)
                 interaction = self._interaction(guild)
                 view = SimpleNamespace(
                     definition=definition,
@@ -1319,7 +1320,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
                         for user_id in (10, 12)
                     ],
                 )
-                cog._send_maintenance_log.assert_not_awaited()
+                cog._send_error_notice.assert_not_awaited()
                 cog._send_moderation_log.assert_awaited_once()
                 audit = cog._send_moderation_log.await_args.args[1]
                 self.assertIn(
@@ -1497,7 +1498,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             side_effect=nhmisc.commands.UserFeedbackCheckFailure("role hierarchy")
         )
         cog._send_moderation_log = mock.AsyncMock(return_value=True)
-        cog._send_maintenance_log = mock.AsyncMock(return_value=True)
+        cog._send_error_notice = mock.AsyncMock(return_value=True)
         interaction = self._interaction(guild)
         view = SimpleNamespace(
             definition=definition,
@@ -1516,7 +1517,8 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         )
 
         store.replace_role.assert_awaited_once()
-        cog._send_maintenance_log.assert_awaited_once()
+        cog._send_error_notice.assert_awaited_once()
+        self.assertFalse(cog._send_error_notice.await_args.kwargs["ping"])
         self.assertIn(
             "Members skipped: 1",
             cog._send_moderation_log.await_args.args[1],
@@ -1656,6 +1658,69 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(allowed_mentions.replied_user)
         self.assertNotIn("Speedrun", source.reply.await_args.args[0])
 
+    async def test_grant_partial_failure_is_recorded_without_a_ping(self):
+        default_role = SimpleNamespace(id=0, position=0)
+        solo_role = SimpleNamespace(
+            id=nhmisc.SINGLEPLAYER_GATE_COMPLETED_ROLE_ID,
+            managed=False,
+            position=2,
+        )
+        member = SimpleNamespace(
+            id=10,
+            display_name="Player",
+            bot=False,
+            top_role=SimpleNamespace(position=1),
+            roles=[default_role],
+            edit=mock.AsyncMock(side_effect=nhmisc.discord.Forbidden()),
+        )
+        guild = SimpleNamespace(
+            id=1,
+            me=SimpleNamespace(
+                guild_permissions=SimpleNamespace(manage_roles=True),
+                top_role=SimpleNamespace(position=10),
+            ),
+            default_role=default_role,
+            get_member=lambda user_id: member if user_id == member.id else None,
+            get_role=lambda role_id: solo_role if role_id == solo_role.id else default_role,
+        )
+        source = SimpleNamespace(
+            id=30,
+            channel=SimpleNamespace(id=20),
+            guild=guild,
+            webhook_id=None,
+            author=member,
+            raw_mentions=(),
+            reply=mock.AsyncMock(),
+        )
+        view = SimpleNamespace(
+            source_message=source,
+            selected_user_ids={member.id},
+            selected_keys={nhmisc.SOLO_GATER_DEFINITION.key},
+            definitions=(nhmisc.SOLO_GATER_DEFINITION,),
+            candidate_ids=(member.id,),
+            stop=mock.Mock(),
+            render_embed=mock.Mock(),
+        )
+        store = SimpleNamespace(
+            grant_boolean=mock.AsyncMock(return_value=SimpleNamespace(created=True)),
+            revoke_booleans=mock.AsyncMock(),
+            list_definitions=mock.AsyncMock(
+                return_value=(nhmisc.SOLO_GATER_DEFINITION,)
+            ),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = store
+        cog._fetch_gate_increment_source = mock.AsyncMock(return_value=source)
+        cog._send_moderation_log = mock.AsyncMock(return_value=True)
+        cog._send_error_notice = mock.AsyncMock(return_value=None)
+        interaction = self._interaction(guild)
+
+        await cog._confirm_achievement_grant(interaction, view)
+
+        cog._send_error_notice.assert_awaited_once()
+        self.assertFalse(cog._send_error_notice.await_args.kwargs["ping"])
+        self.assertIn("partially failed", cog._send_error_notice.await_args.args[1])
+
     async def test_grant_rejects_a_role_binding_changed_during_review(self):
         member = SimpleNamespace(id=10, display_name="Player", bot=False)
         guild = SimpleNamespace(
@@ -1766,6 +1831,54 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         audit = cog._send_moderation_log.await_args.args[1]
         self.assertIn("Achievements revoked", audit)
         self.assertIn("Members: <@10>", audit)
+
+    async def test_revoke_partial_failure_is_recorded_without_a_ping(self):
+        default_role = SimpleNamespace(id=0, position=0)
+        solo_role = SimpleNamespace(
+            id=nhmisc.SINGLEPLAYER_GATE_COMPLETED_ROLE_ID,
+            managed=False,
+            position=2,
+        )
+        member = SimpleNamespace(
+            id=10,
+            top_role=SimpleNamespace(position=1),
+            roles=[default_role, solo_role],
+            edit=mock.AsyncMock(side_effect=nhmisc.discord.Forbidden()),
+        )
+        guild = SimpleNamespace(
+            id=1,
+            me=SimpleNamespace(
+                guild_permissions=SimpleNamespace(manage_roles=True),
+                top_role=SimpleNamespace(position=10),
+            ),
+            default_role=default_role,
+            get_role=lambda role_id: solo_role if role_id == solo_role.id else default_role,
+        )
+        store = SimpleNamespace(
+            shared_boolean_keys=mock.AsyncMock(return_value=("solo_gater",)),
+            revoke_booleans=mock.AsyncMock(return_value=1),
+            list_definitions=mock.AsyncMock(
+                return_value=(nhmisc.SOLO_GATER_DEFINITION,)
+            ),
+        )
+        view = SimpleNamespace(
+            members=(member,),
+            selected_keys={"solo_gater"},
+            definitions=(nhmisc.SOLO_GATER_DEFINITION,),
+            stop=mock.Mock(),
+            render_embed=mock.Mock(),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = store
+        cog._send_moderation_log = mock.AsyncMock(return_value=True)
+        cog._send_error_notice = mock.AsyncMock(return_value=None)
+        interaction = self._interaction(guild)
+
+        await cog._confirm_achievement_revoke(interaction, view)
+
+        cog._send_error_notice.assert_awaited_once()
+        self.assertFalse(cog._send_error_notice.await_args.kwargs["ping"])
+        self.assertIn("partially failed", cog._send_error_notice.await_args.args[1])
 
     async def test_revoke_rejects_a_role_binding_changed_during_review(self):
         guild = SimpleNamespace(id=1)
@@ -1989,14 +2102,16 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         cog._sticky_roles = SimpleNamespace(
             get_role_state=mock.AsyncMock(return_value=(False, 0))
         )
-        cog._send_maintenance_log = mock.AsyncMock(return_value=True)
+        cog._send_error_notice = mock.AsyncMock(return_value=True)
 
         await cog.on_guild_role_delete(role)
 
         store.unbind_role.assert_awaited_once_with(guild.id, role.id)
-        cog._send_maintenance_log.assert_awaited_once_with(
+        cog._send_error_notice.assert_awaited_once_with(
             guild,
             "Stopped tracking deleted role All Quests for All Quests",
+            ping=True,
+            failure_action="publish deleted achievement role notice",
         )
 
 

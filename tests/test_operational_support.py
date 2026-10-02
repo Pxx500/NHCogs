@@ -117,6 +117,82 @@ class OperationalSupportTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(UserFeedbackCheckFailure):
             await self.support.require_private_error_channel(self.guild)
 
+    async def test_undelivered_ping_notice_is_persisted_without_raising(self):
+        await self.support.cog_load()
+
+        message = await self.support.send_error_notice(
+            self.guild.id,
+            "Stopped tracking deleted role",
+            ping=True,
+        )
+
+        self.assertIsNone(message)
+        self.assertEqual(await self.support.operational_errors.active_count(self.guild.id), 1)
+
+    async def test_undelivered_quiet_notice_is_not_persisted(self):
+        await self.support.cog_load()
+
+        message = await self.support.send_error_notice(
+            self.guild.id,
+            "Achievement grant partially failed",
+            ping=False,
+        )
+
+        self.assertIsNone(message)
+        self.assertEqual(await self.support.operational_errors.active_count(self.guild.id), 0)
+
+    async def test_ping_notice_failure_is_persisted_without_raising(self):
+        await self.support.cog_load()
+        channel = FakeTextChannel()
+        channel.guild = self.guild
+        channel.send = mock.AsyncMock(side_effect=discord.HTTPException("send failed"))
+        self.guild.channels[channel.id] = channel
+        self.error_config.store_for(self.guild)["error_channel"] = channel.id
+
+        message = await self.support.send_error_notice(
+            self.guild.id,
+            "Stopped tracking deleted role",
+            ping=True,
+            failure_action="publish deleted achievement role notice",
+        )
+
+        self.assertIsNone(message)
+        self.assertEqual(await self.support.operational_errors.active_count(self.guild.id), 1)
+
+    async def test_quiet_notice_failure_is_not_persisted(self):
+        await self.support.cog_load()
+        channel = FakeTextChannel()
+        channel.guild = self.guild
+        channel.send = mock.AsyncMock(side_effect=discord.HTTPException("send failed"))
+        self.guild.channels[channel.id] = channel
+        self.error_config.store_for(self.guild)["error_channel"] = channel.id
+
+        message = await self.support.send_error_notice(
+            self.guild.id,
+            "Achievement grant partially failed",
+            ping=False,
+        )
+
+        self.assertIsNone(message)
+        self.assertEqual(await self.support.operational_errors.active_count(self.guild.id), 0)
+
+    async def test_ping_notice_uses_the_channel_the_caller_already_resolved(self):
+        await self.support.cog_load()
+        channel = FakeTextChannel(channel_id=777)
+        channel.guild = self.guild
+        delivered = SimpleNamespace(id=9)
+        channel.send = mock.AsyncMock(return_value=delivered)
+
+        message = await self.support.send_error_notice(
+            self.guild.id,
+            "Sticky role DB entry needs a decision.",
+            ping=False,
+            channel=channel,
+        )
+
+        self.assertIs(message, delivered)
+        channel.send.assert_awaited_once()
+
     async def test_log_transport_failure_is_recorded_without_raising(self):
         await self.support.cog_load()
         channel = FakeTextChannel()
