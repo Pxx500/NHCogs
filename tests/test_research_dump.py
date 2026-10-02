@@ -71,6 +71,31 @@ def read_dump(result):
 
 
 class ResearchDumpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_one_or_many_channels_have_separate_identity_named_exports(self):
+        for count in (1, 3):
+            with self.subTest(count=count), TemporaryDirectory() as directory:
+                channels = [
+                    LogChannel(20 + index, [message(index + 1, index + 1)])
+                    for index in range(count)
+                ]
+                result = await research_dump.dump_channels(
+                    channels,
+                    Path(directory),
+                    bot_id=BOT,
+                    upload_limit=100_000,
+                    cutoff=START + timedelta(days=1),
+                )
+                data = read_dump(result)
+                metadata = json.loads(data["metadata.json"])
+                self.assertEqual(len(metadata["channels"]), count)
+                self.assertEqual(result.message_counts, {channel.id: 1 for channel in channels})
+                for index, channel in enumerate(channels):
+                    record = json.loads(data[f"channel-{channel.id}.jsonl"])
+                    self.assertEqual(record["channel_id"], str(channel.id))
+                    self.assertEqual(record["message_id"], str(index + 1))
+                    self.assertEqual(len(channel.history_calls), 1)
+                self.assertTrue(result.complete)
+
     async def test_rate_limit_waits_for_server_delay_instead_of_abandoning_history(self):
         failure = Exception("Rate limited")
         failure.status = 429
@@ -91,15 +116,14 @@ class ResearchDumpTests(unittest.IsolatedAsyncioTestCase):
             mock.patch.object(research_dump.asyncio, "sleep", new=mock.AsyncMock()) as sleep,
         ):
             result = await research_dump.dump_channels(
-                source,
-                LogChannel(30, []),
+                [source, LogChannel(30, [])],
                 Path(directory),
                 bot_id=BOT,
                 upload_limit=100_000,
                 cutoff=START + timedelta(days=1),
             )
             self.assertTrue(result.complete)
-            self.assertEqual(result.moderation_messages, 1)
+            self.assertEqual(result.message_counts[20], 1)
             sleep.assert_awaited_once_with(90)
 
     async def test_large_dump_parts_fit_upload_limit_and_keep_every_record(self):
@@ -107,8 +131,7 @@ class ResearchDumpTests(unittest.IsolatedAsyncioTestCase):
         items = [message(index + 1, index, content=rng.randbytes(200).hex()) for index in range(60)]
         with TemporaryDirectory() as directory:
             result = await research_dump.dump_channels(
-                LogChannel(20, items),
-                LogChannel(30, []),
+                [LogChannel(20, items), LogChannel(30, [])],
                 Path(directory),
                 bot_id=BOT,
                 upload_limit=6000,
@@ -117,11 +140,11 @@ class ResearchDumpTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(len(result.archives), 1)
             self.assertTrue(all(path.stat().st_size <= 6000 for path in result.archives))
             data = read_dump(result)
-            records = [json.loads(line) for line in data["moderation-messages.jsonl"].splitlines()]
+            records = [json.loads(line) for line in data["channel-20.jsonl"].splitlines()]
             self.assertEqual(
                 [record["content"] for record in records], [item.content for item in items]
             )
-            self.assertEqual(data["member-messages.jsonl"], b"")
+            self.assertEqual(data["channel-30.jsonl"], b"")
             self.assertTrue(json.loads(data["metadata.json"])["complete"])
 
     async def test_cancelling_packaging_waits_for_file_handles_to_close(self):
@@ -156,8 +179,7 @@ class ResearchDumpTests(unittest.IsolatedAsyncioTestCase):
         ):
             task = asyncio.create_task(
                 research_dump.dump_channels(
-                    LogChannel(20, [message(1, 1)]),
-                    LogChannel(30, []),
+                    [LogChannel(20, [message(1, 1)]), LogChannel(30, [])],
                     Path(directory),
                     bot_id=BOT,
                     upload_limit=100_000,
@@ -187,8 +209,7 @@ class ResearchDumpTests(unittest.IsolatedAsyncioTestCase):
         moderation.history = history
         with TemporaryDirectory() as directory:
             result = await research_dump.dump_channels(
-                moderation,
-                LogChannel(30, [message(2, 2)]),
+                [moderation, LogChannel(30, [message(2, 2)])],
                 Path(directory),
                 bot_id=BOT,
                 upload_limit=100_000,
@@ -197,9 +218,9 @@ class ResearchDumpTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(result.complete)
             data = read_dump(result)
             self.assertEqual(
-                json.loads(data["moderation-messages.jsonl"])["content"], "Already fetched"
+                json.loads(data["channel-20.jsonl"])["content"], "Already fetched"
             )
-            self.assertEqual(len(data["member-messages.jsonl"].splitlines()), 1)
+            self.assertEqual(len(data["channel-30.jsonl"].splitlines()), 1)
             metadata = json.loads(data["metadata.json"])
             self.assertFalse(metadata["complete"])
             self.assertEqual(metadata["channel_errors"][0]["status"], 403)
@@ -238,8 +259,7 @@ class ResearchDumpTests(unittest.IsolatedAsyncioTestCase):
                     ) as sleep,
                 ):
                     result = await research_dump.dump_channels(
-                        moderation,
-                        members,
+                        [moderation, members],
                         Path(directory),
                         bot_id=BOT,
                         upload_limit=100_000,
@@ -247,12 +267,11 @@ class ResearchDumpTests(unittest.IsolatedAsyncioTestCase):
                     )
                     records = [
                         json.loads(line)
-                        for line in read_dump(result)["moderation-messages.jsonl"].splitlines()
+                        for line in read_dump(result)["channel-20.jsonl"].splitlines()
                     ]
                     self.assertEqual([item["message_id"] for item in records], ["1", "2"])
                     self.assertEqual(len(attempts), 2)
-                    self.assertEqual(result.moderation_messages, 2)
-                    self.assertEqual(result.member_messages, 1)
+                    self.assertEqual(result.message_counts, {20: 2, 30: 1})
                     self.assertTrue(result.complete)
                     sleep.assert_awaited_once()
 
@@ -280,26 +299,25 @@ class ResearchDumpTests(unittest.IsolatedAsyncioTestCase):
         members = LogChannel(30, [message(4, 1, {"description": "Raw role and onboarding flags"})])
         with TemporaryDirectory() as directory:
             result = await research_dump.dump_channels(
-                moderation,
-                members,
+                [moderation, members],
                 Path(directory),
                 bot_id=BOT,
                 upload_limit=100_000,
                 cutoff=START + timedelta(days=1),
             )
-            self.assertEqual(result.moderation_messages, 2)
-            self.assertEqual(result.member_messages, 1)
+            self.assertEqual(result.message_counts, {20: 2, 30: 1})
             data = read_dump(result)
-            records = [json.loads(line) for line in data["moderation-messages.jsonl"].splitlines()]
+            records = [json.loads(line) for line in data["channel-20.jsonl"].splitlines()]
             self.assertEqual([record["message_id"] for record in records], ["1", "2"])
             self.assertEqual(records[0]["embeds"][0], embed)
             self.assertEqual(records[1]["author"]["id"], str(USER))
             self.assertEqual(records[1]["content"], "human comment")
-            self.assertEqual(len(data["member-messages.jsonl"].splitlines()), 1)
+            self.assertEqual(len(data["channel-30.jsonl"].splitlines()), 1)
             self.assertNotIn("accounts.jsonl", data)
             metadata = json.loads(data["metadata.json"])
-            self.assertEqual(metadata["moderation_messages"], 2)
-            self.assertEqual(metadata["member_messages"], 1)
+            self.assertEqual(
+                {item["id"]: item["messages"] for item in metadata["channels"]}, {"20": 2, "30": 1}
+            )
             self.assertEqual(metadata["current_role_labels"], {"77": "French"})
             self.assertEqual(
                 moderation.history_calls,

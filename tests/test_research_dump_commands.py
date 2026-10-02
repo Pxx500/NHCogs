@@ -35,14 +35,44 @@ def context(*, public=False, source_permissions=True, attach_files=True):
             view_channel=source_permissions,
             read_message_history=source_permissions,
         )
+    guild.get_channel = {channel.id: channel for channel in (moderation, members)}.get
     return ctx, moderation, members
 
 
 class ResearchDumpCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_numeric_ids_export_one_or_many_channels(self):
+        with (
+            TemporaryDirectory() as directory,
+            _isolated_honeypot_modules(Path(directory)) as honeypot,
+            mock.patch.object(honeypot.discord, "TextChannel", LogChannel),
+        ):
+            cog = object.__new__(honeypot.Honeypot)
+            cog.bot = SimpleNamespace(user=SimpleNamespace(id=BOT))
+            cog._research_dump_jobs = {}
+            for channel_ids in ([20], [20, 30, 40, 20]):
+                with self.subTest(channel_ids=channel_ids):
+                    ctx, first, second = context()
+                    third = LogChannel(40, [message(3, 3)])
+                    third.guild = ctx.guild
+                    third.permissions_for = first.permissions_for
+                    channels = {channel.id: channel for channel in (first, second, third)}
+                    ctx.guild.get_channel = channels.get
+                    await honeypot.Honeypot.research_dump.callback(
+                        cog, ctx, channel_ids
+                    )
+                    self.assertEqual(
+                        [channel_id for channel_id, channel in channels.items() if channel.history_calls],
+                        list(dict.fromkeys(channel_ids)),
+                    )
+                    self.assertTrue(any("file" in call.kwargs for call in ctx.send.await_args_list))
+                    self.assertIn("complete", ctx.send.return_value.edit.await_args.kwargs["content"])
+                    self.assertEqual(cog._research_dump_jobs, {})
+
     async def test_progress_heartbeat_during_api_wait_and_cancel_stops_the_dump(self):
         with (
             TemporaryDirectory() as directory,
             _isolated_honeypot_modules(Path(directory)) as honeypot,
+            mock.patch.object(honeypot.discord, "TextChannel", LogChannel),
         ):
             cog = object.__new__(honeypot.Honeypot)
             cog.bot = SimpleNamespace(user=SimpleNamespace(id=BOT))
@@ -65,7 +95,7 @@ class ResearchDumpCommandTests(unittest.IsolatedAsyncioTestCase):
             ctx.send.return_value.edit.side_effect = observe_status
             with mock.patch.object(honeypot, "RESEARCH_DUMP_PROGRESS_INTERVAL_SECONDS", 0):
                 task = asyncio.create_task(
-                    honeypot.Honeypot.research_dump.callback(cog, ctx, moderation, members)
+                    honeypot.Honeypot.research_dump.callback(cog, ctx, [20, 30])
                 )
                 try:
                     await asyncio.wait_for(waiting.wait(), 3)
@@ -101,7 +131,7 @@ class ResearchDumpCommandTests(unittest.IsolatedAsyncioTestCase):
                 for field in call.kwargs["embed"].fields
             )
             self.assertIn(
-                "??honeypot research dump <channel_1> <channel_2> [progress]",
+                "??honeypot research dump <channel_id> [channel_ids...]",
                 rendered,
             )
             self.assertIn("??honeypot research cancel", rendered)
@@ -113,6 +143,7 @@ class ResearchDumpCommandTests(unittest.IsolatedAsyncioTestCase):
         with (
             TemporaryDirectory() as directory,
             _isolated_honeypot_modules(Path(directory)) as honeypot,
+            mock.patch.object(honeypot.discord, "TextChannel", LogChannel),
         ):
             cog = object.__new__(honeypot.Honeypot)
             cases = (
@@ -120,14 +151,19 @@ class ResearchDumpCommandTests(unittest.IsolatedAsyncioTestCase):
                 {"source_permissions": False},
                 {"attach_files": False},
                 {"other_guild": True},
+                {"missing_id": True},
+                {"empty": True},
             )
             for options in cases:
                 with self.subTest(options=options):
                     other_guild = options.pop("other_guild", False)
+                    missing_id = options.pop("missing_id", False)
+                    empty = options.pop("empty", False)
                     ctx, moderation, members = context(**options)
                     if other_guild:
                         members.guild = SimpleNamespace(id=99)
-                    await honeypot.Honeypot.research_dump.callback(cog, ctx, moderation, members)
+                    channel_ids = [] if empty else [20, 9999 if missing_id else 30]
+                    await honeypot.Honeypot.research_dump.callback(cog, ctx, channel_ids)
                     self.assertEqual(moderation.history_calls, [])
                     self.assertEqual(members.history_calls, [])
                     self.assertEqual(ctx.send.await_count, 1)
@@ -137,6 +173,7 @@ class ResearchDumpCommandTests(unittest.IsolatedAsyncioTestCase):
         with (
             TemporaryDirectory() as directory,
             _isolated_honeypot_modules(Path(directory)) as honeypot,
+            mock.patch.object(honeypot.discord, "TextChannel", LogChannel),
         ):
             cog = object.__new__(honeypot.Honeypot)
             cog.bot = SimpleNamespace(user=SimpleNamespace(id=BOT))
@@ -151,7 +188,7 @@ class ResearchDumpCommandTests(unittest.IsolatedAsyncioTestCase):
                 return ctx.send.return_value
 
             ctx.send.side_effect = capture
-            await honeypot.Honeypot.research_dump.callback(cog, ctx, moderation, members)
+            await honeypot.Honeypot.research_dump.callback(cog, ctx, [20, 30])
             self.assertEqual(len(files), 1)
             self.assertFalse(files[0].exists())
             self.assertEqual(cog._research_dump_jobs, {})
@@ -161,18 +198,19 @@ class ResearchDumpCommandTests(unittest.IsolatedAsyncioTestCase):
         with (
             TemporaryDirectory() as directory,
             _isolated_honeypot_modules(Path(directory)) as honeypot,
+            mock.patch.object(honeypot.discord, "TextChannel", LogChannel),
         ):
             cog = object.__new__(honeypot.Honeypot)
             cog.bot = SimpleNamespace(user=SimpleNamespace(id=BOT))
             cog._research_dump_jobs = {10: object()}
             ctx, moderation, members = context()
-            await honeypot.Honeypot.research_dump.callback(cog, ctx, moderation, members)
+            await honeypot.Honeypot.research_dump.callback(cog, ctx, [20, 30])
             self.assertEqual(moderation.history_calls, [])
 
             cog._research_dump_jobs.clear()
             moderation.history = mock.Mock(side_effect=honeypot.discord.Forbidden("Denied"))
             with self.assertRaises(honeypot.discord.Forbidden):
-                await honeypot.Honeypot.research_dump.callback(cog, ctx, moderation, members)
+                await honeypot.Honeypot.research_dump.callback(cog, ctx, [20, 30])
             self.assertEqual(cog._research_dump_jobs, {})
             self.assertFalse(any("file" in call.kwargs for call in ctx.send.await_args_list))
             self.assertEqual(os.listdir(directory), [])
@@ -181,6 +219,7 @@ class ResearchDumpCommandTests(unittest.IsolatedAsyncioTestCase):
         with (
             TemporaryDirectory() as directory,
             _isolated_honeypot_modules(Path(directory)) as honeypot,
+            mock.patch.object(honeypot.discord, "TextChannel", LogChannel),
         ):
             cog = object.__new__(honeypot.Honeypot)
             cog.bot = SimpleNamespace(user=SimpleNamespace(id=BOT))
@@ -196,6 +235,6 @@ class ResearchDumpCommandTests(unittest.IsolatedAsyncioTestCase):
                     yield item
 
             moderation.history = change_permissions
-            await honeypot.Honeypot.research_dump.callback(cog, ctx, moderation, members)
+            await honeypot.Honeypot.research_dump.callback(cog, ctx, [20, 30])
             self.assertFalse(any("file" in call.kwargs for call in ctx.send.await_args_list))
             self.assertEqual(cog._research_dump_jobs, {})
