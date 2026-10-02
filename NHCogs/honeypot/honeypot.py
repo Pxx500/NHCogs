@@ -4,6 +4,7 @@ import typing
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import discord
 from AAA3A_utils import Cog
@@ -15,6 +16,7 @@ from redbot.core.i18n import Translator, cog_i18n
 
 from .. import command_overview
 from . import (
+    ban_research,
     channel_routing,
     cleanup,
     daily_stats,
@@ -185,6 +187,7 @@ class Honeypot(Cog):
         self._firstpost_dirty_seen_authors: dict[int, set[int]] = defaultdict(set)
         self._firstpost_loaded_guilds: set[int] = set()
         self._review_dump_lock: asyncio.Lock = asyncio.Lock()
+        self._ban_research_guilds: set[int] = set()
         self._imagescan_db_path = cog_data_path(self) / "imagescan.sqlite"
         self._imagescan_files_path = cog_data_path(self) / "imagescan_files"
         self._imagescan_store = ImageScanStore(
@@ -1457,6 +1460,96 @@ class Honeypot(Cog):
             detection.config_all,
             include_descendants=False,
         )
+
+    @honeypot.group(name="research", invoke_without_command=True)
+    async def research(self, ctx: commands.Context) -> None:
+        """Export historical logs for scam-account research"""
+        return await self._send_group_overview(ctx)
+
+    @research.command(name="bans", usage="<moderation_channel> <member_channel>")
+    async def research_bans(
+        self,
+        ctx: commands.Context,
+        moderation_channel: discord.TextChannel,
+        member_channel: discord.TextChannel,
+    ) -> None:
+        """Export historical ban and member logs to a private moderator channel"""
+        mentions = discord.AllowedMentions.none()
+        if not self._channel_is_private(ctx.guild, ctx.channel):
+            await ctx.send(
+                _("Run this export in a private moderator channel"),
+                allowed_mentions=mentions,
+            )
+            return
+        for channel in (moderation_channel, member_channel):
+            if channel.guild.id != ctx.guild.id:
+                await ctx.send(
+                    _("Both source channels must belong to this server"),
+                    allowed_mentions=mentions,
+                )
+                return
+            permissions = channel.permissions_for(ctx.guild.me)
+            if not permissions.view_channel or not permissions.read_message_history:
+                await ctx.send(
+                    _("I need View Channel and Read Message History in both source channels"),
+                    allowed_mentions=mentions,
+                )
+                return
+        if not ctx.channel.permissions_for(ctx.guild.me).attach_files:
+            await ctx.send(
+                _("I need Attach Files in this channel"), allowed_mentions=mentions
+            )
+            return
+        if ctx.guild.id in self._ban_research_guilds:
+            await ctx.send(
+                _("A research export is already running for this server"),
+                allowed_mentions=mentions,
+            )
+            return
+
+        self._ban_research_guilds.add(ctx.guild.id)
+        cutoff = datetime.now(timezone.utc)
+        temporary = None
+        try:
+            await ctx.send(
+                _("Reading historical ban and member logs. This may take a while"),
+                allowed_mentions=mentions,
+            )
+            temporary = TemporaryDirectory(prefix="ban-research-", dir=cog_data_path(self))
+            result = await ban_research.export_ban_research(
+                moderation_channel,
+                member_channel,
+                Path(temporary.name),
+                bot_id=self.bot.user.id,
+                upload_limit=ctx.guild.filesize_limit,
+                cutoff=cutoff,
+            )
+            for archive in result.archives:
+                if not self._channel_is_private(ctx.guild, ctx.channel):
+                    await ctx.send(
+                        _("This channel is no longer private. The remaining export wasn't sent"),
+                        allowed_mentions=mentions,
+                    )
+                    return
+                await ctx.send(
+                    file=discord.File(str(archive), filename=archive.name),
+                    allowed_mentions=mentions,
+                )
+            await ctx.send(
+                _(
+                    "Export complete: {accounts} accounts, {bans} bans, {events} member observations\n"
+                    "Role lists contain observed changes only and may be incomplete"
+                ).format(
+                    accounts=result.account_count,
+                    bans=result.ban_count,
+                    events=result.member_event_count,
+                ),
+                allowed_mentions=mentions,
+            )
+        finally:
+            self._ban_research_guilds.discard(ctx.guild.id)
+            if temporary is not None:
+                await asyncio.to_thread(temporary.cleanup)
 
     @honeypot.group(name="evidence", invoke_without_command=True)
     async def manual_evidence_settings(self, ctx: commands.Context) -> None:
