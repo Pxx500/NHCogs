@@ -1122,7 +1122,17 @@ class NHMisc(commands.Cog):
     ) -> None:
         try:
             if ping or state.message is None:
-                message = await self._send_error_notice(guild, content, ping=ping)
+                previous = state.message
+                message = await self._send_error_notice(
+                    guild,
+                    content,
+                    ping=ping,
+                    failure_action="publish achievement reconciliation retry",
+                )
+                if ping and previous is not None:
+                    await self._quietly_finalize_reconciliation_message(
+                        previous, guild, content
+                    )
                 if not ping:
                     state.message = message
                 return
@@ -1135,6 +1145,20 @@ class NHMisc(commands.Cog):
             await self._support.report_operational_error(
                 guild_id=guild.id, source="NHMisc",
                 action="update achievement reconciliation log", error=error,
+            )
+
+    async def _quietly_finalize_reconciliation_message(self, message, guild, content) -> None:
+        """Leave the earlier retry notice in its final state without a ping."""
+        try:
+            if message.channel.permissions_for(guild.default_role).view_channel:
+                return
+            await message.edit(
+                content=content, allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            log.exception(
+                "Could not update the earlier achievement reconciliation notice for guild %s",
+                guild.id,
             )
 
     async def _reconcile_achievement_roles_once(  # noqa: PLR0912
@@ -4007,13 +4031,30 @@ class NHMisc(commands.Cog):
         finally:
             self._achievement_syncing_guilds.discard(guild_id)
 
+    def _error_channel_label(self, guild: discord.Guild, channel_id: int) -> str:
+        channel = self._support.get_log_channel(guild, channel_id)
+        if channel is None:
+            return f"the configured error channel (`{channel_id}`)"
+        mention = getattr(channel, "mention", None)
+        if mention:
+            return str(mention)
+        name = getattr(channel, "name", None)
+        if name:
+            return f"#{name}"
+        return f"the configured error channel (`{channel_id}`)"
+
     async def _require_rolesync_error_channel(self, ctx: commands.Context) -> discord.TextChannel:
         """Accept rolesync discord only in the shared operational error channel."""
         channel_id = await self._support.config.guild(ctx.guild).error_channel()
         channel = ctx.channel
-        if channel_id is None or getattr(channel, "id", None) != channel_id:
+        if channel_id is None:
             raise commands.UserFeedbackCheckFailure(
-                "Run this command in the operational error channel"
+                "Configure the shared error channel before running this command"
+            )
+        if getattr(channel, "id", None) != channel_id:
+            raise commands.UserFeedbackCheckFailure(
+                "Run this command in "
+                f"{self._error_channel_label(ctx.guild, channel_id)}"
             )
         if self._channel_allows_everyone(channel, ctx.guild):
             raise commands.UserFeedbackCheckFailure(
@@ -6505,6 +6546,7 @@ class NHMisc(commands.Cog):
                 f"Stopped tracking deleted role {role.name} for "
                 f"{definition.display_name}",
                 ping=True,
+                failure_action="publish deleted achievement role notice",
             )
 
         config_exists, saved_rows = await self._sticky_roles.get_role_state(
@@ -6519,6 +6561,12 @@ class NHMisc(commands.Cog):
                 "Sticky role %s was deleted in guild %s but the error channel is unavailable",
                 role.id,
                 role.guild.id,
+            )
+            await self.report_operational_error(
+                guild_id=role.guild.id,
+                source="NHMisc",
+                action="prompt deleted sticky role decision",
+                error=RuntimeError("The error channel is unavailable"),
             )
             return
 
@@ -6900,9 +6948,17 @@ class NHMisc(commands.Cog):
         content: str,
         *,
         ping: bool = False,
+        channel: discord.abc.Messageable | None = None,
+        failure_action: str = "publish error-channel notice",
     ) -> discord.Message | None:
         """Post a former maintenance notice to the shared error channel."""
-        return await self._support.send_error_notice(guild.id, content, ping=ping)
+        return await self._support.send_error_notice(
+            guild.id,
+            content,
+            ping=ping,
+            channel=channel,
+            failure_action=failure_action,
+        )
 
     async def _send_forum_autopin_alert(
         self,
@@ -7322,7 +7378,19 @@ class NHMisc(commands.Cog):
             f"`change {role_id} <role mention or ID>` - move config and saved users to another role"
         )
         if ping:
-            if await self._send_error_notice(guild, prompt, ping=True) is None:
+            delivered = await self._send_error_notice(
+                guild,
+                prompt,
+                ping=True,
+                channel=channel,
+                failure_action="prompt deleted sticky role decision",
+            )
+            if delivered is None:
+                log.warning(
+                    "Sticky role decision prompt was not delivered for role %s in guild %s",
+                    role_id,
+                    guild.id,
+                )
                 return
         else:
             await channel.send(prompt, allowed_mentions=discord.AllowedMentions.none())

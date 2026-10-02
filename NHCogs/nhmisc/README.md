@@ -612,7 +612,9 @@ and run this command in that channel:
 [p]rolesync discord
 ```
 
-The command is refused anywhere else. In the error channel it prepares an import plan
+The command is refused anywhere else. If the error channel is not configured yet, the
+refusal says to configure it first. If it is configured, the refusal names that channel.
+In the error channel it prepares an import plan
 from the role-analytics snapshot, uploads a backup, and waits for the invoking moderator
 to type `confirm` before anything changes. This initializes achievement data from current
 Discord roles. Later uses deliberately replace achievement progress with Discord's current
@@ -623,7 +625,8 @@ If achievement role reconciliation skips members, it posts a quiet error-channel
 with each skipped user id, whether the miss was Gate or Solo Gater, and the exception,
 then `Retrying` with a Discord relative timestamp. One retry runs an hour later. Success
 edits that same message to `Retry completed` without a ping. If people are still skipped,
-the retry posts a new message that pings the error maintainer. A crash still uses the
+the retry posts a new message that pings the error maintainer and updates the earlier
+message to that same final text without a ping. A crash still uses the
 normal operational error ping and does not ping again for the summary. A failed retry
 waits for the next regular or manual synchronization. Repeated syncs share one pending
 retry per guild. A successful manual sync completes the pending report early and cancels

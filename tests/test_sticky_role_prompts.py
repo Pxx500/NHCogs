@@ -289,8 +289,8 @@ class StickyRolePromptTests(unittest.IsolatedAsyncioTestCase):
         cog._sticky_roles = sticky_roles
         notices = []
 
-        async def send_error_notice(notice_guild, content, *, ping=False):
-            notices.append((notice_guild, content, ping))
+        async def send_error_notice(notice_guild, content, *, ping=False, channel=None, **_kwargs):
+            notices.append((notice_guild, content, ping, channel))
             return types.SimpleNamespace(id=1)
 
         cog._send_error_notice = send_error_notice
@@ -312,6 +312,7 @@ class StickyRolePromptTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(channel.sent, [])
             self.assertEqual(notices[0][0], guild)
             self.assertTrue(notices[0][2])
+            self.assertIs(notices[0][3], channel)
             self.assertIn("`remove 101`", notices[0][1])
             self.assertIn("`keep 101`", notices[0][1])
             self.assertIn("`change 101 <role mention or ID>`", notices[0][1])
@@ -333,22 +334,26 @@ class StickyRolePromptTests(unittest.IsolatedAsyncioTestCase):
         cog.bot = bot
         cog._send_error_notice = mock.AsyncMock(return_value=None)
 
-        await cog._prompt_sticky_role_db_action(
-            guild=types.SimpleNamespace(id=55),
-            channel=channel,
-            role_id=101,
-            role_name="Gone",
-            config_exists=True,
-            saved_rows=2,
-            reason="Discord role deletion event",
-            requester=None,
-            ping=True,
-        )
+        with mock.patch.object(nhmisc.log, "warning") as warning:
+            await cog._prompt_sticky_role_db_action(
+                guild=types.SimpleNamespace(id=55),
+                channel=channel,
+                role_id=101,
+                role_name="Gone",
+                config_exists=True,
+                saved_rows=2,
+                reason="Discord role deletion event",
+                requester=None,
+                ping=True,
+            )
+        warning.assert_called_once()
+        self.assertIn("not delivered", warning.call_args.args[0])
 
         self.assertEqual(channel.sent, [])
         self.assertEqual(bot.waiters, [])
         cog._send_error_notice.assert_awaited_once()
         self.assertTrue(cog._send_error_notice.await_args.kwargs["ping"])
+        self.assertIs(cog._send_error_notice.await_args.kwargs["channel"], channel)
 
 
 if __name__ == "__main__":

@@ -536,11 +536,17 @@ class ConfigurationStatusTests(unittest.IsolatedAsyncioTestCase):
         )
         self.cog._support.get_log_channel = mock.Mock(return_value=channel)
         self.cog._prompt_sticky_role_db_action = mock.AsyncMock()
+        self.cog.report_operational_error = mock.AsyncMock()
         role = types.SimpleNamespace(id=456, name="Sticky", guild=self.guild)
 
         await self.cog.on_guild_role_delete(role)
 
         self.cog._prompt_sticky_role_db_action.assert_not_awaited()
+        self.cog.report_operational_error.assert_awaited_once()
+        self.assertEqual(
+            self.cog.report_operational_error.await_args.kwargs["action"],
+            "prompt deleted sticky role decision",
+        )
 
     async def test_roleanalytics_group_shows_database_state(self):
         state = types.SimpleNamespace(

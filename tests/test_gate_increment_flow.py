@@ -1005,6 +1005,61 @@ class GateIncrementReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<@&50>", audit)
         self.assertIn("https://discord.com/channels/1/2/3", audit)
 
+    async def test_partial_gate_increment_is_recorded_without_a_ping(self):
+        interaction = self._interaction()
+        source = SimpleNamespace(
+            guild=_manageable_gate_guild(),
+            channel=SimpleNamespace(id=2),
+            id=3,
+        )
+        candidate = nhmisc.GateIncrementCandidate(
+            10,
+            "Player",
+            (),
+            None,
+            nhmisc.GATE_TIER_ROLE_IDS[0],
+            target_ordinal=1,
+            highest_ordinal=0,
+        )
+        snapshot = SimpleNamespace(
+            custom_achievements=(),
+            members=(
+                StoredGateIncrementMember(
+                    position=0,
+                    user_id=10,
+                    expected_gate_role_ids=(),
+                    target_role_id=nhmisc.GATE_TIER_ROLE_IDS[0],
+                    state=nhmisc.MemberState.FAILED,
+                    failure_code=None,
+                ),
+            ),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._achievement_store = SimpleNamespace(
+            is_bootstrapped=mock.AsyncMock(return_value=True),
+            list_definitions=mock.AsyncMock(return_value=()),
+        )
+        cog._fetch_gate_increment_source = mock.AsyncMock(return_value=source)
+        cog._fetch_gate_increment_candidates = mock.AsyncMock(return_value=(candidate,))
+        cog._validate_gate_increment_candidate_count = mock.Mock()
+        cog._gate_increment_store = SimpleNamespace(
+            claim=mock.AsyncMock(return_value=SimpleNamespace(created=True))
+        )
+        cog._execute_gate_increment_operation = mock.AsyncMock(return_value=snapshot)
+        cog._publish_gate_increment_result = mock.AsyncMock(return_value=True)
+        cog._format_gate_increment_completion = mock.Mock(return_value="done")
+        cog._finish_gate_increment_review = mock.AsyncMock()
+        cog._send_moderation_log = mock.AsyncMock(return_value=True)
+        cog._send_error_notice = mock.AsyncMock(return_value=None)
+        cog._require_private_moderation_log_channel = mock.AsyncMock()
+        view = _review_view(cog, source, (candidate,))
+
+        await view.confirm.callback(interaction)
+
+        cog._send_error_notice.assert_awaited_once()
+        self.assertFalse(cog._send_error_notice.await_args.kwargs["ping"])
+        self.assertIn("partially failed", cog._send_error_notice.await_args.args[1])
+
     async def test_moderation_log_failure_does_not_block_congratulations(self):
         interaction = self._interaction()
         source = SimpleNamespace(

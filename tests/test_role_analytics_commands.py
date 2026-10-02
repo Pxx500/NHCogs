@@ -134,6 +134,10 @@ class FakeEmbed:
 ALLOWED_MENTIONS_NONE = object()
 
 
+class FakeTextChannel:
+    """Marker so the shared log resolver accepts command-test channels."""
+
+
 def load_nhmisc_module():
     discord = types.ModuleType("discord")
     discord.Forbidden = type("Forbidden", (Exception,), {})
@@ -147,6 +151,7 @@ def load_nhmisc_module():
         blue=lambda: 0, green=lambda: 0, orange=lambda: 0, red=lambda: 0
     )
     discord.Embed = FakeEmbed
+    discord.TextChannel = FakeTextChannel
 
     commands = types.ModuleType("redbot.core.commands")
     commands.Cog = FakeCog
@@ -248,7 +253,7 @@ class FakeMember:
         self.display_name = display_name or f"User {user_id}"
 
 
-class FakeChannel:
+class FakeChannel(FakeTextChannel):
     def __init__(self, guild, *, public=False, bot_permissions=None):
         self.id = 321
         self.mention = "#alerts"
@@ -284,6 +289,12 @@ class FakeGuild:
         self.channel = FakeChannel(
             self, public=public, bot_permissions=bot_permissions
         )
+        self.channels = {}
+
+    def get_channel(self, channel_id):
+        if self.channel.id == channel_id:
+            return self.channel
+        return self.channels.get(channel_id)
 
     def get_role(self, role_id):
         return self.roles.get(role_id)
@@ -308,7 +319,11 @@ async def bind_error_channel(cog, ctx):
 class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
     def make_cog(self):
         cog = object.__new__(nhmisc.NHMisc)
-        cog.bot = types.SimpleNamespace(guilds=[], wait_for=mock.AsyncMock())
+        cog.bot = types.SimpleNamespace(
+            guilds=[],
+            wait_for=mock.AsyncMock(),
+            get_channel=lambda _channel_id: None,
+        )
         cog._support = make_support(cog.bot, types.SimpleNamespace(), module=nhmisc)
         cog._activity_store = mock.AsyncMock()
         cog._sticky_roles = mock.AsyncMock()
@@ -761,14 +776,22 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(
             UserFeedbackCheckFailure,
-            "Run this command in the operational error channel",
+            "Configure the shared error channel before running this command",
         ):
             await nhmisc.NHMisc.rolesync_discord.callback(cog, ctx)
 
+        error_channel = FakeChannel(guild)
+        error_channel.id = 999
+        error_channel.mention = "#mod-logs"
+        guild.channels[999] = error_channel
         await cog._support.config.guild(guild).error_channel.set(999)
+        with self.assertRaisesRegex(UserFeedbackCheckFailure, "Run this command in #mod-logs"):
+            await nhmisc.NHMisc.rolesync_discord.callback(cog, ctx)
+
+        guild.channels.clear()
         with self.assertRaisesRegex(
             UserFeedbackCheckFailure,
-            "Run this command in the operational error channel",
+            r"Run this command in the configured error channel \(`999`\)",
         ):
             await nhmisc.NHMisc.rolesync_discord.callback(cog, ctx)
 

@@ -72,7 +72,7 @@ class AchievementReconciliationRetryTests(unittest.IsolatedAsyncioTestCase):
         support = object.__new__(nhmisc.OperationalSupport)
         support.operational_errors = SimpleNamespace(report=mock.AsyncMock())
 
-        async def send_error_notice(_guild_id, content, *, ping=False):
+        async def send_error_notice(_guild_id, content, *, ping=False, **_kwargs):
             message = await self.channel.send(content)
             message.ping = ping
             self.channel.pings.append(ping)
@@ -126,10 +126,11 @@ class AchievementReconciliationRetryTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.channel.sent.wait(), 1)
         self.assertEqual(len(self.channel.messages), 2)
         self.assertTrue(self.channel.pings[1])
+        self.assertFalse(self.channel.pings[0])
         self.assertTrue(self.channel.messages[1].content.endswith("Retry failed"))
+        self.assertTrue(self.channel.messages[0].content.endswith("Retry failed"))
         self.assertIn("10 Gate: _HTTPException", self.channel.messages[1].content)
-        self.assertIn("Retrying", self.channel.messages[0].content)
-        self.assertFalse(self.channel.edited.is_set())
+        self.assertTrue(self.channel.edited.is_set())
         self.assertEqual(self.delays, [3600])
         self.assertEqual(self.guild.fetch_member.await_count, 2)
 

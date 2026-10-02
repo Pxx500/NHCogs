@@ -112,13 +112,38 @@ class OperationalSupport(commands.Cog):
         content: str,
         *,
         ping: bool = False,
+        channel: discord.abc.Messageable | None = None,
+        failure_action: str = "publish error-channel notice",
     ) -> discord.Message | None:
-        """Post to the shared error channel without turning a quiet notice into a ping."""
+        """Post to the shared error channel without turning a quiet notice into a ping.
+
+        A failed must-ping notice is persisted as an operational error and is not
+        re-raised. A quiet notice that cannot be delivered stays quiet.
+        """
         try:
-            return await self.operational_errors.send_alert(guild_id, content, ping=ping)
-        except Exception:
+            message = await self.operational_errors.send_alert(
+                guild_id, content, ping=ping, channel=channel
+            )
+        except Exception as error:
             log.exception("Could not publish error-channel notice for guild %s", guild_id)
+            if ping:
+                await self.report_operational_error(
+                    guild_id=guild_id,
+                    source="NHMisc",
+                    action=failure_action,
+                    error=error,
+                    channel_id=getattr(channel, "id", None),
+                )
             return None
+        if message is None and ping:
+            await self.report_operational_error(
+                guild_id=guild_id,
+                source="NHMisc",
+                action=failure_action,
+                error=RuntimeError("Could not publish the error-channel notice"),
+                channel_id=getattr(channel, "id", None),
+            )
+        return message
 
     async def handle_command_error(self, ctx, error, *, source: str) -> None:
         async def report(original: BaseException) -> None:
