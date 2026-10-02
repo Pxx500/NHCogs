@@ -30,6 +30,25 @@ Requires `AAA3A_utils`. Red will show the pip install command if missing.
 
 The `!honeypot` command and all subcommands require Manage Messages.
 
+### Research exports
+
+`[p]honeypot research` shows the available export commands with the active prefix and full syntax. Research commands require Manage Messages, like the rest of the Honeypot command tree.
+
+| Command | Description |
+|---|---|
+| `[p]honeypot research` | Show the research command overview |
+| `[p]honeypot research bans <moderation_channel> <member_channel>` | Scan historical Red punishment logs and ExtendedModLog member logs, then export banned-account observations |
+
+Run `research bans` in a private moderator channel where `@everyone` can't view messages. Pass the punishment channel first and the member/audit channel second. The bot needs View Channel and Read Message History in both sources and Attach Files in the destination. Only one export can run per server at a time.
+
+The export reads each source once up to the command's start time. Large histories can take a while. It recognizes only this bot's normal `Ban` cases, regardless of whether the user is still banned. Hackban, Tempban and Softban cases are excluded. It doesn't read the current ban list or fetch current profiles. Duplicate case entries count once, but their original log messages remain in the export.
+
+ZIP files contain `accounts.jsonl`, `moderation-events.jsonl`, `member-events.jsonl` and `metadata.json`. Account summaries link bans to observed role additions/removals and join dates. Raw records preserve original embeds, message IDs, links and timestamps, including historical names, avatar URLs and account creation fields. Role lists are always marked incomplete because a missing log isn't proof that a user didn't have a role. Rejoins reset the observed role set. Logger timestamps aren't guaranteed to be the exact time a punishment took effect.
+
+Metadata also includes role names from the current guild cache without extra API requests. These are explicitly current labels, not guaranteed historical names. Deleted roles may have only an ID in the old logs.
+
+Archives are split to fit the server's upload limit. When there are multiple ZIP parts, concatenate matching JSONL files in numbered archive order. The bot removes its temporary files after sending the export. These files contain private moderation data and should not be shared publicly.
+
 ### Manual punishment
 
 Moderators with Manage Messages can use the `Punish` message context action. It can save the message and its attachments to the private manual evidence channel, then deletes the source after the private audit is created. The audit is always written, even when evidence saving is disabled. The action can apply mute, kick, ban, or any configured Role n’t that covers the source channel. Mute uses Red's core `Mutes` cog, while kick and ban use Honeypot's existing moderation path.
