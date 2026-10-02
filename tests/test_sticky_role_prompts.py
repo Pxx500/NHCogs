@@ -268,6 +268,93 @@ class StickyRolePromptTests(unittest.IsolatedAsyncioTestCase):
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
+    async def test_deleted_role_prompt_pings_error_channel_and_accepts_the_reply_there(self):
+        bot = FakeBot()
+        channel = FakeChannel(44)
+
+        class Member:
+            pass
+
+        nhmisc.discord.Member = Member
+        author = Member()
+        author.id = 66
+        author.bot = False
+        author.guild_permissions = types.SimpleNamespace(manage_guild=True)
+        guild = types.SimpleNamespace(id=55, get_member=lambda user_id: author)
+        sticky_roles = types.SimpleNamespace(
+            remove_sticky_role=mock.AsyncMock(return_value=(True, 2)),
+        )
+        cog = object.__new__(nhmisc.NHMisc)
+        cog.bot = bot
+        cog._sticky_roles = sticky_roles
+        notices = []
+
+        async def send_error_notice(notice_guild, content, *, ping=False, channel=None, **_kwargs):
+            notices.append((notice_guild, content, ping, channel))
+            return types.SimpleNamespace(id=1)
+
+        cog._send_error_notice = send_error_notice
+        task = asyncio.create_task(
+            cog._prompt_sticky_role_db_action(
+                guild=guild,
+                channel=channel,
+                role_id=101,
+                role_name="Gone",
+                config_exists=True,
+                saved_rows=2,
+                reason="Discord role deletion event",
+                requester=None,
+                ping=True,
+            )
+        )
+        try:
+            await bot.wait_until_listening()
+            self.assertEqual(channel.sent, [])
+            self.assertEqual(notices[0][0], guild)
+            self.assertTrue(notices[0][2])
+            self.assertIs(notices[0][3], channel)
+            self.assertIn("`remove 101`", notices[0][1])
+            self.assertIn("`keep 101`", notices[0][1])
+            self.assertIn("`change 101 <role mention or ID>`", notices[0][1])
+            bot.dispatch_message(
+                types.SimpleNamespace(channel=channel, author=author, content="remove 101")
+            )
+            await task
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        sticky_roles.remove_sticky_role.assert_awaited_once_with(guild.id, 101)
+        self.assertTrue(any("removed" in content for content, _kwargs in channel.sent))
+
+    async def test_deleted_role_prompt_does_not_listen_when_the_ping_is_not_delivered(self):
+        bot = FakeBot()
+        channel = FakeChannel(44)
+        cog = object.__new__(nhmisc.NHMisc)
+        cog.bot = bot
+        cog._send_error_notice = mock.AsyncMock(return_value=None)
+
+        with mock.patch.object(nhmisc.log, "warning") as warning:
+            await cog._prompt_sticky_role_db_action(
+                guild=types.SimpleNamespace(id=55),
+                channel=channel,
+                role_id=101,
+                role_name="Gone",
+                config_exists=True,
+                saved_rows=2,
+                reason="Discord role deletion event",
+                requester=None,
+                ping=True,
+            )
+        warning.assert_called_once()
+        self.assertIn("not delivered", warning.call_args.args[0])
+
+        self.assertEqual(channel.sent, [])
+        self.assertEqual(bot.waiters, [])
+        cog._send_error_notice.assert_awaited_once()
+        self.assertTrue(cog._send_error_notice.await_args.kwargs["ping"])
+        self.assertIs(cog._send_error_notice.await_args.kwargs["channel"], channel)
+
 
 if __name__ == "__main__":
     unittest.main()

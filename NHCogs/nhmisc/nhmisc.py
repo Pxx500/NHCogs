@@ -197,6 +197,50 @@ class _AchievementReconciliation:
 
 
 @dataclass(frozen=True, slots=True)
+class ReconciliationSkip:
+    user_id: int
+    subject: str
+    error: str
+
+
+def _exception_label(error: BaseException) -> str:
+    name = type(error).__name__
+    detail = str(error).strip()
+    if not detail or detail == name:
+        return name
+    return f"{name}: {detail}"
+
+
+def _format_reconciliation_report(
+    *,
+    aborted: bool,
+    corrected: int | None,
+    skips: tuple[ReconciliationSkip, ...] | None,
+    status_line: str,
+) -> str:
+    """Build a reconciliation notice, keeping skip lines inside Discord's limit."""
+    skipped = "unknown" if skips is None else str(len(skips))
+    corrected_text = "unknown" if corrected is None else str(corrected)
+    lines = [
+        f"Achievement role reconciliation {'failed' if aborted else 'complete'}",
+        f"Members corrected: {corrected_text}",
+        f"Members skipped: {skipped}",
+    ]
+    if skips:
+        lines.append("Skipped:")
+        for shown, skip in enumerate(skips):
+            line = f"{skip.user_id} {skip.subject}: {skip.error}"
+            used = sum(len(item) + 1 for item in lines)
+            if shown >= 20 or used + len(line) > 1700:
+                lines.append(f"and {len(skips) - shown} more")
+                break
+            lines.append(line)
+    if status_line:
+        lines.append(status_line)
+    return "\n".join(lines)
+
+
+@dataclass(frozen=True, slots=True)
 class GateProofCandidate:
     member: discord.Member
     missing_ordinals: tuple[int, ...]
@@ -556,7 +600,7 @@ class NHMisc(commands.Cog):
         self._voice_visits = VoiceChannelVisitTracker()
         self._audit_log_tasks: set[asyncio.Task] = set()
         self._forum_autopin = ForumAutopinService(
-            self.config, alert_sender=self._send_maintenance_log, logger=log
+            self.config, alert_sender=self._send_forum_autopin_alert, logger=log
         )
         self._activity_store = ActivityStore(cog_data_path(self) / "activity.sqlite")
         self._sticky_roles = StickyRoleStore(cog_data_path(self) / "sticky_roles.sqlite")
@@ -1028,32 +1072,40 @@ class NHMisc(commands.Cog):
         async with state.lock:
             aborted = False
             try:
-                corrected, failed = await self._reconcile_achievement_roles_once(guild)
+                corrected, skips = await self._reconcile_achievement_roles_once(guild)
             except Exception as error:
-                corrected = failed = None
+                corrected = None
+                skips = None
                 aborted = True
                 log.exception("Achievement role reconciliation failed for guild %s", guild.id)
                 await self._support.report_operational_error(
                     guild_id=guild.id, source="NHMisc",
                     action="reconcile achievement roles", error=error,
                 )
-            unsuccessful = aborted or bool(failed)
+            unsuccessful = aborted or bool(skips)
             pending = state.task is not None
             if unsuccessful and not retry and not pending:
                 state.retry_at = int(time.time()) + ACHIEVEMENT_RETRY_SECONDS
                 state.task = asyncio.create_task(self._retry_achievement_roles(guild, state))
-            header = "failed" if aborted else "complete"
-            content = (
-                f"Achievement role reconciliation {header}\n"
-                f"Members corrected: {corrected if corrected is not None else 'unknown'}\n"
-                f"Members skipped: {failed if failed is not None else 'unknown'}"
-            )
             if retry or (pending and not unsuccessful):
-                content += "\nRetry failed" if unsuccessful else "\nRetry completed"
+                status_line = "Retry failed" if unsuccessful else "Retry completed"
             elif unsuccessful:
-                content += f"\nRetrying <t:{state.retry_at}:R>"
+                status_line = f"Retrying <t:{state.retry_at}:R>"
+            else:
+                status_line = ""
+            content = _format_reconciliation_report(
+                aborted=aborted,
+                corrected=corrected,
+                skips=skips,
+                status_line=status_line,
+            )
+            # A crash already pings through the operational error report.
+            # Skip-only retries ping with a new message; edits never ping.
+            ping = bool(retry and unsuccessful and not aborted)
             if corrected or unsuccessful or pending or retry:
-                await self._publish_achievement_reconciliation(guild, state, content)
+                await self._publish_achievement_reconciliation(
+                    guild, state, content, ping=ping
+                )
             if retry or not unsuccessful:
                 if state.task is not None and state.task is not asyncio.current_task():
                     state.task.cancel()
@@ -1065,27 +1117,53 @@ class NHMisc(commands.Cog):
         await asyncio.sleep(max(0, state.retry_at - time.time()))
         await self._reconcile_achievement_roles_for_guild(guild, retry=True)
 
-    async def _publish_achievement_reconciliation(self, guild, state, content) -> None:
+    async def _publish_achievement_reconciliation(
+        self, guild, state, content, *, ping: bool = False
+    ) -> None:
         try:
-            if state.message is None:
-                state.message = await self._support.send_configured_log_message(
-                    guild, "maintenance_channel", content, require_private=True,
+            if ping or state.message is None:
+                previous = state.message
+                message = await self._send_error_notice(
+                    guild,
+                    content,
+                    ping=ping,
+                    failure_action="publish achievement reconciliation retry",
                 )
-            elif not state.message.channel.permissions_for(guild.default_role).view_channel:
-                state.message = await state.message.edit(
-                    content=content, allowed_mentions=discord.AllowedMentions.none(),
-                )
-            else:
-                raise commands.UserFeedbackCheckFailure("The maintenance channel is now public")
+                if ping and previous is not None:
+                    await self._quietly_finalize_reconciliation_message(
+                        previous, guild, content
+                    )
+                if not ping:
+                    state.message = message
+                return
+            if state.message.channel.permissions_for(guild.default_role).view_channel:
+                raise commands.UserFeedbackCheckFailure("The error channel is now public")
+            state.message = await state.message.edit(
+                content=content, allowed_mentions=discord.AllowedMentions.none(),
+            )
         except Exception as error:
             await self._support.report_operational_error(
                 guild_id=guild.id, source="NHMisc",
                 action="update achievement reconciliation log", error=error,
             )
 
+    async def _quietly_finalize_reconciliation_message(self, message, guild, content) -> None:
+        """Leave the earlier retry notice in its final state without a ping."""
+        try:
+            if message.channel.permissions_for(guild.default_role).view_channel:
+                return
+            await message.edit(
+                content=content, allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            log.exception(
+                "Could not update the earlier achievement reconciliation notice for guild %s",
+                guild.id,
+            )
+
     async def _reconcile_achievement_roles_once(  # noqa: PLR0912
         self, guild: discord.Guild
-    ) -> tuple[int, int]:
+    ) -> tuple[int, tuple[ReconciliationSkip, ...]]:
         definitions = tuple(
             definition
             for definition in await self._achievement_store.list_definitions(guild.id)
@@ -1111,7 +1189,7 @@ class NHMisc(commands.Cog):
                 actual_gate_roles.setdefault(user_id, set()).add(role_id)
         projections = await self._achievement_store.list_gate_projections(guild.id)
         corrected = 0
-        failed = 0
+        skips: list[ReconciliationSkip] = []
         for user_id in set(actual_gate_roles) | set(projections):
             completed_count = projections.get(user_id, 0)
             expected = (
@@ -1136,13 +1214,19 @@ class NHMisc(commands.Cog):
                 commands.UserFeedbackCheckFailure,
                 discord.Forbidden,
                 discord.HTTPException,
-            ):
+            ) as error:
                 log.exception(
                     "Failed to reconcile Gate projection for guild %s member %s",
                     guild.id,
                     user_id,
                 )
-                failed += 1
+                skips.append(
+                    ReconciliationSkip(
+                        user_id=user_id,
+                        subject="Gate",
+                        error=_exception_label(error),
+                    )
+                )
 
         for definition, actual_user_ids in zip(
             definitions,
@@ -1174,15 +1258,26 @@ class NHMisc(commands.Cog):
                     commands.UserFeedbackCheckFailure,
                     discord.Forbidden,
                     discord.HTTPException,
-                ):
-                    failed += 1
+                ) as error:
                     log.exception(
                         "Failed to reconcile achievement %s for guild %s member %s",
                         definition.key,
                         guild.id,
                         user_id,
                     )
-        return corrected, failed
+                    subject = (
+                        "Solo Gater"
+                        if definition.key == SOLO_GATER_KEY
+                        else definition.display_name
+                    )
+                    skips.append(
+                        ReconciliationSkip(
+                            user_id=user_id,
+                            subject=subject,
+                            error=_exception_label(error),
+                        )
+                    )
+        return corrected, tuple(skips)
 
     @staticmethod
     async def _restore_gate_projection(
@@ -1231,12 +1326,13 @@ class NHMisc(commands.Cog):
             await self._role_analytics.reconcile_enabled_guilds(tuple(self.bot.guilds))
             for guild in self.bot.guilds:
                 if not await self._achievement_store.is_bootstrapped(guild.id):
-                    await self._send_maintenance_log(
+                    await self._send_error_notice(
                         guild,
                         "Achievement initialization is required\n\n"
                         "The achievement database has not been initialized from the "
                         "current Discord roles.\n"
                         "Run `!rolesync discord`.",
+                        ping=False,
                     )
                     continue
                 await self._reconcile_achievement_roles_for_guild(guild)
@@ -2546,12 +2642,12 @@ class NHMisc(commands.Cog):
             current_definitions,
         )
         if failed_members:
-            await self._send_maintenance_log(
+            await self._send_error_notice(
                 source_message.guild,
                 "Achievement grant partially failed\n"
                 f"Moderator: <@{interaction.user.id}>\n"
                 f"Members skipped: {failed_members}",
-                log_failure=False,
+                ping=False,
             )
         await self._finish_action_interaction(
             interaction,
@@ -3394,12 +3490,12 @@ class NHMisc(commands.Cog):
             log_failure=False,
         )
         if skipped_members:
-            await self._send_maintenance_log(
+            await self._send_error_notice(
                 interaction.guild,
                 "Achievement role replacement partially failed\n"
                 f"Achievement: `{result.definition.key}`\n"
                 f"Members skipped: {skipped_members}",
-                log_failure=False,
+                ping=False,
             )
         await self._finish_action_interaction(
             interaction,
@@ -3575,12 +3671,12 @@ class NHMisc(commands.Cog):
                 log_failure=False,
             )
         if failed_members:
-            await self._send_maintenance_log(
+            await self._send_error_notice(
                 interaction.guild,
                 "Achievement revoke partially failed\n"
                 f"Moderator: <@{interaction.user.id}>\n"
                 f"Members with roles not updated: {failed_members}",
-                log_failure=False,
+                ping=False,
             )
         await self._finish_action_interaction(
             interaction,
@@ -3856,12 +3952,13 @@ class NHMisc(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
     async def rolesync_discord(self, ctx: commands.Context) -> None:
-        """Replace achievement state with the current Discord role snapshot"""
+        """Replace achievement state from Discord roles in the operational error channel"""
         guild_id = ctx.guild.id
         if guild_id in self._achievement_syncing_guilds:
             raise commands.UserFeedbackCheckFailure(
                 "Achievement synchronization is already awaiting confirmation"
             )
+        error_channel = await self._require_rolesync_error_channel(ctx)
         self._achievement_syncing_guilds.add(guild_id)
         try:
             snapshot = await self._achievement_discord_snapshot(ctx.guild)
@@ -3871,26 +3968,6 @@ class NHMisc(commands.Cog):
                     "`!rolesync discord` again."
                 )
                 return
-            maintenance_channel = self._support.get_log_channel(
-                ctx.guild,
-                await self.config.guild(ctx.guild).maintenance_channel(),
-            )
-            if maintenance_channel is None:
-                raise commands.UserFeedbackCheckFailure(
-                    "Configure the NHMisc maintenance channel first"
-                )
-            if self._channel_allows_everyone(maintenance_channel, ctx.guild):
-                raise commands.UserFeedbackCheckFailure(
-                    "Configure a private NHMisc maintenance channel first"
-                )
-
-            missing_permissions = self._support.missing_log_permissions(
-                ctx.guild,
-                maintenance_channel,
-                require_attach_files=True,
-            )
-            if missing_permissions is not None:
-                raise commands.UserFeedbackCheckFailure(missing_permissions)
 
             bootstrapped = await self._achievement_store.is_bootstrapped(guild_id)
             summary = await self._achievement_discord_sync_summary(
@@ -3900,23 +3977,19 @@ class NHMisc(commands.Cog):
             )
             await self._upload_achievement_sync_backup(
                 ctx.guild,
-                maintenance_channel,
+                error_channel,
                 snapshot,
             )
 
-            plan_message = await self._support.send_log_message(maintenance_channel, summary)
+            plan_message = await self._support.send_log_message(error_channel, summary)
             if plan_message is None:
                 raise commands.UserFeedbackCheckFailure(
                     "Could not publish the synchronization plan"
                 )
-            if ctx.channel.id != maintenance_channel.id:
-                await ctx.send(
-                    f"Synchronization plan sent to {maintenance_channel.mention}"
-                )
 
             confirmed = await self._wait_for_achievement_sync_confirmation(
                 guild_id=guild_id,
-                channel=maintenance_channel,
+                channel=error_channel,
                 moderator_id=ctx.author.id,
             )
             if not confirmed:
@@ -3925,7 +3998,7 @@ class NHMisc(commands.Cog):
             fresh_snapshot = await self._achievement_discord_snapshot(ctx.guild)
             if fresh_snapshot != snapshot:
                 await self._support.send_log_message(
-                    maintenance_channel,
+                    error_channel,
                     "Role analytics changed. Run `!rolesync discord` again.",
                 )
                 return
@@ -3938,7 +4011,7 @@ class NHMisc(commands.Cog):
             )
             if fresh_bootstrapped != bootstrapped or fresh_summary != summary:
                 await self._support.send_log_message(
-                    maintenance_channel,
+                    error_channel,
                     "Achievement data changed. Run `!rolesync discord` again.",
                 )
                 return
@@ -3950,13 +4023,51 @@ class NHMisc(commands.Cog):
             )
             if completion is None:
                 await self._support.send_log_message(
-                    maintenance_channel,
+                    error_channel,
                     "Achievement initialization was already completed",
                 )
                 return
-            await self._support.send_log_message(maintenance_channel, completion)
+            await self._support.send_log_message(error_channel, completion)
         finally:
             self._achievement_syncing_guilds.discard(guild_id)
+
+    def _error_channel_label(self, guild: discord.Guild, channel_id: int) -> str:
+        channel = self._support.get_log_channel(guild, channel_id)
+        if channel is None:
+            return f"the configured error channel (`{channel_id}`)"
+        mention = getattr(channel, "mention", None)
+        if mention:
+            return str(mention)
+        name = getattr(channel, "name", None)
+        if name:
+            return f"#{name}"
+        return f"the configured error channel (`{channel_id}`)"
+
+    async def _require_rolesync_error_channel(self, ctx: commands.Context) -> discord.TextChannel:
+        """Accept rolesync discord only in the shared operational error channel."""
+        channel_id = await self._support.config.guild(ctx.guild).error_channel()
+        channel = ctx.channel
+        if channel_id is None:
+            raise commands.UserFeedbackCheckFailure(
+                "Configure the shared error channel before running this command"
+            )
+        if getattr(channel, "id", None) != channel_id:
+            raise commands.UserFeedbackCheckFailure(
+                "Run this command in "
+                f"{self._error_channel_label(ctx.guild, channel_id)}"
+            )
+        if self._channel_allows_everyone(channel, ctx.guild):
+            raise commands.UserFeedbackCheckFailure(
+                "The operational error channel must be hidden from `@everyone`"
+            )
+        missing_permissions = self._support.missing_log_permissions(
+            ctx.guild,
+            channel,
+            require_attach_files=True,
+        )
+        if missing_permissions is not None:
+            raise commands.UserFeedbackCheckFailure(missing_permissions)
+        return channel
 
     @commands.command(name="rolestats")
     @commands.guild_only()
@@ -4367,8 +4478,6 @@ class NHMisc(commands.Cog):
                 + self._configured_channel_label(ctx.guild, config["voice_log_channel"]),
                 "Alert: "
                 + self._configured_channel_label(ctx.guild, config["alert_channel"]),
-                "Maintenance: "
-                + self._configured_channel_label(ctx.guild, config["maintenance_channel"]),
                 "Moderation: "
                 + self._configured_channel_label(
                     ctx.guild, config["moderation_log_channel"]
@@ -4454,37 +4563,6 @@ class NHMisc(commands.Cog):
             raise commands.UserFeedbackCheckFailure(missing_permissions)
         await self.config.guild(ctx.guild).alert_channel.set(channel.id)
         await ctx.send(f"Alert channel set to {channel.mention}")
-
-    @nhmisc_log.command(name="maintenance", usage="[channel|clear]")
-    async def nhmisc_log_maintenance(
-        self,
-        ctx: commands.Context,
-        channel: discord.TextChannel | str | None = None,
-    ) -> None:
-        """Show, set, or clear the private channel used for maintenance logs"""
-        if channel is None or isinstance(channel, str):
-            await self._handle_log_channel_word_or_show(
-                ctx,
-                channel,
-                title="Maintenance logging",
-                config_key="maintenance_channel",
-                cleared="Maintenance channel cleared",
-            )
-            return
-        missing_permissions = self._support.missing_log_permissions(
-            ctx.guild,
-            channel,
-            require_attach_files=True,
-        )
-        if missing_permissions is not None:
-            raise commands.UserFeedbackCheckFailure(missing_permissions)
-        if self._channel_allows_everyone(channel, ctx.guild):
-            raise commands.UserFeedbackCheckFailure(
-                "Configure a channel that is private from `@everyone`"
-            )
-
-        await self.config.guild(ctx.guild).maintenance_channel.set(channel.id)
-        await ctx.send(f"Maintenance channel set to {channel.mention}")
 
     @nhmisc_log.command(name="moderation", usage="[channel|clear]")
     async def nhmisc_log_moderation(
@@ -5156,16 +5234,13 @@ class NHMisc(commands.Cog):
         )
         skipped_members = len(snapshot.members) - len(completed_members)
         if skipped_members:
-            try:
-                await self._send_maintenance_log(
-                    source_message.guild,
-                    "Gate increment partially failed\n"
-                    f"Moderator: <@{interaction.user.id}>\n"
-                    f"Members skipped: {skipped_members}",
-                    log_failure=False,
-                )
-            except Exception:
-                pass
+            await self._send_error_notice(
+                source_message.guild,
+                "Gate increment partially failed\n"
+                f"Moderator: <@{interaction.user.id}>\n"
+                f"Members skipped: {skipped_members}",
+                ping=False,
+            )
         published = await self._publish_gate_increment_result(
             source_message,
             snapshot,
@@ -5937,11 +6012,7 @@ class NHMisc(commands.Cog):
             current=(
                 "Enabled: "
                 + ("Yes" if config["sticky_debug_logging_enabled"] else "No"),
-                "Maintenance channel: "
-                + self._configured_channel_label(
-                    ctx.guild,
-                    config["maintenance_channel"]
-                ),
+                "Destination: Process log",
             ),
         )
 
@@ -6470,10 +6541,12 @@ class NHMisc(commands.Cog):
         )
         if definition is not None:
             await self._achievement_store.unbind_role(role.guild.id, role.id)
-            await self._send_maintenance_log(
+            await self._send_error_notice(
                 role.guild,
                 f"Stopped tracking deleted role {role.name} for "
                 f"{definition.display_name}",
+                ping=True,
+                failure_action="publish deleted achievement role notice",
             )
 
         config_exists, saved_rows = await self._sticky_roles.get_role_state(
@@ -6482,20 +6555,18 @@ class NHMisc(commands.Cog):
         if not config_exists and saved_rows == 0:
             return
 
-        config = await self.config.guild(role.guild).all()
-        channel = self._support.get_log_channel(role.guild, config["maintenance_channel"])
+        channel = await self._private_error_channel(role.guild)
         if channel is None:
             log.warning(
-                "Sticky role %s was deleted in guild %s but no maintenance channel is set",
+                "Sticky role %s was deleted in guild %s but the error channel is unavailable",
                 role.id,
                 role.guild.id,
             )
-            return
-        if self._channel_allows_everyone(channel, role.guild):
-            log.warning(
-                "Sticky role %s was deleted in guild %s but the maintenance channel is public",
-                role.id,
-                role.guild.id,
+            await self.report_operational_error(
+                guild_id=role.guild.id,
+                source="NHMisc",
+                action="prompt deleted sticky role decision",
+                error=RuntimeError("The error channel is unavailable"),
             )
             return
 
@@ -6508,6 +6579,7 @@ class NHMisc(commands.Cog):
             saved_rows=saved_rows,
             reason="Discord role deletion event",
             requester=None,
+            ping=True,
         )
 
     @commands.Cog.listener("on_member_join")
@@ -6870,21 +6942,41 @@ class NHMisc(commands.Cog):
             ping_user=ping_user,
         )
 
-    async def _send_maintenance_log(
+    async def _send_error_notice(
         self,
         guild: discord.Guild,
         content: str,
         *,
-        log_failure: bool = True,
-    ) -> bool:
-        """Send to the configured maintenance channel without mentions."""
-        return await self._support.send_configured_log(
-            guild,
-            "maintenance_channel",
+        ping: bool = False,
+        channel: discord.abc.Messageable | None = None,
+        failure_action: str = "publish error-channel notice",
+    ) -> discord.Message | None:
+        """Post a former maintenance notice to the shared error channel."""
+        return await self._support.send_error_notice(
+            guild.id,
             content,
-            require_private=True,
-            log_failure=log_failure,
+            ping=ping,
+            channel=channel,
+            failure_action=failure_action,
         )
+
+    async def _send_forum_autopin_alert(
+        self,
+        guild: discord.Guild,
+        content: str,
+        *,
+        ping: bool = False,
+    ) -> bool:
+        return await self._send_error_notice(guild, content, ping=ping) is not None
+
+    async def _private_error_channel(
+        self, guild: discord.Guild
+    ) -> discord.TextChannel | None:
+        channel_id = await self._support.config.guild(guild).error_channel()
+        channel = self._support.get_log_channel(guild, channel_id)
+        if channel is None or self._channel_allows_everyone(channel, guild):
+            return None
+        return channel
 
     async def _send_moderation_log(
         self,
@@ -7271,9 +7363,10 @@ class NHMisc(commands.Cog):
         saved_rows: int,
         reason: str,
         requester: discord.Member | discord.User | None,
+        ping: bool = False,
     ) -> None:
         role_label = f"{role_name} (`{role_id}`)" if role_name else f"`{role_id}`"
-        await channel.send(
+        prompt = (
             "Sticky role DB entry needs a decision.\n"
             f"Role: {role_label}\n"
             f"Trigger: {reason}\n"
@@ -7282,9 +7375,25 @@ class NHMisc(commands.Cog):
             "Reply with one of:\n"
             f"`remove {role_id}` - delete this role from sticky DB and saved users\n"
             f"`keep {role_id}` - stop configuring this role as sticky, but keep saved user rows\n"
-            f"`change {role_id} <role mention or ID>` - move config and saved users to another role",
-            allowed_mentions=discord.AllowedMentions.none(),
+            f"`change {role_id} <role mention or ID>` - move config and saved users to another role"
         )
+        if ping:
+            delivered = await self._send_error_notice(
+                guild,
+                prompt,
+                ping=True,
+                channel=channel,
+                failure_action="prompt deleted sticky role decision",
+            )
+            if delivered is None:
+                log.warning(
+                    "Sticky role decision prompt was not delivered for role %s in guild %s",
+                    role_id,
+                    guild.id,
+                )
+                return
+        else:
+            await channel.send(prompt, allowed_mentions=discord.AllowedMentions.none())
 
         deadline = time.monotonic() + 300
         while True:
@@ -7407,7 +7516,7 @@ class NHMisc(commands.Cog):
         config = await self.config.guild(guild).all()
         if not config["sticky_debug_logging_enabled"]:
             return
-        await self._send_maintenance_log(guild, content)
+        log.info("Sticky role debug for guild %s\n%s", guild.id, content)
 
     async def _send_paginated_text(self, ctx: commands.Context, content: str) -> None:
         page = ""

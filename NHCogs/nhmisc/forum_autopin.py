@@ -26,8 +26,9 @@ RETRY_SECONDS = 1.0
 AUDIT_REASON = "NHMisc forum starter-message autopin"
 
 # Returns True when the alert was actually delivered, so the service only
-# suppresses repeats it knows a moderator has seen.
-AlertSender = Callable[["discord.Guild", str], Awaitable[bool]]
+# suppresses repeats it knows a moderator has seen. ping is True for a
+# permission loss and False for a deleted-forum record.
+AlertSender = Callable[..., Awaitable[bool]]
 
 
 @dataclass(frozen=True)
@@ -330,6 +331,7 @@ class ForumAutopinService:
                 f"Forum autopin is no longer configured for deleted forum "
                 f"`{channel.name}` (`{channel.id}`)"
             ),
+            ping=False,
         )
         return True
 
@@ -398,6 +400,7 @@ class ForumAutopinService:
                 f"Forum autopin cannot {missing} in {forum_label}. "
                 "New posts will not be pinned until the permission is restored."
             ),
+            ping=True,
         )
         if delivered:
             self._alerted.add(alert_key)

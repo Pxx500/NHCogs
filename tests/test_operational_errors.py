@@ -23,6 +23,10 @@ def load_operational_errors_module():
         def __init__(self, **values):
             self.__dict__.update(values)
 
+        @classmethod
+        def none(cls):
+            return cls(everyone=False, users=False, roles=False, replied_user=False)
+
     class File:
         def __init__(self, fp, *, filename):
             self.fp = fp
@@ -228,6 +232,71 @@ class OperationalErrorReporterTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(await reporter.active_count(guild_id), 1)
             logger.exception.assert_called_once()
+
+    async def test_quiet_notice_posts_without_pinging_the_maintainer(self):
+        guild_id = 100
+        maintainer = SimpleNamespace(id=300, mention="<@300>")
+        channel = _Channel(200)
+        with TemporaryDirectory() as directory:
+            reporter = operational_errors.OperationalErrorReporter(
+                _Bot(guild_id, _Guild(channel, maintainer)),
+                _Config(channel_id=channel.id, maintainer_id=maintainer.id),
+                Path(directory) / "operational_errors.sqlite",
+                logger=logging.getLogger("test.operational-errors"),
+            )
+            await reporter.initialize()
+            message = await reporter.send_alert(guild_id, "Sticky role deleted", ping=False)
+
+        self.assertIs(message, channel.send.return_value)
+        sent = channel.send.await_args
+        self.assertEqual(sent.args[0], "Sticky role deleted")
+        self.assertNotIn("<@300>", sent.args[0])
+        self.assertIs(sent.kwargs["allowed_mentions"].users, False)
+
+    async def test_ping_mentions_only_the_configured_maintainer(self):
+        guild_id = 100
+        maintainer = SimpleNamespace(id=300, mention="<@300>")
+        channel = _Channel(200)
+        with TemporaryDirectory() as directory:
+            reporter = operational_errors.OperationalErrorReporter(
+                _Bot(guild_id, _Guild(channel, maintainer)),
+                _Config(channel_id=channel.id, maintainer_id=maintainer.id),
+                Path(directory) / "operational_errors.sqlite",
+                logger=logging.getLogger("test.operational-errors"),
+            )
+            await reporter.initialize()
+            await reporter.send_alert(
+                guild_id,
+                "Stopped tracking deleted role for <@400>",
+                ping=True,
+            )
+
+        sent = channel.send.await_args
+        self.assertEqual(
+            sent.args[0],
+            "<@300>\nStopped tracking deleted role for <@400>",
+        )
+        self.assertEqual([user.id for user in sent.kwargs["allowed_mentions"].users], [300])
+
+    async def test_alert_uses_the_bot_channel_cache_when_the_guild_cache_misses(self):
+        guild_id = 100
+        channel = _Channel(200)
+        guild = _Guild(channel, None)
+        guild.get_channel = lambda _channel_id: None
+        bot = _Bot(guild_id, guild)
+        bot.get_channel = lambda channel_id: channel if channel_id == channel.id else None
+        with TemporaryDirectory() as directory:
+            reporter = operational_errors.OperationalErrorReporter(
+                bot,
+                _Config(channel_id=channel.id, maintainer_id=None),
+                Path(directory) / "operational_errors.sqlite",
+                logger=logging.getLogger("test.operational-errors"),
+            )
+            await reporter.initialize()
+            message = await reporter.send_alert(guild_id, "Sticky role deleted", ping=False)
+
+        self.assertIs(message, channel.send.return_value)
+        self.assertEqual(channel.send.await_args.args[0], "Sticky role deleted")
 
     async def test_achievement_interaction_failure_is_reported(self):
         cog = object.__new__(nhmisc.NHMisc)
