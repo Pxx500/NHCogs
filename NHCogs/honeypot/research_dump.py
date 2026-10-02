@@ -12,7 +12,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import aiohttp
 
 _WRITE_BATCH_SIZE = 250
-_RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
+_RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504, 524}
 _RETRY_BASE_SECONDS = 5
 _RETRY_MAX_SECONDS = 60
 _RETRY_MAX_EXPONENT = 4
@@ -41,7 +41,13 @@ def _retry_delay(error: Exception, attempts: int) -> float | None:
         status is None
         and retry_after is None
         and not isinstance(
-            error, (aiohttp.ClientConnectionError, asyncio.TimeoutError, TimeoutError)
+            error,
+            (
+                aiohttp.ClientConnectionError,
+                aiohttp.ClientPayloadError,
+                asyncio.TimeoutError,
+                TimeoutError,
+            ),
         )
     ):
         return None

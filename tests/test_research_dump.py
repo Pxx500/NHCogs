@@ -12,6 +12,8 @@ from types import SimpleNamespace
 from unittest import mock
 from zipfile import ZipFile
 
+import aiohttp
+
 MODULE_PATH = Path(__file__).parents[1] / "NHCogs" / "honeypot" / "research_dump.py"
 SPEC = importlib.util.spec_from_file_location("honeypot_research_dump_test", MODULE_PATH)
 research_dump = importlib.util.module_from_spec(SPEC)
@@ -204,39 +206,55 @@ class ResearchDumpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(metadata["channel_errors"][0]["channel_id"], "20")
 
     async def test_transient_api_failure_resumes_after_last_message_without_duplicates(self):
-        moderation = LogChannel(20, [message(1, 1), message(2, 2)])
-        attempts = []
-        failure = Exception("Temporary Discord failure")
-        failure.status = 503
+        failures = [aiohttp.ClientPayloadError("Response body truncated")]
+        for status in (503, 524):
+            failure = Exception("Temporary Discord failure")
+            failure.status = status
+            failures.append(failure)
 
-        async def history(**kwargs):
-            attempts.append(kwargs)
-            if len(attempts) == 1:
-                yield moderation.messages[0]
-                raise failure
-            self.assertEqual(kwargs["after"].id, 1)
-            yield moderation.messages[1]
+        for failure in failures:
+            with self.subTest(
+                failure=type(failure).__name__, status=getattr(failure, "status", None)
+            ):
+                moderation = LogChannel(20, [message(1, 1), message(2, 2)])
+                members = LogChannel(30, [message(3, 3)])
+                attempts = []
 
-        moderation.history = history
-        with (
-            TemporaryDirectory() as directory,
-            mock.patch.object(research_dump.asyncio, "sleep", new=mock.AsyncMock()),
-        ):
-            result = await research_dump.dump_channels(
-                moderation,
-                LogChannel(30, []),
-                Path(directory),
-                bot_id=BOT,
-                upload_limit=100_000,
-                cutoff=START + timedelta(days=1),
-            )
-            records = [
-                json.loads(line)
-                for line in read_dump(result)["moderation-messages.jsonl"].splitlines()
-            ]
-            self.assertEqual([item["message_id"] for item in records], ["1", "2"])
-            self.assertEqual(len(attempts), 2)
-            self.assertEqual(result.moderation_messages, 2)
+                async def history(
+                    *, attempts=attempts, moderation=moderation, failure=failure, **kwargs
+                ):
+                    attempts.append(kwargs)
+                    if len(attempts) == 1:
+                        yield moderation.messages[0]
+                        raise failure
+                    self.assertEqual(kwargs["after"].id, 1)
+                    yield moderation.messages[1]
+
+                moderation.history = history
+                with (
+                    TemporaryDirectory() as directory,
+                    mock.patch.object(
+                        research_dump.asyncio, "sleep", new=mock.AsyncMock()
+                    ) as sleep,
+                ):
+                    result = await research_dump.dump_channels(
+                        moderation,
+                        members,
+                        Path(directory),
+                        bot_id=BOT,
+                        upload_limit=100_000,
+                        cutoff=START + timedelta(days=1),
+                    )
+                    records = [
+                        json.loads(line)
+                        for line in read_dump(result)["moderation-messages.jsonl"].splitlines()
+                    ]
+                    self.assertEqual([item["message_id"] for item in records], ["1", "2"])
+                    self.assertEqual(len(attempts), 2)
+                    self.assertEqual(result.moderation_messages, 2)
+                    self.assertEqual(result.member_messages, 1)
+                    self.assertTrue(result.complete)
+                    sleep.assert_awaited_once()
 
     async def test_dump_preserves_all_messages_without_parsing_or_author_filters(self):
         embed = {
