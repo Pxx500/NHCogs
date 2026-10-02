@@ -30,24 +30,39 @@ Requires `AAA3A_utils`. Red will show the pip install command if missing.
 
 The `!honeypot` command and all subcommands require Manage Messages.
 
-### Research exports
+### Research channel dumps
 
-`[p]honeypot research` shows the available export commands with the active prefix and full syntax. Research commands require Manage Messages, like the rest of the Honeypot command tree.
+`[p]honeypot research` shows the available commands with the active prefix and full syntax. Research commands require Manage Messages, like the rest of the Honeypot command tree.
 
 | Command | Description |
 |---|---|
 | `[p]honeypot research` | Show the research command overview |
-| `[p]honeypot research bans <moderation_channel> <member_channel>` | Scan historical Red punishment logs and ExtendedModLog member logs, then export banned-account observations |
+| `[p]honeypot research dump <moderation_channel> <member_channel> [progress:true\|false]` | Dump all available messages from both source channels for offline analysis |
+| `[p]honeypot research cancel` | Cancel the current server's dump and clean up temporary files |
 
-Run `research bans` in a private moderator channel where `@everyone` can't view messages. Pass the punishment channel first and the member/audit channel second. The bot needs View Channel and Read Message History in both sources and Attach Files in the destination. Only one export can run per server at a time.
+Run `research dump` in a private moderator channel where `@everyone` can't view messages. Pass the punishment channel first and the member/audit channel second. The channels must be different. The bot needs View Channel and Read Message History in both sources and Attach Files in the destination. Only one dump can run per server at a time. `cancel` doesn't require the bot's history or attachment permissions.
 
-The export reads each source once up to the command's start time. Large histories can take a while. It recognizes only this bot's normal `Ban` cases, regardless of whether the user is still banned. Hackban, Tempban and Softban cases are excluded. It doesn't read the current ban list or fetch current profiles. Duplicate case entries count once, but their original log messages remain in the export.
+There is one full-history mode, without test runs or ban parsing. The dump includes every author and log format, including non-ban messages, up to the command's start time. Each channel is traversed once. It doesn't read the current ban list or fetch current profiles. Offline parsers can be changed and rerun without downloading the channels again. This replaces the former `research bans` command, without a compatibility alias.
 
-ZIP files contain `accounts.jsonl`, `moderation-events.jsonl`, `member-events.jsonl` and `metadata.json`. Account summaries link bans to observed role additions/removals and join dates. Raw records preserve original embeds, message IDs, links and timestamps, including historical names, avatar URLs and account creation fields. Role lists are always marked incomplete because a missing log isn't proof that a user didn't have a role. Rejoins reset the observed role set. Logger timestamps aren't guaranteed to be the exact time a punishment took effect.
+Progress is enabled by default. One status message is updated every 30 seconds, including while waiting for Discord or packaging ZIP files. It shows the stage, message counts for each source, current log date and elapsed time. It doesn't invent a percentage because Discord doesn't provide a history total. Pass `false` to disable periodic updates. A final status is still shown.
 
-Metadata also includes role names from the current guild cache without extra API requests. These are explicitly current labels, not guaranteed historical names. Deleted roles may have only an ID in the old logs.
+Discord's built-in rate-limit waits are respected. Temporary server errors, connection failures and timeouts are retried with a delay, resuming after the last fetched message without duplicating records. Permanent API errors preserve the fetched data and allow the other channel to finish. Such ZIPs are explicitly marked incomplete, with channel errors in metadata and the shared error channel. `cancel` stops further reads and waits for file handles to close before deleting temporary files. Any ZIP parts already sent remain available.
 
-Archives are split to fit the server's upload limit. When there are multiple ZIP parts, concatenate matching JSONL files in numbered archive order. The bot removes its temporary files after sending the export. These files contain private moderation data and should not be shared publicly.
+ZIP files contain `moderation-messages.jsonl`, `member-messages.jsonl` and `metadata.json`. Each JSONL line is one message with its ID, author identity, content, original embeds, creation/edit dates, attachment metadata, reply reference and source link. Attachment files and avatars are not downloaded. Metadata identifies the source channels, fixed cutoff, counts, completeness and current cached role labels. Names in message author objects and cached role labels are observed during the export, not guaranteed historical identities. Embedded log identities are preserved as stored.
+
+Archives are split to fit the server's upload limit. When there are multiple ZIP parts, concatenate matching JSONL files in numbered archive order. The bot removes its temporary files after sending the dump. These files contain private moderation data and should not be shared publicly.
+
+Examples:
+
+```text
+[p]honeypot research dump #transparency-log #audit-log
+[p]honeypot research dump #transparency-log #audit-log false
+[p]honeypot research cancel
+```
+
+### Review attachment export
+
+`[p]honeypot debug reviewdump` is a separate exporter for review messages in the current channel, starting on May 1, 2026 UTC. It selects embeds whose `Action Taken` or `Action` field contains `ban`, excluding dry-run and failed actions. It includes replies to those reviews, downloads their attachments and sends numbered ZIPs containing `manifest.json`, `reviews.jsonl` and `cases/<message_id>/attachments/`. It updates a progress message and doesn't change source messages or apply punishments. This older review-embed exporter isn't the unfiltered two-channel research dump.
 
 ### Manual punishment
 
