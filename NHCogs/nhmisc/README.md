@@ -38,10 +38,10 @@ NHMisc does not scan old posts or backfill posts created while offline. Removing
 does not unpin starter messages that were pinned earlier.
 
 If one of these permissions is revoked later, autopinning stops silently on Discord's
-side. NHMisc reports it once per forum in the maintenance channel configured with
-`[p]nhmisc log maintenance`, and reports it again only after a later pin succeeds
-and the problem reappears. Deleting a configured forum removes it from the configuration
-and is also reported in the maintenance channel.
+side. NHMisc pings the error maintainer once per forum in the shared operational error
+channel, and reports it again only after a later pin succeeds and the problem reappears.
+Deleting a configured forum removes it from the configuration and posts a quiet record
+in that same channel.
 
 ## Voice Logging
 
@@ -55,7 +55,7 @@ the member, the bot edits the move log and adds the moderator name and user ID.
 [p]nhmisc log voice clear
 ```
 
-Shows, sets, or clears the text channel used for voice join, leave, and move logs. The same `clear` word works for `alert`, `maintenance`, and `moderation`.
+Shows, sets, or clears the text channel used for voice join, leave, and move logs. The same `clear` word works for `alert` and `moderation`.
 
 ```ini
 [p]nhmisc log alert #alerts
@@ -63,14 +63,9 @@ Shows, sets, or clears the text channel used for voice join, leave, and move log
 
 Sets the alert channel used by higher-priority alerts, such as voice-channel jumping.
 
-```ini
-[p]nhmisc log maintenance #bot-maintenance
-```
-
-Sets the private channel used for maintenance notices, including achievement syncs and
-backups and sticky-role maintenance. The bot needs View Channel, Send Messages, and
-Attach Files in this channel. Technical failures use the shared `[p]nhcogs errors`
-configuration.
+Maintenance notices use the shared operational error channel from `[p]nhcogs errors`.
+Important ones ping the configured error maintainer. Routine records post there without
+a mention. There is no separate maintenance channel.
 
 ```ini
 [p]nhmisc log moderation #moderator-actions
@@ -92,7 +87,7 @@ different channels; entering the same channel repeatedly still counts.
 
 Sets the VC jumping detection window in seconds.
 
-Running `[p]nhmisc log` without a log type shows all four configured destinations.
+Running `[p]nhmisc log` without a log type shows the voice, alert, and moderation destinations.
 Running one of its child commands without a channel shows that destination without changing it.
 VC jumping configuration is shown by `[p]nhmisc vcjumping`.
 
@@ -100,11 +95,11 @@ Defaults:
 
 - VC jumping entries: `3`
 - VC jumping window: `30` seconds
-- Maintenance channel: not configured
 - Moderator action channel: not configured
 
-The maintenance and moderator action channels do not inherit the alert channel. Configure
-each one explicitly after installing or updating NHMisc.
+The moderator action channel does not inherit the alert channel. Configure it explicitly
+after installing or updating NHMisc. Operational notices and technical failures share
+`[p]nhcogs errors`.
 
 ## Bot Proxy
 
@@ -390,10 +385,11 @@ saved user-role rows that are no longer configured as sticky. Choices are `remov
 [p]nhmisc stickyroles debuglogging toggle false
 ```
 
-Enables or disables sticky-role debug logs. When enabled, the bot logs sticky-role
-snapshot writes on member leave and snapshot reads/restores on member join. Debug logs
-use the configured NHMisc maintenance channel. Deleted-role prompts always use that same
-maintenance channel, even when debug logging is disabled.
+Enables or disables sticky-role debug logs. When enabled, the bot writes sticky-role
+snapshot lines to the process log on member leave and member join. Those lines are not
+posted to Discord. Deleting a sticky role that still has saved users pings the error
+channel and takes the `remove`, `keep`, or `change` reply there, even when debug logging
+is disabled.
 
 ## Activity Analytics
 
@@ -609,27 +605,31 @@ initial synchronization, member and role events keep the database current. The b
 reconciles enabled guilds after startup, after a resumed gateway session, and once every
 24 hours. A manual `rolesync` forces an immediate reconciliation.
 
-After installing the achievement system, configure the NHMisc maintenance channel and
-run:
+After installing the achievement system, configure the shared operational error channel
+and run this command in that channel:
 
 ```ini
 [p]rolesync discord
 ```
 
-The command prepares an import plan from the role-analytics snapshot, uploads a backup,
-and posts both in the maintenance channel. The invoking moderator must type `confirm`
-there before anything changes. This initializes achievement data from current Discord
-roles. Later uses deliberately replace achievement progress with Discord's current role
-state. In every normal sync, the achievement database has priority and Discord roles are
-restored from it.
+The command is refused anywhere else. In the error channel it prepares an import plan
+from the role-analytics snapshot, uploads a backup, and waits for the invoking moderator
+to type `confirm` before anything changes. This initializes achievement data from current
+Discord roles. Later uses deliberately replace achievement progress with Discord's current
+role state. In every normal sync, the achievement database has priority and Discord roles
+are restored from it.
 
-If achievement role reconciliation skips members because of errors or aborts, its
-maintenance message includes `Retrying` with a Discord relative timestamp. One retry
-runs an hour later and edits that same message with updated counts and `Retry completed`
-or `Retry failed`. A failed retry waits for the next regular or manual synchronization.
-Repeated syncs share one pending retry per guild. A successful manual sync completes
-the pending report early and cancels the delayed retry. Departed members are ignored.
-Retrying restores roles only and does not send achievement congratulations.
+If achievement role reconciliation skips members, it posts a quiet error-channel record
+with each skipped user id, whether the miss was Gate or Solo Gater, and the exception,
+then `Retrying` with a Discord relative timestamp. One retry runs an hour later. Success
+edits that same message to `Retry completed` without a ping. If people are still skipped,
+the retry posts a new message that pings the error maintainer. A crash still uses the
+normal operational error ping and does not ping again for the summary. A failed retry
+waits for the next regular or manual synchronization. Repeated syncs share one pending
+retry per guild. A successful manual sync completes the pending report early and cancels
+the delayed retry. Departed members are ignored. Retrying restores roles only and does
+not send achievement congratulations. A run that corrects nobody and skips nobody stays
+silent.
 
 Pending retries are cancelled when the cog unloads, and their messages are marked
 `Retry cancelled` when Discord is reachable. After a reload, the normal startup sync
@@ -700,8 +700,9 @@ publication additionally requires the bot to have Manage Webhooks in the destina
 parent channel.
 
 `rolesync`, `rolestats`, and `roleusers` require Manage Messages in the invocation
-channel. Only `roleusers` additionally requires a non-public channel and the bot channel
-permissions described above.
+channel. `rolesync discord` runs only in the operational error channel, which must stay
+hidden from everyone and allow the bot to attach files. Only `roleusers` additionally
+requires a non-public channel and the bot channel permissions described above.
 
 `[p]selfchart` is available to regular guild users because it only returns the caller's
 own activity.

@@ -46,7 +46,6 @@ class OperationalSupport(commands.Cog):
         self.log_config.register_guild(
             voice_log_channel=None,
             alert_channel=None,
-            maintenance_channel=None,
             moderation_log_channel=None,
         )
         self.config = Config.get_conf(
@@ -106,6 +105,20 @@ class OperationalSupport(commands.Cog):
             await self.operational_errors.send_alert(guild_id, content)
         except Exception:
             log.exception("Could not publish operational alert for guild %s", guild_id)
+
+    async def send_error_notice(
+        self,
+        guild_id: int,
+        content: str,
+        *,
+        ping: bool = False,
+    ) -> discord.Message | None:
+        """Post to the shared error channel without turning a quiet notice into a ping."""
+        try:
+            return await self.operational_errors.send_alert(guild_id, content, ping=ping)
+        except Exception:
+            log.exception("Could not publish error-channel notice for guild %s", guild_id)
+            return None
 
     async def handle_command_error(self, ctx, error, *, source: str) -> None:
         async def report(original: BaseException) -> None:

@@ -460,17 +460,18 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             reconcile_enabled_guilds=mock.AsyncMock()
         )
         cog._achievement_store = store
-        cog._send_maintenance_log = mock.AsyncMock(return_value=True)
+        cog._send_error_notice = mock.AsyncMock(return_value=True)
 
         await cog._role_analytics_startup_reconcile()
 
         store.bootstrap_guild.assert_not_awaited()
-        cog._send_maintenance_log.assert_awaited_once_with(
+        cog._send_error_notice.assert_awaited_once_with(
             guild,
             "Achievement initialization is required\n\n"
             "The achievement database has not been initialized from the current "
             "Discord roles.\n"
             "Run `!rolesync discord`.",
+            ping=False,
         )
 
     async def test_resume_refreshes_analytics_then_restores_database_roles(self):
@@ -1280,7 +1281,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 )
                 cog._edit_achievement_roles = mock.AsyncMock()
                 cog._send_moderation_log = mock.AsyncMock(return_value=True)
-                cog._send_maintenance_log = mock.AsyncMock(return_value=True)
+                cog._send_error_notice = mock.AsyncMock(return_value=True)
                 interaction = self._interaction(guild)
                 view = SimpleNamespace(
                     definition=definition,
@@ -1319,7 +1320,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
                         for user_id in (10, 12)
                     ],
                 )
-                cog._send_maintenance_log.assert_not_awaited()
+                cog._send_error_notice.assert_not_awaited()
                 cog._send_moderation_log.assert_awaited_once()
                 audit = cog._send_moderation_log.await_args.args[1]
                 self.assertIn(
@@ -1497,7 +1498,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             side_effect=nhmisc.commands.UserFeedbackCheckFailure("role hierarchy")
         )
         cog._send_moderation_log = mock.AsyncMock(return_value=True)
-        cog._send_maintenance_log = mock.AsyncMock(return_value=True)
+        cog._send_error_notice = mock.AsyncMock(return_value=True)
         interaction = self._interaction(guild)
         view = SimpleNamespace(
             definition=definition,
@@ -1516,7 +1517,8 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         )
 
         store.replace_role.assert_awaited_once()
-        cog._send_maintenance_log.assert_awaited_once()
+        cog._send_error_notice.assert_awaited_once()
+        self.assertFalse(cog._send_error_notice.await_args.kwargs["ping"])
         self.assertIn(
             "Members skipped: 1",
             cog._send_moderation_log.await_args.args[1],
@@ -1989,14 +1991,15 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         cog._sticky_roles = SimpleNamespace(
             get_role_state=mock.AsyncMock(return_value=(False, 0))
         )
-        cog._send_maintenance_log = mock.AsyncMock(return_value=True)
+        cog._send_error_notice = mock.AsyncMock(return_value=True)
 
         await cog.on_guild_role_delete(role)
 
         store.unbind_role.assert_awaited_once_with(guild.id, role.id)
-        cog._send_maintenance_log.assert_awaited_once_with(
+        cog._send_error_notice.assert_awaited_once_with(
             guild,
             "Stopped tracking deleted role All Quests for All Quests",
+            ping=True,
         )
 
 

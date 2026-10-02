@@ -1050,7 +1050,7 @@ class GateIncrementReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         cog._format_gate_increment_completion = mock.Mock(return_value="done")
         cog._finish_gate_increment_review = mock.AsyncMock()
         cog._send_moderation_log = mock.AsyncMock(side_effect=RuntimeError("offline"))
-        cog._send_maintenance_log = mock.AsyncMock()
+        cog._send_error_notice = mock.AsyncMock()
         cog._require_private_moderation_log_channel = mock.AsyncMock()
         view = _review_view(cog, source, (candidate,))
 

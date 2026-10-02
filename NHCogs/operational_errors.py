@@ -245,15 +245,24 @@ class OperationalErrorReporter:
         )
 
     async def send_alert(
-        self, guild_id: int, content: str, *, file: discord.File | None = None
-    ) -> None:
-        """Publish technical failure details only to the shared private destination."""
+        self,
+        guild_id: int,
+        content: str,
+        *,
+        file: discord.File | None = None,
+        ping: bool = True,
+    ) -> discord.Message | None:
+        """Publish to the shared private error channel.
+
+        Operational failures ping the configured maintainer. Other notices pass
+        ``ping=False`` and are posted without a mention.
+        """
         guild = self._bot.get_guild(guild_id)
         if guild is None:
             self._logger.error(
                 "Cannot publish NH operational error because guild %s is unavailable", guild_id
             )
-            return
+            return None
         guild_config = self._config.guild_from_id(guild_id)
         channel_id = await guild_config.error_channel()
         maintainer_id = await guild_config.error_maintainer_id()
@@ -262,26 +271,26 @@ class OperationalErrorReporter:
             self._logger.error(
                 "Cannot publish NH operational error because its channel is not configured"
             )
-            return
+            return None
         if channel.permissions_for(guild.default_role).view_channel:
             self._logger.error(
                 "Cannot publish NH operational error because channel %s is public", channel.id
             )
-            return
-        maintainer = guild.get_member(maintainer_id) if maintainer_id is not None else None
-        if maintainer_id is not None:
+            return None
+        if ping and maintainer_id is not None:
+            maintainer = guild.get_member(maintainer_id)
             mention = maintainer.mention if maintainer is not None else f"<@{maintainer_id}>"
             target = maintainer if maintainer is not None else discord.Object(id=maintainer_id)
             content = f"{mention}\n{content}"
+            allowed_mentions = discord.AllowedMentions(
+                everyone=False,
+                users=[target],
+                roles=False,
+                replied_user=False,
+            )
         else:
-            target = None
-        allowed_mentions = discord.AllowedMentions(
-            everyone=False,
-            users=[target] if target is not None else False,
-            roles=False,
-            replied_user=False,
-        )
-        await channel.send(content, file=file, allowed_mentions=allowed_mentions)
+            allowed_mentions = discord.AllowedMentions.none()
+        return await channel.send(content, file=file, allowed_mentions=allowed_mentions)
 
     @staticmethod
     def _format_context(failure: OperationalFailure) -> str | None:
