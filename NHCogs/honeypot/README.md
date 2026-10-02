@@ -1,556 +1,243 @@
 # Honeypot
 
-Honeypot is a Red-DiscordBot cog that protects your server by creating trap channels for self-bots, scammers,
-spam accounts, and suspicious users. Messages posted in honeypot channels are deleted, logged, optionally purged,
-and either punished automatically or sent to moderators for review. It also alerts moderators when new accounts join the server.
+Detect scam messages, review evidence, intercept animated images, monitor young accounts, and apply moderator-selected punishments. Maintained by Pxx500, originally based on AAA3A's Honeypot.
 
-This implementation is maintained by Pxx500 and was originally based on AAA3A's Honeypot.
+## Setup
 
-## Installation
-
-```ini
-[p]repo add NHCogs https://github.com/Pxx500/NHCogs
-[p]cog install NHCogs Honeypot
-[p]load Honeypot
-```
-
-Requires `AAA3A_utils`. Red will show the pip install command if missing.
-
-## Quick Setup
-
-```ini
-[p]honeypot channels honeypot create
-[p]honeypot channels review #your-review-channel
-[p]honeypot channels daily-stats #your-public-stats-channel
-[p]honeypot honeypot action ban
-[p]honeypot honeypot toggle true
-```
-
-## Commands
-
-The `!honeypot` command and all subcommands require Manage Messages.
-
-### Research channel dumps
-
-`[p]honeypot research` shows the available commands with the active prefix and full syntax. Research commands require Manage Messages, like the rest of the Honeypot command tree.
-
-| Command | Description |
-|---|---|
-| `[p]honeypot research` | Show the research command overview |
-| `[p]honeypot research dump <moderation_channel> <member_channel> [progress:true\|false]` | Dump all available messages from both source channels for offline analysis |
-| `[p]honeypot research cancel` | Cancel the current server's dump and clean up temporary files |
-
-Run `research dump` in a private moderator channel where `@everyone` can't view messages. Pass the punishment channel first and the member/audit channel second. The channels must be different. The bot needs View Channel and Read Message History in both sources and Attach Files in the destination. Only one dump can run per server at a time. `cancel` doesn't require the bot's history or attachment permissions.
-
-There is one full-history mode, without test runs or ban parsing. The dump includes every author and log format, including non-ban messages, up to the command's start time. Each channel is traversed once. It doesn't read the current ban list or fetch current profiles. Offline parsers can be changed and rerun without downloading the channels again. This replaces the former `research bans` command, without a compatibility alias.
-
-Progress is enabled by default. One status message is updated every 30 seconds, including while waiting for Discord or packaging ZIP files. It shows the stage, message counts for each source, current log date and elapsed time. It doesn't invent a percentage because Discord doesn't provide a history total. Pass `false` to disable periodic updates. A final status is still shown.
-
-Discord's built-in rate-limit waits are respected. Temporary server errors, connection failures and timeouts are retried with a delay, resuming after the last fetched message without duplicating records. Permanent API errors preserve the fetched data and allow the other channel to finish. Such ZIPs are explicitly marked incomplete, with channel errors in metadata and the shared error channel. `cancel` stops further reads and waits for file handles to close before deleting temporary files. Any ZIP parts already sent remain available.
-
-ZIP files contain `moderation-messages.jsonl`, `member-messages.jsonl` and `metadata.json`. Each JSONL line is one message with its ID, author identity, content, original embeds, creation/edit dates, attachment metadata, reply reference and source link. Attachment files and avatars are not downloaded. Metadata identifies the source channels, fixed cutoff, counts, completeness and current cached role labels. Names in message author objects and cached role labels are observed during the export, not guaranteed historical identities. Embedded log identities are preserved as stored.
-
-Archives are split to fit the server's upload limit. When there are multiple ZIP parts, concatenate matching JSONL files in numbered archive order. The bot removes its temporary files after sending the dump. These files contain private moderation data and should not be shared publicly.
-
-Examples:
+Honeypot loads through the combined `NHCogs` extension. Requires Red 3.5.23+ and Python 3.10+. Downloader installs dependencies, including AAA3A_utils, Pillow, and the AVIF plugin.
 
 ```text
-[p]honeypot research dump #transparency-log #audit-log
-[p]honeypot research dump #transparency-log #audit-log false
+[p]load downloader
+[p]repo add NHCogs https://github.com/Pxx500/NHCogs
+[p]cog install NHCogs NHCogs
+[p]load NHCogs
+```
+
+Start with a private review destination and run `doctor` before enabling enforcement:
+
+```text
+[p]honeypot channels honeypot create
+[p]honeypot channels review #automod-filter
+[p]honeypot honeypot action review
+[p]honeypot honeypot toggle true
+[p]honeypot doctor
+```
+
+The bot needs View Channel, Send Messages, Embed Links, and Manage Messages where it detects or deletes messages. Review requires Read Message History, Attach Files, Create Public Threads, Send Messages in Threads, and Manage Threads. Enable Ban Members, Kick Members, Manage Roles, or Manage Channels only for features that use them. Keep the bot's role above punishment roles and targets. GIF and manual mutes require Red's core `Mutes` cog and its configured mute role.
+
+Enable the privileged Server Members and Message Content intents. Configure technical error reporting through the shared `[p]nhcogs errors` commands in the [shared README](../README.md).
+
+## Command reference
+
+- `[p]` means your bot's prefix. All Honeypot text commands and the `Punish` message menu require Manage Messages and a server context
+- `<argument>` is required, `[argument]` is optional. Boolean values are `true` and `false`. Most optional configuration arguments show the current value when omitted
+- Use `clear` to unset a channel or role destination where supported
+- Bare `[p]honeypot` shows direct categories. Nested groups show descendant commands and full syntax, with current configuration only when `@everyone` cannot view the channel. The `gifdetector message` group instead shows or sets its warning text
+
+### Main detection
+
+Groups: `[p]honeypot honeypot`, `[p]honeypot honeypot roles`, `[p]honeypot honeypot keywords`, `[p]honeypot honeypot keywords attachments`, `[p]honeypot firstpost`, `[p]honeypot spam`, `[p]honeypot purge`
+
+| Command | What it does |
+|---|---|
+| `[p]honeypot honeypot toggle [value]` | Main message-detection switch |
+| `[p]honeypot honeypot action [value]` | Suspicious-message action: kick, ban, review, none |
+| `[p]honeypot honeypot fallback_action [value]` | Fallback action: review, kick, ban, none |
+| `[p]honeypot honeypot dry_run [value]` | Suppress punitive effects, not evidence capture or deletion |
+| `[p]honeypot honeypot whitelist_mode [value]` | Trusted-role handling: bypass, review, fallback, none |
+| `[p]honeypot honeypot automated_kick_fail_warn [value]` | Warn when an automated kick target has left |
+| `[p]honeypot honeypot roles add <role>` | Trust a role |
+| `[p]honeypot honeypot roles remove <role>` | Remove a trusted role |
+| `[p]honeypot honeypot roles list` | List trusted roles |
+| `[p]honeypot honeypot keywords add <keyword>` | Add a scam phrase |
+| `[p]honeypot honeypot keywords remove <keyword>` | Remove a scam phrase |
+| `[p]honeypot honeypot keywords list` | List scam phrases |
+| `[p]honeypot honeypot keywords reset` | Restore default phrases |
+| `[p]honeypot honeypot keywords attachments add <pattern>` | Add a filename-base regex |
+| `[p]honeypot honeypot keywords attachments remove <pattern>` | Remove a filename-base regex |
+| `[p]honeypot honeypot keywords attachments list` | List filename patterns |
+| `[p]honeypot honeypot keywords attachments reset` | Restore default patterns |
+| `[p]honeypot firstpost toggle [value]` | Enforce first-observed-message detection |
+| `[p]honeypot firstpost warmup [value]` | Record first senders without enforcement |
+| `[p]honeypot firstpost action [value]` | First-post action: review, kick, ban, none |
+| `[p]honeypot spam toggle [value]` | Detect repeats across channels |
+| `[p]honeypot spam action [value]` | Spam action: review, kick, ban, none |
+| `[p]honeypot spam window [seconds]` | Matching window, 3–60 seconds |
+| `[p]honeypot spam channels [count]` | Required distinct channels, 2–10 |
+| `[p]honeypot purge backward [seconds]` | Backward deletion window, 60–3600 seconds |
+| `[p]honeypot purge forward [seconds]` | Forward window, 0–300 seconds. Zero disables it |
+
+Detection combines account age, scam phrases, attachment counts and filenames, and enabled image matching. Firstpost warmup and enforcement are mutually exclusive. Spam detection requires matching messages with attachments or scam phrases. The main switch does not control JoinWatch, bait roles, or GIF interception.
+
+### Channels
+
+Groups: `[p]honeypot channels`, `[p]honeypot channels honeypot`, `[p]honeypot channels gif-detector`
+
+Destinations are independent. Module-specific setters update the same settings as these central commands. Honeypot sources and GIF scopes are separate lists, not output destinations.
+
+| Command | What it does |
+|---|---|
+| `[p]honeypot channels review [channel]` | Review destination, or `clear` |
+| `[p]honeypot channels daily-stats [channel]` | Public daily summaries, or `clear` |
+| `[p]honeypot channels manual-evidence [channel]` | Private manual evidence, or `clear` |
+| `[p]honeypot channels joinwatch [channel]` | JoinWatch alerts, or `clear` |
+| `[p]honeypot channels bait-role [channel]` | Bait-role notifications, or `clear` |
+| `[p]honeypot channels gif-debug [channel]` | GIF diagnostics, or `clear` |
+| `[p]honeypot channels honeypot create` | Create a trap channel |
+| `[p]honeypot channels honeypot add <channel>` | Add a trap channel |
+| `[p]honeypot channels honeypot remove <channel>` | Remove a trap channel |
+| `[p]honeypot channels honeypot list` | List trap channels |
+| `[p]honeypot channels gif-detector add [channel]` | Monitor a channel, defaulting to the current channel |
+| `[p]honeypot channels gif-detector remove [channel]` | Stop monitoring a channel, defaulting to the current channel |
+| `[p]honeypot channels gif-detector list` | List GIF scopes |
+
+### Image detection
+
+Groups: `[p]honeypot imagescan`, `[p]honeypot imagescan detector`
+
+| Command | What it does |
+|---|---|
+| `[p]honeypot imagescan add` | Learn images from the message you reply to |
+| `[p]honeypot imagescan remove <identifier>` | Remove a sample and its file |
+| `[p]honeypot imagescan dropfile <identifier>` | Remove its file, keep matching hashes |
+| `[p]honeypot imagescan rebuild` | Rebuild detector thresholds |
+| `[p]honeypot imagescan status` | Show samples, settings, and timing |
+| `[p]honeypot imagescan detector toggle [value]` | Enable image enforcement |
+| `[p]honeypot imagescan detector action [value]` | Match action: none, review, kick, ban |
+| `[p]honeypot imagescan detector threshold [value]` | Maximum hash difference, 0–100 |
+
+### Review and manual punishment
+
+Groups: `[p]honeypot review`, `[p]honeypot evidence`, `[p]honeypot punishment`, `[p]honeypot punishment role-nt`
+
+| Command | What it does |
+|---|---|
+| `[p]honeypot review toggle [value]` | Route detections to review |
+| `[p]honeypot review channel [channel]` | Review destination, or `clear` |
+| `[p]honeypot review kick_fail_warn [value]` | Missing kick-target warning: false, true, manual |
+| `[p]honeypot punishment mute_role [role]` | Temporary review containment role, or `clear` |
+| `[p]honeypot evidence status` | Show manual evidence settings |
+| `[p]honeypot evidence channel [channel]` | Private evidence destination, or `clear` |
+| `[p]honeypot punishment role-nt add <role> <channel> [channels...]` | Assign source channels to a Role n't |
+| `[p]honeypot punishment role-nt remove-channel <role> <channel> [channels...]` | Remove source channels from a Role n't |
+| `[p]honeypot punishment role-nt notification <role> [channel]` | Show or set its notification destination |
+| `[p]honeypot punishment role-nt notification-clear <role>` | Restore source-channel notifications |
+| `[p]honeypot punishment role-nt remove <role>` | Remove a configured Role n't |
+| `[p]honeypot punishment role-nt list` | List Role n't punishments |
+
+Detected messages and attachments appear in a case summary and its timeline thread. Failed downloads are marked missing instead of blocking the case. Use Ban, Kick, Ignore, and image-review buttons to resolve it. Pending cases expire after 24 hours. Case state and pending operations survive restarts.
+
+Right-click a message and choose **Apps > Punish** to select mute, kick, ban, and configured Role n't roles. Punishments start unselected. Ban and kick exclude all other punishments. Mute and multiple Role n't roles can be combined. Mute durations use `30m`, `2h`, `3d`, or `1w`, up to 28 days. A private audit is always created before source deletion, even with evidence saving disabled. Public notifications do not disclose whether evidence was saved.
+
+### JoinWatch and bait roles
+
+Groups: `[p]honeypot joinwatch`, `[p]honeypot joinwatch alert`, `[p]honeypot joinwatch autorole`, `[p]honeypot joinwatch autorole randomize`, `[p]honeypot bait_role`
+
+| Command | What it does |
+|---|---|
+| `[p]honeypot joinwatch toggle [value]` | Monitor young accounts joining |
+| `[p]honeypot joinwatch alert toggle [value]` | Enable alerts independently of role assignment |
+| `[p]honeypot joinwatch channel [channel]` | Alert destination, or `clear` |
+| `[p]honeypot joinwatch max_age [hours]` | Account-age limit, 1–1000000 hours |
+| `[p]honeypot joinwatch autorole toggle [value]` | Enable temporary role assignment |
+| `[p]honeypot joinwatch autorole role [role]` | Temporary role, or `clear` |
+| `[p]honeypot joinwatch autorole timer [minutes]` | Time until escalation, 1–10080 minutes |
+| `[p]honeypot joinwatch autorole action [value]` | Timer action: none, kick, ban |
+| `[p]honeypot joinwatch bantimers` | Privately list timers and untimed role holders |
+| `[p]honeypot joinwatch autorole randomize toggle [value]` | Delay role assignment |
+| `[p]honeypot joinwatch autorole randomize min_time [minutes]` | Minimum delay, 1–10080 minutes |
+| `[p]honeypot joinwatch autorole randomize max_time [minutes]` | Maximum delay, 1–10080 minutes |
+| `[p]honeypot bait_role toggle [value]` | Enable the bait-role trap |
+| `[p]honeypot bait_role role [role]` | Bait role, or `clear` |
+| `[p]honeypot bait_role action [value]` | Trap action: kick, ban |
+| `[p]honeypot bait_role channel [channel]` | Notification destination, or `clear` |
+
+JoinWatch measures account age, not time on the server. Its timer starts after role assignment. Removing the role clears the timer. Changing the duration recalculates active deadlines and can trigger overdue punishments. `bantimers` shows manually assigned roles without creating timers, using the local member cache and warning when it is incomplete.
+
+The bait role triggers punishment when assigned. Use a dedicated role, never a review mute, JoinWatch role, or sticky role. Protected moderators, administrators, bot owners, and targets outside the bot's role hierarchy are exempt from automated role enforcement.
+
+### GIF detector
+
+Groups: `[p]honeypot gifdetector`, `[p]honeypot gifdetector channel`, `[p]honeypot gifdetector debug`, `[p]honeypot gifdetector message [text]`
+
+| Command | What it does |
+|---|---|
+| `[p]honeypot gifdetector toggle <value>` | Enable GIF interception |
+| `[p]honeypot gifdetector animation <value>` | Enable the ICBM animation |
+| `[p]honeypot gifdetector retention [seconds]` | GIF visibility, 0–60 seconds. Default: 5 |
+| `[p]honeypot gifdetector threshold [count]` | GIFs before a mute, 2–20. Default: 3 |
+| `[p]honeypot gifdetector window [seconds]` | Burst window, 5–3600 seconds. Default: 60 |
+| `[p]honeypot gifdetector muteduration [seconds]` | Mute duration, 60–604800 seconds. Default: 3600 |
+| `[p]honeypot gifdetector channel add [channel]` | Monitor a channel, defaulting to the current channel |
+| `[p]honeypot gifdetector channel remove [channel]` | Stop monitoring a channel, defaulting to the current channel |
+| `[p]honeypot gifdetector channel list` | List monitored channels |
+| `[p]honeypot gifdetector debug toggle <value>` | Enable one diagnostic record per completed interception |
+| `[p]honeypot gifdetector debug channel [channel]` | Diagnostic destination, or `clear` |
+| `[p]honeypot gifdetector message [text]` | Show or set the static warning |
+| `[p]honeypot gifdetector message set <text>` | Explicit warning setter, hidden from normal help |
+| `[p]honeypot gifdetector message reset` | Restore `No gifs!` |
+
+Monitors configured channels and their threads. Recognizes GIF uploads and links, Discord GIF embeds, supported Tenor/Giphy transcodes, and verified animated WebP, PNG/APNG, and AVIF images. Ordinary MP4 files are allowed. Bots, webhooks, and protected moderators are ignored. Historical message edits older than 30 days are ignored.
+
+Only one animation runs per server. Other interceptions use the static warning and the same retention. Zero retention deletes the source immediately. Animated impact deletes the source and leaves an explosion for three seconds. Static warnings last at least five seconds and never disappear before the source. Burst counters reset on reload. GIF mutes use core `Mutes`, without switching to another punishment on failure.
+
+### Statistics and configuration
+
+Groups: `[p]honeypot stats`, `[p]honeypot config`
+
+| Command | What it does |
+|---|---|
+| `[p]honeypot stats show` | Show aggregate server statistics |
+| `[p]honeypot stats channel [channel]` | Daily summary destination, or `clear` |
+| `[p]honeypot modstats` | Moderator counters and current workload |
+| `[p]honeypot doctor` | Check configuration, permissions, and runtime health |
+| `[p]honeypot config all` | Compact configuration summary |
+| `[p]honeypot config honeypot` | Main detection settings |
+| `[p]honeypot config channel` | Destinations and scopes |
+| `[p]honeypot config punishment` | Punishment settings |
+| `[p]honeypot config purge` | Purge windows |
+| `[p]honeypot config firstpost` | First-post settings |
+| `[p]honeypot config imagescan` | Image detector settings |
+| `[p]honeypot config spam` | Spam settings |
+| `[p]honeypot config review` | Review settings |
+| `[p]honeypot config roles` | Trusted roles |
+| `[p]honeypot config keywords` | Keyword and filename-pattern counts |
+| `[p]honeypot config joinwatch` | JoinWatch settings and timers |
+| `[p]honeypot config bait_role` | Bait-role settings |
+| `[p]honeypot config stats` | Stored counters and current case workload |
+
+Daily summaries are published at 00:05 UTC for the completed UTC day. They contain detections, automated bans, manual bans, JoinWatch shadowbans, and JoinWatch bans. Only completed effects count, not failed actions, dry runs, or retries. Historical totals are not backfilled into dated statistics. Clearing the destination disables publication.
+
+### Research and maintenance
+
+Groups: `[p]honeypot research`, `[p]honeypot debug`, `[p]honeypot debug imagescan`
+
+| Command | What it does |
+|---|---|
+| `[p]honeypot research dump <channel_1> <channel_2> [progress]` | Export both channels' full history without parsing |
+| `[p]honeypot research cancel` | Stop this server's dump and clean temporary files |
+| `[p]honeypot debug reviewdump` | Export ban-marked review embeds and attachment files from the current channel |
+| `[p]honeypot debug imagescan dump` | Export image-review events, sample files, and dates |
+| `[p]honeypot debug imagescan importtpzip` | Import TP images from ZIPs attached to the command |
+| `[p]honeypot debug imagescan cleanup_events [confirm]` | Preview event-file cleanup. Supply literal `confirm` to delete, leaving samples intact |
+| `[p]honeypot debug resetstats` | Reset stored Honeypot counters |
+
+For `research dump`, choose any two different text channels from this server. Both are exported identically, including every author and format, up to the run's start time. Run it in a private moderator channel. The bot needs View Channel and Read Message History in both sources, plus Attach Files in the destination. Only one dump can run per server.
+
+Progress defaults to `true`, updating one status message every 30 seconds. Pass `false` to show only the initial and final status. Temporary API failures wait and resume after the last fetched message. Permanent API failures produce explicitly incomplete exports containing the data collected so far.
+
+ZIPs contain `moderation-messages.jsonl` for the first source, `member-messages.jsonl` for the second, and `metadata.json` identifying sources, counts, and completeness. Filenames do not restrict channel content. Records preserve IDs, dates, authors, text, embeds, attachment metadata, reply references, and source links. Attachment files and avatars are not downloaded. Cached names and role labels are current observations, not historical snapshots. For split archives, concatenate matching JSONL files in numbered ZIP order. Keep exports private.
+
+```text
+[p]honeypot research dump #first-source #second-source
+[p]honeypot research dump #first-source #second-source false
 [p]honeypot research cancel
 ```
 
-### Review attachment export
+`debug reviewdump` is separate and filtered. It reads the current channel after May 1, 2026 UTC, selecting review embeds with `ban` in `Action Taken` or `Action`, excluding dry-run and failed actions. It downloads attachments from those messages and their replies into numbered ZIPs with `manifest.json`, `reviews.jsonl`, and case folders. It is not a full-history channel dump.
 
-`[p]honeypot debug reviewdump` is a separate exporter for review messages in the current channel, starting on May 1, 2026 UTC. It selects embeds whose `Action Taken` or `Action` field contains `ban`, excluding dry-run and failed actions. It includes replies to those reviews, downloads their attachments and sends numbered ZIPs containing `manifest.json`, `reviews.jsonl` and `cases/<message_id>/attachments/`. It updates a progress message and doesn't change source messages or apply punishments. This older review-embed exporter isn't the unfiltered two-channel research dump.
+## Stored data
 
-### Manual punishment
+Settings and counters are per server. Cases, operations, first-observed senders, and the message registry use local SQLite storage. The registry retains observed message IDs, dates, author IDs, pin state, and optional spam fingerprints for 14 days, without content or attachments. Purge uses observed IDs, not history scans. Separate `[p]cleanup` commands are documented in their [own README](../cleanup/README.md).
 
-Moderators with Manage Messages can use the `Punish` message context action. It can save the message and its attachments to the private manual evidence channel, then deletes the source after the private audit is created. The audit is always written, even when evidence saving is disabled. The action can apply mute, kick, ban, or any configured Role n’t that covers the source channel. Mute uses Red's core `Mutes` cog, while kick and ban use Honeypot's existing moderation path.
-
-All punishments start unselected and saving evidence starts enabled. Kick and ban exclude every other punishment. Mute and multiple Role n’t roles can be combined. The moderator enters one shared reason and, when needed, a mute duration. Mute durations use `30m`, `2h`, `3d`, or `1w` format and may not exceed 28 days.
-
-| Command | Description |
-|---|---|
-| `!honeypot evidence status` | Show the private manual evidence configuration |
-| `!honeypot evidence channel [channel|clear]` | Show, set, or clear the private destination for manual evidence |
-| `!honeypot punishment role-nt add <role> <channel> [channels...]` | Add source channels to a Role n’t punishment |
-| `!honeypot punishment role-nt remove-channel <role> <channel> [channels...]` | Remove source channels from a Role n’t punishment |
-| `!honeypot punishment role-nt notification <role> [channel]` | Show or set its notification channel |
-| `!honeypot punishment role-nt notification-clear <role>` | Restore source-channel notifications |
-| `!honeypot punishment role-nt remove <role>` | Remove a Role n’t punishment |
-| `!honeypot punishment role-nt list` | List configured Role n’t punishments |
-
-### honeypot
-
-| Command | Description |
-|---------|-------------|
-| `!honeypot honeypot toggle <bool>` | Master switch for all message detection: honeypot channels, spam, firstpost and the image detector. Joinwatch and the bait role are unaffected |
-| `!honeypot honeypot action <kick\|ban\|review\|none>` | Main action for suspicious posts |
-| `!honeypot honeypot fallback_action <review\|kick\|ban\|none>` | Action for non-suspicious posts |
-| `!honeypot honeypot dry_run <bool>` | Log what would happen without punishing |
-| `!honeypot honeypot whitelist_mode <bypass\|review\|fallback\|none>` | How whitelisted roles behave |
-| `!honeypot honeypot automated_kick_fail_warn <bool>` | Warn when the target has already left before the kick is applied |
-
-### gifdetector
-
-The GIF detector removes GIF uploads, direct GIF links, Discord GIF embeds, and supported Tenor/Giphy video transcodes in configured channels and their threads. Ordinary MP4 uploads and links remain allowed. It ignores bots, webhooks, and protected moderators; at most one horizontal ICBM animation runs per server while additional GIFs use the static warning. The ICBM movement completes in five seconds. The GIF remains for the configured retention period, which defaults to five seconds; bot warnings remain for at least five seconds and never expire before the GIF.
-
-By default, three GIFs from one member inside a rolling 60-second window trigger a one-hour server mute through Red's core `Mutes` cog. Core `Mutes` must have a mute role configured; Honeypot never falls back to a native timeout, warning, kick, or ban. Burst counters are in memory and reset when the cog reloads.
-
-| Command | Description |
-|---|---|
-| `!honeypot gifdetector toggle <true\|false>` | Enable or disable GIF interception |
-| `!honeypot gifdetector animation <true\|false>` | Enable or disable the animated ICBM warning |
-| `!honeypot gifdetector retention [0-60]` | Show or set how long detected GIFs remain visible |
-| `!honeypot gifdetector threshold [2-20]` | Show or set the GIF count required for a mute |
-| `!honeypot gifdetector window [5-3600]` | Show or set the rolling window in seconds |
-| `!honeypot gifdetector muteduration [60-604800]` | Show or set the role mute duration in seconds |
-| `!honeypot gifdetector channel add [channel]` | Monitor a channel, or the current channel when omitted |
-| `!honeypot gifdetector channel remove [channel]` | Stop monitoring a channel, or the current channel when omitted |
-| `!honeypot gifdetector channel list` | List monitored channels |
-| `!honeypot gifdetector debug toggle <true\|false>` | Enable or disable moderator-only shot diagnostics |
-| `!honeypot gifdetector debug channel [channel|clear]` | Show, set, or clear the shot diagnostics destination |
-| `!honeypot gifdetector message [text]` | Show or set the static warning shown for additional GIFs |
-| `!honeypot gifdetector message reset` | Reset the static warning to `No gifs!` |
-
-### channels
-
-`!honeypot channels` lists every channel command. In a private moderator channel it also shows the current destinations and scopes. In a channel `@everyone` can see, it shows command syntax only. Destination categories are independent. Setting one never changes another. Pass `clear` instead of a channel to remove a single destination. The older per-feature channel commands, such as `!honeypot review channel`, change the same destination and accept `clear` too.
-
-| Command | Description |
-|---------|-------------|
-| `!honeypot channels review [channel|clear]` | Show, set, or clear the review destination |
-| `!honeypot channels daily-stats [channel|clear]` | Show, set, or clear the public daily statistics destination |
-| `!honeypot channels manual-evidence [channel|clear]` | Show, set, or clear the private manual evidence destination |
-| `!honeypot channels joinwatch [channel|clear]` | Show, set, or clear the JoinWatch destination |
-| `!honeypot channels bait-role [channel|clear]` | Show, set, or clear the bait-role destination |
-| `!honeypot channels gif-debug [channel|clear]` | Show, set, or clear the GIF diagnostics destination |
-| `!honeypot channels honeypot create` | Create and add a new `#honeypot` channel at position 0 |
-| `!honeypot channels honeypot add <channel>` | Add an existing honeypot source |
-| `!honeypot channels honeypot remove <channel>` | Remove a honeypot source |
-| `!honeypot channels honeypot list` | List honeypot sources |
-| `!honeypot channels gif-detector add [channel]` | Add a GIF detector scope |
-| `!honeypot channels gif-detector remove [channel]` | Remove a GIF detector scope |
-| `!honeypot channels gif-detector list` | List GIF detector scopes |
-
-### punishment
-
-| Command | Description |
-|---------|-------------|
-| `!honeypot punishment mute_role [role|clear]` | Show, set, or clear the temp mute role for users awaiting review |
-
-### purge
-
-| Command | Description |
-|---------|-------------|
-| `!honeypot purge backward <60-3600>` | Seconds of cached messages the purge step may delete |
-| `!honeypot purge forward <0-300>` | Seconds of new messages purged after a trigger (`0` disables it) |
-
-### firstpost
-
-| Command | Description |
-|---------|-------------|
-| `!honeypot firstpost toggle <bool>` | Enable or disable suspicious first-post detection |
-| `!honeypot firstpost warmup <bool>` | Record first observed senders without taking action |
-| `!honeypot firstpost action <review\|kick\|ban\|none>` | Action for suspicious first observed messages |
-
-### spam
-
-| Command | Description |
-|---------|-------------|
-| `!honeypot spam toggle <bool>` | Enable or disable repeated message detection |
-| `!honeypot spam action <review\|kick\|ban\|none>` | Action for repeated messages across channels |
-| `!honeypot spam window <3-60>` | Seconds in the repeated message window |
-| `!honeypot spam channels <2-10>` | Different channels required to trigger |
-
-### review
-
-| Command | Description |
-|---------|-------------|
-| `!honeypot review toggle <bool>` | Send suspicious messages to moderator review instead of acting immediately |
-| `!honeypot review channel [channel|clear]` | Show, set, or clear the channel for review requests |
-| `!honeypot review kick_fail_warn <false\|true\|manual>` | How to handle a review kick when the target has already left |
-
-Detection cases expire 24 hours after the first detection. This lifetime is fixed.
-
-### roles
-
-| Command | Description |
-|---------|-------------|
-| `!honeypot honeypot roles add <role>` | Add a whitelisted role |
-| `!honeypot honeypot roles remove <role>` | Remove a whitelisted role |
-| `!honeypot honeypot roles list` | List whitelisted roles |
-
-### keywords
-
-| Command | Description |
-|---------|-------------|
-| `!honeypot honeypot keywords add <keyword>` | Add a scam keyword |
-| `!honeypot honeypot keywords remove <keyword>` | Remove a scam keyword |
-| `!honeypot honeypot keywords list` | List scam keywords |
-| `!honeypot honeypot keywords reset` | Reset to defaults |
-| `!honeypot honeypot keywords attachments add <regex>` | Add filename-base regex (triggers at 2+ matches) |
-| `!honeypot honeypot keywords attachments remove <regex>` | Remove a filename regex |
-| `!honeypot honeypot keywords attachments list` | List filename regexes |
-| `!honeypot honeypot keywords attachments reset` | Reset to default patterns |
-
-### imagescan
-
-| Command | Description |
-|---------|-------------|
-| `!honeypot imagescan add` | Add scam images from the message this command replies to |
-| `!honeypot imagescan remove <identifier>` | Remove an image sample and its stored file from the active dataset |
-| `!honeypot imagescan dropfile <identifier>` | Remove a stored image file while keeping its hashes active |
-| `!honeypot imagescan rebuild` | Recompute image detector threshold state |
-| `!honeypot imagescan status` | Show image detector settings, samples, and timing |
-| `!honeypot imagescan detector toggle <bool>` | Enable or disable production image detection |
-| `!honeypot imagescan detector action <none\|review\|kick\|ban>` | Action for image detector matches |
-| `!honeypot imagescan detector threshold <0-100>` | Maximum image hash distance |
-
-### joinwatch
-
-| Command | Description |
-|---------|-------------|
-| `!honeypot joinwatch toggle <bool>` | Enable or disable the joinwatch module |
-| `!honeypot joinwatch alert toggle <bool>` | Enable or disable joinwatch alert messages |
-| `!honeypot joinwatch channel [channel|clear]` | Show, set, or clear the channel for join alerts |
-| `!honeypot joinwatch max_age <1-1000000>` | Max account age in hours to trigger alert |
-| `!honeypot joinwatch autorole toggle <bool>` | Enable or disable automatic role assignment for young accounts |
-| `!honeypot joinwatch autorole role [role|clear]` | Show, set, or clear the role applied to young accounts |
-| `!honeypot joinwatch autorole timer <1-10080>` | Minutes before punishment if the role remains |
-| `!honeypot joinwatch autorole action <none\|kick\|ban>` | Action when the auto-role is not removed in time |
-| `[p]honeypot joinwatch bantimers` | List active punishment timers and shadowban role holders without a JoinWatch timer. Requires Manage Messages and a private moderator channel. Uses the local member cache without fetching members and reports when the cache is incomplete. Does not create timers for manually assigned roles |
-| `!honeypot joinwatch autorole randomize toggle <bool>` | Enable or disable randomized delay before the auto-role is applied |
-| `!honeypot joinwatch autorole randomize min_time <1-10080>` | Minimum minutes before applying the auto-role |
-| `!honeypot joinwatch autorole randomize max_time <1-10080>` | Maximum minutes before applying the auto-role |
-
-### bait_role
-
-| Command | Description |
-|---------|-------------|
-| `!honeypot bait_role toggle <bool>` | Enable or disable the bait role trap |
-| `!honeypot bait_role role [role|clear]` | Show, set, or clear the bait role |
-| `!honeypot bait_role action <kick\|ban>` | Action to take when users take the bait role |
-| `!honeypot bait_role channel [channel|clear]` | Show, set, or clear the bait-role destination |
-
-### Operational errors
-
-Technical failures from Honeypot use the shared `[p]nhcogs errors` configuration. See the
-[shared command catalog](../README.md) for the setup commands and privacy rules. Expected
-detection outcomes and normal command feedback aren't reported as operational errors.
-
-### other
-
-| Command | Description |
-|---------|-------------|
-| `!honeypot config all` | Show a compact summary of all configuration sections |
-| `!honeypot config honeypot` | Show main honeypot detection settings |
-| `!honeypot config channel` | Show honeypot and log channel settings |
-| `!honeypot config punishment` | Show punishment settings |
-| `!honeypot config purge` | Show purge settings |
-| `!honeypot config firstpost` | Show firstpost settings |
-| `!honeypot config imagescan` | Show image detector settings |
-| `!honeypot config spam` | Show spam detection settings |
-| `!honeypot config review` | Show review settings |
-| `!honeypot config roles` | Show whitelist role settings |
-| `!honeypot config keywords` | Show keyword and attachment-pattern counts |
-| `!honeypot config joinwatch` | Show joinwatch and joinwatch auto-role settings |
-| `!honeypot config bait_role` | Show bait role settings |
-| `!honeypot config stats` | Show stored stats, detection-case operations, and pending timer counts |
-| `!honeypot stats show` | Show public-facing stats |
-| `!honeypot stats channel [channel|clear]` | Show, set, or clear the public daily statistics destination |
-| `!honeypot modstats` | Show detailed moderator statistics |
-| `!honeypot doctor` | Check config, channels, and permissions |
-## Action & Fallback Logic
-
-```
-suspicious + action = kick/ban  → instant punishment
-suspicious + action = review    → review (if review channel is set), otherwise fallback
-suspicious + action = none      → skip to fallback
-non-suspicious                  → fallback_action decides
-
-fallback_action = review   → moderator review
-fallback_action = kick/ban → instant punishment
-fallback_action = none     → log only
-```
-
-Dry-run is checked immediately before every punishment or role addition. Turning
-it on while delayed or retried work is pending prevents those Discord side effects.
-
-## Whitelist Modes
-
-| Mode | Behavior |
-|------|----------|
-| `bypass` | Log and skip (no action) |
-| `review` | Force review regardless of suspicion |
-| `fallback` | Skip instant action, go through fallback logic |
-| `none` | Treat as normal user |
-
-## Detection
-
-A message is considered suspicious if:
-
-- Account is under 7 days old
-- Content contains scam keywords (customizable, see `!honeypot honeypot keywords`)
-- Has attachments and account is under 14 days old
-- Has 4+ image attachments, regardless of filename
-- Has 2+ generic attachment names (e.g. `image.jpeg`, `image(1).jpeg`, `1.jpeg`)
-- Has 2+ attachments matching configured filename-base regexes
-- An image matches the image-detector dataset, when the detector is enabled and
-  samples exist (see `!honeypot imagescan`)
-
-If firstpost is enabled, a user's first observed message is also considered
-suspicious when it has exactly 4 attachments, or exactly 2 attachments with
-configured scam keywords.
-The keyword `bro` is treated as attachment-only: it does not trigger by itself,
-but can satisfy the 2-attachment firstpost rule.
-`firstpost warmup` and active firstpost detection are mutually exclusive:
-enabling one disables the other.
-
-If spam detection is enabled, a user's matching message fingerprint in multiple
-different channels within the configured window is considered suspicious when
-the message has attachments or configured scam keywords.
-
-Default scam keywords: `free nitro`, `giveaway`, `steam gift`, `free discord`, `discord.gift`,
-`claim your`, `you won`, `free vbucks`, `free robux`, `free coins`, `boost your server`,
-`limited time`, `exclusive offer`, `free membership`, `hack`, `crack`, `generator`.
-
-Default attachment patterns: `^image$` (matches `image.jpeg`), `^image ?\(\d+\)$`
-(matches `image(1)`, `image (2)`) and `^\d+$` (matches `1.png`, `42.jpeg`).
-
-## Review Flow
-
-1. Attachment capture starts before the source message is deleted. A failed or
-   timed-out download is shown as missing evidence and does not block containment.
-2. The source message is deleted, along with recent cached messages from that user.
-   Backward purge cannot be turned off; its window is 60-3600 seconds. Forward
-   purge is disabled by setting `purge forward` to `0`.
-3. The review mute role is applied while review is pending when configured.
-4. One compact summary is posted in the review channel and a public case thread is
-   created from it.
-5. The thread receives a chronological copy of every detected message, its signals,
-   deletion status, content, and copied attachment evidence.
-6. Ban / Kick / Ignore and image-learning controls are available on the summary and
-   on the relevant thread messages. Moderators can classify all images, one message,
-   or individual images.
-7. Resolution records the moderator and time, disables controls, releases owned
-   containment roles, and locks and archives the thread.
-8. Open cases, publications, and moderation operations survive bot restarts.
-9. Unresolved cases expire after the fixed 24-hour lifetime.
-
-Any configured honeypot channel uses the same flow. If a user with the review
-mute role or joinwatch auto-role posts in any honeypot channel, the bot treats it
-as repeat honeypot activity and forces a ban with the reason `Suspicious Activity`.
-
-## Stats
-
-`stats` shows a compact public-facing summary: messages, bans,
-sent-for-review cases, early catches, auto-roles applied, and auto role
-punishments.
-
-When a daily statistics channel is configured, Honeypot publishes a separate
-summary at `00:05 UTC` for the completed UTC day. The fixed delay normally puts
-it after the general server activity report without creating a dependency on
-NHMisc. An unset destination disables publication.
-
-The public daily summary contains two compact sections:
-
-- `Honeypot`: detections, automated bans, and manual bans
-- `JoinWatch`: shadowbans and bans
-
-Detections count newly persisted detected messages. Automated and manual bans
-are separated at the action source and count only successful Discord bans.
-JoinWatch shadowbans count successful role applications, while JoinWatch bans
-count successful ban actions after the role timer. Failed actions, dry runs,
-kicks, merely scheduled roles, and retry attempts that do not complete an
-effect do not count. JoinWatch bans are not also included in automated bans.
-
-Daily collection is forward-only from the version that introduces it. Existing
-lifetime counters do not contain enough dates or action-source information for
-a reliable historical backfill. An observed day without matching activity
-publishes zeros, while an unobserved date from before deployment or a full
-outage is skipped.
-
-`modstats` is the detailed moderator view. `Total detections` counts every
-non-exempt message caught in the honeypot channel. `Suspicious detections`
-counts only detections matching suspicious-account, keyword, or attachment
-rules. `Reviews sent` is a historical counter. `Active detection cases` is the
-current number of pending or resolving cases read from SQLite. The operational
-case counters also expose overdue cases, stale resolution leases, failed
-containment, forbidden message deletes, and outstanding durable operations.
-
-`Applied temporary mutes` and `Failed temporary mutes` are historical counters
-for temporary review mutes. They do not mean those users are still muted.
-The review mute role may be the same role as joinwatch auto-role. If that user
-has an active joinwatch auto-role timer, review cleanup leaves the role in place
-so it does not clear the joinwatch timer.
-
-`Purged messages` counts extra recent messages removed by the purge step. It
-does not include the original honeypot message, which is deleted separately as
-part of every detection.
-
-Cached purge stores recent message IDs observed through Discord Gateway events
-for the configured `purge backward` window, then deletes those known messages
-directly. After a purge trigger, the bot also forward-purges new messages from
-that user for the configured `purge forward` window.
-
-`Early catches` counts suspicious first observed messages handled by firstpost.
-`Spam catches` counts repeated messages across channels handled by spam detection.
-
-The `Joinwatch` stats section tracks non-bot joins while joinwatch is enabled.
-`Young joins` counts accounts below the configured `joinwatch max_age`
-threshold, and `Young join rate` is `Young joins / Total joins`. Auto-role
-scheduled, clear, and punishment counters are historical. `Pending role applications`
-is the current number of delayed role applications waiting to run, and
-`Active auto-role timers` is the current number of users still waiting for staff
-action or timeout after the role was applied.
-
-## Config Dumps
-
-Use `!honeypot config <section>` to inspect current settings without exposing raw
-IDs or message contents. Config dumps resolve channels and roles when possible, show
-missing IDs when objects were deleted, and summarize pending reviews or
-joinwatch timers by count instead of exposing message contents.
-
-## Joinwatch
-
-When a user with an account younger than the configured threshold joins, an embed
-is sent to the joinwatch channel when alerts are enabled. If joinwatch auto-role
-is enabled, the cog also applies the configured role and starts a timer. Auto-role
-can run even when alert messages are disabled.
-
-Enable randomized auto-role delay to avoid applying the configured role immediately
-when the user joins. When enabled, the cog schedules the role for a random time
-between `min_time` and `max_time`. The punishment timer starts only after the role
-is actually applied, not when the account joins.
-
-Setup:
-
-```ini
-[p]honeypot joinwatch max_age 24
-[p]honeypot joinwatch alert toggle true
-[p]honeypot joinwatch autorole role @NewAccount
-[p]honeypot joinwatch autorole randomize min_time 5
-[p]honeypot joinwatch autorole randomize max_time 30
-[p]honeypot joinwatch autorole randomize toggle true
-[p]honeypot joinwatch autorole timer 1440
-[p]honeypot joinwatch autorole action ban
-[p]honeypot joinwatch autorole toggle true
-```
-
-If staff removes the auto-role before the timer expires, the timer is cleared and
-no punishment is taken. If the timer expires and the user still has the role, the
-cog applies the configured joinwatch action: `none`, `kick`, or `ban`.
-Changing `joinwatch autorole timer` recalculates active timers immediately. If
-the new timer is already expired for a user, the normal timeout action is handled
-right away.
-
-Joinwatch auto-role ignores bot owners, server mods, server admins, users with
-`Manage Server`, and users whose top role is at or above the bot's top role.
-
-## Bait Role
-
-The bait role trap watches for users receiving a configured role. This is meant for
-roles that should not be assigned to normal users, for example a fake verification,
-reward, or access role used to catch automated accounts.
-
-The bait role must be dedicated to this trap. Do not reuse the review mute role
-or the Joinwatch auto-role: receiving the bait role directly triggers its configured
-kick or ban action regardless of which system assigned it.
-`!honeypot doctor` warns when the bait role reuses either of those roles or a role
-configured as sticky by NHMisc.
-
-Setup:
-
-```ini
-[p]honeypot bait_role role @SuspiciousRole
-[p]honeypot bait_role action ban
-[p]honeypot bait_role toggle true
-```
-
-When the trap is enabled and a non-exempt user receives the bait role, the cog
-immediately performs the configured bait action: `kick` or `ban`. It then sends a
-log embed to the configured bait-role channel if one is available.
-
-The bait trap ignores bot owners, server mods, server admins, users with
-`Manage Server`, and users whose top role is at or above the bot's top role. If
-the bait role is deleted or no bait role is configured, the trap does nothing.
-
-## Adding a channel category
-
-Channel routing is declared in `channel_routing.py`. To add a category:
-
-1. Reuse an existing semantic category when it fits
-2. Otherwise add one `ChannelCategory` entry with its config field, type, permissions, central command, and module command
-3. Route publication through that category and use the shared configuration operations
-4. Add the declared static commands. The registry contract tests name any missing central or module path
-5. Send every technical failure through the shared `[p]nhcogs errors` configuration. Never add a cross-category fallback
-
-## Permissions
-
-- View Channel, Send Messages, Read Message History, Manage Messages (in honeypot channel)
-- Manage Messages (in every visible channel where cached purge should remove recent scammer messages)
-- View Channel and the permissions declared for each configured destination
-- Create Public Threads, Send Messages in Threads, and Manage Threads
-  (in the review channel)
-- Send Messages (in the joinwatch channel)
-- Kick Members (if using kick)
-- Ban Members (if using ban)
-- Manage Roles (if using review mute role or joinwatch auto-role)
-- Manage Channels (if using `channel create`)
-- Bot role must be above users it punishes, the review mute role, and the joinwatch auto-role
-
-## Intents
-
-- `GUILD_MEMBERS` (privileged): required for `on_member_join` (joinwatch) and `on_member_update` (joinwatch auto-role and bait role)
-- `MESSAGE_CONTENT` (privileged): required for `on_message` (detection)
-
-Both are enabled by default in RedBot v3.5+.
-
-## Data Storage
-
-Guild configuration stores channel IDs, role IDs, booleans, numeric settings,
-custom messages, historical counters, and joinwatch timers. Detection cases are
-stored separately in `detection_cases.sqlite`; SQLite is authoritative for case
-status, captured messages and signals, attachment metadata, containment state,
-review publications, and durable operations while the case is active. After the
-terminal summary/thread update, role release, and evidence cleanup complete, the
-detailed case data is compacted. Only the case/guild/user identifiers and Discord
-summary/thread endpoint needed for later privacy deletion remain.
-
-Copied case evidence is stored under `detection_case_files`. Resolution queues
-durable cleanup of those files. If moderators select attachments as image
-learning samples, both true-positive and false-positive files are copied to the
-separate image-scan dataset with SHA-256, pHash, dHash, and aHash before temporary
-case evidence cleanup. False-positive samples prevent known safe images from being
-reported again. Samples remain under the image-scan retention controls. Red
-user-data deletion removes case rows and case evidence for that
-user. When Red leaves a guild, the guild-removal listener removes that guild's
-case rows and case evidence.
-
-Firstpost seen authors are stored separately in `firstpost_seen.sqlite` under
-the cog data directory so large servers do not inflate Red Config.
-
-Honeypot also maintains `message_registry.sqlite`, a 14-day index of guild,
-channel, author, and message IDs observed through Discord Gateway events. It
-stores the observation timestamp, latest observed pin state, author kind, and an
-optional one-way spam fingerprint. It does not store message content or
-attachments. The registry powers automatic purge, duplicate-spam detection, and
-the managed Cleanup commands. User-data deletion, guild removal, and channel or
-thread deletion remove the matching registry rows.
-
-## Operational Notes
-
-- Bot owners, mods, admins, users with `Manage Server`, and users at or above the bot's top role are ignored
-- Purge and `[p]cleanup` use the durable Gateway-observed message registry;
-  they never scan channel history
-- `[p]cleanup messages <1-1000>` removes observed messages before the command in the
-  current channel; `[p]cleanup user <mention-or-id> <1-1000>` removes the
-  user's latest observed messages across the server
-- Cleanup covers only messages observed while Honeypot was loaded and enabled for
-  the guild, skips messages last observed as pinned by default, and requires the
-  consolidated NHCogs extension
-- When using review mode, a mute role is used as temporary containment until moderators decide
-- `!honeypot doctor` checks all permissions and configuration at once
-- Stats are per-server
+Captured case files are temporary. Selected TP and FP samples remain in the image dataset under its retention settings. Red user-data deletion and guild removal remove matching records and evidence, with unavailable Discord deletions queued for retry. Developers declare channel routing in [channel_routing.py](channel_routing.py).

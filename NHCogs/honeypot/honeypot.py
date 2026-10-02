@@ -1539,7 +1539,7 @@ class Honeypot(Cog):
             if not await self._research_dump_update_status(ctx, message, progress, started):
                 return
 
-    @research.command(name="dump", usage="<moderation_channel> <member_channel> [progress:true|false]")
+    @research.command(name="dump", usage="<channel_1> <channel_2> [progress]")
     async def research_dump(
         self,
         ctx: commands.Context,

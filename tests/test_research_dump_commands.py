@@ -101,7 +101,7 @@ class ResearchDumpCommandTests(unittest.IsolatedAsyncioTestCase):
                 for field in call.kwargs["embed"].fields
             )
             self.assertIn(
-                "??honeypot research dump <moderation_channel> <member_channel> [progress:true|false]",
+                "??honeypot research dump <channel_1> <channel_2> [progress]",
                 rendered,
             )
             self.assertIn("??honeypot research cancel", rendered)
