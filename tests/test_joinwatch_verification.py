@@ -678,10 +678,32 @@ class VerificationLifecycleTests(unittest.IsolatedAsyncioTestCase):
             _isolated_honeypot_modules(Path(directory)) as honeypot,
         ):
             runtime = _runtime(honeypot)
+            runtime.role.mention = "<@&51>"
             runtime.raw["joinwatch_pending_roles"].clear()
-            runtime.raw["joinwatch_pending_role_assignments"]["20"] = {"role_id": 51}
+            runtime.member.roles.clear()
+            runtime.raw["joinwatch_auto_role_enabled"] = True
+            runtime.cog._joinwatch_verification = runtime.owner
+            runtime.cog._get_member_or_fetch = mock.AsyncMock(return_value=runtime.member)
+            runtime.cog._increment_stat = mock.AsyncMock()
+            runtime.cog._record_daily_stat = mock.AsyncMock()
             try:
+                incident = honeypot.joinwatch_state.build_incident(
+                    runtime.member, now=runtime.now, expires_at=runtime.now + timedelta(hours=1),
+                    account_age_hours=240,
+                )
+                await runtime.owner.prepare_assignment(runtime.member, incident)
+                await honeypot.joinwatch_state.store_pending_assignment(
+                    runtime.cog, runtime.member, 51, runtime.now - timedelta(minutes=1),
+                    expires_at=runtime.now + timedelta(hours=1), incident=incident,
+                )
+                await _accept_manual_role(honeypot, runtime)
                 self.assertEqual((await runtime.owner.start(runtime.member)).status, "unavailable")
+                with mock.patch.object(honeypot.joinwatch.joinwatch_publication, "publish_joinwatch_incident", mock.AsyncMock()), mock.patch.object(honeypot.discord.utils, "format_dt", lambda value, style: value.isoformat(), create=True):
+                    await honeypot.joinwatch.joinwatch_auto_role_loop(runtime.cog)
+                self.assertEqual((await runtime.owner.start(runtime.member)).status, "unavailable")
+                self.assertIsNone(await runtime.owner.inspect(runtime.member))
+                self.assertIn(runtime.role, runtime.member.roles)
+                self.assertEqual(runtime.member.add_roles.await_count, 1)
                 runtime.member.remove_roles.assert_not_awaited()
             finally:
                 await runtime.owner.close()

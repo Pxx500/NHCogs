@@ -318,6 +318,17 @@ async def _apply_joinwatch_assignment_actions_locked(
         if await cog._is_protected_member(member):
             await joinwatch_state.delete_pending_assignment(cog, guild, member_id)
             continue
+        if role in member.roles:
+            active = (await cog.config.guild(guild).all()).get("joinwatch_pending_roles", {}).get(member_id_str)
+            await joinwatch_state.delete_pending_assignment(cog, guild, member_id)
+            if not (active is not None and active.get("role_id") == role_id
+                    and active.get("incident_id") == data.get("incident_id")):
+                await cog._record_operational_failure(
+                    guild.id, "joinwatch_preexisting_role",
+                    "Scheduled JoinWatch role work was cancelled because the member already holds the role without the same active incident",
+                    terminal=True,
+                )
+            continue
         if role not in member.roles:
             if not await cog._punitive_effect_allowed(guild):
                 await joinwatch_state.delete_pending_assignment(cog, guild, member_id)
