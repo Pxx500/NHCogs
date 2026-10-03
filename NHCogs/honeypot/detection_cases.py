@@ -3426,6 +3426,59 @@ class DetectionCaseStore:
             )
             return result.rowcount == 1
 
+    def transfer_joinwatch_role_to_pending_case(
+        self, guild_id: int, user_id: int, role_id: int, now: datetime
+    ) -> str | None:
+        """Keep actual bot ownership when JoinWatch settles before queued review work."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            owner = connection.execute(
+                """SELECT case_id FROM detection_role_ownership
+                   WHERE guild_id = ? AND user_id = ? AND role_id = ?""",
+                (guild_id, user_id, role_id),
+            ).fetchone()
+            if owner is not None:
+                return str(owner["case_id"])
+            superseding_types = tuple(item.value for item in MODERATION_SUPERSEDING_TYPES)
+            superseding_results = tuple(MODERATION_SUPERSEDING_RESULTS)
+            type_parameters = ",".join("?" for _ in superseding_types)
+            result_parameters = ",".join("?" for _ in superseding_results)
+            queued = connection.execute(
+                f"""SELECT c.case_id, c.status FROM detection_cases c
+                    JOIN detection_operations o ON o.case_id = c.case_id
+                    WHERE c.guild_id = ? AND c.user_id = ?
+                      AND c.status IN ('pending', 'resolving')
+                      AND o.operation_type = 'role_apply'
+                      AND o.idempotency_key = 'role-apply:' || c.case_id || ':' || ?
+                      AND o.status IN ('pending', 'running', 'failed')
+                      AND NOT EXISTS (
+                        SELECT 1 FROM detection_operations moderation
+                        WHERE moderation.case_id = c.case_id
+                          AND moderation.status = 'succeeded'
+                          AND moderation.operation_type IN ({type_parameters})
+                          AND moderation.result IN ({result_parameters}))
+                    ORDER BY c.created_at, c.case_id LIMIT 1""",
+                (guild_id, user_id, str(role_id), *superseding_types, *superseding_results),
+            ).fetchone()
+            if queued is None:
+                return None
+            case_id = str(queued["case_id"])
+            connection.execute(
+                """INSERT INTO detection_role_ownership
+                   (case_id, guild_id, user_id, role_id, applied_at) VALUES (?, ?, ?, ?, ?)""",
+                (case_id, guild_id, user_id, role_id, _to_timestamp(now)),
+            )
+            if queued["status"] == CaseStatus.RESOLVING.value:
+                connection.execute(
+                    """INSERT OR IGNORE INTO detection_operations
+                       (operation_id, case_id, message_sequence, operation_type, status, attempts,
+                        created_at, updated_at, retry_at, last_error, idempotency_key)
+                       VALUES (?, ?, NULL, 'role_release', 'pending', 0, ?, ?, NULL, NULL, ?)""",
+                    (str(uuid4()), case_id, _to_timestamp(now), _to_timestamp(now),
+                     f"role-release:{case_id}:{role_id}"),
+                )
+            return case_id
+
     def claim_operation(self, operation_id: str, now: datetime) -> OperationRecord | None:
         now_value = _to_timestamp(now)
         token = str(uuid4())

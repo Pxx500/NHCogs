@@ -9,7 +9,7 @@ from unittest import mock
 
 from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 from tests.test_daily_stats import _Embed
-from tests.test_settings_commands import _ScalarSetting
+from tests.test_settings_commands import _OverviewEmbed, _ScalarSetting
 
 
 class CaptchaCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -90,16 +90,42 @@ class CaptchaCommandTests(unittest.IsolatedAsyncioTestCase):
                 owner = SimpleNamespace(confirm_criteria=mock.AsyncMock())
                 cog = SimpleNamespace(_joinwatch_groups=owner, _channel_is_private=lambda *args: True)
                 view = honeypot.joinwatch_commands.CriteriaConfirmationView(cog, {}, 20)
-                click = SimpleNamespace(user=SimpleNamespace(id=21, guild_permissions=SimpleNamespace(manage_messages=True)), guild=SimpleNamespace(id=10), channel=object(), response=SimpleNamespace(defer=mock.AsyncMock()), edit_original_response=mock.AsyncMock(), message=SimpleNamespace(edit=mock.AsyncMock()))
+                click = SimpleNamespace(user=SimpleNamespace(id=21, guild_permissions=SimpleNamespace(manage_messages=True)), permissions=SimpleNamespace(manage_messages=True), guild=SimpleNamespace(id=10), channel=object(), response=SimpleNamespace(defer=mock.AsyncMock()), edit_original_response=mock.AsyncMock(), message=SimpleNamespace(edit=mock.AsyncMock()))
                 await view.children[0].callback(click)
                 owner.confirm_criteria.assert_not_awaited()
                 click.user.id = 20
-                click.user.guild_permissions.manage_messages = False
+                click.permissions.manage_messages = False
                 await view.children[0].callback(click)
                 owner.confirm_criteria.assert_not_awaited()
-                click.user.guild_permissions.manage_messages = True
+                click.permissions.manage_messages = True
                 await view.children[0].callback(click)
                 owner.confirm_criteria.assert_awaited_once_with(click.guild, {}, 20, True)
+
+    async def test_wave_controls_follow_channel_grants_and_denials_not_guild_permissions(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                for guild_allowed, channel_allowed in ((False, True), (True, False)):
+                    with self.subTest(guild_allowed=guild_allowed, channel_allowed=channel_allowed):
+                        record = {"id": "wave", "moderator_id": 20, "status": "paused", "criteria": {"minimum_accounts": 5, "join_window_minutes": 15, "creation_distance_hours": 6}}
+                        owner = SimpleNamespace(pause=mock.AsyncMock(return_value=record))
+                        cog = SimpleNamespace(_joinwatch_waves=owner, _channel_is_private=lambda *args: True)
+                        view = honeypot.joinwatch_commands.WaveControlView(cog, record)
+                        click = SimpleNamespace(
+                            user=SimpleNamespace(id=20, guild_permissions=SimpleNamespace(manage_messages=guild_allowed)),
+                            permissions=SimpleNamespace(manage_messages=channel_allowed),
+                            guild=SimpleNamespace(id=10), channel=object(),
+                            response=SimpleNamespace(defer=mock.AsyncMock()),
+                            edit_original_response=mock.AsyncMock(),
+                            message=SimpleNamespace(edit=mock.AsyncMock()),
+                        )
+                        with mock.patch.object(honeypot.discord, "Embed", _OverviewEmbed):
+                            await view.children[0].callback(click)
+                        if channel_allowed:
+                            owner.pause.assert_awaited_once_with(click.guild, "wave", 20, True)
+                            click.message.edit.assert_awaited_once()
+                        else:
+                            owner.pause.assert_not_awaited()
+                            click.message.edit.assert_not_awaited()
 
     async def test_verify_restoration_registers_shared_persistent_handler_without_publication(self):
         with TemporaryDirectory() as directory:

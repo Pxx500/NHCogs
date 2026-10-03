@@ -508,7 +508,7 @@ def _can_manage(interaction, owner_id, cog) -> bool:
     return (
         interaction.guild is not None
         and interaction.user.id == owner_id
-        and bool(getattr(getattr(interaction.user, "guild_permissions", None), "manage_messages", False))
+        and interaction.permissions.manage_messages
         and cog._channel_is_private(interaction.guild, interaction.channel)
     )
 

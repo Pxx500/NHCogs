@@ -255,6 +255,9 @@ async def _apply_joinwatch_assignment_actions_locked(
         member = await cog._get_member_or_fetch(guild, member_id)
         role = guild.get_role(role_id)
         if member is None:
+            if data.get("test"):
+                await joinwatch_state.delete_pending_assignment(cog, guild, member_id)
+                continue
             action_label, failed = await _execute_joinwatch_action(
                 cog,
                 guild,
@@ -338,12 +341,9 @@ async def _apply_joinwatch_assignment_actions_locked(
             try:
                 await member.add_roles(role, reason="Automated account status update.")
                 data["role_owned"] = True
-                await cog._record_daily_stat(
-                    guild,
-                    datetime.now(timezone.utc),
-                    "shadowbans",
-                )
-                await cog._increment_stat(guild, "joinwatch_auto_roles")
+                if not data.get("test") and not data.get("restore_incident"):
+                    await cog._record_daily_stat(guild, datetime.now(timezone.utc), "shadowbans")
+                    await cog._increment_stat(guild, "joinwatch_auto_roles")
             except discord.HTTPException:
                 await cog._increment_stat(guild, "joinwatch_auto_role_failures")
                 await _reschedule_joinwatch_assignment_retry(
@@ -675,21 +675,23 @@ async def _on_member_join_locked(cog, member: discord.Member) -> None:
     raw_config = await cog.config.guild(member.guild).all()
     guild_settings = GuildSettings.from_mapping(raw_config)
     owner = getattr(cog, "_joinwatch_verification", None)
-    if str(member.id) in raw_config.get("joinwatch_verified_members", {}):
+    member_key = str(member.id)
+    existing_incident = guild_settings.joinwatch_pending_role_assignments.get(
+        member_key
+    ) or guild_settings.joinwatch_pending_roles.get(member_key)
+    if existing_incident is None and member_key in raw_config.get("joinwatch_verified_members", {}):
         return
-    if not guild_settings.joinwatch_enabled:
+    if not guild_settings.joinwatch_enabled and existing_incident is None:
         return
-    await cog._increment_stat(member.guild, "joinwatch_total_joins")
+    if not (existing_incident and existing_incident.get("test")):
+        await cog._increment_stat(member.guild, "joinwatch_total_joins")
     channel = cog._get_text_channel_or_thread(member.guild, guild_settings.joinwatch_channel)
     now = datetime.now(timezone.utc)
     min_age = timedelta(hours=guild_settings.joinwatch_min_age_hours)
-    if member.created_at > now - min_age:
-        await cog._increment_stat(member.guild, "joinwatch_young_joins")
+    if member.created_at > now - min_age or existing_incident is not None:
+        if member.created_at > now - min_age and not (existing_incident and existing_incident.get("test")):
+            await cog._increment_stat(member.guild, "joinwatch_young_joins")
         hours = max(1, round((now - member.created_at).total_seconds() / 3600))
-        member_key = str(member.id)
-        existing_incident = guild_settings.joinwatch_pending_role_assignments.get(
-            member_key
-        ) or guild_settings.joinwatch_pending_roles.get(member_key)
         default_expires_at = now + timedelta(
             minutes=guild_settings.joinwatch_auto_role_timer_minutes
         )
@@ -701,6 +703,8 @@ async def _on_member_join_locked(cog, member: discord.Member) -> None:
             existing=existing_incident,
         )
         incident.setdefault("captcha_enabled", bool(raw_config.get("joinwatch_captcha_enabled")))
+        if existing_incident is not None:
+            incident["restore_incident"] = True
         if owner is not None and (incident.get("captcha_enabled") or incident.get("challenge")):
             await owner.prepare_assignment(member, incident)
         try:
@@ -710,10 +714,10 @@ async def _on_member_join_locked(cog, member: discord.Member) -> None:
             incident["expires_at"] = expires_at.isoformat()
         status = None
         if (
-            guild_settings.joinwatch_auto_role_enabled
-            and guild_settings.joinwatch_auto_role_id is not None
+            (guild_settings.joinwatch_auto_role_enabled or existing_incident is not None)
+            and incident.get("role_id", guild_settings.joinwatch_auto_role_id) is not None
         ):
-            role = member.guild.get_role(guild_settings.joinwatch_auto_role_id)
+            role = member.guild.get_role(incident.get("role_id", guild_settings.joinwatch_auto_role_id))
             if (
                 role is not None
                 and role not in member.roles
@@ -748,10 +752,8 @@ async def _on_member_join_locked(cog, member: discord.Member) -> None:
                         )
                         delay_minutes = random.randint(min_delay, max_delay)
                         apply_at = now + timedelta(minutes=delay_minutes)
-                        await cog._increment_stat(
-                            member.guild,
-                            "joinwatch_auto_roles_scheduled",
-                        )
+                        if not incident.get("test"):
+                            await cog._increment_stat(member.guild, "joinwatch_auto_roles_scheduled")
                     await joinwatch_state.store_pending_assignment(
                         cog,
                         member,
@@ -804,12 +806,9 @@ async def _on_member_join_locked(cog, member: discord.Member) -> None:
                     try:
                         await member.add_roles(role, reason="Automated account status update.")
                         incident["role_owned"] = True
-                        await cog._record_daily_stat(
-                            member.guild,
-                            datetime.now(timezone.utc),
-                            "shadowbans",
-                        )
-                        await cog._increment_stat(member.guild, "joinwatch_auto_roles")
+                        if not incident.get("test") and not incident.get("restore_incident"):
+                            await cog._record_daily_stat(member.guild, datetime.now(timezone.utc), "shadowbans")
+                            await cog._increment_stat(member.guild, "joinwatch_auto_roles")
                         await joinwatch_state.store_pending_role(
                             cog,
                             member,

@@ -72,14 +72,14 @@ def select_due_joinwatch_assignments(
 ) -> JoinwatchSelection:
     assignment_actions: list[JoinwatchSelectedAction] = []
     has_group_assignments = any(
-        isinstance(data, dict) and data.get("source") == "group"
+        isinstance(data, dict) and (data.get("source") == "group" or data.get("restore_incident"))
         for data in pending_assignments.values()
     )
     if assignments_enabled or has_group_assignments:
         for member_key_value, data in pending_assignments.items():
             member_key = str(member_key_value)
             if not assignments_enabled and (
-                not isinstance(data, dict) or data.get("source") != "group"
+                not isinstance(data, dict) or (data.get("source") != "group" and not data.get("restore_incident"))
             ):
                 assignment_actions.append(
                     JoinwatchSelectedAction(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -785,7 +786,15 @@ class ManualPunishmentController:
             newly_marked = await joinwatch_state.mark_manual_role_reason(
                 self.cog, member, {role.id for role, _entry in roles}
             )
-            return await self._apply_roles_locked(member, roles, moderator, reason, newly_marked)
+            outcomes = await self._apply_roles_locked(member, roles, moderator, reason, newly_marked)
+            store = getattr(self.cog, "_case_store", None)
+            if store is not None:
+                for outcome in outcomes:
+                    if outcome.role_id is not None and outcome.status in ("succeeded", "already_applied"):
+                        owner = await asyncio.to_thread(store.role_owner_case, member.guild.id, member.id, outcome.role_id)
+                        if owner is not None:
+                            await asyncio.to_thread(store.release_role_ownership, owner, outcome.role_id)
+            return outcomes
 
     async def _apply_roles_locked(
         self,

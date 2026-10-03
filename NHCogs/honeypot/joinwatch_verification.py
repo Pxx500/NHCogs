@@ -475,6 +475,12 @@ class JoinwatchVerification:
         if not await self.cog._punitive_effect_allowed(member.guild):
             return self._result("dry_run", entry)
         role = member.guild.get_role(entry["role_id"])
+        if (entry.get("role_owned") and entry["role_id"] not in entry.get("manual_role_reasons", [])
+                and role is not None and role in member.roles):
+            store = getattr(self.cog, "_case_store", None)
+            if store is not None:
+                await asyncio.to_thread(store.transfer_joinwatch_role_to_pending_case,
+                    member.guild.id, member.id, entry["role_id"], datetime.now(timezone.utc))
         retained = await self._independent_role_reason(member, entry["role_id"])
         if role is not None and role in member.roles and not retained:
             if not entry.get("role_owned"):

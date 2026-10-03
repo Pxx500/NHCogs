@@ -11,6 +11,7 @@ from unittest import mock
 
 from tests.harness import _isolated_honeypot_modules
 from tests.operations.test_role_apply import RoleApplyHandlerTests
+from tests.test_manual_punishment import _CommandTree, _source_message
 
 
 class VerificationTimerTests(unittest.TestCase):
@@ -140,6 +141,72 @@ def _remove_role(member, role):
     return True
 
 
+def _case_runtime(honeypot, directory):
+    runtime = _runtime(honeypot)
+    runtime.cog._case_store = honeypot.DetectionCaseStore(Path(directory) / "ownership.sqlite")
+    runtime.cog.bot.get_guild = lambda _guild_id: runtime.member.guild
+    runtime.cog._case_store.initialize()
+    case = runtime.cog._case_store.append_message(
+        honeypot.NewMessage(guild_id=10, user_id=20, channel_id=30, message_id=40,
+                            content="evidence", created_at=runtime.now,
+                            jump_url="https://discord.test/40", attachments=()), (),
+    ).case
+    operation = runtime.cog._case_store.ensure_operation(
+        case.case_id, honeypot.OperationType.ROLE_APPLY, f"role-apply:{case.case_id}:51"
+    )
+    runtime.cog._remove_review_mute_role = mock.AsyncMock(
+        side_effect=lambda member, role, reason: _remove_role(member, role)
+    )
+    return runtime, case, operation
+
+
+async def _apply_case(honeypot, runtime, operation):
+    store = runtime.cog._case_store
+    claimed = store.claim_operation(operation.operation_id, runtime.now)
+    context = RoleApplyHandlerTests._handler_context(honeypot, runtime.cog, claimed, runtime.now)
+    handler = importlib.import_module(f"{honeypot.__package__}.operations.role_apply")
+    outcome = await handler.role_apply_handler(runtime.cog, context)
+    store.complete_operation(claimed.operation_id, claimed.claim_token, runtime.now, outcome.result)
+
+
+async def _release_case(honeypot, runtime, case):
+    store = runtime.cog._case_store
+    RoleApplyHandlerTests._finish_case(honeypot, runtime.cog, case.case_id, runtime.now,
+        final_operations=(("role_release", f"role-release:{case.case_id}:51"),))
+    operation = next(item for item in store.get_case(case.case_id).operations
+                     if item.operation_type == honeypot.OperationType.ROLE_RELEASE)
+    claimed = store.claim_operation(operation.operation_id, runtime.now)
+    context = RoleApplyHandlerTests._handler_context(honeypot, runtime.cog, claimed, runtime.now)
+    handler = importlib.import_module(f"{honeypot.__package__}.operations.role_release")
+    await handler.role_release_handler(runtime.cog, context)
+
+
+async def _accept_manual_role(honeypot, runtime):
+    module = importlib.import_module(f"{honeypot.__package__}.manual_punishment")
+    runtime.role.name = "Containment"
+    runtime.role.position = 5
+    evidence = SimpleNamespace(id=900)
+    runtime.member.guild.get_channel = lambda channel_id: evidence if channel_id == 900 else None
+    runtime.raw.update(manual_evidence_channel=900,
+                       manual_punishment_roles={"51": {"source_channel_ids": [100]}})
+    runtime.cog.bot.tree = _CommandTree()
+    runtime.cog._channel_is_private = mock.Mock(return_value=True)
+    runtime.cog._missing_channel_permissions = mock.Mock(return_value=None)
+    source = _source_message(guild=runtime.member.guild)
+    interaction = SimpleNamespace(user=SimpleNamespace(id=99),
+                                  permissions=SimpleNamespace(manage_messages=True),
+                                  followup=SimpleNamespace(send=mock.AsyncMock()))
+    with mock.patch.object(module.publication, "create_private_audit", mock.AsyncMock(
+        return_value=SimpleNamespace(primary=SimpleNamespace(jump_url="https://discord.test/audit")))), \
+        mock.patch.object(module.publication, "finalize_private_audit", mock.AsyncMock()), \
+        mock.patch.object(module.publication, "publish_public_result", mock.AsyncMock(return_value=None)):
+        await module.ManualPunishmentController(runtime.cog).execute(
+            interaction, source, module.PunishmentSelection(role_ids=(51,)),
+            reason="Keep this restriction", mute_duration_label=None, mute_duration_seconds=None,
+        )
+    source.delete.assert_awaited_once()
+
+
 async def _question(runtime, *, now=None):
     result = await runtime.owner.start(runtime.member, now=now)
     if result.status == "preparing":
@@ -149,6 +216,78 @@ async def _question(runtime, *, now=None):
 
 
 class VerificationLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_queued_case_receives_joinwatch_role_ownership_before_captcha_settlement(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime, case, operation = _case_runtime(honeypot, directory)
+            try:
+                question = await _question(runtime)
+                second = await runtime.owner.submit(runtime.member, question.session_id, 0, 2)
+                passed = await runtime.owner.submit(runtime.member, second.session_id, 1, 2)
+                self.assertEqual(passed.status, "complete_restricted")
+                await _apply_case(honeypot, runtime, operation)
+                self.assertEqual(runtime.cog._case_store.owned_role_ids(case.case_id), (51,))
+                await _release_case(honeypot, runtime, case)
+                self.assertEqual(runtime.member.roles, [])
+            finally:
+                await runtime.owner.close()
+
+    async def test_accepted_manual_hold_survives_captcha_and_real_case_release(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime, case, operation = _case_runtime(honeypot, directory)
+            try:
+                await _apply_case(honeypot, runtime, operation)
+                await _accept_manual_role(honeypot, runtime)
+                question = await _question(runtime)
+                second = await runtime.owner.submit(runtime.member, question.session_id, 0, 2)
+                passed = await runtime.owner.submit(runtime.member, second.session_id, 1, 2)
+                self.assertEqual(passed.status, "complete_restricted")
+                await _release_case(honeypot, runtime, case)
+                self.assertIn(runtime.role, runtime.member.roles)
+                self.assertEqual(runtime.cog._case_store.owned_role_ids(case.case_id), ())
+            finally:
+                await runtime.owner.close()
+
+    async def test_manual_hold_blocks_queued_and_future_case_ownership(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime, case, operation = _case_runtime(honeypot, directory)
+            try:
+                await _accept_manual_role(honeypot, runtime)
+                await _apply_case(honeypot, runtime, operation)
+                self.assertEqual(runtime.cog._case_store.owned_role_ids(case.case_id), ())
+                question = await _question(runtime)
+                second = await runtime.owner.submit(runtime.member, question.session_id, 0, 2)
+                passed = await runtime.owner.submit(runtime.member, second.session_id, 1, 2)
+                self.assertEqual(passed.status, "complete_restricted")
+                await _release_case(honeypot, runtime, case)
+                store = runtime.cog._case_store
+                future = store.append_message(honeypot.NewMessage(
+                    guild_id=10, user_id=20, channel_id=30, message_id=41, content="new evidence",
+                    created_at=runtime.now + timedelta(seconds=1), jump_url="https://discord.test/41",
+                    attachments=()), ()).case
+                future_apply = store.ensure_operation(future.case_id, honeypot.OperationType.ROLE_APPLY,
+                                                      f"role-apply:{future.case_id}:51")
+                await _apply_case(honeypot, runtime, future_apply)
+                self.assertEqual(store.owned_role_ids(future.case_id), ())
+                await _release_case(honeypot, runtime, future)
+                self.assertIn(runtime.role, runtime.member.roles)
+            finally:
+                await runtime.owner.close()
+
+    async def test_failed_manual_role_add_preserves_valid_case_ownership(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime, case, operation = _case_runtime(honeypot, directory)
+            try:
+                await _apply_case(honeypot, runtime, operation)
+                runtime.member.roles.clear()
+                error = honeypot.discord.HTTPException("forbidden")
+                error.status = 403
+                runtime.member.add_roles.side_effect = error
+                await _accept_manual_role(honeypot, runtime)
+                self.assertEqual(runtime.cog._case_store.owned_role_ids(case.case_id), (51,))
+                self.assertEqual(runtime.raw["joinwatch_pending_roles"]["20"].get("manual_role_reasons"), [])
+            finally:
+                await runtime.owner.close()
+
     async def test_explicit_enable_adopts_existing_timer_but_startup_does_not(self):
         with (
             TemporaryDirectory() as directory,
