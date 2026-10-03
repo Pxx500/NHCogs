@@ -5,7 +5,7 @@ from __future__ import annotations
 import discord
 from redbot.core import commands
 
-from .captcha_views import PANEL_TEXT, VerifyPanelView
+from .captcha_views import PANEL_TEXT, CaptchaPracticeView, VerifyPanelView
 from .settings import GuildSettings
 
 
@@ -76,16 +76,30 @@ async def test(cog, ctx, member) -> None:
     if not _private(cog, ctx):
         await ctx.send("Run this command in a private moderator channel")
         return
+    if member.bot:
+        await ctx.send("Bots can't take the CAPTCHA test", allowed_mentions=discord.AllowedMentions.none())
+        return
+    if await cog._is_protected_member(member):
+        await ctx.send(
+            "This member is protected from restrictions, but can still try the CAPTCHA",
+            view=CaptchaPracticeView(cog, ctx.guild.id, member.id),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
     result = await cog._joinwatch_verification.enroll_test(member, moderator_id=ctx.author.id)
     descriptions = {
         "active": "This member already has an active check. It hasn't been reset",
+        "pending": "This member has a pending role assignment. It hasn't been reset",
+        "ambiguous": "This member already has a restriction outside this check. It hasn't been changed",
+        "unavailable": "The test can't start. Check the configured JoinWatch role and the bot's role permissions",
+        "protected": "This member is now protected from restrictions. Run the command again to try the CAPTCHA without role changes",
         "preparing": "Test check registered. The member can use Verify while the questions prepare",
         "enrolled": "Test check registered. The member can use Verify",
         "question": "Test check ready. The member can use Verify",
         "complete": "Test check ready. The member can use Verify",
         "dry_run": "Test is in dry-run mode. No role changes were made",
     }
-    await ctx.send(descriptions.get(result.status, "The test couldn't be started. Check the moderator log"), allowed_mentions=discord.AllowedMentions.none())
+    await ctx.send(descriptions.get(result.status, "The test couldn't be started"), allowed_mentions=discord.AllowedMentions.none())
 
 
 async def status(cog, ctx, member) -> None:

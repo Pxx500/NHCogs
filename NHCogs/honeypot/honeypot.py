@@ -2408,7 +2408,7 @@ class Honeypot(Cog):
 
     @captcha.command(name="test", usage="<member>")
     async def captcha_test(self, ctx: commands.Context, member: discord.Member) -> None:
-        """Start a repeatable test without automatic punishment or public counters"""
+        """Test restrictions, or offer CAPTCHA-only practice to protected members"""
         return await captcha_commands.test(self, ctx, member)
 
     @captcha.command(name="status", usage="<member>")

@@ -8,8 +8,17 @@ import secrets
 
 import discord
 
+from .captcha import generate_challenge, render_challenge
+
 VERIFY_CUSTOM_ID = "honeypot:captcha:verify"
 PANEL_TEXT = "Complete the quick check below to lift your account restriction."
+
+
+def _question_payload(question, stage: int) -> dict:
+    return {
+        "content": f"Quick check: {stage + 1} of 2\n{question.prompt}",
+        "attachments": [discord.File(io.BytesIO(question.image_png), filename="quick-check.png")],
+    }
 
 
 def _deadline_text(result) -> str:
@@ -27,8 +36,8 @@ async def show_result(cog, interaction, result) -> None:
     view = None
     attachments = []
     if result.status == "question":
-        content = f"Quick check: {result.stage + 1} of 2\n{result.question.prompt}"
-        attachments = [discord.File(io.BytesIO(result.question.image_png), filename="quick-check.png")]
+        payload = _question_payload(result.question, result.stage)
+        content, attachments = payload["content"], payload["attachments"]
         view = CaptchaQuestionView(cog, interaction.guild.id, interaction.user.id, result)
     elif result.status == "incorrect":
         content = "That answer wasn't correct. You can try one more full check."
@@ -72,6 +81,67 @@ class CaptchaView(discord.ui.View):
     async def on_error(self, interaction, error, item) -> None:
         self.cog._support.schedule_error(source="Honeypot", action="CAPTCHA interaction", error=error)
         await interaction.edit_original_response(content="We couldn't complete your check. Please DM a moderator for help", view=None, attachments=[], allowed_mentions=discord.AllowedMentions.none())
+
+
+class CaptchaPracticeView(CaptchaView):
+    """Short-lived practice UI with no access to JoinWatch enrollment or release."""
+
+    def __init__(self, cog, guild_id: int, user_id: int, *, questions=None, stage=0, failures=0):
+        super().__init__(timeout=300)
+        self.cog, self.guild_id, self.user_id = cog, guild_id, user_id
+        self.questions, self.stage, self.failures = questions, stage, failures
+        self._consumed = False
+        if questions is None:
+            button = discord.ui.Button(
+                label="Try CAPTCHA" if failures == 0 else "Try again",
+                style=discord.ButtonStyle.primary,
+                custom_id=secrets.token_urlsafe(24),
+            )
+            button.callback = self.answer
+            self.add_item(button)
+        else:
+            for choice in range(6):
+                button = discord.ui.Button(label=str(choice + 1), style=discord.ButtonStyle.secondary, row=choice // 3, custom_id=secrets.token_urlsafe(24))
+
+                async def answer(interaction, selected=choice):
+                    await self.answer(interaction, selected)
+
+                button.callback = answer
+                self.add_item(button)
+
+    async def answer(self, interaction, choice=None) -> None:
+        invitation = self.questions is None and self.failures == 0
+        await interaction.response.defer(ephemeral=True, thinking=invitation)
+        if interaction.guild is None or interaction.guild.id != self.guild_id or interaction.user.id != self.user_id:
+            if invitation:
+                await interaction.edit_original_response(content="This practice is for the selected member only")
+            return
+        if self._consumed:
+            if invitation:
+                await interaction.edit_original_response(content="This practice has already started. Use your private question reply")
+            return
+        # Claim before rendering so simultaneous clicks cannot start extra attempts.
+        self._consumed = True
+        next_view = None
+        payload = {"content": "Practice passed! No roles or restrictions were changed", "attachments": []}
+        if self.questions is None:
+            def prepare():
+                return tuple((item["answer"], render_challenge(item)) for item in (generate_challenge(), generate_challenge()))
+
+            questions = await asyncio.to_thread(prepare)
+            next_view = CaptchaPracticeView(self.cog, self.guild_id, self.user_id, questions=questions, failures=self.failures)
+        elif choice != self.questions[self.stage][0]:
+            if self.failures == 0:
+                payload["content"] = "That answer wasn't correct. You can try one more full practice"
+                next_view = CaptchaPracticeView(self.cog, self.guild_id, self.user_id, failures=1)
+            else:
+                payload["content"] = "Both practice attempts are used up. Run the test command again to play again. No restrictions were changed"
+        elif self.stage == 0:
+            next_view = CaptchaPracticeView(self.cog, self.guild_id, self.user_id, questions=self.questions, stage=1, failures=self.failures)
+        if next_view is not None and next_view.questions is not None:
+            payload = _question_payload(next_view.questions[next_view.stage][1], next_view.stage)
+        await interaction.edit_original_response(**payload, view=next_view, allowed_mentions=discord.AllowedMentions.none())
+        self.stop()
 
 
 class VerifyPanelView(CaptchaView):

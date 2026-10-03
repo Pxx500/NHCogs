@@ -95,13 +95,22 @@ def _runtime(honeypot):
     }
     config = SimpleNamespace(all=mock.AsyncMock(side_effect=lambda: copy.deepcopy(raw)))
 
-    async def get_raw(*path, default=None):
+    async def get_raw(*path, default=...):
+        if default is ...:
+            default = copy.deepcopy(dict(honeypot.settings.DEFAULTS))
+            for key in path:
+                default = default.get(key) if isinstance(default, dict) else None
         value = raw
         for key in path:
             if not isinstance(value, dict) or key not in value:
                 return copy.deepcopy(default)
             value = value[key]
-        return copy.deepcopy(value)
+        value = copy.deepcopy(value)
+        if isinstance(default, dict) and isinstance(value, dict):
+            # Red merges retrieved mappings into an explicitly supplied default.
+            default.update(value)
+            return default
+        return value
 
     config.get_raw = get_raw
     config.joinwatch_group_admission_times = SimpleNamespace(
@@ -726,6 +735,31 @@ class VerificationLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     "stale",
                 )
                 runtime.member.remove_roles.assert_not_awaited()
+            finally:
+                await runtime.owner.close()
+
+    async def test_successful_test_can_be_repeated_without_restoring_finished_incident(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime = _runtime(honeypot)
+            runtime.raw["joinwatch_pending_roles"].clear()
+            runtime.member.roles.clear()
+            captcha = importlib.import_module(f"{honeypot.__package__}.captcha")
+            random_source = SimpleNamespace(
+                choice=lambda choices: choices[0], randint=lambda low, high: low,
+                randrange=lambda stop: 2, shuffle=lambda items: None,
+            )
+            try:
+                with mock.patch.object(captcha.random, "SystemRandom", return_value=random_source):
+                    for _attempt in range(2):
+                        self.assertEqual((await runtime.owner.enroll_test(runtime.member)).status, "enrolled")
+                        self.assertIn(runtime.role, runtime.member.roles)
+                        self.assertIsNotNone(await runtime.owner.inspect(runtime.member))
+                        question = await _question(runtime)
+                        second = await runtime.owner.submit(runtime.member, question.session_id, 0, 2)
+                        completed = await runtime.owner.submit(runtime.member, second.session_id, 1, 2)
+                        self.assertEqual(completed.status, "complete")
+                        self.assertNotIn(runtime.role, runtime.member.roles)
+                        self.assertIsNone(await runtime.owner.inspect(runtime.member))
             finally:
                 await runtime.owner.close()
 

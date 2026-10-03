@@ -1,5 +1,6 @@
 """CAPTCHA configuration and moderator command contracts."""
 
+import copy
 import importlib
 import unittest
 from pathlib import Path
@@ -8,11 +9,53 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
+from tests.test_captcha_views import interaction
 from tests.test_daily_stats import _Embed
+from tests.test_joinwatch_verification import _runtime
 from tests.test_settings_commands import _OverviewEmbed, _ScalarSetting
 
 
 class CaptchaCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_protected_member_can_practice_twice_without_changing_existing_restrictions(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime = _runtime(honeypot)
+            runtime.cog._is_protected_member.return_value = True
+            runtime.cog._channel_is_private = lambda *args: True
+            runtime.cog._joinwatch_verification = runtime.owner
+            original = copy.deepcopy(runtime.raw)
+            ctx = SimpleNamespace(guild=runtime.member.guild, channel=object(), author=SimpleNamespace(id=99), send=mock.AsyncMock())
+            captcha = importlib.import_module("NHCogs.honeypot.captcha")
+            rng = SimpleNamespace(choice=lambda choices: choices[0], randint=lambda low, high: low, randrange=lambda stop: 2, shuffle=lambda items: None)
+            try:
+                with mock.patch.object(captcha.random, "SystemRandom", return_value=rng):
+                    for _ in range(2):
+                        await honeypot.captcha_commands.test(runtime.cog, ctx, runtime.member)
+                        payload = ctx.send.await_args.kwargs
+                        self.assertIn("view", payload, "Protected members should get a practice invitation")
+                        invitation = payload["view"]
+                        self.assertIn("protected", ctx.send.await_args.args[0].lower())
+                        stranger = interaction(user_id=21)
+                        await invitation.children[0].callback(stranger)
+                        self.assertNotIn("attachments", stranger.edit_original_response.await_args.kwargs)
+                        click = interaction()
+                        await invitation.children[0].callback(click)
+                        click.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+                        for stage in (1, 2):
+                            question = click.edit_original_response.await_args.kwargs
+                            self.assertIn(f"{stage} of 2", question["content"])
+                            self.assertEqual(len(question["view"].children), 6)
+                            self.assertTrue(question["attachments"])
+                            click = interaction()
+                            await question["view"].children[2].callback(click)
+                        result = click.edit_original_response.await_args.kwargs
+                        self.assertIn("passed", result["content"].lower())
+                        self.assertIsNone(result["view"])
+                        self.assertEqual(runtime.raw, original)
+                        runtime.member.add_roles.assert_not_awaited()
+                        runtime.member.remove_roles.assert_not_awaited()
+            finally:
+                await runtime.owner.close()
+
     async def test_explicit_enable_admits_existing_timers_instead_of_startup_restoration(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
