@@ -84,7 +84,6 @@ def _runtime(honeypot):
             "20": {
                 "incident_id": "incident",
                 "role_id": 51,
-                "role_owned": True,
                 "captcha_enabled": True,
                 "expires_at": (now + timedelta(hours=1)).isoformat(),
                 "verification_state": "active",
@@ -374,23 +373,36 @@ class VerificationLifecycleTests(unittest.IsolatedAsyncioTestCase):
             _isolated_honeypot_modules(Path(directory)) as honeypot,
         ):
             runtime = _runtime(honeypot)
-            entry = runtime.raw["joinwatch_pending_roles"]["20"]
-            entry.update({"captcha_enabled": False, "failures": 1, "stage": 1})
-            deadline = entry["expires_at"]
-            original = copy.deepcopy(entry["challenge"])
+            deadline = runtime.now + timedelta(hours=1)
+            runtime.raw["joinwatch_pending_roles"]["20"] = {
+                "role_id": 51, "applied_at": runtime.now.isoformat(),
+                "expires_at": deadline.isoformat(),
+            }
+            captcha = importlib.import_module(f"{honeypot.__package__}.captcha")
+            random_source = SimpleNamespace(
+                choice=lambda choices: choices[0], randint=lambda low, high: low,
+                randrange=lambda stop: 2, shuffle=lambda items: None,
+            )
             try:
                 await runtime.owner.restore()
                 self.assertEqual((await runtime.owner.start(runtime.member)).status, "unavailable")
-                self.assertEqual(await runtime.owner.enable_existing(runtime.member.guild), 1)
+                with mock.patch.object(captcha.random, "SystemRandom", return_value=random_source):
+                    self.assertEqual(await runtime.owner.enable_existing(runtime.member.guild), 1)
+                    question = await _question(runtime)
+                    incorrect = await runtime.owner.submit(runtime.member, question.session_id, 0, 0)
+                    self.assertEqual(incorrect.status, "incorrect")
+                    question = await _question(runtime)
+                    second = await runtime.owner.submit(runtime.member, question.session_id, 0, 2)
+                    self.assertEqual(await runtime.owner.enable_existing(runtime.member.guild), 1)
                 question = await _question(runtime)
                 self.assertEqual(question.stage, 1)
                 self.assertEqual(question.attempts_remaining, 1)
-                self.assertEqual(
-                    runtime.raw["joinwatch_pending_roles"]["20"]["challenge"], original
-                )
-                self.assertEqual(
-                    runtime.raw["joinwatch_pending_roles"]["20"]["expires_at"], deadline
-                )
+                self.assertEqual(question.question, second.question)
+                self.assertEqual(question.deadline, deadline)
+                passed = await runtime.owner.submit(runtime.member, question.session_id, 1, 2)
+                self.assertEqual(passed.status, "complete")
+                self.assertNotIn(runtime.role, runtime.member.roles)
+                self.assertIsNone(await runtime.owner.inspect(runtime.member))
                 runtime.member.add_roles.assert_not_awaited()
             finally:
                 await runtime.owner.close()

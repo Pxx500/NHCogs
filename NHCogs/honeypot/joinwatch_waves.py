@@ -32,7 +32,7 @@ CRITICAL_CONFIGURATION = (
     "captcha_channel", "captcha_log_channel", "captcha_panel_channel_id", "captcha_panel_message_id", "dry_run",
 )
 ACTIVE_WAVE_STATUSES = {"running", "paused", "rolling_back"}
-ALREADY_HANDLED = {"active", "verified"}
+ALREADY_HANDLED = {"active", "pending", "verified"}
 SETTLED_ENTRY_STATUSES = {"notified", "notification_unknown", "skipped", "released", "error"}
 
 
@@ -186,7 +186,7 @@ class JoinwatchWaves:
                 continue
             member = guild.get_member(int(uid))
             active = await self.cog._joinwatch_verification.inspect(member) if member else None
-            if active and active.get("incident_id") == entry.get("incident_id") and active.get("wave_id") == record["id"] and active.get("source") == "wave" and active.get("role_owned") and any(role.id == active["role_id"] for role in member.roles):
+            if active and active.get("incident_id") == entry.get("incident_id") and active.get("wave_id") == record["id"] and active.get("source") == "wave" and any(role.id == active["role_id"] for role in member.roles):
                 entry["status"] = "enrolled"
 
     async def attach_message(self, guild, wave_id, channel_id, message_id):

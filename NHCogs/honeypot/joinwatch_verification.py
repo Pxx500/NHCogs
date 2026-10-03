@@ -116,7 +116,7 @@ class JoinwatchVerification:
         if entry:
             return self._result("active", entry)
         if str(member.id) in settings.get("joinwatch_pending_role_assignments", {}):
-            return VerificationResult("active")
+            return VerificationResult("pending")
         role = member.guild.get_role(settings.get("joinwatch_auto_role_id"))
         if role is None:
             return VerificationResult("unavailable")
@@ -180,19 +180,27 @@ class JoinwatchVerification:
     async def cancel_wave_preparation(self, guild, wave_id) -> int:
         """Retire this wave's unactivated work without changing any active penalty."""
         self._cancelled_waves.add((guild.id, wave_id))
-        keys = [key for key, entry in self._planned.items()
-                if key[0] == guild.id and entry.get("source") == "wave" and entry.get("wave_id") == wave_id]
+        pending = await self.cog.config.guild(guild).get_raw("joinwatch_pending_role_assignments", default={})
+        keys = {key for key, entry in self._planned.items()
+                if key[0] == guild.id and entry.get("source") == "wave" and entry.get("wave_id") == wave_id}
+        keys.update((guild.id, int(user_id)) for user_id, entry in pending.items()
+                    if entry.get("source") == "wave" and entry.get("wave_id") == wave_id)
         cancelled = 0
         for key in keys:
             async with joinwatch_state.member_lock(self.cog, guild.id, key[1]):
+                discarded = []
                 entry = self._planned.get(key)
-                if entry is None or entry.get("source") != "wave" or entry.get("wave_id") != wave_id:
-                    continue
-                self._planned.pop(key)
-                preparation_key = (guild.id, key[1], entry["incident_id"], entry.get("failures", 0))
-                self._deleted_challenges.add(preparation_key)
-                self.preparation.forget(preparation_key)
-                cancelled += 1
+                if entry is not None and entry.get("source") == "wave" and entry.get("wave_id") == wave_id:
+                    discarded.append(self._planned.pop(key))
+                async with self.cog.config.guild(guild).joinwatch_pending_role_assignments() as assignments:
+                    entry = assignments.get(str(key[1]))
+                    if entry is not None and entry.get("source") == "wave" and entry.get("wave_id") == wave_id:
+                        discarded.append(assignments.pop(str(key[1])))
+                for entry in discarded:
+                    preparation_key = (guild.id, key[1], entry["incident_id"], entry.get("failures", 0))
+                    self._deleted_challenges.add(preparation_key)
+                    self.preparation.forget(preparation_key)
+                cancelled += bool(discarded)
         return cancelled
 
     async def enroll_prepared(self, member, *, source="wave", reasons=(), wave_id=None):  # noqa: PLR0911 - enrollment validation precedes effects
@@ -218,35 +226,37 @@ class JoinwatchVerification:
                 return VerificationResult("dry_run")
             now = datetime.now(timezone.utc)
             entry = dict(entry)
+            entry.setdefault("expires_at", (now + timedelta(minutes=settings.get("joinwatch_auto_role_timer_minutes", 1440))).isoformat())
             entry.update(
                 {
-                    "applied_at": now.isoformat(),
-                    "expires_at": (
-                        now
-                        + timedelta(minutes=settings.get("joinwatch_auto_role_timer_minutes", 1440))
-                    ).isoformat(),
                     "verification_state": "enrolling",
-                    "role_owned": False,
                     "member_id": member.id,
                 }
             )
-            await self._save(member, entry)
+            self._planned[key] = entry
+            await joinwatch_state.store_pending_assignment(
+                self.cog, member, entry["role_id"], now,
+                expires_at=datetime.fromisoformat(entry["expires_at"]), incident=entry,
+            )
             role = member.guild.get_role(entry["role_id"])
             try:
                 await member.add_roles(role, reason="Automated account status update.")
             except discord.HTTPException as error:
                 if getattr(error, "status", None) in (400, 403, 404):
-                    await joinwatch_state.delete_pending_role(self.cog, member.guild, member.id)
-                await self._audit(member, "CAPTCHA restriction application failed")
+                    await joinwatch_state.delete_pending_assignment(self.cog, member.guild, member.id)
+                    await self._audit(member, "CAPTCHA restriction application failed")
+                else:
+                    await self._audit(member, "CAPTCHA restriction outcome needs moderator reconciliation")
                 return self._result("error", entry)
             entry.update(
                 {
                     "verification_state": "active",
-                    "role_owned": True,
+                    "applied_at": now.isoformat(),
                     "effect_at": datetime.now(timezone.utc).isoformat(),
                 }
             )
-            await self._save(member, entry, expected=entry["incident_id"])
+            await self._save(member, entry)
+            await joinwatch_state.delete_pending_assignment(self.cog, member.guild, member.id)
             self._planned.pop(key, None)
             await self._record_enrollment(member.guild, entry)
             await self._audit(member, f"CAPTCHA enrolled ({source})")
@@ -297,7 +307,7 @@ class JoinwatchVerification:
             if not settings.get("joinwatch_groups_enabled"):
                 return VerificationResult("unavailable")
             allowed = await self.eligibility(member)
-            if allowed.status not in ("eligible", "active"):
+            if allowed.status not in ("eligible", "active", "pending"):
                 return allowed
             existing = settings.get("joinwatch_pending_roles", {}).get(str(member.id))
             assignment = settings.get("joinwatch_pending_role_assignments", {}).get(str(member.id))
@@ -314,7 +324,7 @@ class JoinwatchVerification:
                         member.guild
                     ).joinwatch_pending_role_assignments() as entries:
                         entries[str(member.id)] = entry
-                return self._result("active", entry)
+                return self._result("active" if existing else "pending", entry)
             if not await self._group_configuration_ready(member.guild):
                 return VerificationResult("unavailable")
             now = datetime.now(timezone.utc)
@@ -382,7 +392,7 @@ class JoinwatchVerification:
 
     async def check_scheduled_group_assignment(self, guild, user_id, entry) -> bool:
         """Discard an unfulfilled group-only assignment if its verification route is gone."""
-        if (entry.get("test") or entry.get("applied_at") or entry.get("role_owned")
+        if (entry.get("test") or entry.get("applied_at")
                 or entry.get("restore_incident") or "age" in entry.get("reasons", [])):
             return True
         if await self._group_configuration_ready(guild):
@@ -402,8 +412,6 @@ class JoinwatchVerification:
                 return self._result("protected", entry)
             if entry.get("verification_state") == "release_pending":
                 return await self._release_locked(member, entry)
-            if entry.get("verification_state") == "enrolling":
-                return self._result("error", entry)
             if not entry.get("test") and datetime.fromisoformat(entry["expires_at"]) <= now:
                 return self._result("unavailable", entry)
             if entry.get("failures", 0) >= MAX_ATTEMPTS:
@@ -525,7 +533,7 @@ class JoinwatchVerification:
         if not await self.cog._punitive_effect_allowed(member.guild):
             return self._result("dry_run", entry)
         role = member.guild.get_role(entry["role_id"])
-        if (entry.get("role_owned") and entry["role_id"] not in entry.get("manual_role_reasons", [])
+        if (entry["role_id"] not in entry.get("manual_role_reasons", [])
                 and role is not None and role in member.roles):
             store = getattr(self.cog, "_case_store", None)
             if store is not None:
@@ -533,8 +541,6 @@ class JoinwatchVerification:
                     member.guild.id, member.id, entry["role_id"], datetime.now(timezone.utc))
         retained = await self._independent_role_reason(member, entry["role_id"])
         if role is not None and role in member.roles and not retained:
-            if not entry.get("role_owned"):
-                return self._result("ambiguous", entry)
             if self.cog._missing_role_assignment_permission(member.guild, role):
                 return self._result("release_pending", entry)
             try:
@@ -597,7 +603,6 @@ class JoinwatchVerification:
                 "source",
                 "wave_id",
                 "role_id",
-                "role_owned",
                 "verification_state",
                 "test",
                 "failures",
@@ -744,7 +749,7 @@ class JoinwatchVerification:
             async with joinwatch_state.member_lock(self.cog, guild.id, int(user_id)):  # noqa: SIM117 - acquire member ownership before the Config context
                 async with self.cog.config.guild(guild).joinwatch_pending_roles() as entries:
                     entry = entries.get(user_id)
-                    if entry is None or entry.get("verification_state") == "enrolling":
+                    if entry is None:
                         continue
                     entry["captcha_enabled"] = True
                     entry.setdefault("incident_id", secrets.token_hex(16))

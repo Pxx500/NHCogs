@@ -170,7 +170,7 @@ class JoinwatchRejoinTests(unittest.IsolatedAsyncioTestCase):
                 config["joinwatch_auto_role_action"] = "ban"
                 runtime.pending_roles["200"] = {
                     "role_id": 501, "incident_id": "test", "test": True,
-                    "source": "test", "role_owned": True,
+                    "source": "test",
                     "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
                 }
                 runtime.guild.ban = mock.AsyncMock()
@@ -201,7 +201,7 @@ class JoinwatchRejoinTests(unittest.IsolatedAsyncioTestCase):
                 deadline = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
                 runtime.pending_roles["200"] = {
                     "role_id": 501, "incident_id": "wave", "source": "wave",
-                    "role_owned": True, "expires_at": deadline, "failures": 1, "stage": 1,
+                    "expires_at": deadline, "failures": 1, "stage": 1,
                     "captcha_enabled": True,
                 }
                 runtime.cog._joinwatch_verification = None

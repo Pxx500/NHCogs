@@ -84,11 +84,4 @@ async def _role_release_locked(cog: Honeypot, context: OperationContext) -> Oper
 async def _joinwatch_retains_role(cog, guild, user_id, role_id):
     pending_roles = await cog.config.guild(guild).joinwatch_pending_roles()
     pending = pending_roles.get(str(user_id))
-    if pending is None or pending.get("role_id") != role_id:
-        return False
-    if not pending.get("role_owned"):
-        async with cog.config.guild(guild).joinwatch_pending_roles() as entries:
-            current = entries.get(str(user_id))
-            if current is not None and current.get("role_id") == role_id:
-                current["role_owned"] = True
-    return True
+    return pending is not None and pending.get("role_id") == role_id

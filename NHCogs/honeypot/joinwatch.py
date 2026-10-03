@@ -342,7 +342,6 @@ async def _apply_joinwatch_assignment_actions_locked(
                 continue
             try:
                 await member.add_roles(role, reason="Automated account status update.")
-                data["role_owned"] = True
                 if not data.get("test") and not data.get("restore_incident"):
                     await cog._record_daily_stat(guild, datetime.now(timezone.utc), "shadowbans")
                     await cog._increment_stat(guild, "joinwatch_auto_roles")
@@ -412,7 +411,7 @@ async def _apply_joinwatch_role_actions(
             )
             if current is None or current != selected_action.data or current.get("test"):
                 continue
-            if current.get("verification_state") in ("release_pending", "enrolling"):
+            if current.get("verification_state") == "release_pending":
                 continue
             await _apply_joinwatch_role_actions_locked(
                 cog,
@@ -678,9 +677,18 @@ async def _on_member_join_locked(cog, member: discord.Member) -> None:
     guild_settings = GuildSettings.from_mapping(raw_config)
     owner = getattr(cog, "_joinwatch_verification", None)
     member_key = str(member.id)
-    existing_incident = guild_settings.joinwatch_pending_role_assignments.get(
-        member_key
-    ) or guild_settings.joinwatch_pending_roles.get(member_key)
+    active_incident = guild_settings.joinwatch_pending_roles.get(member_key)
+    pending_incident = guild_settings.joinwatch_pending_role_assignments.get(member_key)
+    existing_incident = active_incident or pending_incident
+    if active_incident is not None and pending_incident is not None and active_incident.get("incident_id") == pending_incident.get("incident_id"):
+        existing_incident = dict(active_incident)
+        existing_incident["join_count"] = pending_incident.get("join_count", active_incident.get("join_count", 0))
+    if active_incident is None and existing_incident is not None and existing_incident.get("source") in ("wave", "test"):
+        await cog._record_operational_failure(
+            member.guild.id, "joinwatch_enrollment_reconciliation",
+            "Interrupted CAPTCHA role work needs moderator reconciliation before another enrollment",
+        )
+        return
     if existing_incident is None and member_key in raw_config.get("joinwatch_verified_members", {}):
         return
     if not guild_settings.joinwatch_enabled and existing_incident is None:
@@ -706,9 +714,7 @@ async def _on_member_join_locked(cog, member: discord.Member) -> None:
         )
         incident.setdefault("captcha_enabled", bool(raw_config.get("joinwatch_captcha_enabled")))
         if existing_incident is not None:
-            incident["restore_incident"] = bool(
-                existing_incident.get("applied_at") or existing_incident.get("role_owned")
-            )
+            incident["restore_incident"] = active_incident is not None
         if owner is not None and (incident.get("captcha_enabled") or incident.get("challenge")):
             await owner.prepare_assignment(member, incident)
         try:
@@ -809,7 +815,6 @@ async def _on_member_join_locked(cog, member: discord.Member) -> None:
                 else:
                     try:
                         await member.add_roles(role, reason="Automated account status update.")
-                        incident["role_owned"] = True
                         if not incident.get("test") and not incident.get("restore_incident"):
                             await cog._record_daily_stat(member.guild, datetime.now(timezone.utc), "shadowbans")
                             await cog._increment_stat(member.guild, "joinwatch_auto_roles")

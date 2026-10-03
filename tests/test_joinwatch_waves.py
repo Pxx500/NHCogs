@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from tests.harness import _isolated_honeypot_modules
 
@@ -62,7 +62,7 @@ class _Lifecycle:
         if member.id not in self.prepared:
             raise AssertionError("Restrictions must wait for both questions")
         self.entries[member.id] = {"incident_id": str(member.id), "wave_id": kwargs["wave_id"],
-                                   "source": "wave", "ready": True, "role_owned": True, "role_id": 77}
+                                   "source": "wave", "ready": True, "role_id": 77}
         member.roles.append(SimpleNamespace(id=77))
         return SimpleNamespace(status="enrolled", incident_id=str(member.id))
 
@@ -186,6 +186,60 @@ def _real_lifecycle_fixture(honeypot, groups, directory):
 
 
 class JoinwatchWaveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_interrupted_wave_role_application_is_not_an_active_timer_or_auto_punishment(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            groups = importlib.import_module("NHCogs.honeypot.joinwatch_groups")
+            waves = importlib.import_module("NHCogs.honeypot.joinwatch_waves")
+            cog, guild, cfg, lifecycle, ids, now, _, members, role = _real_lifecycle_fixture(honeypot, groups, directory)
+            configuration = await cfg.all()
+            configuration.update(joinwatch_auto_role_action="ban", joinwatch_auto_role_enabled=True)
+            cfg.all = AsyncMock(side_effect=lambda: {
+                **configuration, "joinwatch_pending_roles": cfg.joinwatch_pending_roles.value,
+                "joinwatch_pending_role_assignments": cfg.joinwatch_pending_role_assignments.value,
+            })
+            entered = asyncio.Event()
+            reply = asyncio.Event()
+            member = members[ids[0]]
+
+            async def lost_role_response(added_role, **kwargs):
+                member.roles.append(added_role)
+                entered.set()
+                await reply.wait()
+                raise honeypot.discord.HTTPException("role response unavailable")
+
+            member.add_roles = AsyncMock(side_effect=lost_role_response)
+            guild.ban = AsyncMock()
+            cog._record_operational_failure = AsyncMock()
+            tick = None
+            try:
+                owner = waves.JoinwatchWaves(cog)
+                preview = await owner.preview(guild, groups.GroupCriteria(3, 15, 6), 42, now=now)
+                await owner.confirm(guild, preview["id"], 42, True, now=now)
+                await owner.tick(guild, now=now)
+                await lifecycle.preparation.wait()
+                tick = asyncio.create_task(owner.tick(guild, now=now + timedelta(seconds=15)))
+                await asyncio.wait_for(entered.wait(), timeout=5)
+                self.assertIsNone(await lifecycle.inspect(member))
+                reply.set()
+                await asyncio.wait_for(tick, timeout=5)
+                self.assertEqual((await lifecycle.start(member)).status, "unavailable")
+                await lifecycle.close()
+                lifecycle = importlib.import_module("NHCogs.honeypot.joinwatch_verification").JoinwatchVerification(cog)
+                cog._joinwatch_verification = lifecycle
+                await lifecycle.restore()
+                future = datetime.now(timezone.utc) + timedelta(hours=2)
+                joinwatch = importlib.import_module("NHCogs.honeypot.joinwatch")
+                with patch.object(joinwatch, "datetime", SimpleNamespace(now=lambda tz: future)):
+                    await joinwatch.joinwatch_auto_role_loop(cog)
+                self.assertIsNone(await lifecycle.inspect(member))
+                guild.ban.assert_not_awaited()
+                self.assertEqual(cog._case_store.get_daily_stats(guild.id, datetime.now(timezone.utc).date()).wave_guests, 0)
+            finally:
+                reply.set()
+                if tick is not None:
+                    await asyncio.wait_for(tick, timeout=5)
+                await lifecycle.close()
+
     async def test_rollback_of_preparing_wave_allows_same_candidates_in_new_wave(self):
         with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
             groups = importlib.import_module("NHCogs.honeypot.joinwatch_groups")
@@ -251,7 +305,9 @@ class JoinwatchWaveTests(unittest.IsolatedAsyncioTestCase):
                     await lifecycle.preparation.wait()
                     await owner.tick(guild, now=now + timedelta(seconds=15))
                     self.assertEqual(len(await cfg.joinwatch_pending_roles()), 3)
-                    self.assertTrue(all(entry["role_owned"] for entry in (await cfg.joinwatch_pending_roles()).values()))
+                    self.assertTrue(all(role in member.roles for member in members.values()))
+                    for member in members.values():
+                        self.assertIsNotNone(await lifecycle.inspect(member))
                     # Later independent moderation retains the shared role after wave rollback.
                     cfg.joinwatch_pending_roles.value[str(ids[1])]["manual_role_reasons"] = [77]
                     # A departed participant still owns a timer. Rollback must cancel it.
