@@ -14,12 +14,13 @@ from typing import Any
 
 HISTORY_VERSION = 1
 MAX_HISTORY_BYTES = 20 * 1024 * 1024
-MAX_HISTORY_ACCOUNTS = 100_000
+MAX_HISTORY_ACCOUNTS = 200_000
 MAX_HISTORY_SOURCES = 100
 MAX_SOURCE_LENGTH = 200
 MAX_JOIN_WINDOW_MINUTES = 1440
 MAX_CREATION_DISTANCE_HOURS = 8760
 MINIMUM_GROUP_ACCOUNTS = 2
+MAXIMUM_GROUP_ACCOUNTS = 100_000
 PREVIEW_LIFETIME_MINUTES = 10
 LIVE_HISTORY_RETENTION_DAYS = 90
 DISCORD_EPOCH_MILLISECONDS = 1420070400000
@@ -36,7 +37,7 @@ class GroupCriteria:
         values = (self.minimum_accounts, self.join_window_minutes, self.creation_distance_hours)
         if any(type(value) is not int for value in values):
             raise ValueError("Group criteria must use whole numbers")
-        if not MINIMUM_GROUP_ACCOUNTS <= self.minimum_accounts <= MAX_HISTORY_ACCOUNTS:
+        if not MINIMUM_GROUP_ACCOUNTS <= self.minimum_accounts <= MAXIMUM_GROUP_ACCOUNTS:
             raise ValueError("Minimum accounts is outside supported history bounds")
         if not 1 <= self.join_window_minutes <= MAX_JOIN_WINDOW_MINUTES:
             raise ValueError("Join window must be between 1 and 1440 minutes")
@@ -142,7 +143,7 @@ def normalize_history(payload: bytes | dict, *, guild_id: int) -> dict[str, Any]
         raise ValueError("History date range must end before its generation date")
     rows = payload.get("observations")
     if not isinstance(rows, list) or not rows or len(rows) > MAX_HISTORY_ACCOUNTS:
-        raise ValueError("History needs between 1 and 100000 observations")
+        raise ValueError(f"History needs between 1 and {MAX_HISTORY_ACCOUNTS} observations")
     result = empty_history()
     result["sources"] = [{"source": source.strip(), "generated_at": generated.isoformat(),
                           "range_start": start.isoformat(), "range_end": end.isoformat(),
