@@ -12,7 +12,6 @@ import discord
 
 from . import joinwatch_state
 from .captcha import CaptchaPreparation, CaptchaQuestion, generate_challenge
-from .settings import DEFAULTS
 
 MAX_ATTEMPTS = 2
 PREPARED_ENROLLMENT_CAPACITY = 32
@@ -63,7 +62,7 @@ class JoinwatchVerification:
             "captcha_panel_message_id",
         )
         values = await asyncio.gather(
-            *(config.get_raw(name, default=DEFAULTS.get(name)) for name in names)
+            *(config.get_raw(name) for name in names)
         )
         return dict(zip(names, values, strict=True))
 

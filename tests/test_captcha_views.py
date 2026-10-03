@@ -23,6 +23,39 @@ def interaction(user_id=20, guild_id=10):
 
 
 class CaptchaViewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_practice_rejects_replayed_answers_and_stops_after_two_failed_attempts(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)):
+            views = importlib.import_module("NHCogs.honeypot.captcha_views")
+            captcha = importlib.import_module("NHCogs.honeypot.captcha")
+            rng = SimpleNamespace(choice=lambda choices: choices[0], randint=lambda low, high: low, randrange=lambda stop: 2, shuffle=lambda items: None)
+            # No enrollment/release owner is supplied: practice can't require one.
+            invitation = views.CaptchaPracticeView(object(), 10, 20)
+            with mock.patch.object(captcha.random, "SystemRandom", return_value=rng):
+                click = interaction()
+                await invitation.children[0].callback(click)
+                first = click.edit_original_response.await_args.kwargs["view"]
+                click = interaction()
+                await first.children[2].callback(click)
+                second = click.edit_original_response.await_args.kwargs["view"]
+                replay = interaction()
+                await first.children[0].callback(replay)
+                replay.edit_original_response.assert_not_awaited()
+                click = interaction()
+                await second.children[0].callback(click)
+                retry = click.edit_original_response.await_args.kwargs["view"]
+                self.assertEqual(len(retry.children), 1)
+                click = interaction()
+                await retry.children[0].callback(click)
+                payload = click.edit_original_response.await_args.kwargs
+                self.assertIn("1 of 2", payload["content"])
+                click = interaction()
+                await payload["view"].children[0].callback(click)
+                result = click.edit_original_response.await_args.kwargs
+                self.assertIsNone(result["view"])
+                self.assertEqual(result["attachments"], [])
+                self.assertIn("attempts", result["content"])
+                self.assertIn("No restrictions", result["content"])
+
     async def test_verify_defers_before_loading_a_question(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
