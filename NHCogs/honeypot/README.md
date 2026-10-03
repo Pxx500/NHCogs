@@ -186,6 +186,8 @@ The test command doesn't override a real timer, lift independent punishments, ad
 
 For protected members, `captcha test` instead offers a Try CAPTCHA button usable only by the selected member. Practice uses the same questions, two-step answers, and two attempts, but never changes roles, timers, or statistics. It can be repeated with the command. Practice buttons expire after five minutes of inactivity and aren't restored after a restart. Bots can't participate.
 
+CAPTCHA updates the existing private JoinWatch alert instead of posting each event separately. If there is no alert, the JoinWatch publisher creates one in the configured CAPTCHA log channel. Its message reference survives reloads with the incident. Verify panels are rebound on cog reload, and active question/retry buttons use the current cog.
+
 An explicit `joinwatch captcha true` also admits existing valid JoinWatch timers, including entries created while CAPTCHA was off. It reports the admitted count and prepares questions in the bounded background queue. Role assignments, deadlines, already used attempts, and existing question progress stay unchanged. Repeating `true` doesn't reset checks. Startup restoration alone doesn't adopt unknown old timers.
 
 Group criteria support 2–100000 distinct accounts, a 1–1440 minute join window, and a 1–8760 hour creation-distance window. They compare creation dates against each triggering account, not a chain of similarities. A rejoin doesn't add another participant. Absent and banned historical participants still count toward the original cohort. Only current, eligible, unprotected members receive restrictions.

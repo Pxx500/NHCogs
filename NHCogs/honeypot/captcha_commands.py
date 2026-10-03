@@ -5,7 +5,7 @@ from __future__ import annotations
 import discord
 from redbot.core import commands
 
-from .captcha_views import PANEL_TEXT, CaptchaPracticeView, VerifyPanelView
+from .captcha_views import PANEL_TEXT, VERIFY_CUSTOM_ID, CaptchaPracticeView, VerifyPanelView
 from .settings import GuildSettings
 
 
@@ -68,6 +68,10 @@ async def panel(cog, ctx) -> None:
 
 
 async def restore_panels(cog) -> None:
+    # Message-bound handlers win over the global handler, even after a cog reload.
+    for view in cog.bot.persistent_views:
+        if any(getattr(item, "custom_id", None) == VERIFY_CUSTOM_ID for item in view.children):
+            view.stop()
     # A global persistent handler also restores invitation buttons after restart.
     cog.bot.add_view(VerifyPanelView(cog))
 

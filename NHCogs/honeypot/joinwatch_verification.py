@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 import discord
 
-from . import joinwatch_state
+from . import joinwatch_publication, joinwatch_state
 from .captcha import CaptchaPreparation, CaptchaQuestion, generate_challenge
 
 MAX_ATTEMPTS = 2
@@ -171,7 +171,7 @@ class JoinwatchVerification:
             ready = self.preparation.get(preparation_key)
             if ready is None:
                 if self.preparation.failed(preparation_key):
-                    await self._audit(member, "CAPTCHA image preparation failed")
+                    await self._audit(member, entry, "Image preparation failed")
                     return self._result("error", entry)
                 self.preparation.request(preparation_key, entry["challenge"])
             return self._result("ready" if ready else "preparing", entry)
@@ -202,7 +202,7 @@ class JoinwatchVerification:
                 cancelled += bool(discarded)
         return cancelled
 
-    async def enroll_prepared(self, member, *, source="wave", reasons=(), wave_id=None):  # noqa: PLR0911 - enrollment validation precedes effects
+    async def enroll_prepared(self, member, *, source="wave", reasons=(), wave_id=None, moderator_id=None):  # noqa: PLR0911 - enrollment validation precedes effects
         async with joinwatch_state.member_lock(self.cog, member.guild.id, member.id):
             if source == "wave" and (member.guild.id, wave_id) in self._cancelled_waves:
                 return VerificationResult("unavailable")
@@ -225,6 +225,8 @@ class JoinwatchVerification:
                 return VerificationResult("dry_run")
             now = datetime.now(timezone.utc)
             entry = dict(entry)
+            if moderator_id is not None:
+                entry["enrollment_moderator"] = moderator_id
             entry.setdefault("expires_at", (now + timedelta(minutes=settings.get("joinwatch_auto_role_timer_minutes", 1440))).isoformat())
             entry.update(
                 {
@@ -243,9 +245,9 @@ class JoinwatchVerification:
             except discord.HTTPException as error:
                 if getattr(error, "status", None) in (400, 403, 404):
                     await joinwatch_state.delete_pending_assignment(self.cog, member.guild, member.id)
-                    await self._audit(member, "CAPTCHA restriction application failed")
+                    await self._audit(member, entry, "Restriction application failed")
                 else:
-                    await self._audit(member, "CAPTCHA restriction outcome needs moderator reconciliation")
+                    await self._audit(member, entry, "Restriction outcome needs moderator review")
                 return self._result("error", entry)
             entry.update(
                 {
@@ -258,7 +260,7 @@ class JoinwatchVerification:
             await joinwatch_state.delete_pending_assignment(self.cog, member.guild, member.id)
             self._planned.pop(key, None)
             await self._record_enrollment(member.guild, entry)
-            await self._audit(member, f"CAPTCHA enrolled ({source})")
+            await self._audit(member, entry, "Awaiting verification")
             return self._result("enrolled", entry)
 
     async def enroll_test(self, member, *, moderator_id=None):
@@ -277,10 +279,7 @@ class JoinwatchVerification:
             await self.preparation.wait()
         elif result.status != "ready":
             return result
-        result = await self.enroll_prepared(member, source="test", reasons=("test",))
-        if result.status == "enrolled":
-            await self._audit(member, "CAPTCHA test started", moderator_id=moderator_id)
-        return result
+        return await self.enroll_prepared(member, source="test", reasons=("test",), moderator_id=moderator_id)
 
     async def prepare_assignment(self, member, incident: dict) -> None:
         """Prepare during the existing delay without changing either timestamp."""
@@ -424,7 +423,7 @@ class JoinwatchVerification:
             await self._save(member, entry)
             if questions is None:
                 if self.preparation.failed(key):
-                    await self._audit(member, "CAPTCHA image preparation failed")
+                    await self._audit(member, entry, "Image preparation failed")
                     return self._result("error", entry)
                 self.preparation.request(key, entry["challenge"], priority=0)
                 return self._result("preparing", entry)
@@ -545,7 +544,7 @@ class JoinwatchVerification:
             try:
                 await member.remove_roles(role, reason="Account verification completed.")
             except discord.HTTPException:
-                await self._audit(member, "CAPTCHA restriction release failed")
+                await self._audit(member, entry, "Restriction release failed")
                 return self._result("release_pending", entry)
         if not entry.get("test") and entry.get("completion_outcome") == "passed":
             async with self.cog.config.guild(member.guild).joinwatch_verified_members() as verified:
@@ -562,9 +561,10 @@ class JoinwatchVerification:
         self.preparation.forget(self._key(member, entry))
         await self._audit(
             member,
-            f"CAPTCHA completed ({entry.get('completion_outcome', 'manual')})",
-            moderator_id=entry.get("completion_moderator"),
-            reason=entry.get("completion_reason"),
+            entry,
+            f"Completed ({entry.get('completion_outcome', 'manual')})"
+            + (". An independent restriction remains" if retained else ""),
+            role_status=f"<@&{entry['role_id']}> retained" if retained else "Removed",
         )
         return self._result("complete_restricted" if retained else "complete", entry)
 
@@ -645,24 +645,34 @@ class JoinwatchVerification:
             )
             return self._result("complete", entry)
 
-    async def _audit(self, member, text, *, moderator_id=None, reason=None):
+    async def _audit(self, member, entry, text, *, role_status=None):
         settings = await self._settings(member.guild)
         channel = self.cog._get_text_channel_or_thread(
-            member.guild, settings.get("captcha_log_channel")
+            member.guild, entry.get("alert_channel_id") or settings.get("captcha_log_channel")
         )
         if channel is None or not self.cog._channel_is_private(member.guild, channel):
             return
-        message = f"{text}: user {member.id}"
-        if moderator_id is not None:
-            message += f", moderator {moderator_id}"
-        if reason:
-            message += f", reason: {reason}"
-        try:
-            await channel.send(message, allowed_mentions=discord.AllowedMentions.none())
-        except discord.HTTPException:
-            await self.cog._record_operational_failure(
-                member.guild.id, "captcha_audit", "Could not publish CAPTCHA audit"
-            )
+        entry.setdefault("member_id", member.id)
+        entry.setdefault("account_age_hours", max(0, int((datetime.now(timezone.utc) - member.created_at).total_seconds() // 3600)))
+        entry["captcha_status"] = text
+        # Preserve CAPTCHA status when other JoinWatch events refresh the same embed.
+        config = self.cog.config.guild(member.guild)
+        for name in ("joinwatch_pending_roles", "joinwatch_pending_role_assignments"):
+            async with getattr(config, name)() as entries:
+                current = entries.get(str(member.id))
+                if current is not None and current.get("incident_id") == entry.get("incident_id"):
+                    current.update({key: entry[key] for key in ("member_id", "account_age_hours", "captcha_status")})
+        role = member.guild.get_role(entry["role_id"])
+        if role_status is None:
+            role_status = "Not confirmed"
+            if entry.get("verification_state") == "active" or (role is not None and role in member.roles):
+                role_status = f"<@&{entry['role_id']}> applied"
+                if entry.get("verification_state") != "release_pending" and entry.get("expires_at"):
+                    deadline = int(datetime.fromisoformat(entry["expires_at"]).timestamp())
+                    role_status += f" until <t:{deadline}:R>"
+        await joinwatch_publication.publish_joinwatch_incident(
+            self.cog, member.guild, entry, role_status, destination=channel, member=member,
+        )
 
     async def configuration_issues(self, guild, *, require_panel=True) -> tuple[str, ...]:
         settings = await self._settings(guild)
