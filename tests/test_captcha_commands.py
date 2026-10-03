@@ -174,7 +174,18 @@ class CaptchaCommandTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = honeypot.Honeypot(_Bot(), _operational_support())
+                old_panel = SimpleNamespace(
+                    children=[SimpleNamespace(custom_id="honeypot:captcha:verify")],
+                    stop=mock.Mock(),
+                )
+                other_panel = SimpleNamespace(
+                    children=[SimpleNamespace(custom_id="another:feature")],
+                    stop=mock.Mock(),
+                )
+                cog.bot.persistent_views = [old_panel, other_panel]
                 await honeypot.captcha_commands.restore_panels(cog)
+                old_panel.stop.assert_called_once_with()
+                other_panel.stop.assert_not_called()
                 restored, message_id = cog.bot.restored_views[0]
                 self.assertIsNone(restored.timeout)
                 self.assertIsNone(message_id)

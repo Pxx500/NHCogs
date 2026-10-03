@@ -70,7 +70,17 @@ async def show_result(cog, interaction, result) -> None:
     )
 
 
-async def _start(cog, interaction) -> None:
+async def _current_cog(interaction):
+    cog = interaction.client.get_cog("Honeypot")
+    if cog is None:
+        await interaction.edit_original_response(content="Verification is temporarily unavailable. Please try Verify again shortly", view=None, attachments=[])
+    return cog
+
+
+async def _start(interaction) -> None:
+    cog = await _current_cog(interaction)
+    if cog is None:
+        return
     result = await cog._joinwatch_verification.start(interaction.user)
     await show_result(cog, interaction, result)
 
@@ -160,7 +170,7 @@ class VerifyPanelView(CaptchaView):
         if interaction.guild is None:
             await interaction.edit_original_response(content="Use Verify in the server.")
             return
-        await _start(self.cog, interaction)
+        await _start(interaction)
 
 
 class CaptchaRetryView(CaptchaView):
@@ -175,7 +185,7 @@ class CaptchaRetryView(CaptchaView):
         await interaction.response.defer(ephemeral=True)
         if interaction.guild is None or interaction.guild.id != self.guild_id or interaction.user.id != self.user_id:
             return
-        await _start(self.cog, interaction)
+        await _start(interaction)
 
 
 class CaptchaQuestionView(CaptchaView):
@@ -203,8 +213,11 @@ class CaptchaQuestionView(CaptchaView):
         async with self._lock:
             if self._consumed:
                 return
-            result = await self.cog._joinwatch_verification.submit(
+            cog = await _current_cog(interaction)
+            if cog is None:
+                return
+            result = await cog._joinwatch_verification.submit(
                 interaction.user, self.session_id, self.stage, choice
             )
             self._consumed = True
-            await show_result(self.cog, interaction, result)
+            await show_result(cog, interaction, result)

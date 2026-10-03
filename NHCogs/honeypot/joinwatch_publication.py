@@ -45,7 +45,7 @@ def _incident_embed(
             member.joined_at if member is not None else None
         ) or datetime.now(timezone.utc)
     embed = discord.Embed(
-        title=_("New account joined"),
+        title=_("CAPTCHA test") if incident.get("test") else _("Account verification") if incident.get("source") == "wave" else _("New account joined"),
         description=_(
             "**{member}**\nMention: {mention}\nID: `{id}`\n"
             "Account is ~{hours} hours old"
@@ -105,6 +105,13 @@ def _incident_embed(
             value=status,
             inline=False,
         )
+    if incident.get("captcha_status"):
+        embed.add_field(name=_("CAPTCHA:"), value=incident["captcha_status"], inline=False)
+        for key, label in (("enrollment_moderator", "Started by"), ("completion_moderator", "Resolved by")):
+            if incident.get(key) is not None:
+                embed.add_field(name=_(label), value=f"<@{incident[key]}>", inline=True)
+        if incident.get("completion_reason"):
+            embed.add_field(name=_("Reason"), value=str(incident["completion_reason"])[:1024], inline=False)
     return embed
 
 
@@ -152,7 +159,7 @@ async def _update_current_incident(
         return
     try:
         message = channel.get_partial_message(int(message_id))
-        await message.edit(embed=embed)
+        await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
     except (discord.NotFound, discord.Forbidden, TypeError, ValueError) as exc:
         member_id = incident.get("member_id")
         if member_id is not None:
@@ -241,7 +248,8 @@ async def publish_joinwatch_incident(
     if destination is None:
         return
     try:
-        alert_message = await destination.send(embed=embed)
+        alert_message = await destination.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        incident.update(alert_channel_id=alert_message.channel.id, alert_message_id=alert_message.id)
         await joinwatch_state.store_alert_reference(
             cog,
             guild,

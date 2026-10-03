@@ -11,6 +11,7 @@ from unittest import mock
 
 from tests.harness import _isolated_honeypot_modules
 from tests.operations.test_role_apply import RoleApplyHandlerTests
+from tests.test_joinwatch_rejoin import _Embed
 from tests.test_manual_punishment import _CommandTree, _source_message
 
 
@@ -252,6 +253,67 @@ async def _question(runtime, *, now=None):
 
 
 class VerificationLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_completion_updates_existing_joinwatch_alert_instead_of_sending_a_captcha_log(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime = _runtime(honeypot)
+            # Discord acknowledges the removal before the member cache updates.
+            runtime.member.remove_roles = mock.AsyncMock()
+            message = SimpleNamespace(edit=mock.AsyncMock())
+            alerts = SimpleNamespace(id=89, get_partial_message=mock.Mock(return_value=message), send=mock.AsyncMock())
+            captcha_logs = SimpleNamespace(id=90, send=mock.AsyncMock())
+            runtime.raw["captcha_log_channel"] = captcha_logs.id
+            runtime.raw["joinwatch_pending_roles"]["20"].update(alert_channel_id=89, alert_message_id=123)
+            runtime.cog._get_text_channel_or_thread.side_effect = lambda guild, channel_id: {89: alerts, 90: captcha_logs}.get(channel_id)
+            runtime.cog._channel_is_private = lambda *args: True
+            try:
+                with mock.patch.object(honeypot.discord, "Embed", _Embed), mock.patch.object(honeypot.discord, "Color", SimpleNamespace(orange=lambda: 1)):
+                    result = await runtime.owner.release(runtime.member, moderator_id=99, reason="Manual verification")
+                self.assertEqual(result.status, "complete")
+                alerts.send.assert_not_awaited()
+                captcha_logs.send.assert_not_awaited()
+                alerts.get_partial_message.assert_called_once_with(123)
+                fields = {field.name: field.value for field in message.edit.await_args.kwargs["embed"].fields}
+                self.assertEqual(fields["Auto-role:"], "Removed")
+                self.assertIn("Completed", fields["CAPTCHA:"])
+                self.assertEqual(fields["Resolved by"], "<@99>")
+            finally:
+                await runtime.owner.close()
+
+    async def test_audit_updates_one_embed_through_completion_after_reload(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime = _runtime(honeypot)
+            runtime.raw["joinwatch_pending_roles"].clear()
+            runtime.member.roles.clear()
+            message = SimpleNamespace(id=123, edit=mock.AsyncMock())
+            channel = SimpleNamespace(id=89, send=mock.AsyncMock(return_value=message), get_partial_message=mock.Mock(return_value=message))
+            message.channel = channel
+            runtime.raw["captcha_log_channel"] = channel.id
+            runtime.cog._get_text_channel_or_thread.return_value = channel
+            runtime.cog._channel_is_private = lambda *args: True
+            try:
+                with mock.patch.object(honeypot.discord, "Embed", _Embed), mock.patch.object(honeypot.discord, "Color", SimpleNamespace(orange=lambda: 1)):
+                    self.assertEqual((await runtime.owner.enroll_test(runtime.member, moderator_id=99)).status, "enrolled")
+                    channel.send.assert_awaited_once()
+                    started = channel.send.await_args.kwargs["embed"]
+                    self.assertIn("test", started.title.lower())
+                    self.assertIn("<@99>", [field.value for field in started.fields])
+                    await runtime.owner.close()
+                    runtime.owner = runtime.module.JoinwatchVerification(runtime.cog)
+                    question = await _question(runtime)
+                    answers = [item["answer"] for item in runtime.raw["joinwatch_pending_roles"]["20"]["challenge"]]
+                    await runtime.owner.submit(runtime.member, question.session_id, 0, answers[0])
+                    result = await runtime.owner.submit(runtime.member, question.session_id, 1, answers[1])
+                    self.assertEqual(result.status, "complete")
+                    channel.send.assert_awaited_once()
+                    channel.get_partial_message.assert_called_with(message.id)
+                    completed = message.edit.await_args.kwargs["embed"]
+                    self.assertTrue(any("passed" in field.value.lower() for field in completed.fields))
+                    self.assertIn("<@99>", [field.value for field in completed.fields])
+                    self.assertIsNone(await runtime.owner.inspect(runtime.member))
+                    self.assertNotIn(runtime.role, runtime.member.roles)
+            finally:
+                await runtime.owner.close()
+
     async def test_group_admission_refuses_missing_panel_configuration_or_deleted_channel(self):
         with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
             for loss in ("panel", "channel"):
