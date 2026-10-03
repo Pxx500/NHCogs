@@ -532,17 +532,23 @@ class RemoteMediaInspectionTests(unittest.IsolatedAsyncioTestCase):
             ),
             mock.patch.object(self.remote_media, "MEDIA_DECODE_TIMEOUT_SECONDS", 0.01),
         ):
-            self.assertIsNone(
-                await inspector.inspect("https://media.example/first.png")
-            )
-            self.assertTrue(first_started.is_set())
-            second = asyncio.create_task(
-                inspector.inspect("https://media.example/second.png")
-            )
-            await asyncio.sleep(0.03)
-            self.assertEqual(calls, 1)
-            first_release.set()
-            self.assertIs(await second, False)
+            try:
+                self.assertIsNone(
+                    await inspector.inspect("https://media.example/first.png")
+                )
+                self.assertTrue(first_started.is_set())
+                # Only the blocked first decode needs the short timeout. The
+                # second must tolerate normal thread scheduling on Windows.
+                with mock.patch.object(self.remote_media, "MEDIA_DECODE_TIMEOUT_SECONDS", 1):
+                    second = asyncio.create_task(
+                        inspector.inspect("https://media.example/second.png")
+                    )
+                    await asyncio.sleep(0.03)
+                    self.assertEqual(calls, 1)
+                    first_release.set()
+                    self.assertIs(await second, False)
+            finally:
+                first_release.set()
 
     async def test_partial_range_proves_animation_from_two_complete_frames(self):
         vp8x = bytes((0b00000010,)) + (b"\x00" * 9)

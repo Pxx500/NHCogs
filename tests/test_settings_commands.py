@@ -325,11 +325,8 @@ class JoinwatchSettingsFlowTests(unittest.IsolatedAsyncioTestCase):
                     "joinwatch_auto_role_enabled": False,
                     "joinwatch_alert_enabled": True,
                 }
-                cog.config = SimpleNamespace(
-                    guild=lambda guild: SimpleNamespace(
-                        all=mock.AsyncMock(return_value=config)
-                    )
-                )
+                cog.config._guilds[100] = config
+                cog._case_store.initialize()
                 alert_channel = SimpleNamespace(send=mock.AsyncMock())
                 cog._get_text_channel_or_thread = mock.Mock(
                     return_value=alert_channel

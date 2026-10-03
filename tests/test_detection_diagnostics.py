@@ -173,8 +173,9 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             get_channel=lambda channel_id: None,
             get_thread=lambda channel_id: None,
             get_role=roles.get,
+            default_role=object(),
         )
-        return SimpleNamespace(guild=guild, send=mock.AsyncMock())
+        return SimpleNamespace(guild=guild, channel=SimpleNamespace(permissions_for=lambda role: SimpleNamespace(view_channel=False)), send=mock.AsyncMock())
 
     @staticmethod
     def _doctor_config(**overrides):

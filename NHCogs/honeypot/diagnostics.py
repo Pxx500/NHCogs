@@ -506,6 +506,8 @@ async def _doctor_configuration_checks(
                 )
             )
     results.extend(_doctor_gif_detector_checks(cog, guild, me, guild_settings))
+    if guild_settings.joinwatch_captcha_enabled or guild_settings.joinwatch_groups_enabled or guild_settings.captcha_panel_message_id:
+        results.extend(DoctorResult(issue, "failed", "Check `honeypot captcha` configuration.") for issue in await cog._joinwatch_verification.configuration_issues(guild))
     return tuple(results)
 
 
@@ -536,6 +538,8 @@ def _destination_is_required(key: str, settings: GuildSettings) -> bool:
         and settings.joinwatch_alert_enabled,
         "bait_role": settings.baitrole_enabled,
         "gif_debug": settings.gif_detector_debug_enabled,
+        "captcha": settings.joinwatch_captcha_enabled or settings.joinwatch_groups_enabled,
+        "captcha_log": settings.joinwatch_captcha_enabled or settings.joinwatch_groups_enabled,
     }.get(key, False)
 
 
@@ -710,6 +714,9 @@ def _render_doctor_results(
 
 async def honeypot_doctor(cog, ctx: commands.Context) -> None:
     """Check honeypot configuration and required permissions."""
+    if not cog._channel_is_private(ctx.guild, ctx.channel):
+        await ctx.send("Run this command in a private moderator channel")
+        return
     raw_config = await cog.config.guild(ctx.guild).all()
     guild_settings = GuildSettings.from_mapping(raw_config)
     results = list(

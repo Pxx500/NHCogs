@@ -407,7 +407,6 @@ class CaseRoleTests(CaseExpiryTestCase):
                         member.roles.append(added)
 
                 member.add_roles = mock.AsyncMock(side_effect=add_role)
-                member.remove_roles = mock.AsyncMock()
                 guild = SimpleNamespace(
                     id=first.case.guild_id,
                     get_member=lambda user_id: member,
@@ -472,26 +471,38 @@ class CaseRoleTests(CaseExpiryTestCase):
                     "role_apply",
                     f"role-apply:{second.case.case_id}:{role.id}",
                 )
-                await cog._execute_detection_case_operation(
-                    cog._case_store.claim_operation(
-                        second_apply.operation_id, now + timedelta(seconds=3)
-                    ),
-                    now + timedelta(seconds=3),
-                )
-                allow_release.set()
-                await release_worker
+                second_started = asyncio.Event()
+
+                async def apply_second_case():
+                    second_started.set()
+                    await cog._execute_detection_case_operation(
+                        cog._case_store.claim_operation(
+                            second_apply.operation_id, now + timedelta(seconds=3)
+                        ),
+                        now + timedelta(seconds=3),
+                    )
+
+                apply_worker = asyncio.create_task(apply_second_case())
+                try:
+                    await asyncio.wait_for(second_started.wait(), timeout=1)
+                    self.assertFalse(apply_worker.done())
+                    allow_release.set()
+                    await asyncio.wait_for(
+                        asyncio.gather(release_worker, apply_worker), timeout=5
+                    )
+                finally:
+                    allow_release.set()
+                    for worker in (release_worker, apply_worker):
+                        if not worker.done():
+                            worker.cancel()
+                    await asyncio.gather(release_worker, apply_worker, return_exceptions=True)
 
                 pending = next(
                     item
                     for item in cog._case_store.get_case(second.case.case_id).operations
                     if item.operation_id == second_apply.operation_id
                 )
-                self.assertEqual(pending.status.value, "failed")
-                retry = cog._case_store.claim_operation(
-                    second_apply.operation_id,
-                    pending.retry_at + timedelta(seconds=1),
-                )
-                await cog._execute_detection_case_operation(retry, pending.retry_at)
+                self.assertEqual(pending.status.value, "succeeded")
 
                 self.assertIn(role, member.roles)
                 self.assertEqual(

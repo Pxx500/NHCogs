@@ -382,6 +382,7 @@ class DailyStatsSnapshot:
     manual_bans: int = 0
     shadowbans: int = 0
     joinwatch_bans: int = 0
+    wave_guests: int = 0
     published_at: datetime | None = None
     publication_channel_id: int | None = None
     publication_message_id: int | None = None
@@ -778,12 +779,104 @@ class DetectionCaseStore:
                     "ADD COLUMN render_fingerprint TEXT"
                 )
 
+        def migrate_schema_3(connection: sqlite3.Connection) -> None:
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(public_daily_stats)")
+            }
+            if "wave_guests" not in columns:
+                connection.execute(
+                    "ALTER TABLE public_daily_stats "
+                    "ADD COLUMN wave_guests INTEGER NOT NULL DEFAULT 0"
+                )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS public_wave_enrollments (
+                       guild_id INTEGER NOT NULL,
+                       enrollment_id TEXT NOT NULL,
+                       occurred_at INTEGER NOT NULL,
+                       PRIMARY KEY(guild_id, enrollment_id)
+                   )"""
+            )
+
+        def migrate_schema_4(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS joinwatch_history (
+                       guild_id INTEGER PRIMARY KEY,
+                       history TEXT NOT NULL
+                   )"""
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS joinwatch_waves (
+                       guild_id INTEGER NOT NULL,
+                       wave_id TEXT NOT NULL,
+                       record TEXT NOT NULL,
+                       PRIMARY KEY(guild_id, wave_id)
+                   )"""
+            )
+
         with closing(self._connect()) as connection:
             apply_migrations(
                 connection,
-                (migrate_schema_0, migrate_schema_1, migrate_schema_2),
+                (migrate_schema_0, migrate_schema_1, migrate_schema_2,
+                 migrate_schema_3, migrate_schema_4),
                 label="detection case storage",
             )
+
+    def get_joinwatch_history(self, guild_id: int) -> dict:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT history FROM joinwatch_history WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()
+        if row is None:
+            return {
+                "version": 1, "revision": 0, "import_revision": 0,
+                "sources": [], "observations": {},
+            }
+        return json.loads(row["history"])
+
+    def save_joinwatch_history(self, guild_id: int, history: Mapping) -> None:
+        serialized = json.dumps(_json_value(history), separators=(",", ":"))
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                """INSERT INTO joinwatch_history (guild_id, history) VALUES (?, ?)
+                   ON CONFLICT(guild_id) DO UPDATE SET history = excluded.history""",
+                (guild_id, serialized),
+            )
+
+    def get_joinwatch_waves(self, guild_id: int) -> dict[str, dict]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT wave_id, record FROM joinwatch_waves WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchall()
+        return {row["wave_id"]: json.loads(row["record"]) for row in rows}
+
+    def save_joinwatch_wave(self, guild_id: int, record: Mapping) -> None:
+        wave_id = record["id"]
+        if not isinstance(wave_id, str) or not wave_id:
+            raise ValueError("wave identity must be a non-empty string")
+        serialized = json.dumps(_json_value(record), separators=(",", ":"))
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                """INSERT INTO joinwatch_waves (guild_id, wave_id, record)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(guild_id, wave_id) DO UPDATE SET record = excluded.record""",
+                (guild_id, wave_id, serialized),
+            )
+
+    def delete_joinwatch_wave(self, guild_id: int, wave_id: str) -> None:
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                "DELETE FROM joinwatch_waves WHERE guild_id = ? AND wave_id = ?",
+                (guild_id, wave_id),
+            )
+
+    def clear_joinwatch_auxiliary(self, guild_id: int) -> None:
+        """Delete auxiliary history and waves, leaving punishments and stats alone."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute("DELETE FROM joinwatch_history WHERE guild_id = ?", (guild_id,))
+            connection.execute("DELETE FROM joinwatch_waves WHERE guild_id = ?", (guild_id,))
 
     def record_daily_stat(
         self,
@@ -803,6 +896,39 @@ class DetectionCaseStore:
                         {metric} = {metric} + 1""",
                 (guild_id, date_key),
             )
+
+    def record_wave_enrollment(
+        self,
+        guild_id: int,
+        occurred_at: datetime,
+        enrollment_id: str,
+    ) -> bool:
+        """Count a successful historical-wave enrollment once, even after restart.
+
+        The caller supplies the stable enrollment identity and original role-success
+        time, only after a new, non-test wave restriction is active.
+        """
+        if not enrollment_id:
+            raise ValueError("wave enrollment identity must not be empty")
+        timestamp = _to_timestamp(occurred_at)
+        date_key = occurred_at.astimezone(timezone.utc).date().isoformat()
+        with closing(self._connect()) as connection, connection:
+            inserted = connection.execute(
+                """INSERT INTO public_wave_enrollments
+                   (guild_id, enrollment_id, occurred_at) VALUES (?, ?, ?)
+                   ON CONFLICT(guild_id, enrollment_id) DO NOTHING""",
+                (guild_id, enrollment_id, timestamp),
+            )
+            if inserted.rowcount == 0:
+                return False
+            connection.execute(
+                """INSERT INTO public_daily_stats (guild_id, date_utc, wave_guests)
+                   VALUES (?, ?, 1)
+                   ON CONFLICT(guild_id, date_utc) DO UPDATE SET
+                       wave_guests = wave_guests + 1""",
+                (guild_id, date_key),
+            )
+        return True
 
     def observe_daily_stats_day(self, guild_id: int, date_utc: date) -> None:
         with closing(self._connect()) as connection, connection:
@@ -831,6 +957,7 @@ class DetectionCaseStore:
             manual_bans=row["manual_bans"],
             shadowbans=row["shadowbans"],
             joinwatch_bans=row["joinwatch_bans"],
+            wave_guests=row["wave_guests"],
             published_at=(
                 _from_timestamp(row["published_at"])
                 if row["published_at"] is not None
@@ -3269,6 +3396,28 @@ class DetectionCaseStore:
             ).fetchone()
             return None if row is None else str(row[0])
 
+    def role_required_by_case(self, guild_id: int, user_id: int, role_id: int) -> bool:
+        """Include active reviews that inherited an existing JoinWatch role."""
+        with closing(self._connect()) as connection:
+            if connection.execute(
+                """SELECT 1 FROM detection_role_ownership
+                   WHERE guild_id = ? AND user_id = ? AND role_id = ? LIMIT 1""",
+                (guild_id, user_id, role_id),
+            ).fetchone() is not None:
+                return True
+            return connection.execute(
+                """SELECT 1 FROM detection_cases c JOIN detection_operations o
+                     ON c.case_id = o.case_id
+                   WHERE c.guild_id = ? AND c.user_id = ?
+                     AND c.status IN ('pending', 'resolving')
+                     AND o.operation_type = 'role_apply'
+                     AND o.idempotency_key = 'role-apply:' || c.case_id || ':' || ?
+                     AND (o.result IS NULL OR (o.result NOT LIKE 'planned:%'
+                       AND o.result NOT IN (?, ?, ?))) LIMIT 1""",
+                (guild_id, user_id, str(role_id), OPERATION_RESULT_CASE_TERMINAL,
+                 OPERATION_RESULT_SUPERSEDED_BY_MODERATION, OPERATION_RESULT_MEMBER_UNAVAILABLE),
+            ).fetchone() is not None
+
     def release_role_ownership(self, case_id: str, role_id: int) -> bool:
         with closing(self._connect()) as connection, connection:
             result = connection.execute(
@@ -3276,6 +3425,59 @@ class DetectionCaseStore:
                 (case_id, role_id),
             )
             return result.rowcount == 1
+
+    def transfer_joinwatch_role_to_pending_case(
+        self, guild_id: int, user_id: int, role_id: int, now: datetime
+    ) -> str | None:
+        """Keep actual bot ownership when JoinWatch settles before queued review work."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            owner = connection.execute(
+                """SELECT case_id FROM detection_role_ownership
+                   WHERE guild_id = ? AND user_id = ? AND role_id = ?""",
+                (guild_id, user_id, role_id),
+            ).fetchone()
+            if owner is not None:
+                return str(owner["case_id"])
+            superseding_types = tuple(item.value for item in MODERATION_SUPERSEDING_TYPES)
+            superseding_results = tuple(MODERATION_SUPERSEDING_RESULTS)
+            type_parameters = ",".join("?" for _ in superseding_types)
+            result_parameters = ",".join("?" for _ in superseding_results)
+            queued = connection.execute(
+                f"""SELECT c.case_id, c.status FROM detection_cases c
+                    JOIN detection_operations o ON o.case_id = c.case_id
+                    WHERE c.guild_id = ? AND c.user_id = ?
+                      AND c.status IN ('pending', 'resolving')
+                      AND o.operation_type = 'role_apply'
+                      AND o.idempotency_key = 'role-apply:' || c.case_id || ':' || ?
+                      AND o.status IN ('pending', 'running', 'failed')
+                      AND NOT EXISTS (
+                        SELECT 1 FROM detection_operations moderation
+                        WHERE moderation.case_id = c.case_id
+                          AND moderation.status = 'succeeded'
+                          AND moderation.operation_type IN ({type_parameters})
+                          AND moderation.result IN ({result_parameters}))
+                    ORDER BY c.created_at, c.case_id LIMIT 1""",
+                (guild_id, user_id, str(role_id), *superseding_types, *superseding_results),
+            ).fetchone()
+            if queued is None:
+                return None
+            case_id = str(queued["case_id"])
+            connection.execute(
+                """INSERT INTO detection_role_ownership
+                   (case_id, guild_id, user_id, role_id, applied_at) VALUES (?, ?, ?, ?, ?)""",
+                (case_id, guild_id, user_id, role_id, _to_timestamp(now)),
+            )
+            if queued["status"] == CaseStatus.RESOLVING.value:
+                connection.execute(
+                    """INSERT OR IGNORE INTO detection_operations
+                       (operation_id, case_id, message_sequence, operation_type, status, attempts,
+                        created_at, updated_at, retry_at, last_error, idempotency_key)
+                       VALUES (?, ?, NULL, 'role_release', 'pending', 0, ?, ?, NULL, NULL, ?)""",
+                    (str(uuid4()), case_id, _to_timestamp(now), _to_timestamp(now),
+                     f"role-release:{case_id}:{role_id}"),
+                )
+            return case_id
 
     def claim_operation(self, operation_id: str, now: datetime) -> OperationRecord | None:
         now_value = _to_timestamp(now)

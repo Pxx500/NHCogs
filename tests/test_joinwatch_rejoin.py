@@ -124,6 +124,7 @@ def _make_runtime(honeypot, *, random_delay: bool):
     bot.is_admin = mock.AsyncMock(return_value=False)
     cog = honeypot.Honeypot(bot, _operational_support())
     cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
+    cog._joinwatch_groups = None
     cog._record_daily_stat = mock.AsyncMock()
     return SimpleNamespace(
         role=role,
@@ -138,6 +139,98 @@ def _make_runtime(honeypot, *, random_delay: bool):
 
 
 class JoinwatchRejoinTests(unittest.IsolatedAsyncioTestCase):
+    async def test_delayed_first_application_counts_once_after_early_rejoin_then_restore(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime = _make_runtime(honeypot, random_delay=True)
+            runtime.cog.bot.guilds = [runtime.guild]
+            runtime.cog._increment_stat = mock.AsyncMock(wraps=runtime.cog._increment_stat)
+            with mock.patch.object(honeypot.joinwatch.joinwatch_publication, "publish_joinwatch_incident", mock.AsyncMock()), mock.patch.object(honeypot.discord.utils, "format_dt", lambda value, style: value.isoformat(), create=True):
+                await runtime.cog.on_member_join(runtime.member)
+                await runtime.cog.on_member_join(runtime.member)
+                runtime.pending_assignments["200"]["apply_at"] = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+                await honeypot.joinwatch.joinwatch_auto_role_loop(runtime.cog)
+                self.assertIn(runtime.role, runtime.member.roles)
+                runtime.cog._record_daily_stat.assert_awaited_once_with(runtime.guild, mock.ANY, "shadowbans")
+                runtime.member.roles.clear()
+                await runtime.cog.on_member_join(runtime.member)
+                runtime.pending_assignments["200"]["apply_at"] = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+                await honeypot.joinwatch.joinwatch_auto_role_loop(runtime.cog)
+            self.assertIn(runtime.role, runtime.member.roles)
+            self.assertEqual(runtime.member.add_roles.await_count, 2)
+            runtime.cog._record_daily_stat.assert_awaited_once_with(runtime.guild, mock.ANY, "shadowbans")
+            application_counts = [call for call in runtime.cog._increment_stat.await_args_list
+                                  if call.args[1] == "joinwatch_auto_roles"]
+            self.assertEqual(len(application_counts), 1)
+
+    async def test_departed_test_rejoin_assignment_never_punishes_or_counts(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                runtime = _make_runtime(honeypot, random_delay=True)
+                config = runtime.cog.config.guild(runtime.guild).all.return_value
+                config["joinwatch_auto_role_action"] = "ban"
+                runtime.pending_roles["200"] = {
+                    "role_id": 501, "incident_id": "test", "test": True,
+                    "source": "test",
+                    "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+                }
+                runtime.guild.ban = mock.AsyncMock()
+                runtime.cog._missing_action_permission = mock.Mock(return_value=None)
+                runtime.cog._get_user_or_object = mock.AsyncMock(return_value=SimpleNamespace(id=200))
+                runtime.cog._schedule_post_ban_sweep = mock.Mock()
+                runtime.cog._increment_stat = mock.AsyncMock()
+                runtime.cog.bot.guilds = [runtime.guild]
+                with mock.patch.object(honeypot.joinwatch.joinwatch_publication, "publish_joinwatch_incident", mock.AsyncMock()), mock.patch.object(honeypot.discord.utils, "format_dt", lambda value, style: value.isoformat(), create=True):
+                    await runtime.cog.on_member_join(runtime.member)
+                    assignment = runtime.pending_assignments["200"]
+                    self.assertTrue(assignment["test"])
+                    assignment["apply_at"] = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+                    runtime.cog._get_member_or_fetch = mock.AsyncMock(return_value=None)
+                    await honeypot.joinwatch.joinwatch_auto_role_loop(runtime.cog)
+                runtime.guild.ban.assert_not_awaited()
+                runtime.cog._record_daily_stat.assert_not_awaited()
+                runtime.cog._increment_stat.assert_not_awaited()
+
+    async def test_older_wave_rejoin_restores_recorded_role_and_progress(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                runtime = _make_runtime(honeypot, random_delay=False)
+                runtime.member.created_at = datetime.now(timezone.utc) - timedelta(days=60)
+                config = runtime.cog.config.guild(runtime.guild).all.return_value
+                config.update(joinwatch_enabled=False, joinwatch_auto_role_enabled=False,
+                              joinwatch_auto_role_id=999, joinwatch_verified_members={"200": {}})
+                deadline = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+                runtime.pending_roles["200"] = {
+                    "role_id": 501, "incident_id": "wave", "source": "wave",
+                    "expires_at": deadline, "failures": 1, "stage": 1,
+                    "captcha_enabled": True,
+                }
+                runtime.cog._joinwatch_verification = None
+                with mock.patch.object(honeypot.joinwatch.joinwatch_publication, "publish_joinwatch_incident", mock.AsyncMock()), mock.patch.object(honeypot.discord.utils, "format_dt", lambda value, style: value.isoformat(), create=True):
+                    await runtime.cog.on_member_join(runtime.member)
+                self.assertIn(runtime.role, runtime.member.roles)
+                entry = runtime.pending_roles["200"]
+                self.assertEqual(entry["incident_id"], "wave")
+                self.assertEqual(entry["expires_at"], deadline)
+                self.assertEqual((entry["failures"], entry["stage"]), (1, 1))
+
+    async def test_present_test_rejoin_reapplies_without_public_counts(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime = _make_runtime(honeypot, random_delay=True)
+            runtime.pending_roles["200"] = {
+                "role_id": 501, "incident_id": "test", "test": True, "source": "test",
+                "expires_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+            }
+            runtime.cog._increment_stat = mock.AsyncMock()
+            runtime.cog.bot.guilds = [runtime.guild]
+            with mock.patch.object(honeypot.joinwatch.joinwatch_publication, "publish_joinwatch_incident", mock.AsyncMock()), mock.patch.object(honeypot.discord.utils, "format_dt", lambda value, style: value.isoformat(), create=True):
+                await runtime.cog.on_member_join(runtime.member)
+                runtime.pending_assignments["200"]["apply_at"] = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+                await honeypot.joinwatch.joinwatch_auto_role_loop(runtime.cog)
+            self.assertIn(runtime.role, runtime.member.roles)
+            self.assertTrue(runtime.pending_roles["200"]["test"])
+            runtime.cog._record_daily_stat.assert_not_awaited()
+            runtime.cog._increment_stat.assert_not_awaited()
+
     async def test_immediate_shadowban_records_daily_stat_before_lifetime_counter(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
