@@ -1,6 +1,7 @@
 """Private CAPTCHA interactions through Discord view callbacks."""
 
 import asyncio
+import copy
 import importlib
 import unittest
 from datetime import datetime, timezone
@@ -10,10 +11,12 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.harness import _isolated_honeypot_modules
+from tests.test_joinwatch_verification import _runtime
 
 
-def interaction(user_id=20, guild_id=10):
+def interaction(user_id=20, guild_id=10, *, cog=None):
     return SimpleNamespace(
+        client=SimpleNamespace(get_cog=lambda name: cog if name == "Honeypot" else None),
         user=SimpleNamespace(id=user_id),
         guild=SimpleNamespace(id=guild_id),
         response=SimpleNamespace(defer=mock.AsyncMock()),
@@ -23,6 +26,40 @@ def interaction(user_id=20, guild_id=10):
 
 
 class CaptchaViewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_existing_verify_retry_and_answer_buttons_use_ready_cog_after_reload(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            views = importlib.import_module("NHCogs.honeypot.captcha_views")
+            old, current = _runtime(honeypot), _runtime(honeypot)
+            old.cog._joinwatch_verification = old.owner
+            current.cog._joinwatch_verification = current.owner
+            try:
+                await old.owner.start(old.member)
+                await old.owner.preparation.wait()
+                panel = views.VerifyPanelView(old.cog)
+                retry = views.CaptchaRetryView(old.cog, 10, 20)
+                click = interaction(cog=old.cog)
+                click.user = old.member
+                await panel.children[0].callback(click)
+                old_question = click.edit_original_response.await_args.kwargs["view"]
+                current.raw.clear()
+                current.raw.update(copy.deepcopy(old.raw))
+                await old.owner.close()
+                await current.owner.start(current.member)
+                await current.owner.preparation.wait()
+                self.assertTrue((await current.owner.inspect(current.member))["ready"])
+                for view in (panel, retry):
+                    click = interaction(cog=current.cog)
+                    click.user = current.member
+                    await view.children[0].callback(click)
+                    self.assertIn("1 of 2", click.edit_original_response.await_args.kwargs["content"])
+                click = interaction(cog=current.cog)
+                click.user = current.member
+                await old_question.children[2].callback(click)
+                self.assertIn("2 of 2", click.edit_original_response.await_args.kwargs["content"])
+            finally:
+                await old.owner.close()
+                await current.owner.close()
+
     async def test_practice_rejects_replayed_answers_and_stops_after_two_failed_attempts(self):
         with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)):
             views = importlib.import_module("NHCogs.honeypot.captcha_views")
@@ -67,7 +104,9 @@ class CaptchaViewTests(unittest.IsolatedAsyncioTestCase):
                     return SimpleNamespace(status="preparing", deadline=None)
 
                 owner = SimpleNamespace(start=mock.AsyncMock(side_effect=start))
-                panel = views.VerifyPanelView(SimpleNamespace(_joinwatch_verification=owner))
+                cog = SimpleNamespace(_joinwatch_verification=owner)
+                click.client.get_cog = lambda name: cog
+                panel = views.VerifyPanelView(cog)
                 await panel.children[0].callback(click)
                 owner.start.assert_awaited_once_with(click.user)
                 click.edit_original_response.assert_awaited_once()
@@ -102,8 +141,9 @@ class CaptchaViewTests(unittest.IsolatedAsyncioTestCase):
                     return result
 
                 owner = SimpleNamespace(submit=mock.AsyncMock(side_effect=submit))
-                view = views.CaptchaQuestionView(SimpleNamespace(_joinwatch_verification=owner), 10, 20, SimpleNamespace(session_id="first-session", stage=0))
-                first, second = interaction(), interaction()
+                cog = SimpleNamespace(_joinwatch_verification=owner)
+                view = views.CaptchaQuestionView(cog, 10, 20, SimpleNamespace(session_id="first-session", stage=0))
+                first, second = interaction(cog=cog), interaction(cog=cog)
                 pending = asyncio.create_task(view.children[0].callback(first))
                 await started.wait()
                 duplicate = asyncio.create_task(view.children[1].callback(second))

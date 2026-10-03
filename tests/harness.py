@@ -929,6 +929,7 @@ class _Bot:
         self.ready = asyncio.Event()
         self.tree = _AppCommandTree()
         self.guilds = []
+        self.persistent_views = []
         if ready:
             self.ready.set()
 
