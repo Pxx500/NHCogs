@@ -1539,7 +1539,7 @@ class Honeypot(Cog):
     async def research_dump(
         self,
         ctx: commands.Context,
-        channel_ids: commands.Greedy[int],
+        *channel_ids: int,
     ) -> None:
         """Dump one or more text channels by ID, with progress updates"""
         mentions = discord.AllowedMentions.none()
