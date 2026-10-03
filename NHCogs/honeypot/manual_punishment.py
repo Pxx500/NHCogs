@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,7 @@ import discord
 from redbot.core import commands, modlog
 from redbot.core.utils.chat_formatting import pagify
 
+from . import joinwatch_state
 from . import manual_punishment_publication as publication
 from .channel_routing import channel_scope_id
 from .effects import EffectStatus, ModerationOrigin
@@ -235,9 +237,7 @@ class PunishmentActionView(discord.ui.View):
 
     def _refresh(self) -> None:
         self.evidence_button.label = (
-            "Add evidence: On"
-            if self.selection.capture_evidence
-            else "Add evidence: Off"
+            "Add evidence: On" if self.selection.capture_evidence else "Add evidence: Off"
         )
         self.evidence_button.style = (
             discord.ButtonStyle.success
@@ -268,9 +268,7 @@ class PunishmentActionView(discord.ui.View):
 
     async def _select_roles(self, interaction: discord.Interaction) -> None:
         assert self.role_select is not None
-        self.selection.select_roles(
-            tuple(int(role_id) for role_id in self.role_select.values)
-        )
+        self.selection.select_roles(tuple(int(role_id) for role_id in self.role_select.values))
         self._refresh()
         await interaction.response.edit_message(view=self)
 
@@ -293,9 +291,7 @@ class ManualPunishmentController:
             name="Punish",
             callback=self.open,
         )
-        self.context_menu.default_permissions = discord.Permissions(
-            manage_messages=True
-        )
+        self.context_menu.default_permissions = discord.Permissions(manage_messages=True)
         self.context_menu.guild_only = True
         self._registered = False
 
@@ -373,9 +369,7 @@ class ManualPunishmentController:
                 ephemeral=True,
             )
             return
-        settings = GuildSettings.from_mapping(
-            await self.cog.config.guild(guild).all()
-        )
+        settings = GuildSettings.from_mapping(await self.cog.config.guild(guild).all())
         evidence_channel = (
             guild.get_channel(settings.manual_evidence_channel)
             if settings.manual_evidence_channel is not None
@@ -469,9 +463,7 @@ class ManualPunishmentController:
         selection: PunishmentSelection,
     ) -> PreparedPunishment | None:
         guild = source_message.guild
-        settings = GuildSettings.from_mapping(
-            await self.cog.config.guild(guild).all()
-        )
+        settings = GuildSettings.from_mapping(await self.cog.config.guild(guild).all())
         evidence_channel = (
             guild.get_channel(settings.manual_evidence_channel)
             if settings.manual_evidence_channel is not None
@@ -493,8 +485,7 @@ class ManualPunishmentController:
             return None
         if not self.cog._channel_is_private(guild, evidence_channel):
             await interaction.followup.send(
-                "The manual evidence channel must be private. The source message "
-                "was not deleted.",
+                "The manual evidence channel must be private. The source message was not deleted.",
                 ephemeral=True,
             )
             return None
@@ -535,9 +526,7 @@ class ManualPunishmentController:
                 )
                 return None
 
-        applicable_roles = self._applicable_roles(
-            guild, source_message.channel, settings
-        )
+        applicable_roles = self._applicable_roles(guild, source_message.channel, settings)
         applicable = {role.id: (role, entry) for role, entry in applicable_roles}
         selected_ids = set(selection.role_ids)
         for role_id in selection.role_ids:
@@ -557,9 +546,7 @@ class ManualPunishmentController:
                 )
                 return None
         selected_roles = tuple(
-            (role, entry)
-            for role, entry in applicable_roles
-            if role.id in selected_ids
+            (role, entry) for role, entry in applicable_roles if role.id in selected_ids
         )
         return PreparedPunishment(
             settings=settings,
@@ -581,8 +568,7 @@ class ManualPunishmentController:
         permissions = getattr(interaction, "permissions", None)
         if permissions is None or not permissions.manage_messages:
             await interaction.followup.send(
-                "You need Manage Messages permission. The source message was not "
-                "deleted.",
+                "You need Manage Messages permission. The source message was not deleted.",
                 ephemeral=True,
             )
             return
@@ -796,6 +782,28 @@ class ManualPunishmentController:
         moderator: Any,
         reason: str,
     ) -> tuple[publication.PunishmentOutcome, ...]:
+        async with joinwatch_state.member_lock(self.cog, member.guild.id, member.id):
+            newly_marked = await joinwatch_state.mark_manual_role_reason(
+                self.cog, member, {role.id for role, _entry in roles}
+            )
+            outcomes = await self._apply_roles_locked(member, roles, moderator, reason, newly_marked)
+            store = getattr(self.cog, "_case_store", None)
+            if store is not None:
+                for outcome in outcomes:
+                    if outcome.role_id is not None and outcome.status in ("succeeded", "already_applied"):
+                        owner = await asyncio.to_thread(store.role_owner_case, member.guild.id, member.id, outcome.role_id)
+                        if owner is not None:
+                            await asyncio.to_thread(store.release_role_ownership, owner, outcome.role_id)
+            return outcomes
+
+    async def _apply_roles_locked(
+        self,
+        member,
+        roles,
+        moderator,
+        reason,
+        newly_marked,
+    ) -> tuple[publication.PunishmentOutcome, ...]:
         existing_ids = {role.id for role in getattr(member, "roles", ())}
         outcomes = []
         pending = []
@@ -819,11 +827,13 @@ class ManualPunishmentController:
                 *pending,
                 reason=f"Manual punishment by {moderator} ({moderator.id}): {reason}",
             )
-        except discord.HTTPException:
-            outcomes.extend(
-                publication.PunishmentOutcome.failed(
-                    "role", f"Role n’t {role.name}: Failed"
+        except discord.HTTPException as error:
+            if getattr(error, "status", None) in (400, 403, 404):
+                await joinwatch_state.mark_manual_role_reason(
+                    self.cog, member, {role.id for role in pending} & newly_marked, remove=True
                 )
+            outcomes.extend(
+                publication.PunishmentOutcome.failed("role", f"Role n’t {role.name}: Failed")
                 for role in pending
             )
         else:
@@ -874,9 +884,7 @@ class ManualPunishmentController:
         except discord.HTTPException:
             return publication.PunishmentOutcome.failed("mute", "Mute: Failed")
         if not getattr(response, "success", False):
-            return publication.PunishmentOutcome.failed(
-                "mute", "Mute: Rejected by the Mutes cog"
-            )
+            return publication.PunishmentOutcome.failed("mute", "Mute: Rejected by the Mutes cog")
         try:
             await modlog.create_case(
                 self.cog.bot,
@@ -1040,9 +1048,7 @@ async def role_nt_add(cog: Any, ctx: Any, role: Any, channels: list[Any]) -> Non
     )
 
 
-async def role_nt_remove_channels(
-    cog: Any, ctx: Any, role: Any, channels: list[Any]
-) -> None:
+async def role_nt_remove_channels(cog: Any, ctx: Any, role: Any, channels: list[Any]) -> None:
     channels = list(channels)
     if not channels:
         raise commands.UserFeedbackCheckFailure("Provide at least one source channel")
@@ -1052,9 +1058,7 @@ async def role_nt_remove_channels(
         raise commands.UserFeedbackCheckFailure("That Role n’t is not configured")
     remove_ids = {channel.id for channel in channels}
     remaining = tuple(
-        channel_id
-        for channel_id in current.source_channel_ids
-        if channel_id not in remove_ids
+        channel_id for channel_id in current.source_channel_ids if channel_id not in remove_ids
     )
     if not remaining:
         raise commands.UserFeedbackCheckFailure(
@@ -1074,9 +1078,7 @@ async def role_nt_remove_channels(
     )
 
 
-async def role_nt_notification(
-    cog: Any, ctx: Any, role: Any, channel: Any | None = None
-) -> None:
+async def role_nt_notification(cog: Any, ctx: Any, role: Any, channel: Any | None = None) -> None:
     setting, configured = await _configured_role_nt(cog, ctx.guild)
     current = configured.get(role.id)
     if current is None:
@@ -1153,9 +1155,7 @@ async def role_nt_list(cog: Any, ctx: Any) -> None:
         for channel_id in entry.source_channel_ids:
             channel = ctx.guild.get_channel(channel_id)
             channel_labels.append(
-                f"#{channel.name}"
-                if channel is not None
-                else f"deleted channel {channel_id}"
+                f"#{channel.name}" if channel is not None else f"deleted channel {channel_id}"
             )
         notification = ctx.guild.get_channel(entry.notification_channel_id)
         if notification is not None:
@@ -1165,8 +1165,7 @@ async def role_nt_list(cog: Any, ctx: Any) -> None:
         else:
             notification_label = f"deleted channel {entry.notification_channel_id}"
         lines.append(
-            f"{role_label}: {', '.join(channel_labels)}; notification: "
-            f"{notification_label}"
+            f"{role_label}: {', '.join(channel_labels)}; notification: {notification_label}"
         )
     await _send_pagified(
         ctx,

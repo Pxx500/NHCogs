@@ -153,6 +153,19 @@ EXPECTED_GUILD_DEFAULTS = {
     "joinwatch_auto_role_random_delay_max_minutes": 10,
     "joinwatch_pending_role_assignments": {},
     "joinwatch_pending_roles": {},
+    "joinwatch_captcha_enabled": False,
+    "joinwatch_verified_members": {},
+    "captcha_channel": None,
+    "captcha_log_channel": None,
+    "captcha_panel_channel_id": None,
+    "captcha_panel_message_id": None,
+    "joinwatch_groups_enabled": False,
+    "joinwatch_groups_minimum_accounts": 5,
+    "joinwatch_groups_join_window_minutes": 15,
+    "joinwatch_groups_creation_distance_hours": 6,
+    "joinwatch_groups_max_active": 50,
+    "joinwatch_groups_per_minute": 5,
+    "joinwatch_group_admission_times": [],
     "baitrole_enabled": False,
     "baitrole_channel": None,
     "baitrole_id": None,
@@ -245,6 +258,9 @@ class _GuildConfig:
 
     async def set_raw(self, key, *, value):
         self._values[str(key)] = value
+
+    async def joinwatch_pending_roles(self):
+        return await self.get_raw("joinwatch_pending_roles", default={})
 
     @asynccontextmanager
     async def stats(self):

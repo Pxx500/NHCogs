@@ -199,6 +199,19 @@ DEFAULTS: Mapping[str, object] = MappingProxyType(
         "joinwatch_auto_role_random_delay_max_minutes": 10,
         "joinwatch_pending_role_assignments": {},
         "joinwatch_pending_roles": {},
+        "joinwatch_captcha_enabled": False,
+        "joinwatch_verified_members": {},
+        "captcha_channel": None,
+        "captcha_log_channel": None,
+        "captcha_panel_channel_id": None,
+        "captcha_panel_message_id": None,
+        "joinwatch_groups_enabled": False,
+        "joinwatch_groups_minimum_accounts": 5,
+        "joinwatch_groups_join_window_minutes": 15,
+        "joinwatch_groups_creation_distance_hours": 6,
+        "joinwatch_groups_max_active": 50,
+        "joinwatch_groups_per_minute": 5,
+        "joinwatch_group_admission_times": [],
         "baitrole_enabled": False,
         "baitrole_channel": None,
         "baitrole_id": None,
@@ -287,7 +300,7 @@ def _nested_dict(raw: Mapping[str, object], key: str) -> dict[str, dict[str, obj
         for item_key, item_value in value.items()
     ):
         return {item_key: dict(item_value) for item_key, item_value in value.items()}
-    log.warning("Invalid guild setting %s=%r; using default %r", key, value, DEFAULTS[key])
+    log.warning("Invalid guild setting %s mapping, using default", key)
     return {}
 
 
@@ -434,6 +447,19 @@ class GuildSettings:
     joinwatch_auto_role_random_delay_max_minutes: int
     joinwatch_pending_role_assignments: dict[str, dict[str, object]]
     joinwatch_pending_roles: dict[str, dict[str, object]]
+    joinwatch_captcha_enabled: bool
+    joinwatch_verified_members: dict[str, dict[str, object]]
+    captcha_channel: int | None
+    captcha_log_channel: int | None
+    captcha_panel_channel_id: int | None
+    captcha_panel_message_id: int | None
+    joinwatch_groups_enabled: bool
+    joinwatch_groups_minimum_accounts: int
+    joinwatch_groups_join_window_minutes: int
+    joinwatch_groups_creation_distance_hours: int
+    joinwatch_groups_max_active: int
+    joinwatch_groups_per_minute: int
+    joinwatch_group_admission_times: list[float]
     baitrole_enabled: bool
     baitrole_channel: int | None
     baitrole_id: int | None
@@ -537,6 +563,19 @@ class GuildSettings:
                 raw, "joinwatch_pending_role_assignments"
             ),
             joinwatch_pending_roles=_nested_dict(raw, "joinwatch_pending_roles"),
+            joinwatch_captcha_enabled=_bool(raw, "joinwatch_captcha_enabled"),
+            joinwatch_verified_members=_nested_dict(raw, "joinwatch_verified_members"),
+            captcha_channel=_optional_int(raw, "captcha_channel"),
+            captcha_log_channel=_optional_int(raw, "captcha_log_channel"),
+            captcha_panel_channel_id=_optional_int(raw, "captcha_panel_channel_id"),
+            captcha_panel_message_id=_optional_int(raw, "captcha_panel_message_id"),
+            joinwatch_groups_enabled=_bool(raw, "joinwatch_groups_enabled"),
+            joinwatch_groups_minimum_accounts=_int(raw, "joinwatch_groups_minimum_accounts"),
+            joinwatch_groups_join_window_minutes=_int(raw, "joinwatch_groups_join_window_minutes"),
+            joinwatch_groups_creation_distance_hours=_int(raw, "joinwatch_groups_creation_distance_hours"),
+            joinwatch_groups_max_active=_int(raw, "joinwatch_groups_max_active"),
+            joinwatch_groups_per_minute=_int(raw, "joinwatch_groups_per_minute"),
+            joinwatch_group_admission_times=_list(raw, "joinwatch_group_admission_times", float),
             baitrole_enabled=_bool(raw, "baitrole_enabled"),
             baitrole_channel=_optional_int(raw, "baitrole_channel"),
             baitrole_id=_optional_int(raw, "baitrole_id"),

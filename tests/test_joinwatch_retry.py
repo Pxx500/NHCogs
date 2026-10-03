@@ -51,9 +51,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             def add_field(self, *, name, value, inline):
-                self.fields.append(
-                    SimpleNamespace(name=name, value=value, inline=inline)
-                )
+                self.fields.append(SimpleNamespace(name=name, value=value, inline=inline))
 
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -188,22 +186,24 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                 cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
                 cog._record_daily_stat = mock.AsyncMock()
 
-                with mock.patch.object(
-                    honeypot.discord,
-                    "utils",
-                    SimpleNamespace(
-                        format_dt=lambda value, style: value.isoformat()
+                with (
+                    mock.patch.object(
+                        honeypot.discord,
+                        "utils",
+                        SimpleNamespace(format_dt=lambda value, style: value.isoformat()),
+                        create=True,
                     ),
-                    create=True,
-                ), mock.patch.object(
-                    honeypot.discord,
-                    "Embed",
-                    FakeEmbed,
-                ), mock.patch.object(
-                    honeypot.modlog,
-                    "create_case",
-                    new=mock.AsyncMock(),
-                    create=True,
+                    mock.patch.object(
+                        honeypot.discord,
+                        "Embed",
+                        FakeEmbed,
+                    ),
+                    mock.patch.object(
+                        honeypot.modlog,
+                        "create_case",
+                        new=mock.AsyncMock(),
+                        create=True,
+                    ),
                 ):
                     await cog.joinwatch_auto_role_loop.function(cog)
 
@@ -212,9 +212,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                     role,
                     reason="Automated account status update.",
                 )
-                active_member.kick.assert_awaited_once_with(
-                    reason="Suspicious Account"
-                )
+                active_member.kick.assert_awaited_once_with(reason="Suspicious Account")
                 self.assertEqual(assignments, {})
                 self.assertNotIn("202", roles)
                 self.assertEqual(roles["201"]["role_id"], 501)
@@ -222,10 +220,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                     (
                         stats["joinwatch_auto_roles"],
                         stats["joinwatch_auto_role_punishments"],
-                        [
-                            call.args[2]
-                            for call in cog._record_daily_stat.await_args_list
-                        ],
+                        [call.args[2] for call in cog._record_daily_stat.await_args_list],
                     ),
                     (1, 1, ["shadowbans"]),
                 )
@@ -247,9 +242,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                 current_config = SimpleNamespace(
                     all=mock.AsyncMock(return_value={"dry_run": False})
                 )
-                cog.config = SimpleNamespace(
-                    guild=mock.Mock(return_value=current_config)
-                )
+                cog.config = SimpleNamespace(guild=mock.Mock(return_value=current_config))
                 cog._increment_stat = mock.AsyncMock()
                 cog._record_daily_stat = mock.AsyncMock()
                 cog._missing_action_permission = mock.Mock(return_value=None)
@@ -310,9 +303,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                     _is_protected_member=mock.AsyncMock(return_value=False),
                     _punitive_effect_allowed=mock.AsyncMock(return_value=True),
                     _missing_role_assignment_permission=mock.Mock(return_value=None),
-                    _increment_stat=mock.AsyncMock(
-                        side_effect=RuntimeError("config unavailable")
-                    ),
+                    _increment_stat=mock.AsyncMock(side_effect=RuntimeError("config unavailable")),
                     _record_daily_stat=mock.AsyncMock(),
                 )
                 action = honeypot.joinwatch_state.JoinwatchSelectedAction(
@@ -322,6 +313,15 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                     role.id,
                     now,
                     {"expires_at": (now + timedelta(minutes=30)).isoformat()},
+                )
+                cog.config = SimpleNamespace(
+                    guild=lambda _guild: SimpleNamespace(
+                        all=mock.AsyncMock(
+                            return_value={
+                                "joinwatch_pending_role_assignments": {str(member.id): action.data}
+                            }
+                        )
+                    )
                 )
                 settings = honeypot.GuildSettings.from_mapping(
                     {"joinwatch_auto_role_timer_minutes": 30}
@@ -338,9 +338,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                     )
 
                 member.add_roles.assert_awaited_once()
-                cog._record_daily_stat.assert_awaited_once_with(
-                    guild, mock.ANY, "shadowbans"
-                )
+                cog._record_daily_stat.assert_awaited_once_with(guild, mock.ANY, "shadowbans")
 
     async def test_assignment_settles_before_incident_publication(self):
         with TemporaryDirectory() as directory:
@@ -367,9 +365,13 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                 }
                 roles = {}
                 guild_config = SimpleNamespace(
-                    joinwatch_pending_role_assignments=lambda: self._Store(
-                        assignments
+                    all=mock.AsyncMock(
+                        return_value={
+                            "joinwatch_pending_role_assignments": assignments,
+                            "joinwatch_pending_roles": roles,
+                        }
                     ),
+                    joinwatch_pending_role_assignments=lambda: self._Store(assignments),
                     joinwatch_pending_roles=lambda: self._Store(roles),
                 )
                 cog = SimpleNamespace(
@@ -397,16 +399,12 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                     mock.patch.object(
                         honeypot.joinwatch.joinwatch_publication,
                         "publish_joinwatch_incident",
-                        new=mock.AsyncMock(
-                            side_effect=RuntimeError("publication failed")
-                        ),
+                        new=mock.AsyncMock(side_effect=RuntimeError("publication failed")),
                     ),
                     mock.patch.object(
                         honeypot.discord,
                         "utils",
-                        SimpleNamespace(
-                            format_dt=lambda value, style: value.isoformat()
-                        ),
+                        SimpleNamespace(format_dt=lambda value, style: value.isoformat()),
                         create=True,
                     ),
                 ):
@@ -441,7 +439,9 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                     joinwatch_pending_roles=lambda: self._Store(roles),
                 )
                 cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
-                honeypot.joinwatch.joinwatch_publication.publish_joinwatch_incident = mock.AsyncMock()
+                honeypot.joinwatch.joinwatch_publication.publish_joinwatch_incident = (
+                    mock.AsyncMock()
+                )
                 now = datetime(2026, 7, 15, 12, tzinfo=timezone.utc)
 
                 with mock.patch.object(
@@ -450,8 +450,10 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                     SimpleNamespace(format_dt=lambda value, style: value.isoformat()),
                     create=True,
                 ):
-                    assignment_result = await honeypot.joinwatch._reschedule_joinwatch_assignment_retry(
-                        cog, guild, "200", assignments["200"], now, failure="assignment failed"
+                    assignment_result = (
+                        await honeypot.joinwatch._reschedule_joinwatch_assignment_retry(
+                            cog, guild, "200", assignments["200"], now, failure="assignment failed"
+                        )
                     )
                     role_result = await honeypot.joinwatch._reschedule_joinwatch_role_retry(
                         cog, guild, "200", roles["200"], now, failure="action failed"
@@ -487,7 +489,9 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                     joinwatch_pending_role_assignments=lambda: self._Store(assignments),
                 )
                 cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
-                honeypot.joinwatch.joinwatch_publication.publish_joinwatch_incident = mock.AsyncMock()
+                honeypot.joinwatch.joinwatch_publication.publish_joinwatch_incident = (
+                    mock.AsyncMock()
+                )
 
                 scheduled = await honeypot.joinwatch._reschedule_joinwatch_assignment_retry(
                     cog,

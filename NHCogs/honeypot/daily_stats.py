@@ -14,6 +14,8 @@ from .settings import GuildSettings
 log = logging.getLogger("red.Honeypot")
 
 PUBLICATION_TIME_UTC = time(hour=0, minute=5, tzinfo=timezone.utc)
+WAVE_GUEST_EMOJI_ID = 1136376151485468803
+WAVE_GUEST_EMOJI_NAME = "boubs_ultra"
 
 
 def _utc(value: datetime) -> datetime:
@@ -39,9 +41,27 @@ def next_publication_at(now: datetime) -> datetime:
     return target
 
 
-def build_embed(report_date: date, stats: DailyStatsSnapshot) -> discord.Embed:
+def _wave_guest_emoji(bot) -> str:
+    get_emoji = getattr(bot, "get_emoji", None)
+    emoji = get_emoji(WAVE_GUEST_EMOJI_ID) if callable(get_emoji) else None
+    name = emoji.name if emoji is not None else WAVE_GUEST_EMOJI_NAME
+    prefix = "a" if emoji is not None and emoji.animated else ""
+    return f"<{prefix}:{name}:{WAVE_GUEST_EMOJI_ID}>"
+
+
+def build_embed(
+    report_date: date,
+    stats: DailyStatsSnapshot,
+    *,
+    bot=None,
+    preview: bool = False,
+) -> discord.Embed:
     embed = discord.Embed(
-        title=f"Honeypot daily summary - {report_date.isoformat()} UTC",
+        title=(
+            "Daily summary preview (sample data)"
+            if preview
+            else f"Honeypot daily summary - {report_date.isoformat()} UTC"
+        ),
         color=discord.Color.blue(),
     )
     embed.add_field(
@@ -53,12 +73,31 @@ def build_embed(report_date: date, stats: DailyStatsSnapshot) -> discord.Embed:
         ),
         inline=False,
     )
+    joinwatch_summary = f"Shadowbans: {stats.shadowbans}\nBans: {stats.joinwatch_bans}"
+    if stats.wave_guests > 0:
+        joinwatch_summary += f"\nExtra party guests {_wave_guest_emoji(bot)}: {stats.wave_guests}"
     embed.add_field(
         name="JoinWatch",
-        value=f"Shadowbans: {stats.shadowbans}\nBans: {stats.joinwatch_bans}",
+        value=joinwatch_summary,
         inline=False,
     )
     return embed
+
+
+def build_preview_embed(*, bot=None) -> discord.Embed:
+    """Render public sample aggregates without reading or changing stored state."""
+    report_date = completed_report_date(datetime.now(timezone.utc))
+    sample = DailyStatsSnapshot(
+        guild_id=0,
+        date_utc=report_date,
+        detections=12,
+        automated_bans=7,
+        manual_bans=3,
+        shadowbans=6,
+        joinwatch_bans=2,
+        wave_guests=40,
+    )
+    return build_embed(report_date, sample, bot=bot, preview=True)
 
 
 async def _publish_guild(
@@ -84,7 +123,7 @@ async def _publish_guild(
     if stats.publication_message_id is not None:
         return
     message = await channel.send(
-        embed=build_embed(report_date, stats),
+        embed=build_embed(report_date, stats, bot=cog.bot),
         allowed_mentions=discord.AllowedMentions.none(),
     )
     await asyncio.to_thread(
