@@ -174,7 +174,7 @@ Group: `[p]honeypot captcha`. Its bare invocation shows command syntax and, in a
 | `[p]honeypot captcha channel [channel/clear]` | Set the ordinary text channel for Verify and wave invitations |
 | `[p]honeypot captcha logchannel [channel/clear]` | Set a private moderator audit destination |
 | `[p]honeypot captcha panel` | Explicitly publish or refresh one persistent Verify panel |
-| `[p]honeypot captcha test <member>` | Run the real check pipeline for one explicitly selected test account |
+| `[p]honeypot captcha test <member>` | Test the full restriction flow for a regular account, or offer CAPTCHA-only practice to a protected member |
 | `[p]honeypot captcha status <member>` | Privately inspect an account's active check and deadline |
 | `[p]honeypot captcha resolve <member> <reason>` | Accept the member and settle only their JoinWatch restriction, recording the moderator and reason |
 
@@ -183,6 +183,8 @@ New CAPTCHA and group sources are off after installation. Installation doesn't p
 The participant uses Verify without Manage Messages. An active JoinWatch timer grants access, including timers created before CAPTCHA was added, not merely possession of the role. New timers are activated after successful role application. Pending role assignments don't grant access to CAPTCHA. Each attempt has two independently generated shape-counting PNG questions and six numbered answers per question. The second question replaces the same private reply. An incorrect answer ends the full attempt. One more attempt starts both questions again. After two failed attempts, the participant must DM a moderator. The existing ban deadline continues. No Help button or automatic attempt reset is provided. Infrastructure failures don't consume attempts.
 
 The test command doesn't override a real timer, lift independent punishments, add public statistics, or enable automatic bans. An unfinished test is reused. A completed or locked test can be repeated with new questions. Successful checks settle their own timer, but another moderator or case restriction keeps the role and requires moderator review. Restarts and rejoins preserve attempts and deadlines. `joinwatch captcha false` disables admission of new age-based entries to CAPTCHA, not existing JoinWatch role assignment or its ban timer. Previously admitted participants can still complete their checks. `joinwatch autorole toggle` controls age-based role protection. `joinwatch groups toggle` controls new group detection independently.
+
+For protected members, `captcha test` instead offers a Try CAPTCHA button usable only by the selected member. Practice uses the same questions, two-step answers, and two attempts, but never changes roles, timers, or statistics. It can be repeated with the command. Practice buttons expire after five minutes of inactivity and aren't restored after a restart. Bots can't participate.
 
 An explicit `joinwatch captcha true` also admits existing valid JoinWatch timers, including entries created while CAPTCHA was off. It reports the admitted count and prepares questions in the bounded background queue. Role assignments, deadlines, already used attempts, and existing question progress stay unchanged. Repeating `true` doesn't reset checks. Startup restoration alone doesn't adopt unknown old timers.
 
