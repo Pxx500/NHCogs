@@ -704,7 +704,9 @@ async def _on_member_join_locked(cog, member: discord.Member) -> None:
         )
         incident.setdefault("captcha_enabled", bool(raw_config.get("joinwatch_captcha_enabled")))
         if existing_incident is not None:
-            incident["restore_incident"] = True
+            incident["restore_incident"] = bool(
+                existing_incident.get("applied_at") or existing_incident.get("role_owned")
+            )
         if owner is not None and (incident.get("captcha_enabled") or incident.get("challenge")):
             await owner.prepare_assignment(member, incident)
         try:

@@ -139,6 +139,29 @@ def _make_runtime(honeypot, *, random_delay: bool):
 
 
 class JoinwatchRejoinTests(unittest.IsolatedAsyncioTestCase):
+    async def test_delayed_first_application_counts_once_after_early_rejoin_then_restore(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime = _make_runtime(honeypot, random_delay=True)
+            runtime.cog.bot.guilds = [runtime.guild]
+            runtime.cog._increment_stat = mock.AsyncMock(wraps=runtime.cog._increment_stat)
+            with mock.patch.object(honeypot.joinwatch.joinwatch_publication, "publish_joinwatch_incident", mock.AsyncMock()), mock.patch.object(honeypot.discord.utils, "format_dt", lambda value, style: value.isoformat(), create=True):
+                await runtime.cog.on_member_join(runtime.member)
+                await runtime.cog.on_member_join(runtime.member)
+                runtime.pending_assignments["200"]["apply_at"] = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+                await honeypot.joinwatch.joinwatch_auto_role_loop(runtime.cog)
+                self.assertIn(runtime.role, runtime.member.roles)
+                runtime.cog._record_daily_stat.assert_awaited_once_with(runtime.guild, mock.ANY, "shadowbans")
+                runtime.member.roles.clear()
+                await runtime.cog.on_member_join(runtime.member)
+                runtime.pending_assignments["200"]["apply_at"] = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+                await honeypot.joinwatch.joinwatch_auto_role_loop(runtime.cog)
+            self.assertIn(runtime.role, runtime.member.roles)
+            self.assertEqual(runtime.member.add_roles.await_count, 2)
+            runtime.cog._record_daily_stat.assert_awaited_once_with(runtime.guild, mock.ANY, "shadowbans")
+            application_counts = [call for call in runtime.cog._increment_stat.await_args_list
+                                  if call.args[1] == "joinwatch_auto_roles"]
+            self.assertEqual(len(application_counts), 1)
+
     async def test_departed_test_rejoin_assignment_never_punishes_or_counts(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
