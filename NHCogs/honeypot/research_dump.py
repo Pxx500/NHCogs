@@ -71,8 +71,9 @@ def _retry_delay(error: Exception, attempts: int) -> float | None:
 class DumpProgress:
     """Live observations for the command UI. The exporter owns count updates."""
 
-    phase: str = "moderation"
-    counts: dict[str, int] = field(default_factory=lambda: {"moderation": 0, "members": 0})
+    phase: str = "starting"
+    counts: dict[int, int] = field(default_factory=dict)
+    channel_name: str | None = None
     latest_message_at: datetime | None = None
     retry_until: float | None = None
 
@@ -80,8 +81,7 @@ class DumpProgress:
 @dataclass(frozen=True)
 class ChannelDump:
     archives: tuple[Path, ...]
-    moderation_messages: int
-    member_messages: int
+    message_counts: dict[int, int]
     failures: tuple[tuple[int, Exception], ...] = ()
 
     @property
@@ -139,9 +139,11 @@ def _append_records(path: Path, records: list[dict], cancel: Event) -> None:
 
 
 async def _collect_channel(
-    channel, path: Path, category: str, progress: DumpProgress, *, cutoff: datetime, cancel: Event
+    channel, path: Path, progress: DumpProgress, *, cutoff: datetime, cancel: Event
 ) -> Exception | None:
-    progress.phase = category
+    progress.phase = "reading"
+    progress.channel_name = channel.name
+    progress.counts.setdefault(channel.id, 0)
     progress.latest_message_at = None
     pending = []
     last_message = None
@@ -155,7 +157,7 @@ async def _collect_channel(
                 if last_message is not None and message.id <= last_message.id:
                     continue
                 pending.append(_message_record(message, channel.id))
-                progress.counts[category] += 1
+                progress.counts[channel.id] += 1
                 progress.latest_message_at = message.created_at
                 last_message = message
                 attempts = 0
@@ -245,8 +247,7 @@ def _pack(directory: Path, files: list[Path], upload_limit: int, cancel: Event) 
 
 
 async def dump_channels(
-    moderation_channel,
-    member_channel,
+    channels,
     output_directory: Path,
     *,
     bot_id: int,
@@ -255,24 +256,23 @@ async def dump_channels(
     progress: DumpProgress | None = None,
 ) -> ChannelDump:
     """Read each source once. The caller owns private delivery and temp cleanup."""
+    if not channels:
+        raise ValueError("Choose at least one source channel")
     progress = progress if progress is not None else DumpProgress()
     cancel = Event()
-    role_labels = {str(role.id): role.name for role in moderation_channel.guild.roles}
+    role_labels = {str(role.id): role.name for role in channels[0].guild.roles}
     role_labels_at = datetime.now(timezone.utc).isoformat()
     files = []
     failures = []
-    for category, channel, filename in (
-        ("moderation", moderation_channel, "moderation-messages.jsonl"),
-        ("members", member_channel, "member-messages.jsonl"),
-    ):
-        path = output_directory / filename
-        failure = await _collect_channel(channel, path, category, progress, cutoff=cutoff, cancel=cancel)
+    for channel in channels:
+        path = output_directory / f"channel-{channel.id}.jsonl"
+        failure = await _collect_channel(channel, path, progress, cutoff=cutoff, cancel=cancel)
         if failure is not None:
             failures.append((channel.id, failure))
         files.append(path)
     progress.phase = "packaging"
     metadata = {
-        "format_version": 1,
+        "format_version": 2,
         "export_type": "channel_history_dump",
         "complete": not failures,
         "channel_errors": [
@@ -285,12 +285,15 @@ async def dump_channels(
         ],
         "cutoff": cutoff.isoformat(),
         "bot_id": str(bot_id),
-        "moderation_channel_id": str(moderation_channel.id),
-        "moderation_channel_name": moderation_channel.name,
-        "member_channel_id": str(member_channel.id),
-        "member_channel_name": member_channel.name,
-        "moderation_messages": progress.counts["moderation"],
-        "member_messages": progress.counts["members"],
+        "channels": [
+            {
+                "id": str(channel.id),
+                "name": channel.name,
+                "file": f"channel-{channel.id}.jsonl",
+                "messages": progress.counts[channel.id],
+            }
+            for channel in channels
+        ],
         "current_role_labels": role_labels,
         "role_labels_observed_at": role_labels_at,
         "limitations": [
@@ -309,6 +312,4 @@ async def dump_channels(
         _pack, output_directory, [metadata_path, *files], upload_limit, cancel=cancel
     )
     progress.phase = "uploading"
-    return ChannelDump(
-        archives, progress.counts["moderation"], progress.counts["members"], tuple(failures)
-    )
+    return ChannelDump(archives, dict(progress.counts), tuple(failures))

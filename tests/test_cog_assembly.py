@@ -1,10 +1,6 @@
 """Assembly and contract guards for the Honeypot cog.
 
-These do not exercise the detection pipeline: they pin the shape of the cog as
-it is assembled - the command, listener and loop inventory against
-tests/honeypot_command_contract.json, the README divergence that contract
-records, the Phase 5 domain-shell delegation, and the runtime help and
-info.json metadata.
+These protect command registration, domain delegation, runtime help, and metadata.
 """
 
 import unittest

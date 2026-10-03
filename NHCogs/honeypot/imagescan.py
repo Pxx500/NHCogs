@@ -19,10 +19,9 @@ from redbot.core import commands
 from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import box
 
-from . import detection_runtime, diagnostics
+from . import detection_runtime
 from .detection_cases import ActionIntent, DetectionSignal
 from .detection_runtime import DETECTION_IMAGE_READ_MAX_BYTES
-from .diagnostics import REVIEW_DUMP_MAX_ZIP_BYTES
 from .image_detector import ImageSample, image_hashes_from_bytes, match_image
 from .settings import (
     BOOL_OPTIONS,
@@ -35,6 +34,7 @@ log = logging.getLogger("red.Honeypot")
 
 IMAGE_SCAN_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
 IMAGE_SCAN_MAX_ATTACHMENTS = 4
+IMAGE_SCAN_EXPORT_MAX_ZIP_BYTES = 95 * 1024 * 1024
 IMAGE_ATTACHMENT_EXTENSIONS = {
     ".avif",
     ".bmp",
@@ -46,6 +46,28 @@ IMAGE_ATTACHMENT_EXTENSIONS = {
     ".tiff",
     ".webp",
 }
+
+
+def _imagescan_zip_chunks(root_dir: Path, zip_dir: Path, max_bytes: int) -> list[Path]:
+    files = [path for path in root_dir.rglob("*") if path.is_file()]
+    chunks: list[list[Path]] = [[]]
+    chunk_sizes = [0]
+    for path in sorted(files):
+        size = path.stat().st_size
+        if chunks[-1] and chunk_sizes[-1] + size > max_bytes:
+            chunks.append([])
+            chunk_sizes.append(0)
+        chunks[-1].append(path)
+        chunk_sizes[-1] += size
+    width = max(3, len(str(len(chunks))))
+    archives: list[Path] = []
+    for index, chunk in enumerate(chunks, 1):
+        archive = zip_dir / f"honeypot-imagescan-dump-{index:0{width}d}.zip"
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+            for path in chunk:
+                zip_file.write(path, path.relative_to(root_dir))
+        archives.append(archive)
+    return archives
 
 
 def is_image_attachment(attachment: discord.Attachment) -> bool:
@@ -429,9 +451,7 @@ async def _imagescan_create_dump_archives(cog, guild_id: int) -> tuple[Path, lis
             exported["active"] = bool(exported["active"])
             exported.pop("file_path", None)
             handle.write(json.dumps(exported, ensure_ascii=False) + "\n")
-    archives = diagnostics._review_dump_zip_chunks(
-        data_root, zip_root, REVIEW_DUMP_MAX_ZIP_BYTES
-    )
+    archives = _imagescan_zip_chunks(data_root, zip_root, IMAGE_SCAN_EXPORT_MAX_ZIP_BYTES)
     return temp_root, archives
 
 
