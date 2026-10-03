@@ -111,4 +111,3 @@ class CaptchaCommandTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(message_id)
                 self.assertEqual(restored.children[0].custom_id, "honeypot:captcha:verify")
                 self.assertIsNone(cog.config.defaults['captcha_panel_message_id'])
-

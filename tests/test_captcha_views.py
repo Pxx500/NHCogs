@@ -96,4 +96,3 @@ class CaptchaViewTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(str(int(deadline.timestamp())), payload["content"])
                 self.assertIsNone(payload["view"])
                 self.assertNotIn("JoinWatch", payload["content"])
-
