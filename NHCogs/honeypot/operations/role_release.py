@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, cast
 
 import discord
 
+from .. import joinwatch_state
 from ..detection_cases import OPERATION_RESULT_OWNERSHIP_TRANSFERRED
 from .context import OperationContext, OperationOutcome
 
@@ -15,18 +16,24 @@ if TYPE_CHECKING:
     from ..honeypot import Honeypot
 
 
-async def role_release_handler(
-    cog: Honeypot, context: OperationContext
-) -> OperationOutcome:
+async def role_release_handler(cog: Honeypot, context: OperationContext) -> OperationOutcome:
+    async with joinwatch_state.member_lock(
+        cog, context.snapshot.case.guild_id, context.snapshot.case.user_id
+    ):
+        return await _role_release_locked(cog, context)
+
+
+async def _role_release_locked(cog: Honeypot, context: OperationContext) -> OperationOutcome:
     operation = context.operation
     guild = cog.bot.get_guild(context.snapshot.case.guild_id)
     if guild is None:
         raise RuntimeError("detection case guild is unavailable")
     role_id = int(operation.idempotency_key.rsplit(":", 1)[1])
-    owned_role_ids = await asyncio.to_thread(
-        cog._case_store.owned_role_ids, operation.case_id
-    )
+    owned_role_ids = await asyncio.to_thread(cog._case_store.owned_role_ids, operation.case_id)
     if role_id not in owned_role_ids:
+        return OperationOutcome(result=OPERATION_RESULT_OWNERSHIP_TRANSFERRED)
+    if await _joinwatch_retains_role(cog, guild, context.snapshot.case.user_id, role_id):
+        await asyncio.to_thread(cog._case_store.release_role_ownership, operation.case_id, role_id)
         return OperationOutcome(result=OPERATION_RESULT_OWNERSHIP_TRANSFERRED)
     started = await asyncio.to_thread(
         cog._case_store.start_role_release_effect,
@@ -44,9 +51,7 @@ async def role_release_handler(
             role_id,
         )
         if owner_case_id != operation.case_id:
-            return OperationOutcome(
-                result=OPERATION_RESULT_OWNERSHIP_TRANSFERRED
-            )
+            return OperationOutcome(result=OPERATION_RESULT_OWNERSHIP_TRANSFERRED)
         raise RuntimeError("detection operation lease was lost")
     role = guild.get_role(role_id)
     member = guild.get_member(context.snapshot.case.user_id) if role is not None else None
@@ -74,3 +79,16 @@ async def role_release_handler(
         role_id,
     )
     return OperationOutcome()
+
+
+async def _joinwatch_retains_role(cog, guild, user_id, role_id):
+    pending_roles = await cog.config.guild(guild).joinwatch_pending_roles()
+    pending = pending_roles.get(str(user_id))
+    if pending is None or pending.get("role_id") != role_id:
+        return False
+    if not pending.get("role_owned"):
+        async with cog.config.guild(guild).joinwatch_pending_roles() as entries:
+            current = entries.get(str(user_id))
+            if current is not None and current.get("role_id") == role_id:
+                current["role_owned"] = True
+    return True

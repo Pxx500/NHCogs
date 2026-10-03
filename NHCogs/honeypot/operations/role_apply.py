@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, cast
 
 import discord
 
+from .. import joinwatch_state
 from ..detection_cases import (
     MODERATION_SUPERSEDING_RESULTS,
     MODERATION_SUPERSEDING_TYPES,
@@ -39,23 +40,18 @@ def _is_superseded_by_moderation(snapshot: CaseSnapshot) -> bool:
     )
 
 
-async def _run_pending_role_release(
-    cog: Honeypot, context: OperationContext, role_id: int
-) -> None:
+async def _run_pending_role_release(cog: Honeypot, context: OperationContext, role_id: int) -> None:
     """Drive the queued release of the role's previous detection-case owner."""
     terminal_snapshot = cast(
         CaseSnapshot,
-        await asyncio.to_thread(
-            cog._case_store.get_case, context.operation.case_id
-        ),
+        await asyncio.to_thread(cog._case_store.get_case, context.operation.case_id),
     )
     release = next(
         (
             item
             for item in terminal_snapshot.operations
             if item.operation_type == OperationType.ROLE_RELEASE
-            and item.idempotency_key
-            == f"role-release:{context.operation.case_id}:{role_id}"
+            and item.idempotency_key == f"role-release:{context.operation.case_id}:{role_id}"
         ),
         None,
     )
@@ -66,9 +62,7 @@ async def _run_pending_role_release(
             datetime.now(timezone.utc),
         )
         if claimed_release is not None:
-            await cog._execute_detection_case_operation(
-                claimed_release, datetime.now(timezone.utc)
-            )
+            await cog._execute_detection_case_operation(claimed_release, datetime.now(timezone.utc))
 
 
 async def _add_case_role(
@@ -91,9 +85,7 @@ async def _add_case_role(
     )
     if not started:
         raise RuntimeError("detection operation lease was lost")
-    await member.add_roles(
-        role, reason="Detection case pending moderator review."
-    )
+    await member.add_roles(role, reason="Detection case pending moderator review.")
     result = None
     try:
         ownership_result = await asyncio.to_thread(
@@ -161,17 +153,45 @@ async def _reconcile_preexisting_role(
     if transferred:
         return OperationOutcome(result=OPERATION_RESULT_TRANSFERRED_ROLE_OWNERSHIP)
     if owner_case_id is not None and owner_case_id != context.operation.case_id:
-        raise RuntimeError(
-            "previous detection case role release is still in progress"
-        )
+        raise RuntimeError("previous detection case role release is still in progress")
     if owner_case_id == context.operation.case_id:
+        return OperationOutcome(result=OPERATION_RESULT_ROLE_ALREADY_OWNED)
+    guild = cog.bot.get_guild(context.snapshot.case.guild_id)
+    pending_roles = await cog.config.guild(guild).joinwatch_pending_roles()
+    pending = pending_roles.get(str(context.snapshot.case.user_id))
+    if pending is not None and pending.get("role_id") == role_id and pending.get("role_owned"):
+        started = await asyncio.to_thread(
+            cog._case_store.start_role_apply_effect,
+            context.operation.operation_id,
+            cast(str, context.operation.claim_token),
+            datetime.now(timezone.utc),
+        )
+        if not started:
+            raise RuntimeError("detection operation lease was lost")
+        recorded = await asyncio.to_thread(
+            cog._case_store.record_operation_role_ownership,
+            context.operation.operation_id,
+            cast(str, context.operation.claim_token),
+            context.operation.case_id,
+            context.snapshot.case.guild_id,
+            context.snapshot.case.user_id,
+            role_id=role_id,
+            now=datetime.now(timezone.utc),
+        )
+        if recorded is None:
+            return await _mark_ambiguous_role_ownership(cog, context)
         return OperationOutcome(result=OPERATION_RESULT_ROLE_ALREADY_OWNED)
     return OperationOutcome(result=OPERATION_RESULT_PREEXISTING_ROLE)
 
 
-async def role_apply_handler(
-    cog: Honeypot, context: OperationContext
-) -> OperationOutcome:
+async def role_apply_handler(cog: Honeypot, context: OperationContext) -> OperationOutcome:
+    async with joinwatch_state.member_lock(
+        cog, context.snapshot.case.guild_id, context.snapshot.case.user_id
+    ):
+        return await _role_apply_locked(cog, context)
+
+
+async def _role_apply_locked(cog: Honeypot, context: OperationContext) -> OperationOutcome:
     if _is_superseded_by_moderation(context.snapshot):
         return OperationOutcome(result=OPERATION_RESULT_SUPERSEDED_BY_MODERATION)
     if context.snapshot.case.status is not CaseStatus.PENDING:

@@ -82,6 +82,8 @@ Destinations are independent. Module-specific setters update the same settings a
 | `[p]honeypot channels daily-stats [channel/clear]` | Public daily summaries |
 | `[p]honeypot channels manual-evidence [channel/clear]` | Private manual evidence |
 | `[p]honeypot channels joinwatch [channel/clear]` | JoinWatch alerts |
+| `[p]honeypot channels captcha [channel/clear]` | CAPTCHA panel and wave invitations |
+| `[p]honeypot channels captcha-log [channel/clear]` | Private CAPTCHA audit destination |
 | `[p]honeypot channels bait-role [channel/clear]` | Bait-role notifications |
 | `[p]honeypot channels gif-debug [channel/clear]` | GIF diagnostics |
 | `[p]honeypot channels honeypot create` | Create a trap channel |
@@ -132,7 +134,7 @@ Right-click a message and choose **Apps > Punish** to select mute, kick, ban, an
 
 ### JoinWatch and bait roles
 
-Groups: `[p]honeypot joinwatch`, `[p]honeypot joinwatch alert`, `[p]honeypot joinwatch autorole`, `[p]honeypot joinwatch autorole randomize`, `[p]honeypot bait_role`
+Groups: `[p]honeypot joinwatch`, `[p]honeypot joinwatch alert`, `[p]honeypot joinwatch autorole`, `[p]honeypot joinwatch autorole randomize`, `[p]honeypot joinwatch groups`, `[p]honeypot joinwatch history`, `[p]honeypot bait_role`
 
 | Command | What it does |
 |---|---|
@@ -145,6 +147,12 @@ Groups: `[p]honeypot joinwatch`, `[p]honeypot joinwatch alert`, `[p]honeypot joi
 | `[p]honeypot joinwatch autorole timer [minutes]` | Time until escalation, 1–10080 minutes |
 | `[p]honeypot joinwatch autorole action [none/kick/ban]` | Timer action: none, kick, ban |
 | `[p]honeypot joinwatch bantimers` | Privately list timers and untimed role holders |
+| `[p]honeypot joinwatch captcha <true/false>` | Enable or disable CAPTCHA admission for new age-based entries, preserving existing auto-role protection |
+| `[p]honeypot joinwatch groups toggle <true/false>` | Enable or disable group detection for future joins |
+| `[p]honeypot joinwatch groups criteria <minimum_accounts> <join_window_minutes> <creation_distance_hours>` | Preview the current-member impact and confirm future-join criteria |
+| `[p]honeypot joinwatch groups limits <max_active> <per_minute>` | Set the automatic group-only enrollment budget without starting or catching up checks |
+| `[p]honeypot joinwatch history import` | Import one attached normalized first-join history JSON without role changes |
+| `[p]honeypot joinwatch wave <minimum_accounts> <join_window_minutes> <creation_distance_hours>` | Preview a saved historical wave and explicitly confirm its execution |
 | `[p]honeypot joinwatch autorole randomize toggle [true/false]` | Delay role assignment |
 | `[p]honeypot joinwatch autorole randomize min_time [minutes]` | Minimum delay, 1–10080 minutes |
 | `[p]honeypot joinwatch autorole randomize max_time [minutes]` | Maximum delay, 1–10080 minutes |
@@ -153,9 +161,40 @@ Groups: `[p]honeypot joinwatch`, `[p]honeypot joinwatch alert`, `[p]honeypot joi
 | `[p]honeypot bait_role action [kick/ban]` | Trap action: kick, ban |
 | `[p]honeypot bait_role channel [channel/clear]` | Notification destination |
 
-JoinWatch measures account age, not time on the server. Its timer starts after role assignment. Removing the role clears the timer. Changing the duration recalculates active deadlines and can trigger overdue punishments. `bantimers` shows manually assigned roles without creating timers, using the local member cache and warning when it is incomplete.
+JoinWatch measures account age, not time on the server. Its deadline is set when the account is enrolled, before any delayed role assignment. Removing the role clears the timer. Changing the duration recalculates active deadlines and can trigger overdue punishments. `bantimers` shows manually assigned roles without creating timers, using the local member cache and warning when it is incomplete.
 
 The bait role triggers punishment when assigned. Use a dedicated role, never a review mute, JoinWatch role, or sticky role. Protected moderators, administrators, bot owners, and targets outside the bot's role hierarchy are exempt from automated role enforcement.
+
+### CAPTCHA and historical waves
+
+Group: `[p]honeypot captcha`. Its bare invocation shows command syntax and, in a private moderator channel, the configured channel, log, panel, and existing JoinWatch role. There is no separate CAPTCHA role or role setter.
+
+| Command | What it does |
+|---|---|
+| `[p]honeypot captcha channel [channel/clear]` | Set the ordinary text channel for Verify and wave invitations |
+| `[p]honeypot captcha logchannel [channel/clear]` | Set a private moderator audit destination |
+| `[p]honeypot captcha panel` | Explicitly publish or refresh one persistent Verify panel |
+| `[p]honeypot captcha test <member>` | Run the real check pipeline for one explicitly selected test account |
+| `[p]honeypot captcha status <member>` | Privately inspect an account's active check and deadline |
+| `[p]honeypot captcha resolve <member> <reason>` | Accept the member and settle only their JoinWatch restriction, recording the moderator and reason |
+
+New CAPTCHA and group sources are off after installation. Installation doesn't publish a panel, import history, start a wave, or change the account-age limit. Tests and the panel work without enabling automatic enrollment. Configure the role through `[p]honeypot joinwatch autorole role`, the CAPTCHA channel and private log, then publish the panel. `doctor` checks the configured role, channel access, bot permissions, and panel. Run controlled account tests before wider activation. Daily statistics use the existing destination without another enable switch.
+
+The participant uses Verify without Manage Messages. An active JoinWatch record grants access, not merely possession of the role. Each attempt has two independently generated shape-counting PNG questions and six numbered answers per question. The second question replaces the same private reply. An incorrect answer ends the full attempt. One more attempt starts both questions again. After two failed attempts, the participant must DM a moderator. The existing ban deadline continues. No Help button or automatic attempt reset is provided. Infrastructure failures don't consume attempts.
+
+The test command doesn't override a real timer, lift independent punishments, add public statistics, or enable automatic bans. An unfinished test is reused. A completed or locked test can be repeated with new questions. Successful checks settle their own timer, but another moderator or case restriction keeps the role and requires moderator review. Restarts and rejoins preserve attempts and deadlines. `joinwatch captcha false` disables admission of new age-based entries to CAPTCHA, not existing JoinWatch role assignment or its ban timer. Previously admitted participants can still complete their checks. `joinwatch autorole toggle` controls age-based role protection. `joinwatch groups toggle` controls new group detection independently.
+
+An explicit `joinwatch captcha true` also admits existing valid JoinWatch timers, including entries created while CAPTCHA was off. It reports the admitted count and prepares questions in the bounded background queue. Role assignments, deadlines, already used attempts, and existing question progress stay unchanged. Repeating `true` doesn't reset checks. Startup restoration alone doesn't adopt unknown old timers.
+
+Group criteria support 2–100000 distinct accounts, a 1–1440 minute join window, and a 1–8760 hour creation-distance window. They compare creation dates against each triggering account, not a chain of similarities. A rejoin doesn't add another participant. Absent and banned historical participants still count toward the original cohort. Only current, eligible, unprotected members receive restrictions.
+
+Automatic group-only checks default to at most 50 active or reserved entries and five new entries per rolling minute. `groups limits` accepts 1–10000 for each value. Pending assignments reserve capacity. The budget doesn't weaken existing age-based JoinWatch protection or change an explicitly confirmed historical wave. Exceeding it stops new group-only restrictions and reports privately. Raising a limit doesn't automatically catch up previously skipped accounts.
+
+Criteria changes show the previous and proposed values, data completeness, current matches, already handled accounts, exclusions, and new eligible accounts. Confirm and Cancel belong to the moderator who opened the preview, with Manage Messages checked again at the click. Expired or stale previews cannot change settings. Confirming criteria changes future joins only, not historical members.
+
+`wave` is a leaf command. It saves a fixed candidate list, sends a private candidate attachment, and offers Start wave with the new-account count. Start rechecks eligibility and never grows the saved list. The private progress message has persistent Pause, Resume, and Rollback controls. Pause stops new role assignments and invitations, not existing ban deadlines or participants' ability to pass. Restart pauses unfinished waves until explicit Resume. Rollback needs a second confirmation and settles only that wave's own reasons and timers, keeping independent moderation restrictions. Invitations name at most five newly restricted members every 15 seconds and use the same Verify handler. Uncertain sends are never silently repeated.
+
+History imports accept version 1 JSON, at most 20 MiB and 100000 observations. Top-level fields are `version`, `guild_id`, `source`, `generated_at`, `range_start`, `range_end`, `complete`, and `observations`. Each observation contains `user_id` and `first_joined_at`. IDs are Discord IDs as decimal strings. Dates are UTC ISO timestamps. The source range must contain the observed first joins and end no later than generation. Imported rows preserve the earliest observed first join, including absent or banned participants. Import is idempotent and doesn't infer historical first joins from a member's current rejoin date. Keep these history files private.
 
 ### GIF detector
 
@@ -189,9 +228,10 @@ Groups: `[p]honeypot stats`, `[p]honeypot config`
 | Command | What it does |
 |---|---|
 | `[p]honeypot stats show` | Show aggregate server statistics |
+| `[p]honeypot stats preview` | Send a sample daily summary in the invocation channel without changing counters or publication state |
 | `[p]honeypot stats channel [channel/clear]` | Daily summary destination |
 | `[p]honeypot modstats` | Moderator counters and current workload |
-| `[p]honeypot doctor` | Check configuration, permissions, and runtime health |
+| `[p]honeypot doctor` | Privately check configuration, permissions, and runtime health |
 | `[p]honeypot config all` | Compact configuration summary |
 | `[p]honeypot config honeypot` | Main detection settings |
 | `[p]honeypot config channel` | Destinations and scopes |
@@ -208,6 +248,8 @@ Groups: `[p]honeypot stats`, `[p]honeypot config`
 | `[p]honeypot config stats` | Stored counters and current case workload |
 
 Daily summaries are published at 00:05 UTC for the completed UTC day. They contain detections, automated bans, manual bans, JoinWatch shadowbans, and JoinWatch bans. Only completed effects count, not failed actions, dry runs, or retries. Historical totals are not backfilled into dated statistics. Clearing the destination disables publication.
+
+Historical wave enrollments add `Extra party guests` with the configured `boubs_ultra` emoji only on days with a positive count. This counts unique accounts actually restricted by an approved wave, not bans, previews, pings, tests, or already enrolled members. Ordinary JoinWatch entries remain in their existing line. `stats preview` uses the same renderer with 40 sample wave accounts and the title `Daily summary preview (sample data)`. It can be posted publicly by a moderator and never changes the real counters or schedule.
 
 ### Research and maintenance
 
@@ -239,3 +281,5 @@ ZIPs contain one `channel-<id>.jsonl` per source and `metadata.json` with channe
 Settings and counters are per server. Cases, operations, first-observed senders, and the message registry use local SQLite storage. The registry retains observed message IDs, dates, author IDs, pin state, and optional spam fingerprints for 14 days, without content or attachments. Purge uses observed IDs, not history scans. Separate `[p]cleanup` commands are documented in their [own README](../cleanup/README.md).
 
 Captured case files are temporary. Selected TP and FP samples remain in the image dataset under its retention settings. Red user-data deletion and guild removal remove matching records and evidence, with unavailable Discord deletions queued for retry. Developers declare channel routing in [channel_routing.py](channel_routing.py).
+
+JoinWatch keeps active incident and attempt metadata and verification outcomes in guild Config. Auxiliary first-observed joins and frozen wave execution state use the existing case SQLite store, outside the configuration read by message detectors. Current challenge images and answers are retained only with their active check, not in audit logs or evidence archives. Live first-join observations and settled waves are retained for 90 days. Imported history remains explicitly retained for historical analysis. User-data deletion removes the corresponding observations, results, and wave references. Leaving a guild clears pending JoinWatch work and verification history so rejoining doesn't revive stale enforcement.

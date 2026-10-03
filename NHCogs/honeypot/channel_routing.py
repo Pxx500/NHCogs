@@ -106,6 +106,26 @@ CHANNEL_CATEGORIES = (
         module_command="bait_role channel",
     ),
     ChannelCategory(
+        "captcha",
+        "captcha_channel",
+        "CAPTCHA",
+        "destination",
+        allow_threads=False,
+        required_permissions=("send_messages", "read_history", "attach_files"),
+        central_command="captcha",
+        module_command="captcha channel",
+    ),
+    ChannelCategory(
+        "captcha_log",
+        "captcha_log_channel",
+        "CAPTCHA log",
+        "destination",
+        private=True,
+        required_permissions=("send_messages", "embed_links"),
+        central_command="captcha-log",
+        module_command="captcha logchannel",
+    ),
+    ChannelCategory(
         "gif_debug",
         "gif_detector_debug_channel",
         "GIF debug",
@@ -239,7 +259,8 @@ async def configure_single(
             _("{label}: {channel}").format(
                 label=spec.label,
                 channel=cog._format_channel_setting(ctx.guild, channel_id),
-            )
+            ),
+            allowed_mentions=discord.AllowedMentions.none(),
         )
         return
     _validate_target(cog, ctx, spec, target)
@@ -248,7 +269,8 @@ async def configure_single(
         _("✅ {label} channel set to {channel.mention}").format(
             label=spec.label,
             channel=target,
-        )
+        ),
+        allowed_mentions=discord.AllowedMentions.none(),
     )
 
 

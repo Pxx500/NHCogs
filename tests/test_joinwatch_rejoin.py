@@ -124,6 +124,7 @@ def _make_runtime(honeypot, *, random_delay: bool):
     bot.is_admin = mock.AsyncMock(return_value=False)
     cog = honeypot.Honeypot(bot, _operational_support())
     cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
+    cog._joinwatch_groups = None
     cog._record_daily_stat = mock.AsyncMock()
     return SimpleNamespace(
         role=role,

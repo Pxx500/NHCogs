@@ -1625,7 +1625,10 @@ class GifDetectorCommandTests(unittest.IsolatedAsyncioTestCase):
                     get_role=lambda role_id: None,
                     default_role=object(),
                 )
-                ctx = SimpleNamespace(guild=guild, send=mock.AsyncMock())
+                private_channel = SimpleNamespace(
+                    permissions_for=lambda member: SimpleNamespace(view_channel=False)
+                )
+                ctx = SimpleNamespace(guild=guild, channel=private_channel, send=mock.AsyncMock())
 
                 await cog.honeypot_doctor(ctx)
 

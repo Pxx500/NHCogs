@@ -70,7 +70,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
                 )
             }
 
-        self.assertEqual(version, 3)
+        self.assertEqual(version, 5)
         self.assertIn("detection_cases", tables)
         self.assertIn("detection_attachments", tables)
         self.assertIn("public_daily_stats", tables)
@@ -90,7 +90,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
 
         self.assertEqual(snapshot.case.case_id, stored_case.case_id)
         self.assertEqual(snapshot.messages[0].message_id, 40)
-        self.assertEqual(version, 3)
+        self.assertEqual(version, 5)
 
     def test_initialize_preserves_timeline_publications_from_previous_schema(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
@@ -141,6 +141,48 @@ class DetectionCaseStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown daily statistic"):
             self.store.record_daily_stat(100, occurred_at, "kicks")
 
+    def test_wave_enrollment_is_counted_once_across_restart_on_success_utc_day(self):
+        before_midnight = datetime(2026, 10, 3, 23, 59, tzinfo=timezone.utc)
+        after_midnight = datetime(2026, 10, 4, 2, 1, tzinfo=timezone(timedelta(hours=2)))
+
+        self.assertTrue(self.store.record_wave_enrollment(100, before_midnight, "first"))
+        reopened = DetectionCaseStore(self.database_path)
+        reopened.initialize()
+        self.assertFalse(reopened.record_wave_enrollment(100, after_midnight, "first"))
+        self.assertTrue(reopened.record_wave_enrollment(100, after_midnight, "second"))
+        self.assertTrue(reopened.record_wave_enrollment(200, before_midnight, "first"))
+
+        first_day = reopened.get_daily_stats(100, date(2026, 10, 3))
+        second_day = reopened.get_daily_stats(100, date(2026, 10, 4))
+        self.assertEqual(first_day.wave_guests, 1)
+        self.assertEqual(second_day.wave_guests, 1)
+        self.assertEqual(reopened.get_daily_stats(200, date(2026, 10, 3)).wave_guests, 1)
+        self.assertEqual(first_day.shadowbans, 0)
+        self.assertEqual(second_day.shadowbans, 0)
+        self.assertEqual(first_day.joinwatch_bans, 0)
+        self.assertTrue(first_day.observed)
+
+    def test_daily_stats_migration_preserves_existing_counts_and_publication(self):
+        occurred_at = datetime(2026, 10, 3, 23, 59, tzinfo=timezone.utc)
+        self.store.record_daily_stat(100, occurred_at, "shadowbans")
+        self.store.record_daily_stats_publication(
+            100, occurred_at.date(), occurred_at, channel_id=300, message_id=400
+        )
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
+            connection.execute("ALTER TABLE public_daily_stats DROP COLUMN wave_guests")
+            connection.execute("DROP TABLE public_wave_enrollments")
+            connection.execute("PRAGMA user_version = 3")
+
+        reopened = DetectionCaseStore(self.database_path)
+        reopened.initialize()
+
+        snapshot = reopened.get_daily_stats(100, occurred_at.date())
+        self.assertEqual(snapshot.shadowbans, 1)
+        self.assertEqual(snapshot.wave_guests, 0)
+        self.assertEqual(snapshot.publication_message_id, 400)
+        self.assertTrue(reopened.record_wave_enrollment(100, occurred_at, "new"))
+        self.assertEqual(reopened.get_daily_stats(100, occurred_at.date()).wave_guests, 1)
+
     def test_daily_stats_can_observe_a_zero_activity_day(self):
         report_date = date(2026, 8, 19)
 
@@ -159,6 +201,29 @@ class DetectionCaseStoreTests(unittest.TestCase):
             (0, 0, 0, 0, 0),
         )
 
+    def test_joinwatch_history_roundtrip_survives_restart_and_is_guild_scoped(self):
+        empty = {
+            "version": 1, "revision": 0, "import_revision": 0,
+            "sources": [], "observations": {},
+        }
+        self.assertEqual(self.store.get_joinwatch_history(100), empty)
+        history = {
+            **empty,
+            "revision": 3,
+            "import_revision": 1,
+            "sources": [{"name": "history.json", "count": 1}],
+            "observations": {"20": {"user_id": 20, "joined_at": 1791057600}},
+        }
+        self.store.save_joinwatch_history(100, history)
+        reopened = DetectionCaseStore(self.database_path)
+        reopened.initialize()
+
+        self.assertEqual(reopened.get_joinwatch_history(100), history)
+        self.assertEqual(reopened.get_joinwatch_history(200), empty)
+        detached = reopened.get_joinwatch_history(100)
+        detached["observations"].clear()
+        self.assertEqual(reopened.get_joinwatch_history(100), history)
+
     def test_daily_stats_store_successful_publication_metadata(self):
         report_date = date(2026, 8, 19)
         published_at = datetime(2026, 8, 20, 0, 5, tzinfo=timezone.utc)
@@ -175,6 +240,62 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertEqual(snapshot.published_at, published_at)
         self.assertEqual(snapshot.publication_channel_id, 300)
         self.assertEqual(snapshot.publication_message_id, 400)
+
+    def test_joinwatch_wave_update_and_delete_preserve_other_waves_across_restart(self):
+        self.assertEqual(self.store.get_joinwatch_waves(100), {})
+        first = {"id": "first", "state": "paused", "targets": ["20"], "entries": {}}
+        second = {"id": "second", "state": "prepared", "targets": ["30"], "entries": {}}
+        self.store.save_joinwatch_wave(100, first)
+        self.store.save_joinwatch_wave(100, second)
+        self.store.save_joinwatch_wave(200, first)
+        updated = {**first, "state": "running", "entries": {"20": {"state": "enrolled"}}}
+        self.store.save_joinwatch_wave(100, updated)
+        reopened = DetectionCaseStore(self.database_path)
+        reopened.initialize()
+
+        self.assertEqual(reopened.get_joinwatch_waves(100), {"first": updated, "second": second})
+        reopened.delete_joinwatch_wave(100, "first")
+        reopened.delete_joinwatch_wave(100, "first")
+        self.assertEqual(reopened.get_joinwatch_waves(100), {"second": second})
+        self.assertEqual(reopened.get_joinwatch_waves(200), {"first": first})
+
+    def test_joinwatch_auxiliary_clear_is_guild_scoped_and_preserves_cases_and_stats(self):
+        now = datetime(2026, 10, 3, 12, tzinfo=timezone.utc)
+        case = self.store.append_message(self.message(40, now), ()).case
+        history = {"version": 1, "revision": 1, "import_revision": 0,
+                   "sources": [], "observations": {"20": {"user_id": 20}}}
+        wave = {"id": "wave", "targets": ["20"], "entries": {}}
+        for guild_id in (100, 200):
+            self.store.save_joinwatch_history(guild_id, history)
+            self.store.save_joinwatch_wave(guild_id, wave)
+        self.store.record_wave_enrollment(100, now, "enrollment")
+
+        self.store.clear_joinwatch_auxiliary(100)
+        self.store.clear_joinwatch_auxiliary(100)
+
+        self.assertEqual(self.store.get_joinwatch_history(100)["observations"], {})
+        self.assertEqual(self.store.get_joinwatch_waves(100), {})
+        self.assertEqual(self.store.get_joinwatch_history(200), history)
+        self.assertEqual(self.store.get_joinwatch_waves(200), {"wave": wave})
+        self.assertEqual(self.store.get_daily_stats(100, now.date()).wave_guests, 1)
+        self.assertEqual(self.store.get_case(case.case_id).case.case_id, case.case_id)
+
+    def test_joinwatch_auxiliary_migration_preserves_existing_cases_stats_and_receipts(self):
+        now = datetime(2026, 10, 3, 12, tzinfo=timezone.utc)
+        case = self.store.append_message(self.message(40, now), ()).case
+        self.store.record_wave_enrollment(100, now, "enrollment")
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
+            connection.execute("DROP TABLE joinwatch_history")
+            connection.execute("DROP TABLE joinwatch_waves")
+            connection.execute("PRAGMA user_version = 4")
+        reopened = DetectionCaseStore(self.database_path)
+        reopened.initialize()
+
+        self.assertEqual(reopened.get_joinwatch_waves(100), {})
+        self.assertEqual(reopened.get_joinwatch_history(100)["observations"], {})
+        self.assertEqual(reopened.get_daily_stats(100, now.date()).wave_guests, 1)
+        self.assertFalse(reopened.record_wave_enrollment(100, now, "enrollment"))
+        self.assertEqual(reopened.get_case(case.case_id).case.case_id, case.case_id)
 
     def test_case_subject_identity_survives_store_restart(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
@@ -365,7 +486,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertIn("description", columns)
         self.assertIn("spoiler", columns)
         self.assertEqual(row, ("legacy.png", None, 0))
-        self.assertEqual(version, 3)
+        self.assertEqual(version, 5)
 
     def test_projection_endpoint_survives_store_restart(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)

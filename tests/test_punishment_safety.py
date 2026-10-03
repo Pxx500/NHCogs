@@ -610,10 +610,15 @@ class JoinwatchDryRunTests(unittest.IsolatedAsyncioTestCase):
                     "joinwatch_pending_role_assignments": assignments,
                     "joinwatch_pending_roles": pending_roles,
                 }
-                current_config = dict(stale_config, dry_run=True)
-                config_reads = iter((stale_config, current_config))
+                current_config = dict(stale_config)
+
+                def change_policy_before_effect(member_id):
+                    current_config["dry_run"] = True
+                    return member if member_id == member.id else None
+
+                guild.get_member = change_policy_before_effect
                 guild_config = SimpleNamespace(
-                    all=mock.AsyncMock(side_effect=lambda: next(config_reads)),
+                    all=mock.AsyncMock(side_effect=lambda: dict(current_config)),
                     joinwatch_pending_role_assignments=lambda: _Store(assignments),
                     joinwatch_pending_roles=lambda: _Store(pending_roles),
                     stats=lambda: _Store(stats),

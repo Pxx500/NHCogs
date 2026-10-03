@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import typing
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -12,11 +14,31 @@ JOINWATCH_RETRY_DELAY_MINUTES = 1
 JOINWATCH_MAX_RETRIES = 5
 
 
+@asynccontextmanager
+async def member_lock(cog, guild_id: int, member_id: int):
+    """Serialize timer, verification, and shared-role effects for one member."""
+    locks = getattr(cog, "_joinwatch_member_locks", None)
+    if locks is None:
+        locks = cog._joinwatch_member_locks = {}
+    owners = getattr(cog, "_joinwatch_lock_owners", None)
+    if owners is None:
+        owners = cog._joinwatch_lock_owners = {}
+    key = (guild_id, member_id)
+    task = asyncio.current_task()
+    if owners.get(key) is task:
+        yield
+        return
+    async with locks.setdefault(key, asyncio.Lock()):
+        owners[key] = task
+        try:
+            yield
+        finally:
+            owners.pop(key, None)
+
+
 @dataclass(frozen=True, slots=True)
 class JoinwatchSelectedAction:
-    action: typing.Literal[
-        "discard_assignment", "apply_role", "discard_role", "expire_role"
-    ]
+    action: typing.Literal["discard_assignment", "apply_role", "discard_role", "expire_role"]
     member_key: str
     member_id: int | None
     role_id: int | None
@@ -49,15 +71,26 @@ def select_due_joinwatch_assignments(
     pending_roles: typing.Mapping[str, typing.Any],
 ) -> JoinwatchSelection:
     assignment_actions: list[JoinwatchSelectedAction] = []
-    if assignments_enabled:
+    has_group_assignments = any(
+        isinstance(data, dict) and data.get("source") == "group"
+        for data in pending_assignments.values()
+    )
+    if assignments_enabled or has_group_assignments:
         for member_key_value, data in pending_assignments.items():
             member_key = str(member_key_value)
+            if not assignments_enabled and (
+                not isinstance(data, dict) or data.get("source") != "group"
+            ):
+                assignment_actions.append(
+                    JoinwatchSelectedAction(
+                        "discard_assignment", member_key, None, None, None, data
+                    )
+                )
+                continue
             try:
                 member_id = int(member_key_value)
                 role_id = int(typing.cast(typing.Any, data["role_id"]))
-                due_at = datetime.fromisoformat(
-                    typing.cast(str, data["apply_at"])
-                )
+                due_at = datetime.fromisoformat(typing.cast(str, data["apply_at"]))
             except (KeyError, TypeError, ValueError):
                 assignment_actions.append(
                     JoinwatchSelectedAction(
@@ -84,13 +117,15 @@ def select_due_joinwatch_assignments(
 
     role_actions: list[JoinwatchSelectedAction] = []
     for member_key_value, data in pending_roles.items():
+        if isinstance(data, dict) and (
+            data.get("test") or data.get("verification_state") in ("release_pending", "enrolling")
+        ):
+            continue
         member_key = str(member_key_value)
         try:
             member_id = int(member_key_value)
             role_id = int(typing.cast(typing.Any, data["role_id"]))
-            due_at = datetime.fromisoformat(
-                typing.cast(str, data["expires_at"])
-            )
+            due_at = datetime.fromisoformat(typing.cast(str, data["expires_at"]))
         except (KeyError, TypeError, ValueError):
             role_actions.append(
                 JoinwatchSelectedAction(
@@ -116,7 +151,9 @@ def select_due_joinwatch_assignments(
             )
 
     return JoinwatchSelection(
-        clear_assignments=bool(pending_assignments and not assignments_enabled),
+        clear_assignments=bool(
+            pending_assignments and not assignments_enabled and not has_group_assignments
+        ),
         assignment_actions=tuple(assignment_actions),
         role_actions=tuple(role_actions),
     )
@@ -152,16 +189,13 @@ def build_incident(
             "last_joined_at": joined_at.isoformat(),
             "join_count": previous_count + 1,
             "expires_at": stored_deadline,
-            "member_label": incident.get("member_label")
-            or f"{member.display_name} ({member})",
+            "member_label": incident.get("member_label") or f"{member.display_name} ({member})",
             "member_id": member.id,
             "member_mention": member.mention,
-            "member_display_name": incident.get("member_display_name")
-            or member.display_name,
+            "member_display_name": incident.get("member_display_name") or member.display_name,
             "member_avatar_url": incident.get("member_avatar_url")
             or (str(member.display_avatar) if member.display_avatar else None),
-            "account_age_hours": incident.get("account_age_hours")
-            or account_age_hours,
+            "account_age_hours": incident.get("account_age_hours") or account_age_hours,
         }
     )
     return incident
@@ -193,11 +227,28 @@ async def store_pending_role(
         pending_roles[str(member.id)] = pending_role
 
 
-async def delete_pending_role(
-    cog, guild: discord.Guild, member_id: int | str
-) -> None:
+async def delete_pending_role(cog, guild: discord.Guild, member_id: int | str) -> None:
     async with cog.config.guild(guild).joinwatch_pending_roles() as pending_roles:
         pending_roles.pop(str(member_id), None)
+
+
+async def mark_manual_role_reason(cog, member, role_ids, *, remove=False) -> None:
+    settings = await cog.config.guild(member.guild).all()
+    entry = settings.get("joinwatch_pending_roles", {}).get(str(member.id))
+    if entry is None or entry.get("role_id") not in role_ids:
+        return set()
+    async with cog.config.guild(member.guild).joinwatch_pending_roles() as entries:
+        current = entries.get(str(member.id))
+        if current is None or current.get("role_id") not in role_ids:
+            return set()
+        reasons = set(current.get("manual_role_reasons", []))
+        added = {current["role_id"]} - reasons
+        if remove:
+            reasons.difference_update(role_ids)
+        else:
+            reasons.add(current["role_id"])
+        current["manual_role_reasons"] = sorted(reasons)
+        return added
 
 
 async def store_pending_assignment(
@@ -209,7 +260,9 @@ async def store_pending_assignment(
     expires_at: datetime | None = None,
     incident: typing.Mapping[str, typing.Any] | None = None,
 ) -> None:
-    async with cog.config.guild(member.guild).joinwatch_pending_role_assignments() as pending_assignments:
+    async with cog.config.guild(
+        member.guild
+    ).joinwatch_pending_role_assignments() as pending_assignments:
         pending_assignment = dict(incident or {})
         pending_assignment.update(
             {
@@ -222,9 +275,7 @@ async def store_pending_assignment(
         pending_assignments[str(member.id)] = pending_assignment
 
 
-async def delete_pending_assignment(
-    cog, guild: discord.Guild, member_id: int | str
-) -> None:
+async def delete_pending_assignment(cog, guild: discord.Guild, member_id: int | str) -> None:
     async with cog.config.guild(guild).joinwatch_pending_role_assignments() as pending_assignments:
         pending_assignments.pop(str(member_id), None)
 
@@ -372,9 +423,7 @@ async def reschedule_pending_roles(
                     applied_at = datetime.fromisoformat(data["applied_at"])
                 else:
                     old_expires_at = datetime.fromisoformat(data["expires_at"])
-                    applied_at = old_expires_at - timedelta(
-                        minutes=old_timer_minutes
-                    )
+                    applied_at = old_expires_at - timedelta(minutes=old_timer_minutes)
             except (KeyError, TypeError, ValueError):
                 continue
             expires_at = applied_at + timedelta(minutes=new_timer_minutes)

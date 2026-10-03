@@ -44,6 +44,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
                 cog = SimpleNamespace(
                     joinwatch_auto_role_loop=Loop(running=False),
+                    joinwatch_wave_loop=Loop(),
                     purge_cache_cleanup_loop=Loop(),
                     firstpost_seen_flush_loop=Loop(),
                     detection_case_loop=Loop(),
@@ -249,6 +250,22 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("spam_window_seconds", logged)
                 self.assertIn("action", logged)
 
+    async def test_malformed_pending_map_does_not_log_other_accounts_challenge_data(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                raw = {"joinwatch_pending_roles": {
+                    "account-one": {"challenge": "private-question-answer", "session_nonce": "private-session-nonce"},
+                    "account-two": "malformed entry",
+                }}
+                with self.assertLogs("red.Honeypot", level=logging.WARNING) as captured:
+                    settings = honeypot.GuildSettings.from_mapping(raw)
+                self.assertEqual(settings.joinwatch_pending_roles, {})
+                logged = "\n".join(captured.output)
+                self.assertIn("joinwatch_pending_roles", logged)
+                self.assertNotIn("private-question-answer", logged)
+                self.assertNotIn("private-session-nonce", logged)
+                self.assertNotIn("account-one", logged)
+
 
     async def test_guild_settings_defaults_exactly_match_registered_config(self):
         with TemporaryDirectory() as directory:
@@ -347,7 +364,10 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
                     self.assertEqual(stale_config.read_count, 1)
                     self.assertEqual(stale_config.values[1], {})
-                    self.assertEqual(getattr(bot, "restored_views", []), [])
+                    restored = getattr(bot, "restored_views", [])
+                    self.assertEqual(len(restored), 1)
+                    self.assertEqual(restored[0][0].children[0].label, "Verify")
+                    self.assertIsNone(restored[0][1])
                 finally:
                     await cog.cog_unload()
 

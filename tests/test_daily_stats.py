@@ -21,6 +21,70 @@ class _Embed:
 
 
 class DailyStatsPublisherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wave_line_uses_cached_emoji_and_is_absent_for_zero(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                store = honeypot.DetectionCaseStore(Path(directory) / "daily.sqlite")
+                store.initialize()
+                report_date = date(2026, 10, 3)
+                store.record_wave_enrollment(
+                    100, datetime(2026, 10, 3, 12, tzinfo=timezone.utc), "enrollment"
+                )
+                bot = SimpleNamespace(
+                    get_emoji=mock.Mock(
+                        return_value=SimpleNamespace(name="boubs_ultra", animated=True)
+                    ),
+                    fetch_emoji=mock.AsyncMock(),
+                )
+                with (
+                    mock.patch.object(honeypot.daily_stats.discord, "Embed", _Embed),
+                    mock.patch.object(
+                        honeypot.daily_stats.discord,
+                        "Color",
+                        SimpleNamespace(blue=mock.Mock(return_value="blue")),
+                    ),
+                ):
+                    rendered = honeypot.daily_stats.build_embed(
+                        report_date, store.get_daily_stats(100, report_date), bot=bot
+                    )
+                    empty = honeypot.daily_stats.build_embed(
+                        report_date, store.get_daily_stats(200, report_date), bot=bot
+                    )
+                self.assertEqual(
+                    rendered.fields[1].value,
+                    "Shadowbans: 0\nBans: 0\n"
+                    "Extra party guests <a:boubs_ultra:1136376151485468803>: 1",
+                )
+                self.assertEqual(empty.fields[1].value, "Shadowbans: 0\nBans: 0")
+                bot.get_emoji.assert_called_once_with(1136376151485468803)
+                bot.fetch_emoji.assert_not_awaited()
+
+    async def test_preview_renders_sample_wave_guests_without_changing_real_stats(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                store = honeypot.DetectionCaseStore(Path(directory) / "daily.sqlite")
+                store.initialize()
+                report_date = date(2026, 10, 3)
+                before = store.get_daily_stats(100, report_date)
+                bot = SimpleNamespace(get_emoji=mock.Mock(return_value=None))
+                with (
+                    mock.patch.object(honeypot.daily_stats.discord, "Embed", _Embed),
+                    mock.patch.object(
+                        honeypot.daily_stats.discord,
+                        "Color",
+                        SimpleNamespace(blue=mock.Mock(return_value="blue")),
+                    ),
+                ):
+                    preview = honeypot.daily_stats.build_preview_embed(bot=bot)
+
+                self.assertEqual(preview.title, "Daily summary preview (sample data)")
+                self.assertEqual([field.name for field in preview.fields], ["Honeypot", "JoinWatch"])
+                self.assertIn(
+                    "Extra party guests <:boubs_ultra:1136376151485468803>: 40",
+                    preview.fields[1].value,
+                )
+                self.assertEqual(store.get_daily_stats(100, report_date), before)
+
     async def test_schedule_becomes_due_at_five_minutes_after_midnight_utc(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -49,6 +113,7 @@ class DailyStatsPublisherTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     store.record_daily_stat(100, occurred_at, metric)
                 store.record_daily_stat(100, occurred_at, "detections")
+                store.record_wave_enrollment(100, occurred_at, "wave-enrollment")
 
                 channel = SimpleNamespace(id=300, send=mock.AsyncMock())
                 channel.send.return_value = SimpleNamespace(id=400)
@@ -57,7 +122,12 @@ class DailyStatsPublisherTests(unittest.IsolatedAsyncioTestCase):
                     all=mock.AsyncMock(return_value={"daily_stats_channel": channel.id})
                 )
                 cog = SimpleNamespace(
-                    bot=SimpleNamespace(guilds=[guild]),
+                    bot=SimpleNamespace(
+                        guilds=[guild],
+                        get_emoji=mock.Mock(
+                            return_value=SimpleNamespace(name="boubs_ultra", animated=False)
+                        ),
+                    ),
                     config=SimpleNamespace(guild=mock.Mock(return_value=config)),
                     _case_store=store,
                     _get_text_channel_or_thread=mock.Mock(return_value=channel),
@@ -73,6 +143,11 @@ class DailyStatsPublisherTests(unittest.IsolatedAsyncioTestCase):
                         SimpleNamespace(blue=mock.Mock(return_value="blue")),
                     ),
                 ):
+                    preview = honeypot.daily_stats.build_preview_embed(bot=cog.bot)
+                    self.assertEqual(preview.title, "Daily summary preview (sample data)")
+                    self.assertIsNone(
+                        store.get_daily_stats(100, date(2026, 8, 19)).publication_message_id
+                    )
                     await honeypot.daily_stats.publish_completed_day(cog, now)
                     await honeypot.daily_stats.publish_completed_day(cog, now)
 
@@ -92,7 +167,8 @@ class DailyStatsPublisherTests(unittest.IsolatedAsyncioTestCase):
                         ),
                         (
                             "JoinWatch",
-                            "Shadowbans: 1\nBans: 1",
+                            "Shadowbans: 1\nBans: 1\n"
+                            "Extra party guests <:boubs_ultra:1136376151485468803>: 1",
                             False,
                         ),
                     ],

@@ -17,6 +17,7 @@ from redbot.core.i18n import Translator, cog_i18n
 
 from .. import command_overview
 from . import (
+    captcha_commands,
     channel_routing,
     cleanup,
     daily_stats,
@@ -59,6 +60,9 @@ from .effects import ModerationEffectResult, ModerationOrigin, punitive_effect_a
 from .firstpost_store import FirstPostStore
 from .image_detector import ImageSample
 from .imagescan_store import ImageScanStore
+from .joinwatch_groups import JoinwatchGroups
+from .joinwatch_verification import JoinwatchVerification
+from .joinwatch_waves import JoinwatchWaves
 from .message_registry import (
     MessageRecord,  # noqa: F401 - public module re-export
     MessageRegistry,
@@ -108,6 +112,7 @@ IMAGE_SCAN_MAX_ATTACHMENTS = imagescan.IMAGE_SCAN_MAX_ATTACHMENTS
 DETECTION_ATTACHMENT_TIMEOUT_SECONDS = detection_runtime.DETECTION_ATTACHMENT_TIMEOUT_SECONDS
 DETECTION_HEARTBEAT_INTERVAL_SECONDS = 60.0
 RESEARCH_DUMP_PROGRESS_INTERVAL_SECONDS = 30.0
+JOINWATCH_PRUNE_INTERVAL_SECONDS = 24 * 60 * 60
 
 
 DoctorResult = diagnostics.DoctorResult
@@ -179,6 +184,12 @@ class Honeypot(Cog):
         )
         self.config.register_guild(**settings.DEFAULTS)
         self._manual_punishment = manual_punishment.ManualPunishmentController(self)
+        self._joinwatch_verification = JoinwatchVerification(self)
+        self._joinwatch_groups = JoinwatchGroups(self)
+        self._joinwatch_waves = JoinwatchWaves(self)
+        self._joinwatch_restore_task: asyncio.Task | None = None
+        self._wave_render_state: dict[tuple[int, str], tuple[float, str]] = {}
+        self._joinwatch_last_prune: dict[int, datetime] = {}
 
         self._post_ban_sweep_tasks: set[asyncio.Task] = set()
         self._case_review_tasks: set[asyncio.Task] = set()
@@ -240,6 +251,10 @@ class Honeypot(Cog):
             self._case_store.plan_user_case_deletion,
             user_id,
         )
+        await self._joinwatch_verification.delete_user_data(user_id)
+        for guild in self.bot.guilds:
+            await self._joinwatch_groups.delete_user(guild, user_id)
+            await self._joinwatch_waves.delete_user(guild, user_id)
 
     @commands.Cog.listener()
     async def on_guild_remove(self, guild: discord.Guild) -> None:
@@ -249,6 +264,13 @@ class Honeypot(Cog):
             self._case_store.plan_guild_case_deletion,
             guild.id,
         )
+        await self._joinwatch_verification.delete_guild_data(guild)
+        await self._joinwatch_groups.delete_guild(guild)
+        await self._joinwatch_waves.delete_guild(guild)
+        self._joinwatch_last_prune.pop(guild.id, None)
+        config = self.config.guild(guild)
+        await config.set_raw("captcha_panel_channel_id", value=None)
+        await config.set_raw("captcha_panel_message_id", value=None)
 
     async def _delete_retained_data_scope(
         self,
@@ -979,7 +1001,11 @@ class Honeypot(Cog):
         self._detection_case_files_path.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(self._case_store.initialize)
         await self._run_detection_reconciliation()
+        await captcha_commands.restore_panels(self)
+        self._joinwatch_restore_task = asyncio.create_task(self._restore_joinwatch())
+        self._joinwatch_restore_task.add_done_callback(lambda task: self._observe_background_task(task, "JoinWatch restoration"))
         self.joinwatch_auto_role_loop.start()
+        self.joinwatch_wave_loop.start()
         self.purge_cache_cleanup_loop.start()
         self.firstpost_seen_flush_loop.start()
         self.detection_case_loop.start()
@@ -998,6 +1024,7 @@ class Honeypot(Cog):
         issues = []
         loops = (
             (self.joinwatch_auto_role_loop, "joinwatch auto role loop"),
+            (self.joinwatch_wave_loop, "joinwatch wave loop"),
             (self.purge_cache_cleanup_loop, "purge cache cleanup loop"),
             (self.firstpost_seen_flush_loop, "firstpost seen flush loop"),
             (self.detection_case_loop, "detection case loop"),
@@ -1055,6 +1082,7 @@ class Honeypot(Cog):
         await self._stop_research_dumps()
         loops = (
             self.joinwatch_auto_role_loop,
+            self.joinwatch_wave_loop,
             self.purge_cache_cleanup_loop,
             self.firstpost_seen_flush_loop,
             self.detection_case_loop,
@@ -1065,6 +1093,9 @@ class Honeypot(Cog):
         )
         for loop in loops:
             loop.cancel()
+        await self._cancel_owned_task(self._joinwatch_restore_task)
+        self._joinwatch_restore_task = None
+        await self._joinwatch_verification.close()
         await self._manual_punishment.shutdown()
         if loop_tasks:
             await asyncio.gather(*loop_tasks, return_exceptions=True)
@@ -1456,6 +1487,38 @@ class Honeypot(Cog):
     @joinwatch_auto_role_loop.before_loop
     async def before_joinwatch_auto_role(self) -> None:
         await self.bot.wait_until_red_ready()
+        if self._joinwatch_restore_task is not None:
+            await self._joinwatch_restore_task
+
+    async def _restore_joinwatch(self) -> None:
+        await self.bot.wait_until_red_ready()
+        await self._joinwatch_verification.restore()
+        for guild in self.bot.guilds:
+            for record in await self._joinwatch_waves.restore(guild):
+                if record.get("message_id"):
+                    self.bot.add_view(joinwatch_commands.WaveControlView(self, record), message_id=record["message_id"])
+
+    @tasks.loop(seconds=5)
+    async def joinwatch_wave_loop(self) -> None:
+        for guild in self.bot.guilds:
+            try:
+                record = await self._joinwatch_waves.tick(guild)
+                if record is not None:
+                    await joinwatch_commands.update_wave_message(self, guild, record)
+                now = datetime.now(timezone.utc)
+                last_prune = self._joinwatch_last_prune.get(guild.id)
+                if last_prune is None or (now - last_prune).total_seconds() >= JOINWATCH_PRUNE_INTERVAL_SECONDS:
+                    await self._joinwatch_groups.prune(guild)
+                    await self._joinwatch_waves.prune(guild)
+                    self._joinwatch_last_prune[guild.id] = now
+            except Exception as error:
+                await self._support.report_operational_error(guild_id=guild.id, source="Honeypot", action="JoinWatch wave processing", error=error)
+
+    @joinwatch_wave_loop.before_loop
+    async def before_joinwatch_wave_loop(self) -> None:
+        await self.bot.wait_until_red_ready()
+        if self._joinwatch_restore_task is not None:
+            await self._joinwatch_restore_task
 
     # ─── New account join alert ────────────────────────────────────────
 
@@ -1998,6 +2061,16 @@ class Honeypot(Cog):
         """Show, set, or clear the bait-role destination"""
         return await channel_routing.configure_single(self, ctx, "bait_role", target)
 
+    @channels.command(name="captcha", usage="[channel|clear]")
+    async def channels_captcha(self, ctx: commands.Context, target: discord.TextChannel | str | None = None) -> None:
+        """Show, set, or clear the CAPTCHA panel destination"""
+        return await channel_routing.configure_single(self, ctx, "captcha", target)
+
+    @channels.command(name="captcha-log", usage="[channel|clear]")
+    async def channels_captcha_log(self, ctx: commands.Context, target: discord.TextChannel | discord.Thread | str | None = None) -> None:
+        """Show, set, or clear the private CAPTCHA log destination"""
+        return await channel_routing.configure_single(self, ctx, "captcha_log", target)
+
     @channels.command(name="gif-debug", usage="[channel|clear]")
     async def channels_gif_debug(
         self,
@@ -2313,6 +2386,41 @@ class Honeypot(Cog):
 
     # ─── joinwatch sub-group ──────────────────────────────────────────
 
+    @honeypot.group(name="captcha", invoke_without_command=True)
+    async def captcha(self, ctx: commands.Context) -> None:
+        """Configure private account checks and controlled tests"""
+        return await self._send_group_overview(ctx, captcha_commands.config_captcha)
+
+    @captcha.command(name="channel", usage="[channel|clear]")
+    async def captcha_channel(self, ctx: commands.Context, target: discord.TextChannel | str | None = None) -> None:
+        """Show, set, or clear the CAPTCHA panel destination"""
+        return await channel_routing.configure_single(self, ctx, "captcha", target)
+
+    @captcha.command(name="logchannel", usage="[channel|clear]")
+    async def captcha_logchannel(self, ctx: commands.Context, target: discord.TextChannel | discord.Thread | str | None = None) -> None:
+        """Show, set, or clear the private CAPTCHA log destination"""
+        return await channel_routing.configure_single(self, ctx, "captcha_log", target)
+
+    @captcha.command(name="panel")
+    async def captcha_panel(self, ctx: commands.Context) -> None:
+        """Publish or refresh the persistent Verify panel"""
+        return await captcha_commands.panel(self, ctx)
+
+    @captcha.command(name="test", usage="<member>")
+    async def captcha_test(self, ctx: commands.Context, member: discord.Member) -> None:
+        """Start a repeatable test without automatic punishment or public counters"""
+        return await captcha_commands.test(self, ctx, member)
+
+    @captcha.command(name="status", usage="<member>")
+    async def captcha_status(self, ctx: commands.Context, member: discord.Member) -> None:
+        """Inspect one member's check in a private moderator channel"""
+        return await captcha_commands.status(self, ctx, member)
+
+    @captcha.command(name="resolve", usage="<member> <reason>")
+    async def captcha_resolve(self, ctx: commands.Context, member: discord.Member, *, reason: str) -> None:
+        """Accept a member and settle only their JoinWatch restriction"""
+        return await captcha_commands.resolve(self, ctx, member, reason)
+
     @honeypot.group(invoke_without_command=True)
     async def joinwatch(self, ctx: commands.Context) -> None:
         """Configure young-account join monitoring"""
@@ -2322,6 +2430,46 @@ class Honeypot(Cog):
     async def joinwatch_toggle(self, ctx: commands.Context, value: bool = None) -> None:
         """Enable or disable young-account join monitoring"""
         return await joinwatch_commands.joinwatch_toggle(self, ctx, value)
+
+    @joinwatch.command(name="captcha", usage="<true|false>")
+    async def joinwatch_captcha(self, ctx: commands.Context, value: bool) -> None:
+        """Enable new age-case CAPTCHA admission without disabling auto-role protection"""
+        return await joinwatch_commands.captcha_toggle(self, ctx, value)
+
+    @joinwatch.group(name="groups", invoke_without_command=True)
+    async def joinwatch_groups(self, ctx: commands.Context) -> None:
+        """Configure detection of groups with nearby account-creation times"""
+        return await self._send_group_overview(ctx, joinwatch_commands.config_groups)
+
+    @joinwatch_groups.command(name="toggle", usage="<true|false>")
+    async def joinwatch_groups_toggle(self, ctx: commands.Context, value: bool) -> None:
+        """Enable or disable the group rule for new joins"""
+        return await joinwatch_commands.groups_toggle(self, ctx, value)
+
+    @joinwatch_groups.command(name="criteria", usage="<minimum_accounts> <join_window_minutes> <creation_distance_hours>")
+    async def joinwatch_groups_criteria(self, ctx: commands.Context, minimum_accounts: int, join_window_minutes: int, creation_distance_hours: int) -> None:
+        """Preview the impact and confirm criteria for future joins"""
+        return await joinwatch_commands.groups_criteria(self, ctx, minimum_accounts, join_window_minutes, creation_distance_hours)
+
+    @joinwatch_groups.command(name="limits", usage="<max_active> <per_minute>")
+    async def joinwatch_groups_limits(self, ctx: commands.Context, max_active: int, per_minute: int) -> None:
+        """Set limits for automatic group-only checks without enrolling more accounts"""
+        return await joinwatch_commands.groups_limits(self, ctx, max_active, per_minute)
+
+    @joinwatch.group(name="history", invoke_without_command=True)
+    async def joinwatch_history(self, ctx: commands.Context) -> None:
+        """Import normalized first-join history without changing roles"""
+        return await self._send_group_overview(ctx)
+
+    @joinwatch_history.command(name="import")
+    async def joinwatch_history_import(self, ctx: commands.Context) -> None:
+        """Import one normalized history JSON attached to this command"""
+        return await joinwatch_commands.history_import(self, ctx)
+
+    @joinwatch.command(name="wave", usage="<minimum_accounts> <join_window_minutes> <creation_distance_hours>")
+    async def joinwatch_wave(self, ctx: commands.Context, minimum_accounts: int, join_window_minutes: int, creation_distance_hours: int) -> None:
+        """Preview and explicitly confirm a historical wave"""
+        return await joinwatch_commands.wave(self, ctx, minimum_accounts, join_window_minutes, creation_distance_hours)
 
     @joinwatch.command(usage="[channel|clear]")
     async def channel(
@@ -2542,6 +2690,12 @@ class Honeypot(Cog):
     ) -> None:
         """Show, set, or clear the destination for daily public Honeypot statistics"""
         return await channel_routing.configure_single(self, ctx, "daily_stats", target)
+
+    @honeypot_stats_group.command(name="preview")
+    @commands.has_permissions(manage_messages=True)
+    async def honeypot_stats_preview(self, ctx: commands.Context) -> None:
+        """Show a sample daily report without writing real statistics"""
+        await ctx.send(embed=daily_stats.build_preview_embed(bot=self.bot), allowed_mentions=discord.AllowedMentions.none())
 
     @debug.command(name="resetstats")
     @commands.has_permissions(manage_messages=True)
