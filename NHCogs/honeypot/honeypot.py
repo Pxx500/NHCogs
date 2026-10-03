@@ -103,9 +103,6 @@ COG_REPO_NAME = "NHCogs"
 COG_REPO_URL = "https://github.com/Pxx500/NHCogs"
 JOINWATCH_RETRY_DELAY_MINUTES = joinwatch_state.JOINWATCH_RETRY_DELAY_MINUTES
 JOINWATCH_MAX_RETRIES = joinwatch_state.JOINWATCH_MAX_RETRIES
-REVIEW_DUMP_START = diagnostics.REVIEW_DUMP_START
-REVIEW_DUMP_MAX_ZIP_BYTES = diagnostics.REVIEW_DUMP_MAX_ZIP_BYTES
-REVIEW_DUMP_ATTACHMENT_DELAY_SECONDS = diagnostics.REVIEW_DUMP_ATTACHMENT_DELAY_SECONDS
 IMAGE_SCAN_EXTENSIONS = imagescan.IMAGE_SCAN_EXTENSIONS
 IMAGE_SCAN_MAX_ATTACHMENTS = imagescan.IMAGE_SCAN_MAX_ATTACHMENTS
 DETECTION_ATTACHMENT_TIMEOUT_SECONDS = detection_runtime.DETECTION_ATTACHMENT_TIMEOUT_SECONDS
@@ -204,7 +201,6 @@ class Honeypot(Cog):
         self._firstpost_seen_authors: dict[int, set[int]] = defaultdict(set)
         self._firstpost_dirty_seen_authors: dict[int, set[int]] = defaultdict(set)
         self._firstpost_loaded_guilds: set[int] = set()
-        self._review_dump_lock: asyncio.Lock = asyncio.Lock()
         self._research_dump_jobs: dict[int, _ResearchDumpRun] = {}
         self._imagescan_db_path = cog_data_path(self) / "imagescan.sqlite"
         self._imagescan_files_path = cog_data_path(self) / "imagescan_files"
@@ -1496,8 +1492,8 @@ class Honeypot(Cog):
         hours, remainder = divmod(elapsed, 3600)
         minutes, seconds = divmod(remainder, 60)
         phases = {
-            "moderation": "Reading punishment logs",
-            "members": "Reading member logs",
+            "starting": "Preparing channel dump",
+            "reading": f"Reading #{progress.channel_name}",
             "packaging": "Packing ZIP files",
             "uploading": "Uploading ZIP files",
         }
@@ -1505,8 +1501,8 @@ class Honeypot(Cog):
         text = (
             f"**Research dump: {status}**\n"
             f"Stage: {phases[progress.phase]}\n"
-            f"Punishment messages read: {progress.counts['moderation']:,}\n"
-            f"Member messages read: {progress.counts['members']:,}\n"
+            f"Source channels: {len(progress.counts)}\n"
+            f"Messages read: {sum(progress.counts.values()):,}\n"
             f"Current log date: {current}\n"
             f"Elapsed: {hours:02}:{minutes:02}:{seconds:02}"
         )
@@ -1539,15 +1535,13 @@ class Honeypot(Cog):
             if not await self._research_dump_update_status(ctx, message, progress, started):
                 return
 
-    @research.command(name="dump", usage="<channel_1> <channel_2> [progress]")
+    @research.command(name="dump", usage="<channel_id> [channel_ids...]", ignore_extra=False)
     async def research_dump(
         self,
         ctx: commands.Context,
-        moderation_channel: discord.TextChannel,
-        member_channel: discord.TextChannel,
-        progress: bool = True,
+        *channel_ids: int,
     ) -> None:
-        """Dump both channels without parsing logs, with optional progress updates"""
+        """Dump one or more text channels by ID, with progress updates"""
         mentions = discord.AllowedMentions.none()
         if not self._channel_is_private(ctx.guild, ctx.channel):
             await ctx.send(
@@ -1555,27 +1549,30 @@ class Honeypot(Cog):
                 allowed_mentions=mentions,
             )
             return
-        for channel in (moderation_channel, member_channel):
-            if channel.guild.id != ctx.guild.id:
+        if not channel_ids:
+            await ctx.send(_("Provide at least one channel ID"), allowed_mentions=mentions)
+            return
+        channels = []
+        for channel_id in dict.fromkeys(channel_ids):
+            channel = ctx.guild.get_channel(channel_id)
+            if not isinstance(channel, discord.TextChannel) or channel.guild.id != ctx.guild.id:
                 await ctx.send(
-                    _("Both source channels must belong to this server"),
+                    _("{channel_id} isn't a text channel in this server").format(channel_id=channel_id),
                     allowed_mentions=mentions,
                 )
                 return
             permissions = channel.permissions_for(ctx.guild.me)
             if not permissions.view_channel or not permissions.read_message_history:
                 await ctx.send(
-                    _("I need View Channel and Read Message History in both source channels"),
+                    _("I need View Channel and Read Message History in every source channel"),
                     allowed_mentions=mentions,
                 )
                 return
+            channels.append(channel)
         if not ctx.channel.permissions_for(ctx.guild.me).attach_files:
             await ctx.send(
                 _("I need Attach Files in this channel"), allowed_mentions=mentions
             )
-            return
-        if moderation_channel.id == member_channel.id:
-            await ctx.send(_("Choose two different source channels"), allowed_mentions=mentions)
             return
         if ctx.guild.id in self._research_dump_jobs:
             await ctx.send(
@@ -1584,11 +1581,14 @@ class Honeypot(Cog):
             )
             return
 
-        await self._run_research_dump(ctx, moderation_channel, member_channel, progress)
+        await self._run_research_dump(ctx, channels)
 
-    async def _run_research_dump(self, ctx, moderation_channel, member_channel, show_progress) -> None:
+    async def _run_research_dump(self, ctx, channels) -> None:
         mentions = discord.AllowedMentions.none()
-        run = _ResearchDumpRun(asyncio.current_task(), research_export.DumpProgress())
+        run = _ResearchDumpRun(
+            asyncio.current_task(),
+            research_export.DumpProgress(counts=dict.fromkeys((channel.id for channel in channels), 0)),
+        )
         self._research_dump_jobs[ctx.guild.id] = run
         cutoff = datetime.now(timezone.utc)
         started = asyncio.get_running_loop().time()
@@ -1601,12 +1601,10 @@ class Honeypot(Cog):
                 self._research_dump_status(run.progress, started),
                 allowed_mentions=mentions,
             )
-            if show_progress:
-                heartbeat = asyncio.create_task(self._research_dump_heartbeat(ctx, status_message, run.progress, started))
+            heartbeat = asyncio.create_task(self._research_dump_heartbeat(ctx, status_message, run.progress, started))
             temporary = TemporaryDirectory(prefix="research-dump-", dir=cog_data_path(self))
             result = await research_export.dump_channels(
-                moderation_channel,
-                member_channel,
+                channels,
                 Path(temporary.name),
                 bot_id=self.bot.user.id,
                 upload_limit=ctx.guild.filesize_limit,
@@ -1728,11 +1726,6 @@ class Honeypot(Cog):
                     size=size_mb,
                 )
             )
-
-    @debug.command(name="reviewdump")
-    async def review_dump(self, ctx: commands.Context) -> None:
-        """Export banned review cases from the current channel"""
-        return await diagnostics.review_dump(self, ctx)
 
     # ─── honeypot sub-group ───────────────────────────────────────────
 

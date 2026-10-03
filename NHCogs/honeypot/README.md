@@ -30,7 +30,8 @@ Enable the privileged Server Members and Message Content intents. Configure tech
 ## Command reference
 
 - `[p]` means your bot's prefix. All Honeypot text commands and the `Punish` message menu require Manage Messages and a server context
-- `<argument>` is required, `[argument]` is optional. Boolean values are `true` and `false`. Most optional configuration arguments show the current value when omitted
+- `<argument>` is required, `[argument]` is optional. A slash separates choices: `[true/false]` means an optional boolean. Write one value without brackets or the slash. Most optional configuration arguments show the current value when omitted
+- `[confirm]` means the optional literal word `confirm`, not a boolean. For example, `[p]honeypot debug imagescan cleanup_events confirm` deletes event files. Omitting `confirm` only previews the cleanup
 - Use `clear` to unset a channel or role destination where supported
 - Bare `[p]honeypot` shows direct categories. Nested groups show descendant commands and full syntax, with current configuration only when `@everyone` cannot view the channel. The `gifdetector message` group instead shows or sets its warning text
 
@@ -40,12 +41,12 @@ Groups: `[p]honeypot honeypot`, `[p]honeypot honeypot roles`, `[p]honeypot honey
 
 | Command | What it does |
 |---|---|
-| `[p]honeypot honeypot toggle [value]` | Main message-detection switch |
-| `[p]honeypot honeypot action [value]` | Suspicious-message action: kick, ban, review, none |
-| `[p]honeypot honeypot fallback_action [value]` | Fallback action: review, kick, ban, none |
-| `[p]honeypot honeypot dry_run [value]` | Suppress punitive effects, not evidence capture or deletion |
-| `[p]honeypot honeypot whitelist_mode [value]` | Trusted-role handling: bypass, review, fallback, none |
-| `[p]honeypot honeypot automated_kick_fail_warn [value]` | Warn when an automated kick target has left |
+| `[p]honeypot honeypot toggle [true/false]` | Main message-detection switch |
+| `[p]honeypot honeypot action [kick/ban/review/none]` | Suspicious-message action: kick, ban, review, none |
+| `[p]honeypot honeypot fallback_action [review/kick/ban/none]` | Fallback action: review, kick, ban, none |
+| `[p]honeypot honeypot dry_run [true/false]` | Suppress punitive effects, not evidence capture or deletion |
+| `[p]honeypot honeypot whitelist_mode [bypass/review/fallback/none]` | Trusted-role handling: bypass, review, fallback, none |
+| `[p]honeypot honeypot automated_kick_fail_warn [true/false]` | Warn when an automated kick target has left |
 | `[p]honeypot honeypot roles add <role>` | Trust a role |
 | `[p]honeypot honeypot roles remove <role>` | Remove a trusted role |
 | `[p]honeypot honeypot roles list` | List trusted roles |
@@ -57,11 +58,11 @@ Groups: `[p]honeypot honeypot`, `[p]honeypot honeypot roles`, `[p]honeypot honey
 | `[p]honeypot honeypot keywords attachments remove <pattern>` | Remove a filename-base regex |
 | `[p]honeypot honeypot keywords attachments list` | List filename patterns |
 | `[p]honeypot honeypot keywords attachments reset` | Restore default patterns |
-| `[p]honeypot firstpost toggle [value]` | Enforce first-observed-message detection |
-| `[p]honeypot firstpost warmup [value]` | Record first senders without enforcement |
-| `[p]honeypot firstpost action [value]` | First-post action: review, kick, ban, none |
-| `[p]honeypot spam toggle [value]` | Detect repeats across channels |
-| `[p]honeypot spam action [value]` | Spam action: review, kick, ban, none |
+| `[p]honeypot firstpost toggle [true/false]` | Enforce first-observed-message detection |
+| `[p]honeypot firstpost warmup [true/false]` | Record first senders without enforcement |
+| `[p]honeypot firstpost action [review/kick/ban/none]` | First-post action: review, kick, ban, none |
+| `[p]honeypot spam toggle [true/false]` | Detect repeats across channels |
+| `[p]honeypot spam action [review/kick/ban/none]` | Spam action: review, kick, ban, none |
 | `[p]honeypot spam window [seconds]` | Matching window, 3–60 seconds |
 | `[p]honeypot spam channels [count]` | Required distinct channels, 2–10 |
 | `[p]honeypot purge backward [seconds]` | Backward deletion window, 60–3600 seconds |
@@ -77,12 +78,12 @@ Destinations are independent. Module-specific setters update the same settings a
 
 | Command | What it does |
 |---|---|
-| `[p]honeypot channels review [channel]` | Review destination, or `clear` |
-| `[p]honeypot channels daily-stats [channel]` | Public daily summaries, or `clear` |
-| `[p]honeypot channels manual-evidence [channel]` | Private manual evidence, or `clear` |
-| `[p]honeypot channels joinwatch [channel]` | JoinWatch alerts, or `clear` |
-| `[p]honeypot channels bait-role [channel]` | Bait-role notifications, or `clear` |
-| `[p]honeypot channels gif-debug [channel]` | GIF diagnostics, or `clear` |
+| `[p]honeypot channels review [channel/clear]` | Review destination |
+| `[p]honeypot channels daily-stats [channel/clear]` | Public daily summaries |
+| `[p]honeypot channels manual-evidence [channel/clear]` | Private manual evidence |
+| `[p]honeypot channels joinwatch [channel/clear]` | JoinWatch alerts |
+| `[p]honeypot channels bait-role [channel/clear]` | Bait-role notifications |
+| `[p]honeypot channels gif-debug [channel/clear]` | GIF diagnostics |
 | `[p]honeypot channels honeypot create` | Create a trap channel |
 | `[p]honeypot channels honeypot add <channel>` | Add a trap channel |
 | `[p]honeypot channels honeypot remove <channel>` | Remove a trap channel |
@@ -102,9 +103,9 @@ Groups: `[p]honeypot imagescan`, `[p]honeypot imagescan detector`
 | `[p]honeypot imagescan dropfile <identifier>` | Remove its file, keep matching hashes |
 | `[p]honeypot imagescan rebuild` | Rebuild detector thresholds |
 | `[p]honeypot imagescan status` | Show samples, settings, and timing |
-| `[p]honeypot imagescan detector toggle [value]` | Enable image enforcement |
-| `[p]honeypot imagescan detector action [value]` | Match action: none, review, kick, ban |
-| `[p]honeypot imagescan detector threshold [value]` | Maximum hash difference, 0–100 |
+| `[p]honeypot imagescan detector toggle [true/false]` | Enable image enforcement |
+| `[p]honeypot imagescan detector action [none/review/kick/ban]` | Match action: none, review, kick, ban |
+| `[p]honeypot imagescan detector threshold [threshold]` | Maximum hash difference, 0–100 |
 
 ### Review and manual punishment
 
@@ -112,12 +113,12 @@ Groups: `[p]honeypot review`, `[p]honeypot evidence`, `[p]honeypot punishment`, 
 
 | Command | What it does |
 |---|---|
-| `[p]honeypot review toggle [value]` | Route detections to review |
-| `[p]honeypot review channel [channel]` | Review destination, or `clear` |
-| `[p]honeypot review kick_fail_warn [value]` | Missing kick-target warning: false, true, manual |
-| `[p]honeypot punishment mute_role [role]` | Temporary review containment role, or `clear` |
+| `[p]honeypot review toggle [true/false]` | Route detections to review |
+| `[p]honeypot review channel [channel/clear]` | Review destination |
+| `[p]honeypot review kick_fail_warn [false/true/manual]` | Missing kick-target warning: false, true, manual |
+| `[p]honeypot punishment mute_role [role/clear]` | Temporary review containment role |
 | `[p]honeypot evidence status` | Show manual evidence settings |
-| `[p]honeypot evidence channel [channel]` | Private evidence destination, or `clear` |
+| `[p]honeypot evidence channel [channel/clear]` | Private evidence destination |
 | `[p]honeypot punishment role-nt add <role> <channel> [channels...]` | Assign source channels to a Role n't |
 | `[p]honeypot punishment role-nt remove-channel <role> <channel> [channels...]` | Remove source channels from a Role n't |
 | `[p]honeypot punishment role-nt notification <role> [channel]` | Show or set its notification destination |
@@ -135,22 +136,22 @@ Groups: `[p]honeypot joinwatch`, `[p]honeypot joinwatch alert`, `[p]honeypot joi
 
 | Command | What it does |
 |---|---|
-| `[p]honeypot joinwatch toggle [value]` | Monitor young accounts joining |
-| `[p]honeypot joinwatch alert toggle [value]` | Enable alerts independently of role assignment |
-| `[p]honeypot joinwatch channel [channel]` | Alert destination, or `clear` |
+| `[p]honeypot joinwatch toggle [true/false]` | Monitor young accounts joining |
+| `[p]honeypot joinwatch alert toggle [true/false]` | Enable alerts independently of role assignment |
+| `[p]honeypot joinwatch channel [channel/clear]` | Alert destination |
 | `[p]honeypot joinwatch max_age [hours]` | Account-age limit, 1–1000000 hours |
-| `[p]honeypot joinwatch autorole toggle [value]` | Enable temporary role assignment |
-| `[p]honeypot joinwatch autorole role [role]` | Temporary role, or `clear` |
+| `[p]honeypot joinwatch autorole toggle [true/false]` | Enable temporary role assignment |
+| `[p]honeypot joinwatch autorole role [role/clear]` | Temporary role |
 | `[p]honeypot joinwatch autorole timer [minutes]` | Time until escalation, 1–10080 minutes |
-| `[p]honeypot joinwatch autorole action [value]` | Timer action: none, kick, ban |
+| `[p]honeypot joinwatch autorole action [none/kick/ban]` | Timer action: none, kick, ban |
 | `[p]honeypot joinwatch bantimers` | Privately list timers and untimed role holders |
-| `[p]honeypot joinwatch autorole randomize toggle [value]` | Delay role assignment |
+| `[p]honeypot joinwatch autorole randomize toggle [true/false]` | Delay role assignment |
 | `[p]honeypot joinwatch autorole randomize min_time [minutes]` | Minimum delay, 1–10080 minutes |
 | `[p]honeypot joinwatch autorole randomize max_time [minutes]` | Maximum delay, 1–10080 minutes |
-| `[p]honeypot bait_role toggle [value]` | Enable the bait-role trap |
-| `[p]honeypot bait_role role [role]` | Bait role, or `clear` |
-| `[p]honeypot bait_role action [value]` | Trap action: kick, ban |
-| `[p]honeypot bait_role channel [channel]` | Notification destination, or `clear` |
+| `[p]honeypot bait_role toggle [true/false]` | Enable the bait-role trap |
+| `[p]honeypot bait_role role [role/clear]` | Bait role |
+| `[p]honeypot bait_role action [kick/ban]` | Trap action: kick, ban |
+| `[p]honeypot bait_role channel [channel/clear]` | Notification destination |
 
 JoinWatch measures account age, not time on the server. Its timer starts after role assignment. Removing the role clears the timer. Changing the duration recalculates active deadlines and can trigger overdue punishments. `bantimers` shows manually assigned roles without creating timers, using the local member cache and warning when it is incomplete.
 
@@ -162,8 +163,8 @@ Groups: `[p]honeypot gifdetector`, `[p]honeypot gifdetector channel`, `[p]honeyp
 
 | Command | What it does |
 |---|---|
-| `[p]honeypot gifdetector toggle <value>` | Enable GIF interception |
-| `[p]honeypot gifdetector animation <value>` | Enable the ICBM animation |
+| `[p]honeypot gifdetector toggle <true/false>` | Enable GIF interception |
+| `[p]honeypot gifdetector animation <true/false>` | Enable the ICBM animation |
 | `[p]honeypot gifdetector retention [seconds]` | GIF visibility, 0–60 seconds. Default: 5 |
 | `[p]honeypot gifdetector threshold [count]` | GIFs before a mute, 2–20. Default: 3 |
 | `[p]honeypot gifdetector window [seconds]` | Burst window, 5–3600 seconds. Default: 60 |
@@ -171,8 +172,8 @@ Groups: `[p]honeypot gifdetector`, `[p]honeypot gifdetector channel`, `[p]honeyp
 | `[p]honeypot gifdetector channel add [channel]` | Monitor a channel, defaulting to the current channel |
 | `[p]honeypot gifdetector channel remove [channel]` | Stop monitoring a channel, defaulting to the current channel |
 | `[p]honeypot gifdetector channel list` | List monitored channels |
-| `[p]honeypot gifdetector debug toggle <value>` | Enable one diagnostic record per completed interception |
-| `[p]honeypot gifdetector debug channel [channel]` | Diagnostic destination, or `clear` |
+| `[p]honeypot gifdetector debug toggle <true/false>` | Enable one diagnostic record per completed interception |
+| `[p]honeypot gifdetector debug channel [channel/clear]` | Diagnostic destination |
 | `[p]honeypot gifdetector message [text]` | Show or set the static warning |
 | `[p]honeypot gifdetector message set <text>` | Explicit warning setter, hidden from normal help |
 | `[p]honeypot gifdetector message reset` | Restore `No gifs!` |
@@ -188,7 +189,7 @@ Groups: `[p]honeypot stats`, `[p]honeypot config`
 | Command | What it does |
 |---|---|
 | `[p]honeypot stats show` | Show aggregate server statistics |
-| `[p]honeypot stats channel [channel]` | Daily summary destination, or `clear` |
+| `[p]honeypot stats channel [channel/clear]` | Daily summary destination |
 | `[p]honeypot modstats` | Moderator counters and current workload |
 | `[p]honeypot doctor` | Check configuration, permissions, and runtime health |
 | `[p]honeypot config all` | Compact configuration summary |
@@ -214,27 +215,24 @@ Groups: `[p]honeypot research`, `[p]honeypot debug`, `[p]honeypot debug imagesca
 
 | Command | What it does |
 |---|---|
-| `[p]honeypot research dump <channel_1> <channel_2> [progress]` | Export both channels' full history without parsing |
+| `[p]honeypot research dump <channel_id> [channel_ids...]` | Export full history from one or more channels by ID |
 | `[p]honeypot research cancel` | Stop this server's dump and clean temporary files |
-| `[p]honeypot debug reviewdump` | Export ban-marked review embeds and attachment files from the current channel |
 | `[p]honeypot debug imagescan dump` | Export image-review events, sample files, and dates |
 | `[p]honeypot debug imagescan importtpzip` | Import TP images from ZIPs attached to the command |
 | `[p]honeypot debug imagescan cleanup_events [confirm]` | Preview event-file cleanup. Supply literal `confirm` to delete, leaving samples intact |
 | `[p]honeypot debug resetstats` | Reset stored Honeypot counters |
 
-For `research dump`, choose any two different text channels from this server. Both are exported identically, including every author and format, up to the run's start time. Run it in a private moderator channel. The bot needs View Channel and Read Message History in both sources, plus Attach Files in the destination. Only one dump can run per server.
+For `research dump`, provide one or more text-channel IDs separated by spaces. Every source is exported identically, including all authors and message formats, up to the run's start time. Duplicate IDs are scanned once. Run it in a private moderator channel. The bot needs View Channel and Read Message History in every source, plus Attach Files in the destination. Only one dump can run per server.
 
-Progress defaults to `true`, updating one status message every 30 seconds. Pass `false` to show only the initial and final status. Temporary API failures wait and resume after the last fetched message. Permanent API failures produce explicitly incomplete exports containing the data collected so far.
+Progress is always active. One status message updates every 30 seconds with the current channel, total message count, current message date, and elapsed time. Temporary API failures wait and resume after the last fetched message. Permanent API failures produce explicitly incomplete exports containing the data collected so far.
 
-ZIPs contain `moderation-messages.jsonl` for the first source, `member-messages.jsonl` for the second, and `metadata.json` identifying sources, counts, and completeness. Filenames do not restrict channel content. Records preserve IDs, dates, authors, text, embeds, attachment metadata, reply references, and source links. Attachment files and avatars are not downloaded. Cached names and role labels are current observations, not historical snapshots. For split archives, concatenate matching JSONL files in numbered ZIP order. Keep exports private.
+ZIPs contain one `channel-<id>.jsonl` per source and `metadata.json` with channel names, counts, completeness, and format version 2. Records preserve IDs, dates, authors, text, embeds, attachment metadata, reply references, and source links. Attachment files and avatars are not downloaded. Cached names and role labels are current observations, not historical snapshots. For split archives, concatenate matching JSONL files in numbered ZIP order. Keep exports private.
 
 ```text
-[p]honeypot research dump #first-source #second-source
-[p]honeypot research dump #first-source #second-source false
+[p]honeypot research dump 123456789012345678
+[p]honeypot research dump 123456789012345678 234567890123456789
 [p]honeypot research cancel
 ```
-
-`debug reviewdump` is separate and filtered. It reads the current channel after May 1, 2026 UTC, selecting review embeds with `ban` in `Action Taken` or `Action`, excluding dry-run and failed actions. It downloads attachments from those messages and their replies into numbered ZIPs with `manifest.json`, `reviews.jsonl`, and case folders. It is not a full-history channel dump.
 
 ## Stored data
 
