@@ -39,6 +39,7 @@ class JoinwatchVerification:
         self._fill_tasks: set[asyncio.Task] = set()
         self._deleted_challenges: set[tuple] = set()
         self._group_locks: dict[int, asyncio.Lock] = {}
+        self._cancelled_waves: set[tuple[int, str]] = set()
 
     async def _settings(self, guild) -> dict:
         config = self.cog.config.guild(guild)
@@ -116,21 +117,23 @@ class JoinwatchVerification:
             return self._result("active", entry)
         if str(member.id) in settings.get("joinwatch_pending_role_assignments", {}):
             return VerificationResult("active")
-        if str(member.id) in settings.get("joinwatch_verified_members", {}):
-            return VerificationResult("verified")
         role = member.guild.get_role(settings.get("joinwatch_auto_role_id"))
         if role is None:
             return VerificationResult("unavailable")
         if role in member.roles:
             return VerificationResult("ambiguous")
+        if str(member.id) in settings.get("joinwatch_verified_members", {}):
+            return VerificationResult("verified")
         if self.cog._missing_role_assignment_permission(member.guild, role):
             return VerificationResult("unavailable")
         if settings.get("dry_run"):
             return VerificationResult("dry_run")
         return VerificationResult("eligible")
 
-    async def prepare_enrollment(self, member, *, source="wave", reasons=(), wave_id=None):
+    async def prepare_enrollment(self, member, *, source="wave", reasons=(), wave_id=None):  # noqa: PLR0911 - cancellation and enrollment refusal outcomes
         async with joinwatch_state.member_lock(self.cog, member.guild.id, member.id):
+            if source == "wave" and (member.guild.id, wave_id) in self._cancelled_waves:
+                return VerificationResult("unavailable")
             allowed = await self.eligibility(member)
             if allowed.status == "active":
                 active = await self._entry(member)
@@ -148,6 +151,8 @@ class JoinwatchVerification:
                 if len(self._planned) >= PREPARED_ENROLLMENT_CAPACITY:
                     return VerificationResult("preparing")
                 settings = await self._settings(member.guild)
+                if source == "wave" and (member.guild.id, wave_id) in self._cancelled_waves:
+                    return VerificationResult("unavailable")
                 entry = {
                     "incident_id": secrets.token_hex(16),
                     "source": source,
@@ -172,8 +177,28 @@ class JoinwatchVerification:
                 self.preparation.request(preparation_key, entry["challenge"])
             return self._result("ready" if ready else "preparing", entry)
 
+    async def cancel_wave_preparation(self, guild, wave_id) -> int:
+        """Retire this wave's unactivated work without changing any active penalty."""
+        self._cancelled_waves.add((guild.id, wave_id))
+        keys = [key for key, entry in self._planned.items()
+                if key[0] == guild.id and entry.get("source") == "wave" and entry.get("wave_id") == wave_id]
+        cancelled = 0
+        for key in keys:
+            async with joinwatch_state.member_lock(self.cog, guild.id, key[1]):
+                entry = self._planned.get(key)
+                if entry is None or entry.get("source") != "wave" or entry.get("wave_id") != wave_id:
+                    continue
+                self._planned.pop(key)
+                preparation_key = (guild.id, key[1], entry["incident_id"], entry.get("failures", 0))
+                self._deleted_challenges.add(preparation_key)
+                self.preparation.forget(preparation_key)
+                cancelled += 1
+        return cancelled
+
     async def enroll_prepared(self, member, *, source="wave", reasons=(), wave_id=None):  # noqa: PLR0911 - enrollment validation precedes effects
         async with joinwatch_state.member_lock(self.cog, member.guild.id, member.id):
+            if source == "wave" and (member.guild.id, wave_id) in self._cancelled_waves:
+                return VerificationResult("unavailable")
             allowed = await self.eligibility(member)
             if allowed.status not in ("eligible", "verified") or (
                 allowed.status == "verified" and source != "test"
@@ -290,6 +315,8 @@ class JoinwatchVerification:
                     ).joinwatch_pending_role_assignments() as entries:
                         entries[str(member.id)] = entry
                 return self._result("active", entry)
+            if not await self._group_configuration_ready(member.guild):
+                return VerificationResult("unavailable")
             now = datetime.now(timezone.utc)
             reserved = sum(
                 entry.get("source") == "group" and not entry.get("test")
@@ -341,6 +368,29 @@ class JoinwatchVerification:
                 timestamps
             )
             return self._result("scheduled", incident)
+
+    async def _group_configuration_ready(self, guild) -> bool:
+        try:
+            await self.check_configuration(guild)
+        except ValueError:
+            await self.cog._record_operational_failure(
+                guild.id, "joinwatch_group_configuration",
+                "Live group enrollment stopped because CAPTCHA configuration is unavailable",
+            )
+            return False
+        return True
+
+    async def check_scheduled_group_assignment(self, guild, user_id, entry) -> bool:
+        """Discard an unfulfilled group-only assignment if its verification route is gone."""
+        if (entry.get("test") or entry.get("applied_at") or entry.get("role_owned")
+                or entry.get("restore_incident") or "age" in entry.get("reasons", [])):
+            return True
+        if await self._group_configuration_ready(guild):
+            return True
+        await joinwatch_state.delete_pending_assignment(self.cog, guild, user_id)
+        if entry.get("incident_id"):
+            self.preparation.forget((guild.id, user_id, entry["incident_id"], entry.get("failures", 0)))
+        return False
 
     async def start(self, member, *, now=None) -> VerificationResult:  # noqa: PLR0911 - active incident guards precede session exposure
         now = now or datetime.now(timezone.utc)
@@ -780,3 +830,4 @@ class JoinwatchVerification:
         await asyncio.gather(*self._fill_tasks, return_exceptions=True)
         self._fill_tasks.clear()
         await self.preparation.close()
+        self._cancelled_waves.clear()

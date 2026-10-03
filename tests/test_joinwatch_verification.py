@@ -141,6 +141,34 @@ def _remove_role(member, role):
     return True
 
 
+def _configured_group_runtime(honeypot):
+    runtime = _runtime(honeypot)
+    runtime.raw["joinwatch_pending_roles"].clear()
+    runtime.member.roles.clear()
+    runtime.role.mention = "<@&51>"
+    panel = SimpleNamespace(components=[SimpleNamespace(children=[
+        SimpleNamespace(custom_id="honeypot:captcha:verify")
+    ])])
+    channels = {
+        88: SimpleNamespace(id=88, fetch_message=mock.AsyncMock(return_value=panel),
+                            permissions_for=lambda _role: SimpleNamespace(view_channel=True)),
+        89: SimpleNamespace(id=89, send=mock.AsyncMock()),
+    }
+    runtime.raw.update(joinwatch_groups_enabled=True, joinwatch_group_admission_times=[],
+                       captcha_channel=88, captcha_log_channel=89,
+                       captcha_panel_channel_id=88, captcha_panel_message_id=99,
+                       joinwatch_auto_role_random_delay_enabled=True,
+                       joinwatch_auto_role_random_delay_min_minutes=1,
+                       joinwatch_auto_role_random_delay_max_minutes=1)
+    runtime.cog._get_text_channel_or_thread = mock.Mock(side_effect=lambda _guild, channel_id: channels.get(channel_id))
+    runtime.cog._channel_is_private = mock.Mock(side_effect=lambda _guild, channel: channel.id == 89)
+    runtime.cog._missing_channel_permissions = mock.Mock(return_value=None)
+    runtime.cog._get_member_or_fetch = mock.AsyncMock(side_effect=lambda _guild, user_id: runtime.member if user_id == 20 else None)
+    runtime.cog._increment_stat = mock.AsyncMock()
+    runtime.cog._record_daily_stat = mock.AsyncMock()
+    return runtime, channels
+
+
 def _case_runtime(honeypot, directory):
     runtime = _runtime(honeypot)
     runtime.cog._case_store = honeypot.DetectionCaseStore(Path(directory) / "ownership.sqlite")
@@ -216,6 +244,58 @@ async def _question(runtime, *, now=None):
 
 
 class VerificationLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_group_admission_refuses_missing_panel_configuration_or_deleted_channel(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            for loss in ("panel", "channel"):
+                with self.subTest(loss=loss):
+                    runtime, channels = _configured_group_runtime(honeypot)
+                    try:
+                        await runtime.owner.check_configuration(runtime.member.guild)
+                        if loss == "panel":
+                            runtime.raw["captcha_panel_message_id"] = None
+                        else:
+                            channels.pop(88)
+                        result = await runtime.owner.schedule_group(runtime.member)
+                        self.assertEqual(result.status, "unavailable")
+                        self.assertEqual(runtime.raw["joinwatch_pending_role_assignments"], {})
+                        runtime.member.add_roles.assert_not_awaited()
+                        runtime.cog._record_operational_failure.assert_awaited()
+                    finally:
+                        await runtime.owner.close()
+
+    async def test_delayed_first_group_role_is_cancelled_if_configured_channel_disappears(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime, channels = _configured_group_runtime(honeypot)
+            runtime.cog._joinwatch_verification = runtime.owner
+            try:
+                self.assertEqual((await runtime.owner.schedule_group(runtime.member)).status, "scheduled")
+                channels.pop(88)
+                runtime.raw["joinwatch_pending_role_assignments"]["20"]["apply_at"] = (runtime.now - timedelta(minutes=1)).isoformat()
+                with mock.patch.object(honeypot.joinwatch.joinwatch_publication, "publish_joinwatch_incident", mock.AsyncMock()), mock.patch.object(honeypot.discord.utils, "format_dt", lambda value, style: value.isoformat(), create=True):
+                    await honeypot.joinwatch.joinwatch_auto_role_loop(runtime.cog)
+                runtime.member.add_roles.assert_not_awaited()
+                self.assertEqual(runtime.raw["joinwatch_pending_roles"], {})
+                self.assertEqual(runtime.raw["joinwatch_pending_role_assignments"], {})
+                runtime.cog._record_daily_stat.assert_not_awaited()
+                runtime.cog._record_operational_failure.assert_awaited()
+            finally:
+                await runtime.owner.close()
+
+    async def test_repeat_test_refuses_a_manual_role_on_previously_verified_member(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime = _runtime(honeypot)
+            runtime.raw["joinwatch_pending_roles"].clear()
+            runtime.raw["joinwatch_verified_members"]["20"] = {"incident_id": "completed"}
+            try:
+                result = await runtime.owner.enroll_test(runtime.member)
+                self.assertEqual(result.status, "ambiguous")
+                self.assertEqual(runtime.raw["joinwatch_pending_roles"], {})
+                runtime.member.add_roles.assert_not_awaited()
+                runtime.member.remove_roles.assert_not_awaited()
+                self.assertIn(runtime.role, runtime.member.roles)
+            finally:
+                await runtime.owner.close()
+
     async def test_queued_case_receives_joinwatch_role_ownership_before_captcha_settlement(self):
         with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
             runtime, case, operation = _case_runtime(honeypot, directory)
@@ -320,7 +400,7 @@ class VerificationLifecycleTests(unittest.IsolatedAsyncioTestCase):
             TemporaryDirectory() as directory,
             _isolated_honeypot_modules(Path(directory)) as honeypot,
         ):
-            runtime = _runtime(honeypot)
+            runtime, _ = _configured_group_runtime(honeypot)
             runtime.raw["joinwatch_pending_roles"].clear()
             runtime.member.roles.clear()
             runtime.raw.update(

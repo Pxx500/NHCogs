@@ -252,6 +252,8 @@ async def _apply_joinwatch_assignment_actions_locked(
         data = typing.cast(dict, selected_action.data)
         member_id = typing.cast(int, selected_action.member_id)
         role_id = typing.cast(int, selected_action.role_id)
+        if data.get("source") == "group" and not await cog._joinwatch_verification.check_scheduled_group_assignment(guild, member_id, data):
+            continue
         member = await cog._get_member_or_fetch(guild, member_id)
         role = guild.get_role(role_id)
         if member is None:

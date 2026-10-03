@@ -385,6 +385,7 @@ class JoinwatchWaves:
                 raise ValueError("Rollback confirmation expired or changed")
             record["status"] = "rolling_back"
             await self._save(guild, record)
+            await self.cog._joinwatch_verification.cancel_wave_preparation(guild, wave_id)
             for target in rollback["targets"]:
                 uid = target["user_id"]
                 active = await self.cog._joinwatch_verification.inspect_id(guild, int(uid))
