@@ -174,7 +174,7 @@ Group: `[p]honeypot captcha`. Its bare invocation shows command syntax and, in a
 | `[p]honeypot captcha channel [channel/clear]` | Set the ordinary text channel for Verify and wave invitations |
 | `[p]honeypot captcha logchannel [channel/clear]` | Set a private moderator audit destination |
 | `[p]honeypot captcha panel` | Explicitly publish or refresh one persistent Verify panel |
-| `[p]honeypot captcha test <member>` | Test the full restriction flow for a regular account, or offer CAPTCHA-only practice to a protected member. Usable in public channels by moderators |
+| `[p]honeypot captcha test <member>` | Test the full restriction flow for a regular account, or offer CAPTCHA-only practice to a protected member |
 | `[p]honeypot captcha status <member>` | Privately inspect an account's active check and deadline |
 | `[p]honeypot captcha resolve <member> <reason>` | Accept the member and settle only their JoinWatch restriction, recording the moderator and reason |
 
