@@ -559,6 +559,8 @@ class JoinwatchDryRunTests(unittest.IsolatedAsyncioTestCase):
                 member.add_roles.assert_not_awaited()
                 self.assertNotIn(str(member.id), assignments)
                 self.assertNotIn(str(member.id), pending_roles)
+                history = await cog._joinwatch_verification.export_history(guild.id)
+                self.assertEqual(history["incidents"][0]["outcome"], "dry_run")
 
     async def test_current_dry_run_plans_due_punishment_from_stale_settings(self):
         with TemporaryDirectory() as directory:

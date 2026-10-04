@@ -366,7 +366,7 @@ async def _apply_joinwatch_assignment_actions_locked(
             continue
         if role not in member.roles:
             if not await cog._punitive_effect_allowed(guild):
-                await joinwatch_state.delete_pending_assignment(cog, guild, member_id)
+                await joinwatch_state.delete_pending_assignment(cog, guild, member_id, outcome="dry_run")
                 await joinwatch_publication.publish_joinwatch_incident(
                     cog,
                     guild,

@@ -1553,7 +1553,10 @@ class DetectionCaseStore:
                      account_created_at = COALESCE(
                          excluded.account_created_at, account_created_at
                      ),
-                     guild_joined_at = COALESCE(excluded.guild_joined_at, guild_joined_at)""",
+                     guild_joined_at = COALESCE(excluded.guild_joined_at, guild_joined_at),
+                     account_snapshot = COALESCE(account_snapshot, excluded.account_snapshot),
+                     activity_summary = COALESCE(activity_summary, excluded.activity_summary),
+                     context_captured_at = COALESCE(context_captured_at, excluded.context_captured_at)""",
                 (
                     case_id,
                     new_message.display_name,

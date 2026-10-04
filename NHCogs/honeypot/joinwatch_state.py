@@ -234,7 +234,7 @@ async def store_pending_role(
     owner = getattr(cog, "_joinwatch_verification", None)
     if owner is not None:
         await owner.capture_enrollment(member, pending_role)
-        pending_role["verification_state"] = "active"
+        pending_role.setdefault("verification_state", "active")
         if not (incident or {}).get("applied_at"):
             owner.event(pending_role, "enrolled")
     if alert_channel_id is not None and alert_message_id is not None:

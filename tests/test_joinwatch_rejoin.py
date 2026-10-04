@@ -159,6 +159,40 @@ def _make_runtime(honeypot, *, random_delay: bool):
 
 
 class JoinwatchRejoinTests(unittest.IsolatedAsyncioTestCase):
+    async def test_solved_rejoin_does_not_restore_timer_punishment(self):
+        for random_delay in (False, True):
+            with self.subTest(random_delay=random_delay), TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+                runtime = _make_runtime(honeypot, random_delay=random_delay)
+                runtime.cog.bot.guilds = [runtime.guild]
+                config = await runtime.cog.config.guild(runtime.guild).all()
+                config.update(joinwatch_captcha_enabled=True, joinwatch_auto_role_action="ban")
+                deadline = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+                runtime.pending_roles["200"] = {
+                    "role_id": runtime.role.id, "incident_id": "solved", "source": "join",
+                    "verification_state": "release_pending", "completion_outcome": "passed",
+                    "expires_at": deadline, "applied_at": deadline, "captcha_enabled": True,
+                }
+                runtime.guild.ban = mock.AsyncMock()
+                try:
+                    with (
+                        mock.patch.object(honeypot.joinwatch.joinwatch_publication, "publish_joinwatch_incident", mock.AsyncMock()),
+                        mock.patch.object(honeypot.discord.utils, "format_dt", lambda value, style: value.isoformat(), create=True),
+                        mock.patch.object(runtime.cog._joinwatch_verification.preparation, "request"),
+                    ):
+                        await runtime.cog.on_member_join(runtime.member)
+                        if random_delay:
+                            runtime.pending_assignments["200"]["apply_at"] = deadline
+                        await honeypot.joinwatch.joinwatch_auto_role_loop(runtime.cog)
+                    self.assertEqual(runtime.pending_roles["200"]["verification_state"], "release_pending")
+                    selected = honeypot.joinwatch_state.select_due_joinwatch_assignments(
+                        now=datetime.now(timezone.utc), assignments_enabled=True,
+                        pending_assignments=runtime.pending_assignments, pending_roles=runtime.pending_roles,
+                    )
+                    self.assertEqual(selected.role_actions, ())
+                    runtime.guild.ban.assert_not_awaited()
+                finally:
+                    await runtime.cog._joinwatch_verification.close()
+
     async def test_join_alert_does_not_offer_captcha_without_enrollment(self):
         for reason in ("autorole_disabled", "protected", "missing_permission"):
             with self.subTest(reason=reason), TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:

@@ -5,6 +5,7 @@ import types
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from importlib import util
 from pathlib import Path
@@ -60,6 +61,30 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.database_path = Path(self.temp_dir.name) / "cases.sqlite3"
         self.store = DetectionCaseStore(self.database_path)
         self.store.initialize()
+
+    def test_active_case_keeps_first_available_context_with_actual_capture_time(self):
+        created_at = datetime(2026, 10, 4, 12, tzinfo=timezone.utc)
+        captured_at = created_at + timedelta(hours=1)
+        first = self.store.append_message(self.message(40, created_at), ())
+        enriched = replace(
+            self.message(41, captured_at),
+            account_snapshot={"username": "first_available"},
+            activity_summary={"availability": "observed", "messages": 5, "captured_at": captured_at.isoformat()},
+            context_captured_at=captured_at,
+        )
+        second = self.store.append_message(enriched, ())
+        self.assertEqual(second.case.case_id, first.case.case_id)
+        self.store.append_message(replace(
+            enriched, message_id=42, created_at=captured_at + timedelta(minutes=1),
+            account_snapshot={"username": "later_profile"},
+            activity_summary={"availability": "observed", "messages": 7},
+            context_captured_at=captured_at + timedelta(minutes=1),
+        ), ())
+        record = DetectionCaseStore(self.database_path).export_detection_history(10)[0]
+        self.assertEqual(record["account_snapshot"], enriched.account_snapshot)
+        self.assertEqual(record["activity_summary"], enriched.activity_summary)
+        self.assertEqual(record["context_captured_at"], captured_at.isoformat())
+        self.assertEqual(record["created_at"], created_at.isoformat())
 
     def test_initialize_sets_the_detection_schema_version_on_an_empty_database(self):
         with closing(sqlite3.connect(self.database_path)) as connection:
