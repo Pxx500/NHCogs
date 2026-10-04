@@ -194,6 +194,8 @@ New wave invitations include the member mentions, a short verification prompt, a
 
 `Extra party guests` counts historical-wave enrollments minus confirmed rollbacks, on the original enrollment day. Passing CAPTCHA doesn't subtract an enrollment. On upgrade, retained wave records also correct previous rollbacks, without changing roles or timers. This corrects stored totals and future previews or reports, not messages already published on Discord.
 
+`Extra party guests` counts historical-wave enrollments minus confirmed rollbacks, on the original enrollment day. Passing CAPTCHA doesn't subtract an enrollment. On upgrade, retained wave records also correct previous rollbacks, without changing roles or timers. This corrects stored totals and future previews or reports, not messages already published on Discord.
+
 An explicit `joinwatch captcha true` also admits existing valid JoinWatch timers, including entries created while CAPTCHA was off. It reports the admitted count and prepares questions in the bounded background queue. Role assignments, deadlines, already used attempts, and existing question progress stay unchanged. Repeating `true` doesn't reset checks. Startup restoration alone doesn't adopt unknown old timers.
 
 Group criteria support 2–100000 distinct accounts, a 1–1440 minute join window, and a 1–8760 hour creation-distance window. They compare creation dates against each triggering account, not a chain of similarities. A rejoin doesn't add another participant. Absent and banned historical participants still count toward the original cohort. Only current, eligible, unprotected members receive restrictions.
