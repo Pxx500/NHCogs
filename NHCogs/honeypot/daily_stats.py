@@ -58,7 +58,7 @@ def build_embed(
 ) -> discord.Embed:
     embed = discord.Embed(
         title=(
-            "Daily summary preview (sample data)"
+            f"Daily summary preview - {report_date.isoformat()} UTC"
             if preview
             else f"Honeypot daily summary - {report_date.isoformat()} UTC"
         ),
@@ -74,7 +74,7 @@ def build_embed(
         inline=False,
     )
     joinwatch_summary = f"Shadowbans: {stats.shadowbans}\nBans: {stats.joinwatch_bans}"
-    if stats.wave_guests > 0:
+    if preview or stats.wave_guests > 0:
         joinwatch_summary += f"\nExtra party guests {_wave_guest_emoji(bot)}: {stats.wave_guests}"
     embed.add_field(
         name="JoinWatch",
@@ -84,20 +84,11 @@ def build_embed(
     return embed
 
 
-def build_preview_embed(*, bot=None) -> discord.Embed:
-    """Render public sample aggregates without reading or changing stored state."""
-    report_date = completed_report_date(datetime.now(timezone.utc))
-    sample = DailyStatsSnapshot(
-        guild_id=0,
-        date_utc=report_date,
-        detections=12,
-        automated_bans=7,
-        manual_bans=3,
-        shadowbans=6,
-        joinwatch_bans=2,
-        wave_guests=40,
-    )
-    return build_embed(report_date, sample, bot=bot, preview=True)
+async def build_preview_embed(cog, guild) -> discord.Embed:
+    """Render today's public aggregates, including zero fields, without publishing."""
+    report_date = datetime.now(timezone.utc).date()
+    stats = await asyncio.to_thread(cog._case_store.get_daily_stats, guild.id, report_date)
+    return build_embed(report_date, stats, bot=cog.bot, preview=True)
 
 
 async def _publish_guild(

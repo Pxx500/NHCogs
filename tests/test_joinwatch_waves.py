@@ -450,6 +450,10 @@ class JoinwatchWaveTests(unittest.IsolatedAsyncioTestCase):
                 await owner.tick(guild, now=now + timedelta(seconds=15))
                 self.assertEqual(set(lifecycle.entries), set(ids))
                 self.assertEqual(len(sent), 2)
+                for content, kwargs in sent:
+                    self.assertEqual(kwargs.get("delete_after"), 25)
+                    self.assertEqual(content.splitlines()[1], "Please complete the verification below")
+                    self.assertEqual(kwargs["view"].children[0].custom_id, "honeypot:captcha:verify")
                 self.assertEqual(sent[0][1]["allowed_mentions"].everyone, False)
                 self.assertEqual(sent[0][1]["allowed_mentions"].roles, False)
                 self.assertEqual([user.id for user in sent[0][1]["allowed_mentions"].users], ids[:5])
