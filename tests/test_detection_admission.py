@@ -240,8 +240,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     "whitelist_mode": "bypass",
                     "action": "ban",
                     "fallback_action": "none",
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -265,12 +263,18 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 cog._publish_detection_case.assert_not_awaited()
                 cog._increment_stat.assert_any_await(message.guild, "whitelisted")
 
-    async def test_admission_preserves_discord_attachment_description_and_spoiler(self):
+    async def test_admission_preserves_attachment_and_pre_restriction_context(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1, channel_id=9)
+                message.author.name = "member_before_restriction"
+                activity = SimpleNamespace(get_member_activity_summary=mock.AsyncMock(return_value={
+                    "availability": "observed", "messages": 12, "active_days": 3,
+                    "distinct_channels": 2, "coverage": "unknown",
+                }))
+                cog.bot.get_cog = lambda name: activity if name == "NHMisc" else None
                 message.attachments[0].description = "suspicious payment form"
                 message.attachments[0].is_spoiler = lambda: True
                 message.author.roles = [SimpleNamespace(id=7)]
@@ -283,8 +287,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     "whitelist_mode": "bypass",
                     "action": "ban",
                     "fallback_action": "none",
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -304,6 +306,10 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     "suspicious payment form",
                 )
                 self.assertTrue(snapshot.attachments[0].spoiler)
+                archive = cog._case_store.export_detection_history(message.guild.id)
+                self.assertEqual(archive[0]["account_snapshot"]["username"], "member_before_restriction")
+                self.assertEqual(archive[0]["activity_summary"]["messages"], 12)
+                self.assertIsNotNone(archive[0]["context_captured_at"])
 
     async def test_concurrent_detection_preserves_message_arrival_order(self):
         with TemporaryDirectory() as directory:
@@ -338,8 +344,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     "review_channel": None,
                     "spam_enabled": True,
                     "spam_action": "review",
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -394,8 +398,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     "dry_run": True,
                     "review_channel": None,
                     "review_enabled": True,
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -434,50 +436,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     release_first_scan.set()
                     await asyncio.gather(first_task, second_task)
 
-    async def test_firstpost_claim_is_persisted_with_containment(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot(), _operational_support())
-                await asyncio.to_thread(cog._case_store.initialize)
-                message = self._message(honeypot, attachment_count=1)
-                signal = honeypot.DetectionSignal(
-                    "firstpost",
-                    "suspicious first message",
-                    honeypot.ActionIntent.REVIEW,
-                    True,
-                    {},
-                )
-                config = {
-                    "enabled": True,
-                    "dry_run": False,
-                    "review_channel": None,
-                    "spam_enabled": False,
-                    "firstpost_enabled": True,
-                    "firstpost_collect_enabled": False,
-                    "firstpost_action": "review",
-                    "imagescan_detector_enabled": False,
-                }
-                self._configure_public_boundary(cog, config)
-                cog._is_forward_purge_active.return_value = False
-                cog._firstpost_loaded_guilds.add(message.guild.id)
-                cog._collect_detection_signals = mock.AsyncMock(
-                    return_value=(signal,)
-                )
-                cog._scan_all_case_message_images = mock.AsyncMock()
-                cog._publish_detection_case = mock.AsyncMock()
-                await cog.on_message(message)
-
-                message.delete.assert_awaited_once()
-                snapshot = active_case(
-                    cog._case_store,
-                    message.guild.id, message.author.id
-                )
-                self.assertFalse(snapshot.case.needs_attention)
-                self.assertEqual(
-                    [item.signal.detector for item in snapshot.signals],
-                    ["firstpost"],
-                )
-
     async def test_restart_recovers_voice_channel_work_committed_with_message_admission(self):
         class SimulatedCrash(BaseException):
             pass
@@ -507,8 +465,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     "review_channel": None,
                     "spam_enabled": True,
                     "spam_action": "ban",
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(crashed, config)
@@ -573,7 +529,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 self.assertEqual(recovered.signals, ())
                 self.assertEqual(recovered.operations, ())
 
-    async def test_firstpost_only_admission_persists_signal_before_pipeline_claim(self):
+    async def test_honeypot_admission_persists_signal_before_pipeline_claim(self):
         class SimulatedCrash(BaseException):
             pass
 
@@ -582,27 +538,19 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=0)
-                signal = honeypot.DetectionSignal(
-                    "firstpost",
-                    "suspicious first message",
-                    honeypot.ActionIntent.REVIEW,
-                    True,
-                    {},
-                )
                 config = {
                     "enabled": True,
                     "dry_run": False,
                     "review_channel": None,
                     "spam_enabled": False,
-                    "firstpost_enabled": True,
-                    "firstpost_collect_enabled": False,
-                    "firstpost_action": "review",
+                    "honeypot_channels": [message.channel.id],
+                    "action": "review",
+                    "fallback_action": "review",
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
                 cog._is_forward_purge_active.return_value = False
-                cog._firstpost_loaded_guilds.add(message.guild.id)
-                cog._collect_detection_signals = mock.AsyncMock(return_value=(signal,))
+                cog._suspicion_reasons = mock.AsyncMock(return_value=[])
 
                 with mock.patch.object(
                     cog._case_store,
@@ -618,7 +566,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 )
                 self.assertEqual(
                     [record.signal.detector for record in snapshot.signals],
-                    ["firstpost"],
+                    ["honeypot"],
                 )
 
     async def test_successive_forward_messages_share_case_and_keep_ordered_channels(self):
@@ -633,8 +581,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     "dry_run": False,
                     "review_channel": None,
                     "spam_enabled": False,
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
                 cog._scan_all_case_message_images = mock.AsyncMock()
@@ -688,8 +634,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                         "dry_run": False,
                         "review_channel": None,
                         "spam_enabled": False,
-                        "firstpost_enabled": False,
-                        "firstpost_collect_enabled": False,
                     },
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
@@ -714,7 +658,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     "enabled": True, "review_enabled": True,
                     "dry_run": False,
                     "review_channel": None, "spam_enabled": False,
-                    "firstpost_enabled": False, "firstpost_collect_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
                 cog._purge_detection_case_cached_messages = mock.AsyncMock(return_value=2)
@@ -751,7 +694,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                         "enabled": True, "review_enabled": True,
                         "dry_run": False,
                         "review_channel": None, "spam_enabled": False,
-                        "firstpost_enabled": False, "firstpost_collect_enabled": False,
                     },
                 )
                 await asyncio.to_thread(
@@ -774,13 +716,12 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 message.attachments[0].read.assert_awaited_once()
                 self.assertEqual(cog._publish_detection_case.await_count, 2)
 
-    async def test_forward_firstpost_state_is_consumed_only_after_case_append(self):
+    async def test_forward_purge_signal_is_persisted_with_case_admission(self):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
             with _isolated_honeypot_modules(data_path) as honeypot:
                 cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
-                cog._firstpost_loaded_guilds.add(100)
                 message = self._message(honeypot, attachment_count=4)
                 self._configure_public_boundary(
                     cog,
@@ -789,8 +730,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                         "dry_run": True,
                         "review_channel": None,
                         "spam_enabled": False,
-                        "firstpost_enabled": True,
-                        "firstpost_collect_enabled": False,
                     },
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
@@ -803,15 +742,14 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 )
                 self.assertEqual(
                     [signal.signal.detector for signal in snapshot.signals],
-                    ["forward_purge", "firstpost"],
+                    ["forward_purge"],
                 )
 
-    async def test_firstpost_review_delete_failure_is_visible(self):
+    async def test_honeypot_review_delete_failure_is_visible(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
-                cog._firstpost_loaded_guilds.add(100)
                 message = self._message(
                     honeypot,
                     attachment_count=4,
@@ -820,12 +758,13 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": False,
-                    "firstpost_enabled": True, "firstpost_action": "review",
-                    "firstpost_collect_enabled": False,
+                    "honeypot_channels": [message.channel.id],
+                    "action": "review", "fallback_action": "review",
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
                 cog._is_forward_purge_active.return_value = False
+                cog._suspicion_reasons = mock.AsyncMock(return_value=[])
                 cog._scan_all_case_message_images = mock.AsyncMock()
                 cog._publish_detection_case = mock.AsyncMock()
 
@@ -835,7 +774,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     active_case, cog._case_store, message.guild.id, message.author.id
                 )
                 self.assertEqual(
-                    [item.signal.detector for item in snapshot.signals], ["firstpost"]
+                    [item.signal.detector for item in snapshot.signals], ["honeypot"]
                 )
                 self.assertTrue(snapshot.case.needs_attention)
                 self.assertEqual(snapshot.messages[0].delete_status.value, "forbidden")
@@ -866,8 +805,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": True,
-                    "spam_action": "none", "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
+                    "spam_action": "none",
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -900,7 +838,6 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     "review_channel": None, "honeypot_channels": [999],
                     "whitelisted_roles": [], "fallback_action": "none",
                     "action": "none", "spam_enabled": False,
-                    "firstpost_enabled": False, "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -942,8 +879,7 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": True,
-                    "spam_action": "ban", "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
+                    "spam_action": "ban",
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -978,55 +914,3 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 enforced.assert_awaited_once()
                 message.attachments[0].read.assert_awaited_once()
                 cog._scan_all_case_message_images.assert_awaited_once()
-
-    async def test_concurrent_firstpost_messages_have_one_action_owner(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog = honeypot.Honeypot(_Bot(), _operational_support())
-                other = honeypot.Honeypot(_Bot(), _operational_support())
-                await asyncio.to_thread(cog._case_store.initialize)
-                await asyncio.to_thread(other._case_store.initialize)
-                cog._firstpost_loaded_guilds.add(100)
-                other._firstpost_loaded_guilds.add(100)
-                first = self._message(
-                    honeypot, attachment_count=4, message_id=300, channel_id=400
-                )
-                second = self._message(
-                    honeypot, attachment_count=4, message_id=301, channel_id=401
-                )
-                second.guild = first.guild
-                second.author = first.author
-                first.guild.get_member = lambda user_id: first.author
-                cog.bot.get_guild = lambda guild_id: first.guild
-                other.bot.get_guild = lambda guild_id: first.guild
-                config = {
-                    "enabled": True, "dry_run": False,
-                    "review_channel": None, "spam_enabled": False,
-                    "firstpost_enabled": True, "firstpost_action": "ban",
-                    "firstpost_collect_enabled": False,
-                    "imagescan_detector_enabled": False,
-                }
-                self._configure_public_boundary(cog, config)
-                self._configure_public_boundary(other, config)
-                cog._is_forward_purge_active.return_value = False
-                other._is_forward_purge_active.return_value = False
-                cog._execute_action = mock.AsyncMock(return_value=("banned", None))
-                other._execute_action = mock.AsyncMock(return_value=("banned", None))
-                cog._scan_all_case_message_images = mock.AsyncMock()
-                other._scan_all_case_message_images = mock.AsyncMock()
-                cog._publish_detection_case = mock.AsyncMock()
-                other._publish_detection_case = mock.AsyncMock()
-
-                await asyncio.gather(cog.on_message(first), other.on_message(second))
-
-                snapshot = await asyncio.to_thread(
-                    active_case, cog._case_store, first.guild.id, first.author.id
-                )
-                firstpost_signals = [
-                    item for item in snapshot.signals
-                    if item.signal.detector == "firstpost"
-                ]
-                self.assertEqual(len(firstpost_signals), 1)
-                self.assertEqual(
-                    cog._execute_action.await_count + other._execute_action.await_count, 1
-                )

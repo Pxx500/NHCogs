@@ -46,9 +46,6 @@ EXPECTED_GUILD_DEFAULTS = {
     "purge_backward_seconds": 60,
     "purge_forward_seconds": 10,
     "whitelisted_roles": [],
-    "firstpost_collect_enabled": False,
-    "firstpost_enabled": False,
-    "firstpost_action": "review",
     "spam_enabled": False,
     "spam_action": "review",
     "spam_window_seconds": 10,
@@ -81,12 +78,6 @@ EXPECTED_GUILD_DEFAULTS = {
         "evidence_capture_failures": 0,
         "delete_forbidden": 0,
         "delete_transient_failures": 0,
-        "firstpost_seen": 0,
-        "firstpost_hits": 0,
-        "firstpost_reviews": 0,
-        "firstpost_kicks": 0,
-        "firstpost_bans": 0,
-        "early_catches": 0,
         "spam_hits": 0,
         "spam_reviews": 0,
         "spam_kicks": 0,
@@ -540,6 +531,7 @@ def _isolated_honeypot_modules(data_path: Path):
         "NHCogs",
         "NHCogs.command_overview",
         "NHCogs.command_feedback",
+        "NHCogs.account_snapshot",
         "NHCogs.storage",
         package_name,
         *(f"{package_name}.{name}" for name in (*load_order, "honeypot")),
@@ -869,6 +861,7 @@ def _isolated_honeypot_modules(data_path: Path):
             sys.modules.pop(name, None)
         sys.modules.pop("NHCogs.command_overview", None)
         sys.modules.pop("NHCogs.command_feedback", None)
+        sys.modules.pop("NHCogs.account_snapshot", None)
         sys.modules.update(
             {
                 "discord": discord,
@@ -947,6 +940,9 @@ class _Bot:
         self.restored_views.append((view, message_id))
 
     def get_guild(self, guild_id):
+        return None
+
+    def get_cog(self, name):
         return None
 
 
@@ -1081,7 +1077,6 @@ class DetectionPipelineTestCase(unittest.IsolatedAsyncioTestCase):
         cog._is_protected_member = mock.AsyncMock(return_value=False)
         cog._is_forward_purge_active = mock.Mock(return_value=True)
         cog._handle_spam_message = mock.AsyncMock()
-        cog._handle_firstpost_message = mock.AsyncMock()
         cog._handle_imagescan_detector_message = mock.AsyncMock()
         cog._increment_stat = mock.AsyncMock()
         cog._purge_detection_case_cached_messages = mock.AsyncMock(return_value=0)

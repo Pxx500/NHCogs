@@ -24,7 +24,7 @@ class DetectionSignalOutcomeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self._now = datetime.now(timezone.utc).replace(microsecond=0)
 
-    async def test_spam_and_firstpost_record_case_signals_and_stat_counters(self):
+    async def test_spam_records_case_signals_and_stat_counters(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog, guild, author = await self._open_cog(honeypot)
@@ -42,8 +42,6 @@ class DetectionSignalOutcomeTests(unittest.IsolatedAsyncioTestCase):
                     guild,
                     spam_enabled=True,
                     spam_action="ban",
-                    firstpost_enabled=True,
-                    firstpost_action="review",
                     dry_run=True,
                 )
                 await self._observe_duplicate(cog, honeypot, message)
@@ -54,10 +52,9 @@ class DetectionSignalOutcomeTests(unittest.IsolatedAsyncioTestCase):
                 signals = self._signals(snapshot, snapshot.messages[-1].sequence)
                 self.assertEqual(
                     [signal.detector for signal in signals],
-                    ["spam", "firstpost"],
+                    ["spam"],
                 )
                 self.assertEqual(signals[0].action, honeypot.ActionIntent.BAN)
-                self.assertEqual(signals[1].action, honeypot.ActionIntent.REVIEW)
                 moderation = [
                     operation
                     for operation in snapshot.operations
@@ -75,9 +72,6 @@ class DetectionSignalOutcomeTests(unittest.IsolatedAsyncioTestCase):
                     "spam_hits",
                     "spam_bans",
                     "spam_catches",
-                    "firstpost_hits",
-                    "firstpost_reviews",
-                    "early_catches",
                 ):
                     self.assertGreaterEqual(stats.get(key, 0), 1, key)
                 self.assertEqual(stats.get("image_hits", 0), 0)
@@ -233,7 +227,7 @@ class DetectionSignalOutcomeTests(unittest.IsolatedAsyncioTestCase):
                 author.ban.assert_not_awaited()
                 await self._finish(cog)
 
-    async def test_three_attachments_do_not_open_a_firstpost_case(self):
+    async def test_retired_firstpost_settings_do_not_create_cases_or_block_image_detection(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog, guild, author = await self._open_cog(honeypot)
@@ -241,7 +235,7 @@ class DetectionSignalOutcomeTests(unittest.IsolatedAsyncioTestCase):
                     guild,
                     author,
                     content="hello",
-                    attachments=self._attachments(3),
+                    attachments=self._attachments(4),
                 )
                 await self._settings(cog, guild, firstpost_enabled=True)
 
@@ -249,48 +243,19 @@ class DetectionSignalOutcomeTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertIsNone(await self._snapshot(cog, guild.id, author.id))
                 self.assertEqual(self._stats(cog).get("firstpost_hits", 0), 0)
-                await self._finish(cog)
-
-    async def test_collect_only_firstpost_does_not_consume_the_first_message(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                cog, guild, author = await self._open_cog(honeypot)
-                await self._settings(cog, guild, firstpost_collect_enabled=True)
-                preview = self._message(
-                    guild,
-                    author,
-                    content="hello",
-                    attachments=self._attachments(4),
-                    message_id=300,
+                await cog._init_imagescan_store()
+                self._insert_sample(cog, guild.id, sha256="known-bad")
+                await self._settings(cog, guild, imagescan_detector_enabled=True)
+                image_message = self._message(
+                    guild, author, content="hello", message_id=301,
+                    attachments=self._attachments(4, payloads=[b"known-bad", b"nope", b"nope", b"nope"]),
                 )
-
-                await cog.on_message(preview)
-
-                self.assertIsNone(await self._snapshot(cog, guild.id, author.id))
-                await self._settings(
-                    cog,
-                    guild,
-                    firstpost_enabled=True,
-                    firstpost_action="review",
-                )
-                follow_up = self._message(
-                    guild,
-                    author,
-                    content="hello again",
-                    attachments=self._attachments(4),
-                    message_id=301,
-                    created_at=self._now + timedelta(seconds=1),
-                )
-
-                await cog.on_message(follow_up)
-
+                with mock.patch.object(honeypot.imagescan, "image_hashes_from_bytes", side_effect=self._hashes_from_bytes):
+                    await cog.on_message(image_message)
                 snapshot = await self._snapshot(cog, guild.id, author.id)
-                self.assertEqual(
-                    [signal.detector for signal in self._signals(snapshot)],
-                    ["firstpost"],
-                )
-                self.assertGreaterEqual(self._stats(cog).get("firstpost_hits", 0), 1)
+                self.assertEqual([signal.detector for signal in self._signals(snapshot)], ["image"])
                 await self._finish(cog)
+
 
     async def test_honeypot_channel_opens_a_ban_case_and_another_channel_does_not(self):
         with TemporaryDirectory() as directory:
@@ -422,8 +387,6 @@ class DetectionSignalOutcomeTests(unittest.IsolatedAsyncioTestCase):
                 await self._settings(
                     cog,
                     guild,
-                    firstpost_enabled=True,
-                    firstpost_action="kick",
                     spam_action="ban",
                 )
                 attachments = self._attachments(4, payloads=[b"known-bad", b"nope", b"nope", b"nope"])
@@ -451,12 +414,11 @@ class DetectionSignalOutcomeTests(unittest.IsolatedAsyncioTestCase):
                 follow_signals = self._signals(snapshot, snapshot.messages[-1].sequence)
                 self.assertEqual(
                     [signal.detector for signal in follow_signals],
-                    ["forward_purge", "spam", "firstpost"],
+                    ["forward_purge", "spam"],
                 )
                 self.assertEqual(follow_signals[0].action, honeypot.ActionIntent.REVIEW)
                 self.assertTrue(follow_signals[0].metadata["containment_required"])
                 self.assertEqual(follow_signals[1].action, honeypot.ActionIntent.BAN)
-                self.assertEqual(follow_signals[2].action, honeypot.ActionIntent.KICK)
                 self.assertEqual(self._stats(cog).get("image_hits", 0), 0)
                 stored = next(
                     item
@@ -773,7 +735,6 @@ class DetectionSignalOutcomeTests(unittest.IsolatedAsyncioTestCase):
         honeypot.modlog.create_case = mock.AsyncMock()
         await asyncio.to_thread(cog._case_store.initialize)
         await cog._message_registry.initialize()
-        await cog._init_firstpost_seen_store()
         await self._settings(cog, guild, enabled=True)
         return cog, guild, author
 

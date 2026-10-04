@@ -82,14 +82,6 @@ async def honeypot_mod_stats(cog, ctx: commands.Context) -> None:
             "Outstanding durable operations": case_counts["outstanding_operations"],
             "Queued privacy deletions": case_counts["privacy_deletion_jobs"],
         },
-        "Firstpost": {
-            "Firstpost seen": stats["firstpost_seen"],
-            "Firstpost hits": stats["firstpost_hits"],
-            "Firstpost reviews": stats["firstpost_reviews"],
-            "Firstpost kicks": stats["firstpost_kicks"],
-            "Firstpost bans": stats["firstpost_bans"],
-            "Early catches": stats["early_catches"],
-        },
         "Honeypot": {
             "Honeypot hits": stats["honeypot_hits"],
             "Honeypot reviews": stats["honeypot_reviews"],
@@ -380,14 +372,6 @@ async def _doctor_configuration_checks(
                 "Run `honeypot honeypot action`.",
             )
         )
-    if guild_settings.firstpost_action.value not in CORE_ACTION_OPTIONS:
-        results.append(
-            DoctorResult(
-                "Firstpost action is invalid",
-                "failed",
-                "Run `honeypot firstpost action`.",
-            )
-        )
     if guild_settings.spam_action.value not in CORE_ACTION_OPTIONS:
         results.append(
             DoctorResult(
@@ -516,8 +500,6 @@ def _destination_is_required(key: str, settings: GuildSettings) -> bool:
         settings.fallback_action.value == "review"
         or settings.review_enabled
         or settings.whitelist_mode.value == "review"
-        or settings.firstpost_enabled
-        and settings.firstpost_action.value == "review"
         or settings.spam_enabled
         and settings.spam_action.value == "review"
     )
@@ -525,7 +507,6 @@ def _destination_is_required(key: str, settings: GuildSettings) -> bool:
         "errors": any(
             (
                 settings.enabled,
-                settings.firstpost_enabled,
                 settings.spam_enabled,
                 settings.imagescan_detector_enabled,
                 settings.gif_detector_enabled,
@@ -662,7 +643,6 @@ async def _doctor_guild_permission_checks(
     configured_actions = {
         guild_settings.action.value if guild_settings.action is not None else None,
         guild_settings.fallback_action.value,
-        guild_settings.firstpost_action.value,
         guild_settings.spam_action.value,
         guild_settings.imagescan_detector_action.value,
     }

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import tempfile
 from collections.abc import Awaitable, Callable, Sequence
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -13,6 +15,7 @@ from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
 from redbot.core.utils.chat_formatting import pagify
 
+from ..account_snapshot import account_snapshot
 from ..command_feedback import respond_to_command_error
 from ..command_overview import (
     MAX_FIELD_VALUE_LENGTH,
@@ -24,6 +27,7 @@ from ..operational_errors import OperationalErrorReporter, OperationalFailure
 from ..ranked_donut_chart import render_ranked_donut_chart
 from .command_inputs import parse_banchart_arguments
 from .history import NHModerationHistory
+from .history_export import write_archive
 from .models import BanChartQuery, ModerationObservation
 from .synchronization import (
     ModerationSynchronizer,
@@ -68,6 +72,7 @@ class NHModeration(commands.Cog):
         self._sync_tasks: dict[int, asyncio.Task[Any]] = {}
         self._message_filter_groups: dict[int, dict[str, dict]] = {}
         self._message_filter_lock = asyncio.Lock()
+        self._history_export_lock = asyncio.Lock()
 
     async def cog_load(self) -> None:
         await self.history.initialize()
@@ -394,6 +399,21 @@ class NHModeration(commands.Cog):
                         guild, "weekly reconciliation", error
                     )
 
+    async def _activity_summary(self, guild, user_id, observed_at) -> dict | None:
+        if user_id is None:
+            return None
+        get_cog = getattr(self.bot, "get_cog", None)
+        nhmisc = get_cog("NHMisc") if get_cog is not None else None
+        if nhmisc is None:
+            return None
+        try:
+            return await nhmisc.get_member_activity_summary(guild.id, user_id, now=observed_at)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await self._report_background_error(guild, "activity snapshot", error)
+            return None
+
     @commands.Cog.listener()
     async def on_member_ban(
         self, guild: discord.Guild, user: discord.User | discord.Member
@@ -409,6 +429,8 @@ class NHModeration(commands.Cog):
                     target_user_id=user.id,
                     occurred_at=now,
                     observed_at=now,
+                    account_snapshot=account_snapshot(user),
+                    activity_summary=await self._activity_summary(guild, user.id, now),
                 )
             )
             await self._mark_operational_recovered(guild, "member ban event")
@@ -432,6 +454,7 @@ class NHModeration(commands.Cog):
                     target_user_id=user.id,
                     occurred_at=now,
                     observed_at=now,
+                    account_snapshot=account_snapshot(user),
                 )
             )
             await self._mark_operational_recovered(guild, "member unban event")
@@ -448,15 +471,18 @@ class NHModeration(commands.Cog):
         guild = entry.guild
         now = datetime.now(timezone.utc)
         try:
-            await self.history.observe(
-                audit_observation(
+            item = audit_observation(
                     guild.id,
                     entry,
                     action_name,
                     getattr(getattr(self.bot, "user", None), "id", 0),
                     now,
                 )
-            )
+            if action_name == "ban":
+                item = replace(item, activity_summary=await self._activity_summary(
+                    guild, item.target_user_id, now,
+                ))
+            await self.history.observe(item)
             await self._mark_operational_recovered(guild, "audit event")
         except asyncio.CancelledError:
             raise
@@ -478,6 +504,10 @@ class NHModeration(commands.Cog):
         if item is None:
             return
         try:
+            if item.action_hint != "unban":
+                item = replace(item, activity_summary=await self._activity_summary(
+                    guild, item.target_user_id, now,
+                ))
             await self.history.observe(item)
             await self._mark_operational_recovered(guild, "modlog event")
         except asyncio.CancelledError:
@@ -573,6 +603,73 @@ class NHModeration(commands.Cog):
         self._require_private_channel(ctx)
         await send_group_overview(ctx, include_descendants=False)
         await self._mark_operational_recovered(ctx.guild, "nhmod")
+
+    @nhmod.group(name="history", invoke_without_command=True)
+    async def nhmod_history(self, ctx: commands.Context) -> None:
+        """Export stored moderation and account verification history"""
+        self._require_private_channel(ctx)
+        await send_group_overview(ctx)
+
+    @nhmod_history.command(name="export")
+    async def nhmod_history_export(self, ctx: commands.Context) -> None:
+        """Export private ban, detection, JoinWatch and retained join records"""
+        self._require_private_channel(ctx)
+        if not ctx.channel.permissions_for(ctx.guild.me).attach_files:
+            raise commands.UserFeedbackCheckFailure("I need Attach Files in this channel")
+        honeypot = self.bot.get_cog("Honeypot")
+        if honeypot is None:
+            raise commands.UserFeedbackCheckFailure("Load Honeypot to export the combined moderation and verification history")
+        if self._history_export_lock.locked():
+            raise commands.UserFeedbackCheckFailure("A history export is already running. Try again after it finishes")
+        async with self._history_export_lock:
+            started_at = datetime.now(timezone.utc).isoformat()
+            moderation = await self.history.export_history(ctx.guild.id)
+            verification = await honeypot._joinwatch_verification.export_history(ctx.guild.id)
+            joins = await honeypot._joinwatch_groups.read_history(ctx.guild)
+            joins_read_at = datetime.now(timezone.utc).isoformat()
+            detections = await asyncio.to_thread(honeypot._case_store.export_detection_history, ctx.guild.id)
+            detections_read_at = datetime.now(timezone.utc).isoformat()
+            manifest = {
+                "schema_version": 1,
+                "guild_id": str(ctx.guild.id),
+                "started_at": started_at,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "coverage": {
+                    "moderation": moderation["coverage"],
+                    "joinwatch": verification["coverage"],
+                    "first_joins": {"sources": joins.get("sources", []), "complete": False},
+                },
+                "read_at": {
+                    "moderation": moderation["read_at"],
+                    "joinwatch": verification["coverage"].get("read_at"),
+                    "first_joins": joins_read_at,
+                    "detection_cases": detections_read_at,
+                },
+                "consistency": "Independent owner snapshots, not an atomic cross-database snapshot",
+                "labels": "CAPTCHA success is not a verified-human label. A ban is not a confirmed-scam label",
+                "privacy": "Downloaded or published exports aren't erased by later database privacy deletion",
+            }
+            datasets = {
+                "moderation_observations": moderation["observations"],
+                "moderation_actions": moderation["actions"],
+                "joinwatch_incidents": verification["incidents"],
+                "joinwatch_events": verification["events"],
+                "detection_cases": detections,
+                "first_joins": ({"user_id": str(uid), **record} for uid, record in joins.get("observations", {}).items()),
+            }
+            with tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b") as output:
+                try:
+                    await asyncio.to_thread(
+                        write_archive, output, manifest=manifest, datasets=datasets,
+                        max_bytes=ctx.guild.filesize_limit,
+                    )
+                except ValueError as error:
+                    raise commands.UserFeedbackCheckFailure(str(error)) from error
+                await ctx.send(
+                    file=discord.File(output, filename=f"moderation-history-{ctx.guild.id}.zip"),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+        await self._mark_operational_recovered(ctx.guild, "nhmod history export")
 
     @nhmod.command(name="status")
     async def nhmod_status(self, ctx: commands.Context) -> None:

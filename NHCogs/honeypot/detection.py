@@ -1,8 +1,5 @@
 """Detection: signal collection, the durable operation dispatcher, purge and actions.
 
-The first-observed-message (firstpost) domain is folded in here: it is one of the
-detectors on this path and is far under the size that would justify its own module.
-
 Every definition here was a `Honeypot` method. The cog keeps a one-line seam only
 where another module or a test must reach the behaviour through `self`; see the
 `# Detection seam` comments in `honeypot.py`.
@@ -208,7 +205,6 @@ async def _record_detection_stats(
         await cog._increment_stat(guild, "suspicious")
     for detector, prefix, catch_key in (
         ("honeypot", "honeypot", "honeypot_catches"),
-        ("firstpost", "firstpost", "early_catches"),
         ("spam", "spam", "spam_catches"),
         ("image", "image", "image_catches"),
     ):
@@ -228,46 +224,6 @@ async def _record_detection_stats(
         ):
             if intent in intents:
                 await cog._increment_stat(guild, f"{prefix}_{suffix}")
-
-
-async def _init_firstpost_seen_store(cog) -> None:
-    await asyncio.to_thread(cog._firstpost_store.initialize)
-
-
-async def _count_firstpost_seen_authors(cog, guild_id: int) -> int:
-    return await asyncio.to_thread(cog._firstpost_store.count, guild_id)
-
-
-async def _ensure_firstpost_seen_loaded(cog, guild_id: int) -> None:
-    if guild_id in cog._firstpost_loaded_guilds:
-        return
-    async with cog._firstpost_db_lock:
-        if guild_id in cog._firstpost_loaded_guilds:
-            return
-        seen = await asyncio.to_thread(cog._firstpost_store.load_guild, guild_id)
-        cog._firstpost_seen_authors[guild_id].update(seen)
-        cog._firstpost_loaded_guilds.add(guild_id)
-
-
-async def _flush_firstpost_seen_authors(cog) -> None:
-    async with cog._firstpost_db_lock:
-        dirty = {
-            guild_id: set(user_ids)
-            for guild_id, user_ids in cog._firstpost_dirty_seen_authors.items()
-            if user_ids
-        }
-    if not dirty:
-        return
-    for guild_id, user_ids in dirty.items():
-        await asyncio.to_thread(cog._firstpost_store.flush, guild_id, user_ids)
-    async with cog._firstpost_db_lock:
-        for guild_id, user_ids in dirty.items():
-            remaining = cog._firstpost_dirty_seen_authors.get(guild_id)
-            if remaining is None:
-                continue
-            remaining.difference_update(user_ids)
-            if not remaining:
-                cog._firstpost_dirty_seen_authors.pop(guild_id, None)
 
 
 async def _remove_review_mute_role(
@@ -880,51 +836,6 @@ async def _spam_signal(
     )
 
 
-async def _firstpost_signal(
-    cog, message: discord.Message, guild_settings: GuildSettings
-) -> DetectionSignal | None:
-    firstpost_enabled = guild_settings.firstpost_enabled
-    collect_enabled = guild_settings.firstpost_collect_enabled
-    if not firstpost_enabled and not collect_enabled:
-        return None
-    await _ensure_firstpost_seen_loaded(cog, message.guild.id)
-    if message.author.id in cog._firstpost_seen_authors[message.guild.id]:
-        return None
-    if not firstpost_enabled:
-        return None
-    reasons = _firstpost_suspicion_reasons(message, guild_settings)
-    if not reasons:
-        return None
-    return DetectionSignal(
-        detector="firstpost",
-        reason="\n".join(reasons),
-        action=_signal_action(
-            guild_settings.firstpost_action.value, CORE_ACTION_OPTIONS
-        ),
-        decisive=True,
-        metadata={"reasons": tuple(reasons)},
-    )
-
-
-def _firstpost_candidate(
-    cog, message: discord.Message, guild_settings: GuildSettings
-) -> DetectionSignal | None:
-    if not guild_settings.firstpost_enabled:
-        return None
-    reasons = _firstpost_suspicion_reasons(message, guild_settings)
-    if not reasons:
-        return None
-    return DetectionSignal(
-        detector="firstpost",
-        reason="\n".join(reasons),
-        action=_signal_action(
-            guild_settings.firstpost_action.value, CORE_ACTION_OPTIONS
-        ),
-        decisive=True,
-        metadata={"reasons": tuple(reasons)},
-    )
-
-
 async def _honeypot_signals(
     cog,
     message: discord.Message,
@@ -1033,9 +944,6 @@ async def _collect_detection_signals(
         spam = await _spam_signal(cog, message, guild_settings)
         if spam is not None:
             signals.append(spam)
-        firstpost = await _firstpost_signal(cog, message, guild_settings)
-        if firstpost is not None:
-            signals.append(firstpost)
         if not any(signal.decisive for signal in signals):
             image = await cog._initial_image_signal(message, guild_settings)
             if image is not None:
@@ -1172,33 +1080,29 @@ async def _process_detected_message(
             )
         return tuple(operations)
 
-    tracking_firstpost = (
-        guild_settings.firstpost_enabled
-        or guild_settings.firstpost_collect_enabled
-    )
     admission_started = perf_counter()
     try:
+        activity_summary = {"availability": "unavailable"}
+        activity_owner = cog.bot.get_cog("NHMisc")
+        if activity_owner is not None:
+            try:
+                activity_summary = await activity_owner.get_member_activity_summary(
+                    message.guild.id, message.author.id
+                )
+            except Exception:
+                log.exception("Could not capture detection activity context")
         append = await asyncio.to_thread(
             cog._case_store.append_message,
-            review_publication._new_case_message(message),
+            review_publication._new_case_message(message, activity_summary=activity_summary),
             signals,
-            initial_operations,
-            claim_firstpost=tracking_firstpost,
+            initial_operations(signals),
         )
     finally:
         if admission_lock is not None:
             admission_lock.release()
     timings["admission_ms"] = (perf_counter() - admission_started) * 1000
     if append is None:
-        cog._firstpost_seen_authors[message.guild.id].add(message.author.id)
         return
-    if tracking_firstpost:
-        cog._firstpost_seen_authors[message.guild.id].add(message.author.id)
-        if append.firstpost_claimed:
-            cog._firstpost_dirty_seen_authors[message.guild.id].add(
-                message.author.id
-            )
-            await cog._increment_stat(message.guild, "firstpost_seen")
     admitted_snapshot = await asyncio.to_thread(
         cog._case_store.get_case, append.case.case_id
     )
@@ -1598,30 +1502,6 @@ async def _purge_detection_case_cached_messages(
             guild_settings.purge_forward_seconds,
         )
     return deleted
-
-
-def _firstpost_suspicion_reasons(
-    message: discord.Message, guild_settings: GuildSettings
-) -> list[str]:
-    attachment_count = len(message.attachments)
-    reasons: list[str] = []
-    content = message.content.strip().lower()
-    if attachment_count == 4:
-        reasons.append(_("First post with four attachments"))
-    elif attachment_count == 2:
-        scam_keywords = guild_settings.scam_keywords
-        matched_keywords = matched_scam_keywords(
-            scam_keywords,
-            content,
-            include_attachment_only=True,
-        )
-        if matched_keywords:
-            reasons.append(
-                _("First post with two attachments and keywords: {keywords}").format(
-                    keywords=", ".join(matched_keywords[:5])
-                )
-            )
-    return reasons
 
 
 async def _spam_suspicion_reasons(
@@ -2114,54 +1994,6 @@ async def spam_channels(cog, ctx: commands.Context, count: int = None) -> None:
         await ctx.send(_("✅ Spam channel threshold set to {count}").format(count=count))
 
 
-async def firstpost_toggle(cog, ctx: commands.Context, value: bool = None) -> None:
-    if value is None:
-        v = await cog.config.guild(ctx.guild).firstpost_enabled()
-        await ctx.send(
-            _("Current: {value}. Choices: {options}").format(
-                value=str(v).lower(),
-                options=cog._format_options(BOOL_OPTIONS),
-            )
-        )
-    else:
-        await cog.config.guild(ctx.guild).firstpost_enabled.set(value)
-        if value:
-            await cog.config.guild(ctx.guild).firstpost_collect_enabled.set(False)
-        await ctx.send(_("✅ Firstpost enabled set to {value}").format(value=value))
-
-
-async def firstpost_collect(cog, ctx: commands.Context, value: bool = None) -> None:
-    if value is None:
-        v = await cog.config.guild(ctx.guild).firstpost_collect_enabled()
-        await ctx.send(
-            _("Current: {value}. Choices: {options}").format(
-                value=str(v).lower(),
-                options=cog._format_options(BOOL_OPTIONS),
-            )
-        )
-    else:
-        await cog.config.guild(ctx.guild).firstpost_collect_enabled.set(value)
-        if value:
-            await cog.config.guild(ctx.guild).firstpost_enabled.set(False)
-        await ctx.send(_("✅ Firstpost warmup set to {value}").format(value=value))
-
-
-async def firstpost_action(cog, ctx: commands.Context, value: str = None) -> None:
-    if value is None:
-        v = await cog.config.guild(ctx.guild).firstpost_action()
-        await ctx.send(
-            _("Current: {value}. Choices: {options}").format(
-                value=v,
-                options=cog._format_options(CORE_ACTION_OPTIONS),
-            )
-        )
-    elif value not in CORE_ACTION_OPTIONS:
-        await ctx.send(_("Choose one of: {options}").format(options=cog._format_options(CORE_ACTION_OPTIONS)))
-    else:
-        await cog.config.guild(ctx.guild).firstpost_action.set(value)
-        await ctx.send(_("✅ Firstpost action set to {value}").format(value=value))
-
-
 async def review_toggle(cog, ctx: commands.Context, value: bool = None) -> None:
     if value is None:
         v = await cog.config.guild(ctx.guild).review_enabled()
@@ -2423,30 +2255,6 @@ async def config_purge(cog, ctx: commands.Context) -> None:
                 ),
             ),
             (_("Minimum retention"), _("{seconds}s").format(seconds=PURGE_MIN_RETENTION_SECONDS)),
-        ],
-    )
-
-
-async def config_firstpost(cog, ctx: commands.Context) -> None:
-    raw_config = await cog.config.guild(ctx.guild).all()
-    guild_settings = GuildSettings.from_mapping(raw_config)
-    seen_count = await _count_firstpost_seen_authors(cog, ctx.guild.id)
-    await cog._send_config_dump(
-        ctx,
-        _("Firstpost config"),
-        [
-            (
-                _("Enabled"),
-                cog._format_bool_setting(guild_settings.firstpost_enabled),
-            ),
-            (
-                _("Warmup"),
-                cog._format_bool_setting(
-                    guild_settings.firstpost_collect_enabled
-                ),
-            ),
-            (_("Action"), guild_settings.firstpost_action.value),
-            (_("Seen authors"), seen_count),
         ],
     )
 

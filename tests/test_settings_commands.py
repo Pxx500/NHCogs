@@ -483,6 +483,16 @@ class JoinwatchCommandTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
+    def test_firstpost_is_retired_without_hiding_image_import_or_other_detectors(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                tree = _registered_command_tree(honeypot, honeypot.Honeypot.honeypot)
+                leaves = _leaf_command_names(tree)
+                self.assertFalse(any("firstpost" in name.split() for name in leaves))
+                categories = {child.name for child in tree.commands}
+                self.assertTrue({"spam", "imagescan", "honeypot", "joinwatch"} <= categories)
+                self.assertIn(honeypot.Honeypot.imagescan_import_tp_zip.qualified_name, leaves)
+
     async def test_channels_overview_lists_categories_and_active_prefix_commands(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
