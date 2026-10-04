@@ -265,12 +265,18 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 cog._publish_detection_case.assert_not_awaited()
                 cog._increment_stat.assert_any_await(message.guild, "whitelisted")
 
-    async def test_admission_preserves_discord_attachment_description_and_spoiler(self):
+    async def test_admission_preserves_attachment_and_pre_restriction_context(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
                 message = self._message(honeypot, attachment_count=1, channel_id=9)
+                message.author.name = "member_before_restriction"
+                activity = SimpleNamespace(get_member_activity_summary=mock.AsyncMock(return_value={
+                    "availability": "observed", "messages": 12, "active_days": 3,
+                    "distinct_channels": 2, "coverage": "unknown",
+                }))
+                cog.bot.get_cog = lambda name: activity if name == "NHMisc" else None
                 message.attachments[0].description = "suspicious payment form"
                 message.attachments[0].is_spoiler = lambda: True
                 message.author.roles = [SimpleNamespace(id=7)]
@@ -304,6 +310,10 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                     "suspicious payment form",
                 )
                 self.assertTrue(snapshot.attachments[0].spoiler)
+                archive = cog._case_store.export_detection_history(message.guild.id)
+                self.assertEqual(archive[0]["account_snapshot"]["username"], "member_before_restriction")
+                self.assertEqual(archive[0]["activity_summary"]["messages"], 12)
+                self.assertIsNotNone(archive[0]["context_captured_at"])
 
     async def test_concurrent_detection_preserves_message_arrival_order(self):
         with TemporaryDirectory() as directory:

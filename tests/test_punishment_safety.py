@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
+from tests.test_joinwatch_rejoin import _RawGuildConfig
 
 
 class _Store:
@@ -450,7 +451,7 @@ class JoinwatchDryRunTests(unittest.IsolatedAsyncioTestCase):
                     "joinwatch_pending_role_assignments": pending_assignments,
                     "joinwatch_pending_roles": pending_roles,
                 }
-                guild_config = SimpleNamespace(
+                guild_config = _RawGuildConfig(
                     all=mock.AsyncMock(return_value=raw_config),
                     joinwatch_pending_role_assignments=lambda: _Store(
                         pending_assignments
@@ -465,6 +466,7 @@ class JoinwatchDryRunTests(unittest.IsolatedAsyncioTestCase):
                 bot.is_admin = mock.AsyncMock(return_value=False)
                 cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
+                cog._case_store.initialize()
 
                 with mock.patch.object(honeypot.discord, "Embed", _FakeEmbed), mock.patch.object(
                     honeypot.discord,
@@ -531,7 +533,7 @@ class JoinwatchDryRunTests(unittest.IsolatedAsyncioTestCase):
                     "joinwatch_pending_role_assignments": assignments,
                     "joinwatch_pending_roles": pending_roles,
                 }
-                guild_config = SimpleNamespace(
+                guild_config = _RawGuildConfig(
                     all=mock.AsyncMock(return_value=raw_config),
                     joinwatch_pending_role_assignments=lambda: _Store(assignments),
                     joinwatch_pending_roles=lambda: _Store(pending_roles),
@@ -544,6 +546,7 @@ class JoinwatchDryRunTests(unittest.IsolatedAsyncioTestCase):
                 bot.is_admin = mock.AsyncMock(return_value=False)
                 cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
+                cog._case_store.initialize()
 
                 with mock.patch.object(
                     honeypot.discord,
@@ -617,7 +620,7 @@ class JoinwatchDryRunTests(unittest.IsolatedAsyncioTestCase):
                     return member if member_id == member.id else None
 
                 guild.get_member = change_policy_before_effect
-                guild_config = SimpleNamespace(
+                guild_config = _RawGuildConfig(
                     all=mock.AsyncMock(side_effect=lambda: dict(current_config)),
                     joinwatch_pending_role_assignments=lambda: _Store(assignments),
                     joinwatch_pending_roles=lambda: _Store(pending_roles),
@@ -631,6 +634,7 @@ class JoinwatchDryRunTests(unittest.IsolatedAsyncioTestCase):
                 bot.is_admin = mock.AsyncMock(return_value=False)
                 cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
+                cog._case_store.initialize()
                 cog._get_text_channel_or_thread = mock.Mock(
                     return_value=moderator_channel
                 )
@@ -705,7 +709,7 @@ class JoinwatchDryRunTests(unittest.IsolatedAsyncioTestCase):
                     "joinwatch_pending_role_assignments": assignments,
                     "joinwatch_pending_roles": pending_roles,
                 }
-                guild_config = SimpleNamespace(
+                guild_config = _RawGuildConfig(
                     all=mock.AsyncMock(side_effect=lambda: raw_config),
                     joinwatch_pending_role_assignments=lambda: _Store(assignments),
                     joinwatch_pending_roles=lambda: _Store(pending_roles),

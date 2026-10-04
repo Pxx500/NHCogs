@@ -12,6 +12,8 @@ from redbot.core import modlog
 from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import box
 
+from NHCogs.account_snapshot import account_snapshot
+
 from . import joinwatch_publication, joinwatch_state
 from .effects import EffectStatus, ModerationOrigin
 from .settings import GuildSettings, JoinwatchAutoRoleActionOption
@@ -133,19 +135,41 @@ async def _execute_joinwatch_action(
     settings: GuildSettings,
     *,
     reason: str,
+    incident: dict | None = None,
+    store_name: str = "joinwatch_pending_roles",
 ) -> tuple[str | None, str | None]:
     action = settings.joinwatch_auto_role_action.value
+    owner = getattr(cog, "_joinwatch_verification", None)
+    async def finish(outcome, *, retain_pending=False):
+        if owner is not None and incident is not None:
+            await owner.finish(guild, member_id, incident, outcome, store_name=store_name, retain_pending=retain_pending)
+
     if action not in ("kick", "ban"):
+        await finish("no_action")
         return (_("No joinwatch punishment configured"), None)
     if not await cog._punitive_effect_allowed(guild):
+        await finish("dry_run")
         return (cog._dry_run_label(action), None)
+    if incident is not None and incident.get("punishment_started_at"):
+        await finish(incident.get("history_terminal", "action_uncertain"))
+        return (_("Action outcome needs moderator review"), None)
     missing_permission = cog._missing_action_permission(guild, action)
     if missing_permission is not None:
         await cog._increment_stat(guild, "failed_actions")
         return (None, missing_permission)
     try:
+        if owner is not None and incident is not None and (action == "ban" or member is not None):
+            incident["punishment_started_at"] = datetime.now(timezone.utc).isoformat()
+            incident["pre_action"] = {
+                "captured_at": incident["punishment_started_at"],
+                "profile": account_snapshot(member if member is not None else member_id),
+                "action": action, "reason": reason, "executor_id": str(guild.me.id),
+            }
+            owner.event(incident, "action_started")
+            await owner.persist_history(guild, member_id, incident, store_name=store_name)
         if action == "kick":
             if member is None:
+                await finish("member_absent")
                 if cog._automated_kick_fail_warning_enabled(settings.automated_kick_fail_warning):
                     return await cog._create_kick_fail_warning(guild, member_id)
                 return (_("The member is no longer in the server"), None)
@@ -155,6 +179,7 @@ async def _execute_joinwatch_action(
                 if cog._automated_kick_fail_warning_enabled(settings.automated_kick_fail_warning):
                     return await cog._create_kick_fail_warning(guild, member_id)
                 raise
+            await finish("timer_kicked", retain_pending=True)
         elif action == "ban":
             target = member if member is not None else await cog._get_user_or_object(member_id)
             await guild.ban(
@@ -162,6 +187,7 @@ async def _execute_joinwatch_action(
                 reason=reason,
                 delete_message_seconds=cog._ban_delete_message_seconds(),
             )
+            await finish("timer_banned", retain_pending=True)
             cog._schedule_post_ban_sweep(guild, target.id)
             await cog._record_daily_stat(
                 guild,
@@ -170,11 +196,15 @@ async def _execute_joinwatch_action(
             )
         await cog._increment_stat(guild, "joinwatch_auto_role_punishments")
     except discord.HTTPException as exc:
+        if owner is not None and incident is not None:
+            incident.pop("punishment_started_at", None)
+            owner.event(incident, "action_failed")
+            await owner.persist_history(guild, member_id, incident, store_name=store_name)
         await cog._increment_stat(guild, "failed_actions")
         return (None, _("**Action failed:**\n") + box(str(exc), lang="py"))
     user = member if member is not None else await cog._get_user_or_object(member_id)
     try:
-        await modlog.create_case(
+        case = await modlog.create_case(
             cog.bot,
             guild,
             datetime.now(timezone.utc),
@@ -183,11 +213,14 @@ async def _execute_joinwatch_action(
             moderator=guild.me,
             reason=reason,
         )
+        if incident is not None and case is not None:
+            incident["modlog_case_number"] = case.case_number
     except Exception as error:
         log.exception("Failed to create modlog case in _execute_joinwatch_action")
         await cog._support.report_operational_error(
             guild_id=guild.id, source="Honeypot", action="create joinwatch log case", error=error
         )
+    await finish("timer_kicked" if action == "kick" else "timer_banned")
     label = _("The member has been kicked") if action == "kick" else _("The member has been banned")
     return (label, None)
 
@@ -267,6 +300,8 @@ async def _apply_joinwatch_assignment_actions_locked(
                 member_id,
                 guild_settings,
                 reason="Suspicious Account",
+                incident=data,
+                store_name="joinwatch_pending_role_assignments",
             )
             if failed:
                 await _reschedule_joinwatch_assignment_retry(
@@ -465,6 +500,7 @@ async def _apply_joinwatch_role_actions_locked(
                 member_id,
                 guild_settings,
                 reason="Suspicious Account",
+                incident=data,
             )
             if failed:
                 await _reschedule_joinwatch_role_retry(
@@ -513,10 +549,10 @@ async def _apply_joinwatch_role_actions_locked(
                 )
             continue
         if role is None:
-            await joinwatch_state.delete_pending_role(cog, guild, member_id)
+            await joinwatch_state.delete_pending_role(cog, guild, member_id, outcome="role_missing")
             continue
         if role not in member.roles:
-            await joinwatch_state.delete_pending_role(cog, guild, member_id)
+            await joinwatch_state.delete_pending_role(cog, guild, member_id, outcome="manual")
             await joinwatch_publication.publish_joinwatch_incident(
                 cog,
                 guild,
@@ -526,7 +562,7 @@ async def _apply_joinwatch_role_actions_locked(
             await cog._increment_stat(guild, "joinwatch_auto_roles_cleared")
             continue
         if await cog._is_protected_member(member):
-            await joinwatch_state.delete_pending_role(cog, guild, member_id)
+            await joinwatch_state.delete_pending_role(cog, guild, member_id, outcome="protected")
             continue
         action_label, failed = await _execute_joinwatch_action(
             cog,
@@ -535,6 +571,7 @@ async def _apply_joinwatch_role_actions_locked(
             member_id,
             guild_settings,
             reason="Suspicious Account",
+            incident=data,
         )
         if failed:
             await _reschedule_joinwatch_role_retry(
@@ -625,6 +662,9 @@ async def joinwatch_auto_role_loop(cog) -> None:
     now = datetime.now(timezone.utc)
     for guild in cog.bot.guilds:
         try:
+            owner = getattr(cog, "_joinwatch_verification", None)
+            if owner is not None:
+                await owner.settle_history(guild)
             raw_config = await cog.config.guild(guild).all()
             guild_settings = GuildSettings.from_mapping(raw_config)
             selected = joinwatch_state.select_due_joinwatch_assignments(
@@ -724,6 +764,10 @@ async def _on_member_join_locked(cog, member: discord.Member) -> None:
             existing=existing_incident,
         )
         incident.setdefault("captcha_enabled", bool(raw_config.get("joinwatch_captcha_enabled")))
+        if owner is not None:
+            incident.setdefault("source", "join")
+            incident.setdefault("reasons", ["age"])
+            await owner.capture_enrollment(member, incident)
         if existing_incident is not None:
             incident["restore_incident"] = active_incident is not None
         if owner is not None and (incident.get("captcha_enabled") or incident.get("challenge")):
@@ -889,7 +933,7 @@ async def _on_member_update_locked(cog, before: discord.Member, after: discord.M
                 role.id == pending_role_id for role in after.roles
             )
             if role_removed:
-                await joinwatch_state.delete_pending_role(cog, after.guild, after.id)
+                await joinwatch_state.delete_pending_role(cog, after.guild, after.id, outcome="manual")
                 await joinwatch_publication.publish_joinwatch_incident(
                     cog,
                     after.guild,

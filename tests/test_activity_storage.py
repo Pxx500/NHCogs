@@ -13,6 +13,82 @@ SPEC.loader.exec_module(activity_storage)
 
 
 class ActivityStoreLeaderboardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_member_activity_summary_does_not_infer_zero_from_guild_history(self):
+        with TemporaryDirectory() as directory:
+            store = activity_storage.ActivityStore(Path(directory) / "activity.sqlite3")
+            await store.initialize()
+            await store.record_message(
+                guild_id=1,
+                date_utc=date(2026, 7, 25),
+                hour_utc=12,
+                user_id=42,
+                channel_id=100,
+                thread_id=None,
+                now_utc=datetime(2026, 7, 25, 12, tzinfo=timezone.utc),
+            )
+            await store.close_stale_days(
+                guild_id=1, current_date_utc=date(2026, 7, 26), member_count=100,
+            )
+            await store.prune_detail_rows_older_than(1, date(2026, 7, 26))
+            for guild_id, user_id in ((1, 42), (1, 99), (2, 42)):
+                with self.subTest(guild_id=guild_id, user_id=user_id):
+                    summary = await store.get_member_activity_summary(
+                        guild_id=guild_id,
+                        user_id=user_id,
+                        start_date_utc=date(2026, 7, 25),
+                        end_date_utc=date(2026, 7, 27),
+                    )
+                    self.assertEqual(summary, {
+                        "messages": None,
+                        "active_days": None,
+                        "distinct_channels": None,
+                        "availability": "no_data",
+                        "coverage": "unknown",
+                    })
+
+    async def test_member_activity_summary_counts_retained_days_and_parent_channels(self):
+        with TemporaryDirectory() as directory:
+            store = activity_storage.ActivityStore(Path(directory) / "activity.sqlite3")
+            await store.initialize()
+            for guild_id, user_id, day, channel_id, thread_id in (
+                (1, 42, 24, 100, None),
+                (1, 42, 25, 100, None),
+                (1, 42, 25, 100, 101),
+                (1, 42, 27, 200, None),
+                (1, 42, 28, 300, None),
+                (1, 99, 26, 300, None),
+                (2, 42, 26, 300, None),
+            ):
+                await store.record_message(
+                    guild_id=guild_id,
+                    date_utc=date(2026, 7, day),
+                    hour_utc=12,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    thread_id=thread_id,
+                    now_utc=datetime(2026, 7, day, 12, tzinfo=timezone.utc),
+                )
+            await store.close_stale_days(
+                guild_id=1,
+                current_date_utc=date(2026, 7, 29),
+                member_count=100,
+            )
+
+            summary = await store.get_member_activity_summary(
+                guild_id=1,
+                user_id=42,
+                start_date_utc=date(2026, 7, 25),
+                end_date_utc=date(2026, 7, 27),
+            )
+
+        self.assertEqual(summary, {
+            "messages": 3,
+            "active_days": 2,
+            "distinct_channels": 2,
+            "availability": "observed",
+            "coverage": "unknown",
+        })
+
     async def test_guild_user_counts_aggregate_date_range_and_apply_limit(self):
         with TemporaryDirectory() as directory:
             store = activity_storage.ActivityStore(Path(directory) / "activity.sqlite3")

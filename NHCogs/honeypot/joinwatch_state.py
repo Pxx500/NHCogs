@@ -77,6 +77,8 @@ def select_due_joinwatch_assignments(
     )
     if assignments_enabled or has_group_assignments:
         for member_key_value, data in pending_assignments.items():
+            if isinstance(data, dict) and data.get("history_terminal"):
+                continue
             member_key = str(member_key_value)
             active = pending_roles.get(member_key)
             if isinstance(data, dict) and (
@@ -126,7 +128,8 @@ def select_due_joinwatch_assignments(
     role_actions: list[JoinwatchSelectedAction] = []
     for member_key_value, data in pending_roles.items():
         if isinstance(data, dict) and (
-            data.get("test") or data.get("verification_state") == "release_pending"
+            data.get("test") or data.get("history_terminal")
+            or data.get("verification_state") == "release_pending"
         ):
             continue
         member_key = str(member_key_value)
@@ -228,14 +231,28 @@ async def store_pending_role(
             "expires_at": expires_at.isoformat(),
         }
     )
+    owner = getattr(cog, "_joinwatch_verification", None)
+    if owner is not None:
+        await owner.capture_enrollment(member, pending_role)
+        pending_role["verification_state"] = "active"
+        if not (incident or {}).get("applied_at"):
+            owner.event(pending_role, "enrolled")
     if alert_channel_id is not None and alert_message_id is not None:
         pending_role["alert_channel_id"] = alert_channel_id
         pending_role["alert_message_id"] = alert_message_id
     async with cog.config.guild(member.guild).joinwatch_pending_roles() as pending_roles:
         pending_roles[str(member.id)] = pending_role
+    if owner is not None:
+        await owner.persist_history(member.guild, member.id, pending_role)
 
 
-async def delete_pending_role(cog, guild: discord.Guild, member_id: int | str) -> None:
+async def delete_pending_role(cog, guild: discord.Guild, member_id: int | str, *, outcome="cancelled") -> None:
+    owner = getattr(cog, "_joinwatch_verification", None)
+    if owner is not None:
+        entry = await cog.config.guild(guild).get_raw("joinwatch_pending_roles", str(member_id), default=None)
+        if entry is not None:
+            await owner.finish(guild, int(member_id), dict(entry), outcome)
+        return
     async with cog.config.guild(guild).joinwatch_pending_roles() as pending_roles:
         pending_roles.pop(str(member_id), None)
 
@@ -281,15 +298,32 @@ async def store_pending_assignment(
         if expires_at is not None:
             pending_assignment["expires_at"] = expires_at.isoformat()
         pending_assignments[str(member.id)] = pending_assignment
+    owner = getattr(cog, "_joinwatch_verification", None)
+    if owner is not None:
+        await owner.capture_enrollment(member, pending_assignment)
+        await owner.persist_history(member.guild, member.id, pending_assignment,
+                                    store_name="joinwatch_pending_role_assignments")
 
 
-async def delete_pending_assignment(cog, guild: discord.Guild, member_id: int | str) -> None:
+async def delete_pending_assignment(cog, guild: discord.Guild, member_id: int | str, *, outcome="cancelled") -> None:
+    owner = getattr(cog, "_joinwatch_verification", None)
+    if owner is not None:
+        config = cog.config.guild(guild)
+        entry = await config.get_raw("joinwatch_pending_role_assignments", str(member_id), default=None)
+        active = await config.get_raw("joinwatch_pending_roles", str(member_id), default=None)
+        if entry is not None and not (active and active.get("incident_id") == entry.get("incident_id")):
+            await owner.finish(guild, int(member_id), dict(entry), outcome,
+                               store_name="joinwatch_pending_role_assignments")
+            return
     async with cog.config.guild(guild).joinwatch_pending_role_assignments() as pending_assignments:
         pending_assignments.pop(str(member_id), None)
 
 
 async def clear_pending_assignments(cog, guild: discord.Guild) -> None:
-    await cog.config.guild(guild).joinwatch_pending_role_assignments.clear()
+    pending = await cog.config.guild(guild).get_raw("joinwatch_pending_role_assignments", default={})
+    for member_id in tuple(pending):
+        async with member_lock(cog, guild.id, int(member_id)):
+            await delete_pending_assignment(cog, guild, member_id)
 
 
 async def store_alert_reference(
@@ -360,8 +394,12 @@ async def _reschedule_retry(
     retry_count = next_retry_count(data)
     store = getattr(cog.config.guild(guild), store_name)
     if retry_count is None:
-        async with store() as entries:
-            entries.pop(member_key, None)
+        owner = getattr(cog, "_joinwatch_verification", None)
+        if owner is not None:
+            await owner.finish(guild, int(member_key), data, "action_failed", store_name=store_name)
+        else:
+            async with store() as entries:
+                entries.pop(member_key, None)
         return JoinwatchRetryTransition(
             attempts=JOINWATCH_MAX_RETRIES + 1,
             retry_at=None,

@@ -22,6 +22,8 @@ from uuid import UUID, uuid4
 import discord
 from redbot.core.i18n import Translator
 
+from NHCogs.account_snapshot import account_snapshot
+
 from . import detection_runtime
 from .case_review import (
     CaseFeedbackItem,
@@ -298,7 +300,7 @@ async def _retry_detection_case_deletions(cog) -> None:
         await _finish_detection_case_deletions(cog, cases)
 
 
-def _new_case_message(message: discord.Message) -> NewMessage:
+def _new_case_message(message: discord.Message, *, activity_summary=None) -> NewMessage:
     return NewMessage(
         guild_id=message.guild.id,
         user_id=message.author.id,
@@ -329,6 +331,9 @@ def _new_case_message(message: discord.Message) -> NewMessage:
         ),
         account_created_at=getattr(message.author, "created_at", None),
         guild_joined_at=getattr(message.author, "joined_at", None),
+        account_snapshot=account_snapshot(message.author),
+        activity_summary=activity_summary,
+        context_captured_at=datetime.now(timezone.utc),
     )
 
 

@@ -21,6 +21,16 @@ class _Store:
         return False
 
 
+class _RawGuildConfig(SimpleNamespace):
+    async def get_raw(self, *path, default=None):
+        value = await self.all()
+        for key in path:
+            if not isinstance(value, dict) or key not in value:
+                return default
+            value = value[key]
+        return value
+
+
 class _Ranked:
     def __init__(self, position: int):
         self.position = position
@@ -118,11 +128,21 @@ def _make_runtime(honeypot, *, random_delay: bool):
         stats=lambda: _Store(stats),
     )
     bot = _Bot()
+    bot.get_cog = lambda _name: None
     bot.owner_ids = ()
     bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
     bot.is_mod = mock.AsyncMock(return_value=False)
     bot.is_admin = mock.AsyncMock(return_value=False)
     cog = honeypot.Honeypot(bot, _operational_support())
+    cog._case_store.initialize()
+    async def get_raw(*path, default=None):
+        value = raw_config
+        for key in path:
+            if not isinstance(value, dict) or key not in value:
+                return default
+            value = value[key]
+        return value
+    guild_config.get_raw = get_raw
     cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
     cog._joinwatch_groups = None
     cog._record_daily_stat = mock.AsyncMock()

@@ -49,6 +49,8 @@ Names are resolved only from the Discord cache. The command does not call `fetch
 |---|---|
 | `[p]nhmod` | Show the NHModeration command overview |
 | `[p]nhmod status` | Show private migration, historical coverage, synchronization, and schedule health |
+| `[p]nhmod history` | Show the stored-history export command |
+| `[p]nhmod history export` | Export stored ban, detection, JoinWatch and retained join records as a private ZIP |
 | `[p]nhmod filter` | Show all filter commands and configured groups |
 | `[p]nhmod filter create <group>` | Create an empty group in all-channel mode |
 | `[p]nhmod filter add <group> <phrase>` | Add a phrase to the group |
@@ -86,6 +88,14 @@ Existing phrases are automatically migrated on load to `default` in `all` mode. 
 
 The listener reads a memory cache restored when the cog loads and updated after successful configuration writes. Deletion is not recorded as a moderation action and does not affect BanChart.
 
+## Private history export
+
+`[p]nhmod history` shows the history command overview. `[p]nhmod history export` sends a ZIP of stored moderation observations/actions, detection-case context, JoinWatch incidents/events and retained first-join observations. It requires Manage Messages, a channel hidden from `@everyone`, bot Attach Files permission and a loaded Honeypot cog. It doesn't scrape channels or fetch member profiles.
+
+The ZIP contains UTF-8 JSONL datasets and a versioned manifest with record counts, source coverage and capture times. Discord IDs are strings. Each owner is read independently, not as one atomic cross-database snapshot. Exports above the server upload limit are rejected without truncation. Only one history export runs at a time.
+
+Counts must distinguish active checks, tests, rollback and completed incidents. CAPTCHA success doesn't prove that an account is human, and a ban doesn't prove that it is a scam account. Keep exported files private. Later user-data deletion cannot erase copies already downloaded or sent to Discord.
+
 ## Synchronization
 
 Gateway and Red ModLog events are stored immediately. A low-cost catch-up runs after startup when migration is complete.
@@ -108,4 +118,12 @@ source keys, reasons, or database identifiers.
 
 NHModeration stores immutable source observations and rebuildable canonical actions. Stored fields may include guild, target, technical executor, credited moderator, and channel IDs, action type, timestamps, reasons, expiry, source identity, migration identity, attribution, synchronization cursors, and operational failures. Message filter groups, phrases, modes, and channel IDs are stored per guild in Red Config.
 
-Red user-data deletion anonymizes matching identities and reasons, then rebuilds affected actions. Guild removal deletes the guild's history, synchronization state, migration state, failures, and configuration.
+Observations retain available usernames, global names, server nicknames, account creation and current membership join dates, bot/system flags, and public account flags. Account creation can be derived from a Discord snowflake when the profile is sparse. Its provenance distinguishes profile metadata from snowflake derivation. Missing fields remain unknown. No avatar data or message content is added.
+
+The snapshot belongs to the observation time, not the date of an older imported action. Gateway events, audit entries, Red ModLog cases, initial ban snapshots, and repair snapshots preserve the metadata available when observed. Later snapshots do not overwrite earlier evidence. Live ban observations may also retain NHMisc's bounded message, active-day, and distinct-channel counts with their window and coverage. An unavailable source is not zero activity. Historical imports do not query current activity.
+
+Existing SQLite databases upgrade transactionally. Old observations remain valid with null snapshots. This does not add new ban sources or change action matching and BanChart counting.
+
+`NHModerationHistory.export_history(guild_id)` reads observations, canonical actions and synchronization coverage in one local read transaction. Discord IDs are decimal strings and times are UTC ISO 8601. Canonical action IDs are export-local because rebuilding can replace database IDs. Supporting observation IDs preserve the evidence links. The read does not query Discord or claim complete lifetime coverage.
+
+Red user-data deletion anonymizes matching identities and reasons, removes the subject's account and activity snapshots, then rebuilds affected actions. Guild removal deletes the guild's history, synchronization state, migration state, failures, and configuration. Retained history otherwise survives unbans and member departure. Exported copies cannot be retroactively scrubbed after download or publication.

@@ -1178,9 +1178,18 @@ async def _process_detected_message(
     )
     admission_started = perf_counter()
     try:
+        activity_summary = {"availability": "unavailable"}
+        activity_owner = cog.bot.get_cog("NHMisc")
+        if activity_owner is not None:
+            try:
+                activity_summary = await activity_owner.get_member_activity_summary(
+                    message.guild.id, message.author.id
+                )
+            except Exception:
+                log.exception("Could not capture detection activity context")
         append = await asyncio.to_thread(
             cog._case_store.append_message,
-            review_publication._new_case_message(message),
+            review_publication._new_case_message(message, activity_summary=activity_summary),
             signals,
             initial_operations,
             claim_firstpost=tracking_firstpost,

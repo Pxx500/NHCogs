@@ -71,7 +71,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
                 )
             }
 
-        self.assertEqual(version, 6)
+        self.assertEqual(version, 7)
         self.assertIn("detection_cases", tables)
         self.assertIn("detection_attachments", tables)
         self.assertIn("public_daily_stats", tables)
@@ -91,7 +91,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
 
         self.assertEqual(snapshot.case.case_id, stored_case.case_id)
         self.assertEqual(snapshot.messages[0].message_id, 40)
-        self.assertEqual(version, 6)
+        self.assertEqual(version, 7)
 
     def test_initialize_preserves_timeline_publications_from_previous_schema(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
@@ -535,7 +535,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertIn("description", columns)
         self.assertIn("spoiler", columns)
         self.assertEqual(row, ("legacy.png", None, 0))
-        self.assertEqual(version, 6)
+        self.assertEqual(version, 7)
 
     def test_projection_endpoint_survives_store_restart(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)

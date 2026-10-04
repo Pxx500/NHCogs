@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import importlib
+import json
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -127,20 +128,24 @@ def _runtime(honeypot):
         setattr(config, key, lambda key=key: _Value(raw[key]))
     cog = SimpleNamespace(
         config=SimpleNamespace(guild=lambda _guild: config),
-        bot=SimpleNamespace(guilds=[guild]),
+        bot=SimpleNamespace(guilds=[guild], get_cog=lambda _name: None),
         _is_protected_member=mock.AsyncMock(return_value=False),
         _punitive_effect_allowed=mock.AsyncMock(return_value=True),
         _missing_role_assignment_permission=mock.Mock(return_value=None),
         _get_text_channel_or_thread=mock.Mock(return_value=None),
         _record_operational_failure=mock.AsyncMock(),
     )
+    cog._case_store = honeypot.DetectionCaseStore(honeypot.cog_data_path() / "verification.sqlite")
+    cog._case_store.initialize()
+    owner = module.JoinwatchVerification(cog)
+    cog._joinwatch_verification = owner
     return SimpleNamespace(
         module=module,
         cog=cog,
         raw=raw,
         member=member,
         role=role,
-        owner=module.JoinwatchVerification(cog),
+        owner=owner,
         now=now,
     )
 
@@ -253,6 +258,159 @@ async def _question(runtime, *, now=None):
 
 
 class VerificationLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancelled_assignments_do_not_remain_pending_in_history(self):
+        for wave in (False, True):
+            with self.subTest(wave=wave), TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+                runtime = _runtime(honeypot)
+                runtime.raw["joinwatch_pending_roles"].clear()
+                entry = {"incident_id": "cancel-me", "source": "wave" if wave else "join", "wave_id": "wave"}
+                try:
+                    await honeypot.joinwatch_state.store_pending_assignment(
+                        runtime.cog, runtime.member, 51, runtime.now, incident=entry
+                    )
+                    if wave:
+                        await runtime.owner.cancel_wave_preparation(runtime.member.guild, "wave")
+                    else:
+                        await honeypot.joinwatch_state.clear_pending_assignments(runtime.cog, runtime.member.guild)
+                    history = await runtime.owner.export_history(10)
+                    self.assertEqual(history["incidents"][0]["outcome"], "cancelled")
+                    self.assertEqual(runtime.raw["joinwatch_pending_role_assignments"], {})
+                finally:
+                    await runtime.owner.close()
+
+    async def test_preparation_error_is_archived_without_using_an_answer_attempt(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime = _runtime(honeypot)
+            try:
+                with mock.patch.object(runtime.owner.preparation, "get", return_value=None), \
+                     mock.patch.object(runtime.owner.preparation, "failed", return_value=True):
+                    self.assertEqual((await runtime.owner.start(runtime.member)).status, "error")
+                    await runtime.owner.start(runtime.member)
+                history = await runtime.owner.export_history(10)
+                self.assertEqual([event["kind"] for event in history["events"]], ["preparation_failed"])
+                self.assertEqual(history["incidents"][0]["failures"], 0)
+            finally:
+                await runtime.owner.close()
+
+    async def test_moderator_privacy_deletion_is_not_undone_by_active_incident(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime = _runtime(honeypot)
+            entry = runtime.raw["joinwatch_pending_roles"]["20"]
+            entry["enrollment_moderator"] = 99
+            try:
+                await runtime.owner.persist_history(runtime.member.guild, 20, entry)
+                await runtime.owner.delete_user_data(99)
+                await runtime.owner.restore()
+                history = await runtime.owner.export_history(10)
+                self.assertIsNone(history["incidents"][0]["enrollment_moderator"])
+            finally:
+                await runtime.owner.close()
+
+    async def test_history_outage_does_not_hold_solved_role_and_restore_settles_once(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime = _runtime(honeypot)
+            try:
+                await runtime.owner.restore()
+                with mock.patch.object(runtime.cog._case_store, "save_verification_history", side_effect=OSError("disk unavailable")):
+                    result = await runtime.owner.release(runtime.member, outcome="passed")
+                self.assertEqual(result.status, "complete")
+                self.assertNotIn(runtime.role, runtime.member.roles)
+                self.assertEqual(runtime.raw["joinwatch_pending_roles"]["20"]["history_terminal"], "passed")
+                await runtime.owner.restore()
+                await runtime.owner.restore()
+                self.assertNotIn("20", runtime.raw["joinwatch_pending_roles"])
+                history = await runtime.owner.export_history(10)
+                self.assertEqual(history["incidents"][0]["outcome"], "passed")
+                self.assertEqual([event["kind"] for event in history["events"]], ["completed"])
+                runtime.member.remove_roles.assert_awaited_once()
+            finally:
+                await runtime.owner.close()
+
+    async def test_restore_adopts_absent_old_timer_without_changing_enforcement(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime = _runtime(honeypot)
+            entry = runtime.raw["joinwatch_pending_roles"]["20"]
+            entry.pop("incident_id")
+            entry["captcha_enabled"] = False
+            entry["failures"] = 1
+            original = copy.deepcopy(entry)
+            runtime.member.guild.get_member = lambda _value: None
+            try:
+                await runtime.owner.restore()
+                adopted = runtime.raw["joinwatch_pending_roles"]["20"]
+                for key, value in original.items():
+                    self.assertEqual(adopted[key], value)
+                identity = adopted["incident_id"]
+                await runtime.owner.restore()
+                history = await runtime.owner.export_history(10)
+                self.assertEqual(len(history["incidents"]), 1)
+                self.assertEqual(history["incidents"][0]["incident_id"], identity)
+                self.assertEqual(history["incidents"][0]["history_origin"], "adopted_active_state")
+                self.assertEqual(history["events"], [])
+            finally:
+                await runtime.owner.close()
+
+    async def test_successful_timer_ban_is_not_repeated_during_archive_outage(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime = _runtime(honeypot)
+            guild = runtime.member.guild
+            guild.me = SimpleNamespace(id=9)
+            guild.ban = mock.AsyncMock()
+            runtime.raw.update(joinwatch_auto_role_enabled=True, joinwatch_auto_role_action="ban")
+            runtime.raw["joinwatch_pending_roles"]["20"]["expires_at"] = (runtime.now - timedelta(minutes=1)).isoformat()
+            runtime.cog._get_member_or_fetch = mock.AsyncMock(return_value=runtime.member)
+            runtime.cog._missing_action_permission = mock.Mock(return_value=None)
+            runtime.cog._ban_delete_message_seconds = mock.Mock(return_value=0)
+            runtime.cog._schedule_post_ban_sweep = mock.Mock()
+            runtime.cog._record_daily_stat = mock.AsyncMock()
+            runtime.cog._increment_stat = mock.AsyncMock()
+            runtime.member.name = "name_before_ban"
+            entry = runtime.raw["joinwatch_pending_roles"]["20"]
+            await runtime.owner.capture_enrollment(runtime.member, entry)
+            runtime.member.name = "changed_before_ban"
+            try:
+                with mock.patch.object(honeypot.joinwatch.modlog, "create_case", mock.AsyncMock(return_value=SimpleNamespace(case_number=77)), create=True), \
+                     mock.patch.object(runtime.cog._case_store, "save_verification_history", side_effect=OSError("disk unavailable")):
+                    await honeypot.joinwatch.joinwatch_auto_role_loop(runtime.cog)
+                    await honeypot.joinwatch.joinwatch_auto_role_loop(runtime.cog)
+                guild.ban.assert_awaited_once()
+                self.assertEqual(runtime.raw["joinwatch_pending_roles"]["20"]["history_terminal"], "timer_banned")
+                await runtime.owner.restore()
+                history = await runtime.owner.export_history(10)
+                self.assertEqual(history["incidents"][0]["outcome"], "timer_banned")
+                self.assertEqual(history["incidents"][0]["modlog_case_number"], 77)
+                self.assertEqual(history["incidents"][0]["profile"]["username"], "name_before_ban")
+                self.assertEqual(history["incidents"][0]["pre_action"]["profile"]["username"], "changed_before_ban")
+                self.assertNotIn("20", runtime.raw["joinwatch_pending_roles"])
+            finally:
+                await runtime.owner.close()
+
+    async def test_pass_survives_timer_removal_without_captcha_secrets(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime = _runtime(honeypot)
+            try:
+                runtime.raw["joinwatch_pending_roles"].clear()
+                runtime.member.roles.clear()
+                await runtime.owner.enroll_test(runtime.member, moderator_id=99)
+                question = await _question(runtime)
+                answers = [row["answer"] for row in runtime.raw["joinwatch_pending_roles"]["20"]["challenge"]]
+                await runtime.owner.submit(runtime.member, question.session_id, 0, answers[0])
+                result = await runtime.owner.submit(runtime.member, question.session_id, 1, answers[1])
+                self.assertEqual(result.status, "complete")
+                history = await runtime.owner.export_history(10)
+                incident = history["incidents"][0]
+                self.assertEqual(incident["outcome"], "passed")
+                self.assertTrue(incident["test"])
+                self.assertEqual(incident["enrollment_moderator"], "99")
+                self.assertEqual([row["kind"] for row in sorted(history["events"], key=lambda row: row["occurred_at"])],
+                                 ["enrolled", "started", "stage_passed", "passed", "completed"])
+                self.assertNotIn("20", runtime.raw["joinwatch_pending_roles"])
+                exported = json.dumps(history)
+                for secret in ("challenge", "session_id", "answer", "avatar"):
+                    self.assertNotIn(secret, exported)
+            finally:
+                await runtime.owner.close()
+
     async def test_completion_updates_existing_joinwatch_alert_instead_of_sending_a_captcha_log(self):
         with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
             runtime = _runtime(honeypot)

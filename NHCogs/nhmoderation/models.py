@@ -21,6 +21,8 @@ class ModerationObservation:
     channel_id: int | None = None
     import_batch_id: str | None = None
     source_payload_version: int = 1
+    account_snapshot: dict | None = None
+    activity_summary: dict | None = None
 
 
 @dataclass(frozen=True)

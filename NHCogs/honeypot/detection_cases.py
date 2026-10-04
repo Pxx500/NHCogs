@@ -345,6 +345,9 @@ class NewMessage:
     avatar_url: str | None = None
     account_created_at: datetime | None = None
     guild_joined_at: datetime | None = None
+    account_snapshot: dict | None = None
+    activity_summary: dict | None = None
+    context_captured_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -824,13 +827,133 @@ class DetectionCaseStore:
             for row in connection.execute("SELECT guild_id, record FROM joinwatch_waves").fetchall():
                 self._retract_wave_guests(connection, row["guild_id"], json.loads(row["record"]))
 
+        def migrate_schema_6(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS verification_incidents (
+                       incident_id TEXT PRIMARY KEY,
+                       guild_id INTEGER NOT NULL,
+                       user_id INTEGER NOT NULL,
+                       record TEXT NOT NULL
+                   )"""
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS verification_incidents_by_member "
+                "ON verification_incidents(guild_id, user_id)"
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS verification_events (
+                       event_id TEXT PRIMARY KEY,
+                       incident_id TEXT NOT NULL,
+                       record TEXT NOT NULL,
+                       FOREIGN KEY(incident_id) REFERENCES verification_incidents(incident_id)
+                           ON DELETE CASCADE
+                   )"""
+            )
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(detection_case_subjects)")}
+            for name, kind in (("account_snapshot", "TEXT"), ("activity_summary", "TEXT"), ("context_captured_at", "INTEGER")):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE detection_case_subjects ADD COLUMN {name} {kind}")
+
         with closing(self._connect()) as connection:
             apply_migrations(
                 connection,
                 (migrate_schema_0, migrate_schema_1, migrate_schema_2,
-                 migrate_schema_3, migrate_schema_4, migrate_schema_5),
+                 migrate_schema_3, migrate_schema_4, migrate_schema_5, migrate_schema_6),
                 label="detection case storage",
             )
+
+    def save_verification_history(self, incident: Mapping, events: Iterable[Mapping]) -> None:
+        """Atomically retain an incident projection and idempotent factual events."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                """INSERT INTO verification_incidents(incident_id, guild_id, user_id, record)
+                   VALUES (?, ?, ?, ?) ON CONFLICT(incident_id)
+                   DO UPDATE SET record = excluded.record""",
+                (incident["incident_id"], int(incident["guild_id"]), int(incident["user_id"]),
+                 json.dumps({key: value for key, value in incident.items()
+                             if key not in {"incident_id", "guild_id", "user_id"}}, separators=(",", ":"))),
+            )
+            connection.executemany(
+                """INSERT INTO verification_events(event_id, incident_id, record)
+                   VALUES (?, ?, ?) ON CONFLICT(event_id) DO NOTHING""",
+                [(event["event_id"], incident["incident_id"], json.dumps(
+                    {key: value for key, value in event.items() if key not in {"event_id", "incident_id"}},
+                    separators=(",", ":")))
+                 for event in events],
+            )
+
+    def export_verification_history(self, guild_id: int) -> dict:
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN")
+            incidents = [{**json.loads(row["record"]), "incident_id": row["incident_id"],
+                          "guild_id": str(row["guild_id"]), "user_id": str(row["user_id"])}
+                         for row in connection.execute(
+                "SELECT * FROM verification_incidents WHERE guild_id = ? ORDER BY incident_id",
+                (guild_id,),
+            )]
+            events = [{**json.loads(row["record"]), "event_id": row["event_id"], "incident_id": row["incident_id"]}
+                      for row in connection.execute(
+                """SELECT e.* FROM verification_events e JOIN verification_incidents i
+                   ON e.incident_id = i.incident_id WHERE i.guild_id = ? ORDER BY e.event_id""",
+                (guild_id,),
+            )]
+        return {"incidents": incidents, "events": events, "coverage": {
+            "earliest_capture_at": min((row["captured_at"] for row in incidents), default=None),
+            "adopted_incidents": sum(row.get("history_origin") == "adopted_active_state" for row in incidents),
+            "prior_completed_history_available": False,
+            "read_at": datetime.now(timezone.utc).isoformat(),
+        }}
+
+    def delete_verification_history(self, *, user_id: int | None = None, guild_id: int | None = None) -> None:
+        if (user_id is None) == (guild_id is None):
+            raise ValueError("specify exactly one privacy scope")
+        with closing(self._connect()) as connection, connection:
+            if guild_id is not None:
+                connection.execute("DELETE FROM verification_incidents WHERE guild_id = ?", (guild_id,))
+            else:
+                connection.execute("DELETE FROM verification_incidents WHERE user_id = ?", (user_id,))
+                # A moderator can also occur on another member's retained incident.
+                for row in connection.execute("SELECT incident_id, record FROM verification_incidents").fetchall():
+                    record = json.loads(row["record"])
+                    changed = False
+                    for key in ("enrollment_moderator", "completion_moderator"):
+                        if record.get(key) == str(user_id):
+                            record[key] = None
+                            changed = True
+                    if changed:
+                        record["completion_reason"] = None
+                        connection.execute("UPDATE verification_incidents SET record = ? WHERE incident_id = ?",
+                                           (json.dumps(record), row["incident_id"]))
+
+    def export_detection_history(self, guild_id: int) -> list[dict]:
+        """Export retained case context without message content or media."""
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN")
+            records = []
+            for row in connection.execute(
+                """SELECT c.case_id, c.guild_id, c.user_id, c.status, c.created_at,
+                          c.resolved_at, c.resolution, c.moderator_id, s.display_name,
+                          s.account_created_at, s.guild_joined_at, s.account_snapshot,
+                          s.activity_summary, s.context_captured_at
+                   FROM detection_cases c LEFT JOIN detection_case_subjects s
+                   ON c.case_id = s.case_id WHERE c.guild_id = ? ORDER BY c.created_at, c.case_id""",
+                (guild_id,),
+            ):
+                record = dict(row)
+                for key in ("guild_id", "user_id", "moderator_id"):
+                    record[key] = str(record[key]) if record[key] is not None else None
+                for key in ("created_at", "resolved_at", "account_created_at", "guild_joined_at", "context_captured_at"):
+                    record[key] = _from_timestamp(record[key]).isoformat() if record[key] is not None else None
+                for key in ("account_snapshot", "activity_summary"):
+                    record[key] = json.loads(record[key]) if record[key] is not None else None
+                record["signals"] = [
+                    {**dict(signal), "decisive": bool(signal["decisive"])}
+                    for signal in connection.execute(
+                        "SELECT detector, reason, action, decisive FROM detection_signals "
+                        "WHERE case_id = ? ORDER BY message_sequence, position", (row["case_id"],))
+                ]
+                records.append(record)
+        return records
 
     def get_joinwatch_history(self, guild_id: int) -> dict:
         with closing(self._connect()) as connection:
@@ -844,6 +967,15 @@ class DetectionCaseStore:
                 "sources": [], "observations": {},
             }
         return json.loads(row["history"])
+
+    def get_joinwatch_observation(self, guild_id: int, user_id: int) -> dict | None:
+        """Read one retained join without decoding the server archive into Python objects."""
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT json_extract(history, ?) FROM joinwatch_history WHERE guild_id = ?",
+                (f'$.observations."{int(user_id)}"', guild_id),
+            ).fetchone()
+        return json.loads(row[0]) if row is not None and row[0] is not None else None
 
     def save_joinwatch_history(self, guild_id: int, history: Mapping) -> None:
         serialized = json.dumps(_json_value(history), separators=(",", ":"))
@@ -1449,8 +1581,9 @@ class DetectionCaseStore:
             case_id = case_row["case_id"]
             connection.execute(
                 """INSERT INTO detection_case_subjects
-                   (case_id, display_name, avatar_url, account_created_at, guild_joined_at)
-                   VALUES (?, ?, ?, ?, ?)
+                   (case_id, display_name, avatar_url, account_created_at, guild_joined_at,
+                    account_snapshot, activity_summary, context_captured_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(case_id) DO UPDATE SET
                      display_name = COALESCE(excluded.display_name, display_name),
                      avatar_url = COALESCE(excluded.avatar_url, avatar_url),
@@ -1472,6 +1605,9 @@ class DetectionCaseStore:
                         if new_message.guild_joined_at is not None
                         else None
                     ),
+                    json.dumps(new_message.account_snapshot) if new_message.account_snapshot is not None else None,
+                    json.dumps(new_message.activity_summary) if new_message.activity_summary is not None else None,
+                    _to_timestamp(new_message.context_captured_at) if new_message.context_captured_at is not None else None,
                 ),
             )
             sequence = connection.execute(

@@ -540,6 +540,7 @@ def _isolated_honeypot_modules(data_path: Path):
         "NHCogs",
         "NHCogs.command_overview",
         "NHCogs.command_feedback",
+        "NHCogs.account_snapshot",
         "NHCogs.storage",
         package_name,
         *(f"{package_name}.{name}" for name in (*load_order, "honeypot")),
@@ -869,6 +870,7 @@ def _isolated_honeypot_modules(data_path: Path):
             sys.modules.pop(name, None)
         sys.modules.pop("NHCogs.command_overview", None)
         sys.modules.pop("NHCogs.command_feedback", None)
+        sys.modules.pop("NHCogs.account_snapshot", None)
         sys.modules.update(
             {
                 "discord": discord,
@@ -947,6 +949,9 @@ class _Bot:
         self.restored_views.append((view, message_id))
 
     def get_guild(self, guild_id):
+        return None
+
+    def get_cog(self, name):
         return None
 
 

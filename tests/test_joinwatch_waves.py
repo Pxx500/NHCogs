@@ -168,7 +168,7 @@ def _real_lifecycle_fixture(honeypot, groups, directory, *, count=3):
     for member in members.values():
         member.add_roles = AsyncMock(side_effect=lambda role, member=member, **_kwargs: member.roles.append(role))
         member.remove_roles = AsyncMock(side_effect=lambda role, member=member, **_kwargs: member.roles.remove(role))
-    cog.bot = SimpleNamespace(guilds=[guild])
+    cog.bot = SimpleNamespace(guilds=[guild], get_cog=lambda _name: None)
     cog._is_protected_member = AsyncMock(return_value=False)
     cog._punitive_effect_allowed = AsyncMock(return_value=True)
     cog._missing_role_assignment_permission = Mock(return_value=None)
