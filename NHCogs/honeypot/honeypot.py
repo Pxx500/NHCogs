@@ -57,7 +57,6 @@ from .detection_cases import (
     OperationType,
 )
 from .effects import ModerationEffectResult, ModerationOrigin, punitive_effect_allowed
-from .firstpost_store import FirstPostStore
 from .image_detector import ImageSample
 from .imagescan_store import ImageScanStore
 from .joinwatch_groups import JoinwatchGroups
@@ -206,12 +205,6 @@ class Honeypot(Cog):
         self._message_registry = MessageRegistry(
             cog_data_path(self) / "message_registry.sqlite"
         )
-        self._firstpost_db_path = cog_data_path(self) / "firstpost_seen.sqlite"
-        self._firstpost_store = FirstPostStore(self._firstpost_db_path)
-        self._firstpost_db_lock: asyncio.Lock = asyncio.Lock()
-        self._firstpost_seen_authors: dict[int, set[int]] = defaultdict(set)
-        self._firstpost_dirty_seen_authors: dict[int, set[int]] = defaultdict(set)
-        self._firstpost_loaded_guilds: set[int] = set()
         self._research_dump_jobs: dict[int, _ResearchDumpRun] = {}
         self._imagescan_db_path = cog_data_path(self) / "imagescan.sqlite"
         self._imagescan_files_path = cog_data_path(self) / "imagescan_files"
@@ -456,12 +449,6 @@ class Honeypot(Cog):
     _persisted_capture_results = staticmethod(detection._persisted_capture_results)
     _signal_action = staticmethod(detection._signal_action)
     _public_moderation_reason = staticmethod(detection._public_moderation_reason)
-
-    async def _init_firstpost_seen_store(self) -> None:
-        return await detection._init_firstpost_seen_store(self)
-
-    async def _flush_firstpost_seen_authors(self) -> None:
-        return await detection._flush_firstpost_seen_authors(self)
 
     async def _remove_review_mute_role(
         self,
@@ -995,7 +982,6 @@ class Honeypot(Cog):
     async def cog_load(self) -> None:
         await super().cog_load()
         await self._prune_unknown_guild_config()
-        await self._init_firstpost_seen_store()
         await self._init_imagescan_store()
         await self._message_registry.initialize()
         self._detection_case_files_path.mkdir(parents=True, exist_ok=True)
@@ -1007,7 +993,6 @@ class Honeypot(Cog):
         self.joinwatch_auto_role_loop.start()
         self.joinwatch_wave_loop.start()
         self.purge_cache_cleanup_loop.start()
-        self.firstpost_seen_flush_loop.start()
         self.detection_case_loop.start()
         self.detection_reconciliation_loop.start()
         self._case_restore_task = asyncio.create_task(self._restore_detection_case_views())
@@ -1026,7 +1011,6 @@ class Honeypot(Cog):
             (self.joinwatch_auto_role_loop, "joinwatch auto role loop"),
             (self.joinwatch_wave_loop, "joinwatch wave loop"),
             (self.purge_cache_cleanup_loop, "purge cache cleanup loop"),
-            (self.firstpost_seen_flush_loop, "firstpost seen flush loop"),
             (self.detection_case_loop, "detection case loop"),
             (self.detection_reconciliation_loop, "detection reconciliation loop"),
         )
@@ -1084,7 +1068,6 @@ class Honeypot(Cog):
             self.joinwatch_auto_role_loop,
             self.joinwatch_wave_loop,
             self.purge_cache_cleanup_loop,
-            self.firstpost_seen_flush_loop,
             self.detection_case_loop,
             self.detection_reconciliation_loop,
         )
@@ -1137,12 +1120,7 @@ class Honeypot(Cog):
             await asyncio.gather(*pending_scans, return_exceptions=True)
         self._initial_image_scan_tasks.clear()
         self._initial_image_scan_batches.clear()
-        await self._flush_firstpost_seen_authors()
         await super().cog_unload()
-
-    @tasks.loop(seconds=60)
-    async def firstpost_seen_flush_loop(self) -> None:
-        await self._flush_firstpost_seen_authors()
 
     @tasks.loop(minutes=1)
     async def purge_cache_cleanup_loop(self) -> None:
@@ -2259,32 +2237,10 @@ class Honeypot(Cog):
         """Export image shadow-review events and copied files"""
         return await imagescan.imagescan_dump(self, ctx)
 
-    # ─── firstpost sub-group ────────────────────────────────────────────
-
     @debug_imagescan.command(name="importtpzip")
     async def imagescan_import_tp_zip(self, ctx: commands.Context) -> None:
         """Import true-positive scam images from attached zip files"""
         return await imagescan.imagescan_import_tp_zip(self, ctx)
-
-    @honeypot.group(invoke_without_command=True)
-    async def firstpost(self, ctx: commands.Context) -> None:
-        """Configure first-message detection"""
-        return await self._send_group_overview(ctx, detection.config_firstpost)
-
-    @firstpost.command(name="toggle")
-    async def firstpost_toggle(self, ctx: commands.Context, value: bool = None) -> None:
-        """Enable or disable first-message enforcement"""
-        return await detection.firstpost_toggle(self, ctx, value)
-
-    @firstpost.command(name="warmup")
-    async def firstpost_collect(self, ctx: commands.Context, value: bool = None) -> None:
-        """Record first-message senders without taking action"""
-        return await detection.firstpost_collect(self, ctx, value)
-
-    @firstpost.command(name="action")
-    async def firstpost_action(self, ctx: commands.Context, value: str = None) -> None:
-        """Set the action for suspicious first messages"""
-        return await detection.firstpost_action(self, ctx, value)
 
     # ─── review sub-group ─────────────────────────────────────────────
 
@@ -2614,11 +2570,6 @@ class Honeypot(Cog):
     async def config_purge(self, ctx: commands.Context) -> None:
         """Show message purge behavior"""
         return await detection.config_purge(self, ctx)
-
-    @config_dump.command(name="firstpost")
-    async def config_firstpost(self, ctx: commands.Context) -> None:
-        """Show first-message detection settings"""
-        return await detection.config_firstpost(self, ctx)
 
     @config_dump.command(name="imagescan")
     async def config_imagescan(self, ctx: commands.Context) -> None:

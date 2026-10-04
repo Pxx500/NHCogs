@@ -2011,7 +2011,6 @@ class GifDetectorRuntimeEdgeCaseTests(unittest.IsolatedAsyncioTestCase):
                 task = asyncio.create_task(wait_until_cancelled())
                 cog._gif_detector_tasks.add(task)
                 cog._gif_detector_animated_guilds.add(1)
-                cog._flush_firstpost_seen_authors = mock.AsyncMock()
                 await started.wait()
 
                 try:

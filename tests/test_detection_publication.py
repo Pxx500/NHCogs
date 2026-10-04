@@ -36,8 +36,6 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                     "whitelisted_roles": [],
                     "action": "review",
                     "fallback_action": "review",
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -73,8 +71,6 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                         "dry_run": True,
                         "review_channel": None,
                         "review_enabled": True,
-                        "firstpost_enabled": False,
-                        "firstpost_collect_enabled": False,
                         "imagescan_detector_enabled": False,
                     },
                 )
@@ -122,8 +118,6 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                         "dry_run": False,
                         "review_channel": None,
                         "spam_enabled": False,
-                        "firstpost_enabled": False,
-                        "firstpost_collect_enabled": False,
                     },
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
@@ -163,8 +157,6 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                         "dry_run": False,
                         "review_channel": None,
                         "spam_enabled": False,
-                        "firstpost_enabled": False,
-                        "firstpost_collect_enabled": False,
                     },
                 )
                 scan_started = asyncio.Event()
@@ -245,8 +237,6 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                         "dry_run": False,
                         "review_channel": None,
                         "spam_enabled": False,
-                        "firstpost_enabled": False,
-                        "firstpost_collect_enabled": False,
                     },
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
@@ -741,13 +731,10 @@ class DetectionPublicationTests(DetectionPipelineTestCase):
                     "spam_action": "review",
                     "spam_min_channels": 2,
                     "spam_window_seconds": 10,
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
                 del cog._handle_spam_message
-                cog._handle_firstpost_message.return_value = False
                 cog._handle_imagescan_detector_message.return_value = False
                 cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
                 honeypot.discord.Color = SimpleNamespace(

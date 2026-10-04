@@ -78,7 +78,11 @@ class DetectionCaseStoreTests(unittest.TestCase):
 
     def test_initialize_preserves_current_schema_data_when_backfilling_version(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
-        stored_case = self.store.append_message(self.message(40, now), ()).case
+        stored_case = self.store.append_message(
+            self.message(40, now),
+            (DetectionSignal("firstpost", "Historical first post", ActionIntent.REVIEW, True, {}),),
+            ((OperationType.MESSAGE_PROCESS, "message-process:{case_id}:{sequence}"),),
+        ).case
         with closing(sqlite3.connect(self.database_path)) as connection, connection:
             connection.execute("PRAGMA user_version = 0")
 
@@ -91,6 +95,8 @@ class DetectionCaseStoreTests(unittest.TestCase):
 
         self.assertEqual(snapshot.case.case_id, stored_case.case_id)
         self.assertEqual(snapshot.messages[0].message_id, 40)
+        self.assertEqual(snapshot.signals[0].signal.detector, "firstpost")
+        self.assertEqual(snapshot.operations[0].status, OperationStatus.PENDING)
         self.assertEqual(version, 7)
 
     def test_initialize_preserves_timeline_publications_from_previous_schema(self):
@@ -1792,29 +1798,6 @@ class DetectionCaseStoreTests(unittest.TestCase):
             ["evidence_cleanup"],
         )
 
-    def test_append_atomically_claims_firstpost_signal_with_initial_outbox(self):
-        now = datetime.now(timezone.utc)
-        firstpost = DetectionSignal(
-            "firstpost", "suspicious first message", ActionIntent.REVIEW, True, {}
-        )
-
-        appended = self.store.append_message(
-            self.message(92, now),
-            (firstpost,),
-            (("message_process", "process:{case_id}:{sequence}"),),
-            claim_firstpost=True,
-        )
-        snapshot = self.store.get_case(appended.case.case_id)
-
-        self.assertTrue(appended.firstpost_claimed)
-        self.assertEqual(
-            [record.signal.detector for record in snapshot.signals],
-            ["firstpost"],
-        )
-        self.assertEqual(
-            [operation.operation_type for operation in snapshot.operations],
-            ["message_process"],
-        )
 
     def test_failed_operation_is_only_claimed_when_retry_is_due(self):
         created_at = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)

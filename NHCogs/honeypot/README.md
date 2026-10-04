@@ -37,7 +37,7 @@ Enable the privileged Server Members and Message Content intents. Configure tech
 
 ### Main detection
 
-Groups: `[p]honeypot honeypot`, `[p]honeypot honeypot roles`, `[p]honeypot honeypot keywords`, `[p]honeypot honeypot keywords attachments`, `[p]honeypot firstpost`, `[p]honeypot spam`, `[p]honeypot purge`
+Groups: `[p]honeypot honeypot`, `[p]honeypot honeypot roles`, `[p]honeypot honeypot keywords`, `[p]honeypot honeypot keywords attachments`, `[p]honeypot spam`, `[p]honeypot purge`
 
 | Command | What it does |
 |---|---|
@@ -58,9 +58,6 @@ Groups: `[p]honeypot honeypot`, `[p]honeypot honeypot roles`, `[p]honeypot honey
 | `[p]honeypot honeypot keywords attachments remove <pattern>` | Remove a filename-base regex |
 | `[p]honeypot honeypot keywords attachments list` | List filename patterns |
 | `[p]honeypot honeypot keywords attachments reset` | Restore default patterns |
-| `[p]honeypot firstpost toggle [true/false]` | Enforce first-observed-message detection |
-| `[p]honeypot firstpost warmup [true/false]` | Record first senders without enforcement |
-| `[p]honeypot firstpost action [review/kick/ban/none]` | First-post action: review, kick, ban, none |
 | `[p]honeypot spam toggle [true/false]` | Detect repeats across channels |
 | `[p]honeypot spam action [review/kick/ban/none]` | Spam action: review, kick, ban, none |
 | `[p]honeypot spam window [seconds]` | Matching window, 3–60 seconds |
@@ -68,7 +65,9 @@ Groups: `[p]honeypot honeypot`, `[p]honeypot honeypot roles`, `[p]honeypot honey
 | `[p]honeypot purge backward [seconds]` | Backward deletion window, 60–3600 seconds |
 | `[p]honeypot purge forward [seconds]` | Forward window, 0–300 seconds. Zero disables it |
 
-Detection combines account age, scam phrases, attachment counts and filenames, and enabled image matching. Firstpost warmup and enforcement are mutually exclusive. Spam detection requires matching messages with attachments or scam phrases. The main switch does not control JoinWatch, bait roles, or GIF interception.
+Detection combines account age, scam phrases, attachment counts and filenames, and enabled image matching. Spam detection requires matching messages with attachments or scam phrases. The main switch does not control JoinWatch, bait roles, or GIF interception.
+
+Firstpost detection and its commands have been retired. Existing firstpost configuration keys are pruned on load. Historical cases, pending case operations, and aggregate statistics remain intact. The old `firstpost_seen.sqlite` file and claim table are left untouched, but the detector no longer reads or writes them. An attachment-heavy first message no longer triggers firstpost, and enabled image scanning can evaluate it when no remaining detector has already selected an action.
 
 ### Channels
 
@@ -247,7 +246,6 @@ Groups: `[p]honeypot stats`, `[p]honeypot config`
 | `[p]honeypot config channel` | Destinations and scopes |
 | `[p]honeypot config punishment` | Punishment settings |
 | `[p]honeypot config purge` | Purge windows |
-| `[p]honeypot config firstpost` | First-post settings |
 | `[p]honeypot config imagescan` | Image detector settings |
 | `[p]honeypot config spam` | Spam settings |
 | `[p]honeypot config review` | Review settings |

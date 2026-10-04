@@ -372,7 +372,6 @@ class AppendResult:
     message: MessageRecord
     case_created: bool
     message_created: bool
-    firstpost_claimed: bool = False
 
 
 @dataclass(frozen=True)
@@ -531,17 +530,6 @@ class DetectionCaseStore:
                     decisive INTEGER NOT NULL,
                     metadata TEXT NOT NULL,
                     PRIMARY KEY(case_id, message_sequence, position),
-                    FOREIGN KEY(case_id, message_sequence)
-                        REFERENCES detection_messages(case_id, sequence) ON DELETE CASCADE
-                );
-
-                CREATE TABLE IF NOT EXISTS firstpost_claims (
-                    guild_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    case_id TEXT NOT NULL,
-                    message_sequence INTEGER NOT NULL,
-                    claimed_at INTEGER NOT NULL,
-                    PRIMARY KEY(guild_id, user_id),
                     FOREIGN KEY(case_id, message_sequence)
                         REFERENCES detection_messages(case_id, sequence) ON DELETE CASCADE
                 );
@@ -1458,13 +1446,7 @@ class DetectionCaseStore:
         self,
         new_message: NewMessage,
         signals: tuple[DetectionSignal, ...],
-        initial_operations: tuple[tuple[OperationType | str, str], ...]
-        | Callable[
-            [tuple[DetectionSignal, ...]],
-            tuple[tuple[OperationType | str, str], ...],
-        ] = (),
-        *,
-        claim_firstpost: bool = False,
+        initial_operations: tuple[tuple[OperationType | str, str], ...] = (),
     ) -> AppendResult | None:
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1481,25 +1463,6 @@ class DetectionCaseStore:
                         ).fetchone()
                     )
                     return AppendResult(case, self._message_from_row(existing), False, False)
-
-                firstpost_claimed = False
-                owned_signals = signals
-                if claim_firstpost:
-                    existing_claim = connection.execute(
-                        "SELECT 1 FROM firstpost_claims WHERE guild_id = ? AND user_id = ?",
-                        (new_message.guild_id, new_message.user_id),
-                    ).fetchone()
-                    firstpost_signals = tuple(
-                        signal for signal in signals if signal.detector == "firstpost"
-                    )
-                    owned_signals = tuple(
-                        signal for signal in signals if signal.detector != "firstpost"
-                    )
-                    if existing_claim is None:
-                        firstpost_claimed = True
-                        owned_signals += firstpost_signals
-                    elif not owned_signals:
-                        return None
 
                 case_row = connection.execute(
                     """SELECT * FROM detection_cases
@@ -1615,7 +1578,7 @@ class DetectionCaseStore:
                 (case_id,),
             ).fetchone()[0]
             admitted_by = next(
-                (signal.detector for signal in owned_signals if signal.decisive), "unknown"
+                (signal.detector for signal in signals if signal.decisive), "unknown"
             )
             connection.execute(
                 """INSERT INTO detection_messages
@@ -1635,20 +1598,7 @@ class DetectionCaseStore:
                     DeleteStatus.PENDING.value,
                 ),
             )
-            if firstpost_claimed:
-                connection.execute(
-                    """INSERT INTO firstpost_claims
-                       (guild_id, user_id, case_id, message_sequence, claimed_at)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    (
-                        new_message.guild_id,
-                        new_message.user_id,
-                        case_id,
-                        sequence,
-                        _to_timestamp(new_message.created_at),
-                    ),
-                )
-            for position, signal in enumerate(owned_signals):
+            for position, signal in enumerate(signals):
                 connection.execute(
                     """INSERT INTO detection_signals
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -1687,12 +1637,7 @@ class DetectionCaseStore:
                     ),
                 )
             operation_time = _to_timestamp(new_message.created_at)
-            resolved_initial_operations = (
-                initial_operations(owned_signals)
-                if callable(initial_operations)
-                else initial_operations
-            )
-            for operation_type, idempotency_key in resolved_initial_operations:
+            for operation_type, idempotency_key in initial_operations:
                 resolved_key = idempotency_key.format(
                     case_id=case_id, sequence=sequence
                 )
@@ -1724,7 +1669,6 @@ class DetectionCaseStore:
                 self._message_from_row(message_row),
                 case_created,
                 True,
-                firstpost_claimed,
             )
 
     def get_case(self, case_id: str) -> CaseSnapshot | None:
@@ -1736,52 +1680,6 @@ class DetectionCaseStore:
             if case_row is None:
                 return None
             return self._snapshot(connection, case_row)
-
-
-    def claim_firstpost(
-        self,
-        guild_id: int,
-        user_id: int,
-        case_id: str,
-        message_sequence: int,
-        signal: DetectionSignal | None,
-    ) -> bool:
-        with closing(self._connect()) as connection, connection:
-            connection.execute("BEGIN IMMEDIATE")
-            claimed = connection.execute(
-                """INSERT OR IGNORE INTO firstpost_claims
-                   (guild_id, user_id, case_id, message_sequence, claimed_at)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (
-                    guild_id,
-                    user_id,
-                    case_id,
-                    message_sequence,
-                    _to_timestamp(datetime.now(timezone.utc)),
-                ),
-            )
-            if claimed.rowcount != 1:
-                return False
-            if signal is not None:
-                next_position = connection.execute(
-                    """SELECT COALESCE(MAX(position), -1) + 1 FROM detection_signals
-                       WHERE case_id = ? AND message_sequence = ?""",
-                    (case_id, message_sequence),
-                ).fetchone()[0]
-                connection.execute(
-                    """INSERT INTO detection_signals VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        case_id,
-                        message_sequence,
-                        next_position,
-                        signal.detector,
-                        signal.reason,
-                        signal.action.value,
-                        signal.decisive,
-                        json.dumps(_json_value(signal.metadata), separators=(",", ":")),
-                    ),
-                )
-            return True
 
     def reserve_attachment_capture(
         self,

@@ -90,12 +90,6 @@ DEFAULT_STATS = {
     "evidence_capture_failures": 0,
     "delete_forbidden": 0,
     "delete_transient_failures": 0,
-    "firstpost_seen": 0,
-    "firstpost_hits": 0,
-    "firstpost_reviews": 0,
-    "firstpost_kicks": 0,
-    "firstpost_bans": 0,
-    "early_catches": 0,
     "spam_hits": 0,
     "spam_reviews": 0,
     "spam_kicks": 0,
@@ -158,9 +152,6 @@ DEFAULTS: Mapping[str, object] = MappingProxyType(
         "purge_backward_seconds": PURGE_BACKWARD_DEFAULT_SECONDS,
         "purge_forward_seconds": PURGE_FORWARD_DEFAULT_SECONDS,
         "whitelisted_roles": [],
-        "firstpost_collect_enabled": False,
-        "firstpost_enabled": False,
-        "firstpost_action": "review",
         "spam_enabled": False,
         "spam_action": "review",
         "spam_window_seconds": 10,
@@ -406,9 +397,6 @@ class GuildSettings:
     purge_backward_seconds: int
     purge_forward_seconds: int
     whitelisted_roles: list[int]
-    firstpost_collect_enabled: bool
-    firstpost_enabled: bool
-    firstpost_action: CoreActionOption
     spam_enabled: bool
     spam_action: CoreActionOption
     spam_window_seconds: int
@@ -485,11 +473,6 @@ class GuildSettings:
             purge_backward_seconds=_int(raw, "purge_backward_seconds"),
             purge_forward_seconds=_int(raw, "purge_forward_seconds"),
             whitelisted_roles=_list(raw, "whitelisted_roles", int),
-            firstpost_collect_enabled=_bool(raw, "firstpost_collect_enabled"),
-            firstpost_enabled=_bool(raw, "firstpost_enabled"),
-            firstpost_action=_enum(
-                raw, "firstpost_action", CoreActionOption, CoreActionOption.REVIEW
-            ),
             spam_enabled=_bool(raw, "spam_enabled"),
             spam_action=_enum(raw, "spam_action", CoreActionOption, CoreActionOption.REVIEW),
             spam_window_seconds=_int(raw, "spam_window_seconds"),
