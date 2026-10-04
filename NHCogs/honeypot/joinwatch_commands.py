@@ -481,7 +481,6 @@ def wave_embed(record, *, criteria_change=False):
         f"Excluded: {record.get('excluded', 0)}",
         f"Calculated: {record.get('created_at', 'Not available')}",
         f"Data: {'Complete' if record.get('complete') else 'Incomplete or approximate'}",
-        f"Source: {record.get('source', 'Observed first joins')}",
     ]
     if criteria_change:
         rows.insert(0, f"Previous: {_criteria_text(record['previous'])}")

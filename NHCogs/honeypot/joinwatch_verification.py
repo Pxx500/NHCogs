@@ -286,6 +286,7 @@ class JoinwatchVerification:
         if not incident.get("incident_id"):
             incident["incident_id"] = secrets.token_hex(16)
         incident["captcha_enabled"] = True
+        incident.setdefault("captcha_status", "Awaiting verification")
         incident.setdefault("source", "join")
         incident.setdefault("reasons", ["age"])
         incident.setdefault("failures", 0)
