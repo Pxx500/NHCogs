@@ -20,7 +20,7 @@ from .joinwatch_groups import (
 )
 
 WAVE_BATCH_SIZE = 5
-WAVE_INTERVAL_SECONDS = 15
+WAVE_INTERVAL_SECONDS = 10
 WAVE_RETENTION_DAYS = 90
 NOTIFICATION_TEXT = "Please complete the verification below"
 CRITICAL_CONFIGURATION = (
