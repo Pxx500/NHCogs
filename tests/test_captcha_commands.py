@@ -194,8 +194,10 @@ class CaptchaCommandTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 owner = SimpleNamespace(confirm_criteria=mock.AsyncMock())
                 cog = SimpleNamespace(_joinwatch_groups=owner, _channel_is_private=lambda *args: True)
-                view = honeypot.joinwatch_commands.CriteriaConfirmationView(cog, {}, 20)
-                click = SimpleNamespace(user=SimpleNamespace(id=21, guild_permissions=SimpleNamespace(manage_messages=True)), permissions=SimpleNamespace(manage_messages=True), guild=SimpleNamespace(id=10), channel=object(), response=SimpleNamespace(defer=mock.AsyncMock()), edit_original_response=mock.AsyncMock(), message=SimpleNamespace(edit=mock.AsyncMock()))
+                criteria = {"minimum_accounts": 3, "join_window_minutes": 15, "creation_distance_hours": 6}
+                preview = {"criteria": criteria, "previous": criteria}
+                view = honeypot.joinwatch_commands.CriteriaConfirmationView(cog, preview, 20)
+                click = SimpleNamespace(user=SimpleNamespace(id=21, guild_permissions=SimpleNamespace(manage_messages=True)), permissions=SimpleNamespace(manage_messages=True), guild=SimpleNamespace(id=10), channel=object(), response=SimpleNamespace(defer=mock.AsyncMock()), edit_original_response=mock.AsyncMock(), followup=SimpleNamespace(send=mock.AsyncMock()), message=SimpleNamespace(edit=mock.AsyncMock()))
                 await view.children[0].callback(click)
                 owner.confirm_criteria.assert_not_awaited()
                 click.user.id = 20
@@ -203,8 +205,17 @@ class CaptchaCommandTests(unittest.IsolatedAsyncioTestCase):
                 await view.children[0].callback(click)
                 owner.confirm_criteria.assert_not_awaited()
                 click.permissions.manage_messages = True
-                await view.children[0].callback(click)
-                owner.confirm_criteria.assert_awaited_once_with(click.guild, {}, 20, True)
+                with mock.patch.object(honeypot.discord, "Embed", _OverviewEmbed):
+                    await view.children[0].callback(click)
+                    self.assertIn("State: confirmed", click.message.edit.await_args.kwargs["embed"].description)
+                    cancel = honeypot.joinwatch_commands.CriteriaConfirmationView(cog, preview, 20)
+                    await cancel.children[1].callback(click)
+                self.assertIn("State: cancelled", click.message.edit.await_args.kwargs["embed"].description)
+                self.assertIsNone(click.message.edit.await_args.kwargs["view"])
+                click.edit_original_response.assert_not_awaited()
+                self.assertEqual(click.followup.send.await_count, 2)
+                self.assertTrue(all(not call.kwargs.get("thinking") for call in click.response.defer.await_args_list))
+                owner.confirm_criteria.assert_awaited_once_with(click.guild, preview, 20, True)
 
     async def test_wave_controls_follow_channel_grants_and_denials_not_guild_permissions(self):
         with TemporaryDirectory() as directory:

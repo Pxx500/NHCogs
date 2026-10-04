@@ -66,7 +66,7 @@ def _deadline_text(result) -> str:
     )
 
 
-async def show_result(cog, interaction, result) -> None:
+async def show_result(cog, interaction, result) -> None:  # noqa: PLR0912 - explicit participant-facing outcomes
     """Update the same private reply without exposing operational metadata."""
     view = None
     embed = None
@@ -85,7 +85,13 @@ async def show_result(cog, interaction, result) -> None:
         content = "Your check is preparing. Please try again shortly."
         view = CaptchaRetryView(cog, interaction.guild.id, interaction.user.id, label="Check again")
     elif result.status == "complete":
-        content = "Your check is complete and your restriction has been lifted."
+        try:
+            await interaction.delete_original_response()
+        except discord.NotFound:
+            pass
+        except discord.HTTPException:
+            log.warning("Could not dismiss completed CAPTCHA: interaction=%s", interaction.id, exc_info=True)
+        return
     elif result.status == "complete_restricted":
         content = "You passed the check, but your restriction still requires moderator review. Please DM a moderator."
     elif result.status == "release_pending":

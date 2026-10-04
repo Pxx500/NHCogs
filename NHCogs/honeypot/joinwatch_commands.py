@@ -484,7 +484,12 @@ def wave_embed(record, *, criteria_change=False):
     ]
     if criteria_change:
         rows.insert(0, f"Previous: {_criteria_text(record['previous'])}")
-        rows.append("Confirm changes future-join criteria only. It doesn't enroll current members.")
+        if record.get("status") == "confirmed":
+            rows.append("Criteria saved for future joins. No historical wave was started.")
+        elif record.get("status") == "cancelled":
+            rows.append("Criteria change cancelled. Settings are unchanged.")
+        else:
+            rows.append("Confirm changes future-join criteria only. It doesn't enroll current members.")
     else:
         notification = record.get('notifications', {})
         rows.append(f"Invitations: {notification.get('batch_size', 5)} people every {notification.get('interval_seconds', 15)} seconds, about {notification.get('estimated_seconds', 0)} seconds")
@@ -527,22 +532,22 @@ class CriteriaConfirmationView(ModeratorConfirmationView):
             button = discord.ui.Button(label=label, style=discord.ButtonStyle.success if label == "Confirm" else discord.ButtonStyle.secondary, custom_id=secrets.token_urlsafe(24))
 
             async def callback(interaction, selected=label):
-                await interaction.response.defer(ephemeral=True, thinking=True)
+                await interaction.response.defer()
                 if not _can_manage(interaction, self.owner_id, self.cog):
-                    await interaction.edit_original_response(content="Only the moderator who opened this preview can use it, with Manage Messages in a private channel.")
+                    await interaction.followup.send(content="Only the moderator who opened this preview can use it, with Manage Messages in a private channel.", ephemeral=True)
                     return
                 if self._used:
-                    await interaction.edit_original_response(content="This preview is already closed.")
+                    await interaction.followup.send(content="This preview is already closed.", ephemeral=True)
                     return
                 if selected == "Confirm":
                     try:
                         await self.cog._joinwatch_groups.confirm_criteria(interaction.guild, self.preview, interaction.user.id, True)
                     except ValueError as error:
-                        await interaction.edit_original_response(content=str(error), allowed_mentions=discord.AllowedMentions.none())
+                        await interaction.followup.send(content=str(error), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
                         return
                 self._used = True
-                await interaction.message.edit(view=None)
-                await interaction.edit_original_response(content="Criteria updated. No historical wave was started." if selected == "Confirm" else "Criteria change cancelled.")
+                record = {**self.preview, "status": "confirmed" if selected == "Confirm" else "cancelled"}
+                await interaction.message.edit(embed=wave_embed(record, criteria_change=True), view=None, allowed_mentions=discord.AllowedMentions.none())
 
             button.callback = callback
             self.add_item(button)
