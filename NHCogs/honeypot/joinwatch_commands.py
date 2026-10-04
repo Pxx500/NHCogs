@@ -492,7 +492,7 @@ def wave_embed(record, *, criteria_change=False):
             rows.append("Confirm changes future-join criteria only. It doesn't enroll current members.")
     else:
         notification = record.get('notifications', {})
-        rows.append(f"Invitations: {notification.get('batch_size', 5)} people every {notification.get('interval_seconds', 15)} seconds, about {notification.get('estimated_seconds', 0)} seconds")
+        rows.append(f"Invitations: {notification.get('batch_size', 5)} people every {notification.get('interval_seconds', 10)} seconds, about {notification.get('estimated_seconds', 0)} seconds")
         rows.append("Start applies restrictions to this saved candidate list only.")
         rows.append("Pause stops new restrictions and invitations. Existing deadlines continue. Rollback settles only this wave's restrictions.")
     embed.add_field(name="Scope", value="\n".join(rows)[:1024], inline=False)
