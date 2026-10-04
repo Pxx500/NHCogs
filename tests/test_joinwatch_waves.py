@@ -140,9 +140,9 @@ def _fixture(groups, count=7):
     return cog, guild, cfg, lifecycle, ids, now, sent, configuration
 
 
-def _real_lifecycle_fixture(honeypot, groups, directory):
+def _real_lifecycle_fixture(honeypot, groups, directory, *, count=3):
     verification = importlib.import_module("NHCogs.honeypot.joinwatch_verification")
-    cog, guild, cfg, _, ids, now, sent, configuration = _fixture(groups, count=3)
+    cog, guild, cfg, _, ids, now, sent, configuration = _fixture(groups, count=count)
     cfg.joinwatch_pending_role_assignments = _Value({})
     cfg.joinwatch_verified_members = _Value({})
     configuration["joinwatch_auto_role_timer_minutes"] = 60
@@ -186,6 +186,35 @@ def _real_lifecycle_fixture(honeypot, groups, directory):
 
 
 class JoinwatchWaveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_real_preparation_does_not_add_a_second_batch_cooldown(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            groups = importlib.import_module("NHCogs.honeypot.joinwatch_groups")
+            waves = importlib.import_module("NHCogs.honeypot.joinwatch_waves")
+            cog, guild, cfg, lifecycle, ids, now, sent, _, _ = _real_lifecycle_fixture(
+                honeypot, groups, directory, count=12
+            )
+            owner = waves.JoinwatchWaves(cog)
+            deliveries = []
+            try:
+                record = await owner.preview(guild, groups.GroupCriteria(3, 15, 6), 42, now=now)
+                await owner.confirm(guild, record["id"], 42, True, now=now)
+                for second in range(0, 36, 5):
+                    before = len(sent)
+                    await owner.tick(guild, now=now + timedelta(seconds=second))
+                    await lifecycle.preparation.wait()
+                    if len(sent) > before:
+                        deliveries.append(second)
+                    expected = 0 if second < 5 else 5 if second < 20 else 10 if second < 35 else 12
+                    self.assertEqual(len(await cfg.joinwatch_pending_roles()), expected, second)
+                self.assertEqual(deliveries, [5, 20, 35])
+                self.assertEqual(
+                    [user.id for _, kwargs in sent for user in kwargs["allowed_mentions"].users], ids
+                )
+                self.assertTrue(all(kwargs["delete_after"] == 25 for _, kwargs in sent))
+                self.assertEqual((await owner.status(guild, record["id"]))["status"], "completed")
+            finally:
+                await lifecycle.close()
+
     async def test_interrupted_wave_role_application_is_not_an_active_timer_or_auto_punishment(self):
         with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
             groups = importlib.import_module("NHCogs.honeypot.joinwatch_groups")

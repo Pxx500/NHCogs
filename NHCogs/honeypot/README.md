@@ -190,7 +190,7 @@ CAPTCHA updates the existing private JoinWatch alert instead of posting each eve
 
 Bot logs under `red.Honeypot.captcha` record interaction arrival age, acknowledgement time, and reply upload time at INFO level. Failures include tracebacks. These diagnostics stay out of Discord messages and don't include answers or interaction tokens. A successful upload doesn't confirm that the participant's client has displayed the image.
 
-New wave invitations include the member mentions, a short verification prompt, and Verify. They are scheduled for deletion after 25 seconds, leaving the permanent panel and member timers unchanged. Old invitations aren't cleaned up. Pending invitation deletions don't survive a full bot restart.
+New wave invitations include the member mentions, a short verification prompt, and Verify. They are scheduled for deletion after 25 seconds, leaving the permanent panel and member timers unchanged. The next batch's questions prepare during the 15-second pause between batches, without consuming another cooldown. Old invitations aren't cleaned up. Pending invitation deletions don't survive a full bot restart.
 
 An explicit `joinwatch captcha true` also admits existing valid JoinWatch timers, including entries created while CAPTCHA was off. It reports the admitted count and prepares questions in the bounded background queue. Role assignments, deadlines, already used attempts, and existing question progress stay unchanged. Repeating `true` doesn't reset checks. Startup restoration alone doesn't adopt unknown old timers.
 

@@ -221,7 +221,7 @@ class JoinwatchWaves:
                 await self._save(guild, record)
             return list(records.values())
 
-    async def _advance(self, guild, wave_id, uid):
+    async def _advance(self, guild, wave_id, uid, *, activate=True):
         lifecycle = self.cog._joinwatch_verification
         member = guild.get_member(int(uid))
         result_status = "absent" if member is None else (await lifecycle.eligibility(member)).status
@@ -249,9 +249,10 @@ class JoinwatchWaves:
                 record.update(status="paused", error="Verification settings changed")
                 await self._save(guild, record)
                 return False
-            if prepared.status != "ready":
-                record.update(status="paused", error=f"Question preparation: {prepared.status}")
-                await self._save(guild, record)
+            if prepared.status != "ready" or not activate:
+                if prepared.status != "ready":
+                    record.update(status="paused", error=f"Question preparation: {prepared.status}")
+                    await self._save(guild, record)
                 return False
             await lifecycle.check_configuration(guild)
             # Persist before any role effect. A crash here is never silently retried.
@@ -289,24 +290,24 @@ class JoinwatchWaves:
                 break
         return selected
 
-    async def _notify(self, guild, wave_id):
+    async def _notify(self, guild, wave_id) -> bool:
         async with self._lock(guild):
             record = await self.status(guild, wave_id)
             if record["status"] != "running":
-                return
+                return False
             selected = await self._notification_targets(guild, record)
             if record["status"] != "running":
                 await self._save(guild, record)
-                return
+                return False
             await self.cog._joinwatch_verification.check_configuration(guild)
             if not selected:
                 await self._save(guild, record)
-                return
+                return False
             channel = guild.get_channel(record["configuration"]["captcha_channel"])
             if channel is None:
                 record.update(status="paused", error="Verification channel unavailable")
                 await self._save(guild, record)
-                return
+                return False
             for uid in selected:
                 record["entries"][uid]["status"] = "notifying"
             await self._save(guild, record)
@@ -326,6 +327,7 @@ class JoinwatchWaves:
             for uid in selected:
                 record["entries"][uid].update(status="notified", notification_message_id=message.id)
             await self._save(guild, record)
+            return True
 
     async def tick(self, guild, *, now=None):
         tick_lock = self._tick_locks.setdefault(guild.id, asyncio.Lock())
@@ -337,8 +339,7 @@ class JoinwatchWaves:
                 record = next((wave for wave in (await self._records(guild)).values() if wave["status"] == "running"), None)
                 if record is None:
                     return None
-                if record.get("last_batch_at") and (observed - utc_timestamp(record["last_batch_at"])).total_seconds() < WAVE_INTERVAL_SECONDS:
-                    return record
+                cooling_down = bool(record.get("last_batch_at")) and (observed - utc_timestamp(record["last_batch_at"])).total_seconds() < WAVE_INTERVAL_SECONDS
                 if record["configuration"] != await self._configuration(guild):
                     record.update(status="paused", error="Verification settings changed")
                     await self._save(guild, record)
@@ -349,13 +350,12 @@ class JoinwatchWaves:
                     record.update(status="paused", error="Verification configuration is unavailable")
                     await self._save(guild, record)
                     raise
-                record["last_batch_at"] = observed.isoformat()
-                await self._save(guild, record)
                 queued = [] if any(entry["status"] == "enrolled" for entry in record["entries"].values()) else [uid for uid, entry in record["entries"].items() if entry["status"] in {"queued", "preparing"}][:WAVE_BATCH_SIZE]
             try:
+                activated = False
                 for uid in queued:
-                    await self._advance(guild, record["id"], uid)
-                await self._notify(guild, record["id"])
+                    activated = await self._advance(guild, record["id"], uid, activate=not cooling_down) or activated
+                notified = await self._notify(guild, record["id"]) if not cooling_down else False
             except Exception:
                 async with self._lock(guild):
                     failed = await self.status(guild, record["id"])
@@ -364,7 +364,9 @@ class JoinwatchWaves:
                 raise
             async with self._lock(guild):
                 record = await self.status(guild, record["id"])
-                record["last_batch_at"] = (now or datetime.now(timezone.utc)).isoformat()
+                # Preparation uses the pause between batches without consuming it.
+                if activated or notified:
+                    record["last_batch_at"] = (now or datetime.now(timezone.utc)).isoformat()
                 if record["status"] == "running" and all(entry["status"] in SETTLED_ENTRY_STATUSES for entry in record["entries"].values()):
                     record.update(status="completed", completed_at=observed.isoformat())
                 await self._save(guild, record)
