@@ -24,11 +24,24 @@ def interaction(user_id=20, guild_id=10, *, cog=None):
         guild=SimpleNamespace(id=guild_id),
         response=SimpleNamespace(defer=mock.AsyncMock()),
         edit_original_response=mock.AsyncMock(),
+        delete_original_response=mock.AsyncMock(),
         message=SimpleNamespace(edit=mock.AsyncMock()),
     )
 
 
 class CaptchaViewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_completed_check_closes_prompt_but_remaining_restriction_is_explained(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)):
+            views = importlib.import_module("NHCogs.honeypot.captcha_views")
+            completed = interaction()
+            await views.show_result(object(), completed, SimpleNamespace(status="complete"))
+            completed.delete_original_response.assert_awaited_once()
+            completed.edit_original_response.assert_not_awaited()
+            restricted = interaction()
+            await views.show_result(object(), restricted, SimpleNamespace(status="complete_restricted"))
+            restricted.delete_original_response.assert_not_awaited()
+            self.assertIn("moderator", restricted.edit_original_response.await_args.kwargs["content"])
+
     async def test_existing_verify_retry_and_answer_buttons_use_ready_cog_after_reload(self):
         with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
             views = importlib.import_module("NHCogs.honeypot.captcha_views")

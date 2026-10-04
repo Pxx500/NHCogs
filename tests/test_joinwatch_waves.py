@@ -237,9 +237,9 @@ class JoinwatchWaveTests(unittest.IsolatedAsyncioTestCase):
                     await lifecycle.preparation.wait()
                     if len(sent) > before:
                         deliveries.append(second)
-                    expected = 0 if second < 5 else 5 if second < 20 else 10 if second < 35 else 12
+                    expected = 0 if second < 5 else 5 if second < 15 else 10 if second < 25 else 12
                     self.assertEqual(len(await cfg.joinwatch_pending_roles()), expected, second)
-                self.assertEqual(deliveries, [5, 20, 35])
+                self.assertEqual(deliveries, [5, 15, 25])
                 self.assertEqual(
                     [user.id for _, kwargs in sent for user in kwargs["allowed_mentions"].users], ids
                 )
@@ -523,9 +523,9 @@ class JoinwatchWaveTests(unittest.IsolatedAsyncioTestCase):
                 await owner.confirm(guild, preview["id"], 42, True, now=now)
                 await owner.tick(guild, now=now)
                 self.assertEqual(len(lifecycle.entries), 5)
-                await owner.tick(guild, now=now + timedelta(seconds=14))
+                await owner.tick(guild, now=now + timedelta(seconds=9))
                 self.assertEqual(len(lifecycle.entries), 5)
-                await owner.tick(guild, now=now + timedelta(seconds=15))
+                await owner.tick(guild, now=now + timedelta(seconds=10))
                 self.assertEqual(set(lifecycle.entries), set(ids))
                 self.assertEqual(len(sent), 2)
                 for content, kwargs in sent:
