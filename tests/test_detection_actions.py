@@ -150,8 +150,6 @@ class DetectionActionTests(DetectionPipelineTestCase):
                         "fallback_action": "review",
                         "mute_role": role.id,
                         "spam_enabled": False,
-                        "firstpost_enabled": False,
-                        "firstpost_collect_enabled": False,
                     },
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
@@ -184,7 +182,6 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": False,
-                    "firstpost_enabled": False, "firstpost_collect_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
                 appended = await asyncio.to_thread(
@@ -233,7 +230,6 @@ class DetectionActionTests(DetectionPipelineTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = honeypot.Honeypot(_Bot(), _operational_support())
                 await asyncio.to_thread(cog._case_store.initialize)
-                cog._firstpost_loaded_guilds.add(100)
                 message = self._message(honeypot, attachment_count=4)
                 message.author.ban = mock.AsyncMock()
                 message.guild.get_member = lambda user_id: message.author
@@ -242,12 +238,10 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": True,
-                    "spam_action": "ban", "firstpost_enabled": True,
-                    "firstpost_action": "ban", "firstpost_collect_enabled": False,
+                    "spam_action": "ban",
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
-                cog._is_forward_purge_active.return_value = False
                 cog._spam_suspicion_reasons = mock.AsyncMock(return_value=["duplicate"])
                 cog._missing_action_permission = mock.Mock(return_value=None)
                 cog._ban_delete_message_seconds = mock.Mock(return_value=0)
@@ -264,7 +258,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 )
                 self.assertEqual(
                     [item.signal.detector for item in snapshot.signals],
-                    ["spam", "firstpost"],
+                    ["forward_purge", "spam"],
                 )
 
     async def test_automatic_ban_case_projection_catches_up_after_early_publication(self):
@@ -291,8 +285,6 @@ class DetectionActionTests(DetectionPipelineTestCase):
                     "fallback_action": "review",
                     "action": "ban",
                     "spam_enabled": False,
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -529,8 +521,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": True,
-                    "spam_action": "ban", "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
+                    "spam_action": "ban",
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -573,8 +564,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": True,
-                    "spam_action": "kick", "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
+                    "spam_action": "kick",
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -611,8 +601,6 @@ class DetectionActionTests(DetectionPipelineTestCase):
                         "review_channel": None,
                         "spam_enabled": True,
                         "spam_action": action,
-                        "firstpost_enabled": False,
-                        "firstpost_collect_enabled": False,
                         "imagescan_detector_enabled": False,
                     }
                     self._configure_public_boundary(cog, config)
@@ -778,8 +766,6 @@ class DetectionActionTests(DetectionPipelineTestCase):
                     "review_channel": None,
                     "spam_enabled": True,
                     "spam_action": "ban",
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -861,8 +847,6 @@ class DetectionActionTests(DetectionPipelineTestCase):
                     "mute_role": role.id,
                     "spam_enabled": True,
                     "spam_action": "review",
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -911,8 +895,6 @@ class DetectionActionTests(DetectionPipelineTestCase):
                     "review_channel": None,
                     "spam_enabled": True,
                     "spam_action": "ban",
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -995,8 +977,6 @@ class DetectionActionTests(DetectionPipelineTestCase):
                     "fallback_action": "review",
                     "action": "ban",
                     "spam_enabled": False,
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": True,
                     "imagescan_detector_action": "review",
                     "imagescan_detector_threshold": 20,

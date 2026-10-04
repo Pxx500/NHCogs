@@ -1,20 +1,26 @@
+import json
 import sqlite3
 import unittest
 from contextlib import closing
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from tests.storage_loader import load_shared_storage
 
 load_shared_storage()
 
+from NHCogs.nhmoderation import store as store_module  # noqa: E402
 from NHCogs.nhmoderation.history import NHModerationHistory  # noqa: E402
 from NHCogs.nhmoderation.models import (  # noqa: E402
     BanChartQuery,
     ModerationObservation,
+    StoredObservation,  # noqa: E402
 )
 from NHCogs.nhmoderation.projection import PROJECTION_VERSION  # noqa: E402
+from NHCogs.nhmoderation.store import ModerationStore  # noqa: E402
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
 
@@ -50,6 +56,91 @@ def observation(
 
 
 class ModerationHistoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_existing_database_upgrade_preserves_history_with_unknown_snapshots(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "moderation.sqlite"
+            with mock.patch.object(store_module, "MIGRATIONS", store_module.MIGRATIONS[:1]):
+                await ModerationStore(path).initialize()
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    """INSERT INTO moderation_observations
+                       (guild_id, source_kind, source_key, action_hint, target_user_id,
+                        observed_at, occurred_at, source_payload_version)
+                       VALUES (1, 'discord_audit', '500', 'ban', 100, ?, ?, 1)""",
+                    (NOW.isoformat(), NOW.isoformat()),
+                )
+            history = NHModerationHistory(path)
+            await history.initialize()
+            await history.initialize()
+            exported = await history.export_history(1)
+            self.assertEqual(len(exported["actions"]), 1)
+            self.assertEqual(len(exported["observations"]), 1)
+            self.assertIsNone(exported["observations"][0]["account_snapshot"])
+            self.assertIsNone(exported["observations"][0]["activity_summary"])
+            self.assertEqual(exported["observations"][0]["occurred_at"], NOW.isoformat())
+            self.assertEqual((await history.get_ban_chart(BanChartQuery(guild_id=1))).total_count, 1)
+
+    async def test_export_retains_evidence_links_and_erases_subject_data(self):
+        with TemporaryDirectory() as directory:
+            history = NHModerationHistory(Path(directory) / "moderation.sqlite")
+            await history.initialize()
+            first = replace(
+                observation(source_kind="discord_audit", source_key="500", executor_user_id=55),
+                account_snapshot={"username": "then-name"},
+                activity_summary={"availability": "observed", "messages": 5},
+            )
+            await history.observe(first)
+            await history.observe(observation(source_kind="red_modlog", source_key="10"))
+            await history.observe(replace(first, guild_id=2))
+            payload = json.loads(json.dumps(await history.export_history(1)))
+            self.assertEqual(payload["guild_id"], "1")
+            self.assertEqual(len(payload["observations"]), 2)
+            self.assertEqual(len(payload["actions"]), 1)
+            evidence = payload["observations"][0]
+            self.assertEqual(evidence["target_user_id"], "100")
+            self.assertEqual(evidence["executor_user_id"], "55")
+            self.assertEqual(evidence["account_snapshot"], {"username": "then-name"})
+            self.assertEqual(evidence["snapshot_observed_at"], NOW.isoformat())
+            self.assertEqual(evidence["snapshot_source"], "discord_audit")
+            self.assertEqual(set(payload["actions"][0]["observation_ids"]),
+                             {item["observation_id"] for item in payload["observations"]})
+            self.assertEqual(payload["coverage"]["first_observed_at"], NOW.isoformat())
+            self.assertEqual(payload["coverage"]["synchronization"]["migration_state"], "pending")
+            await history.rebuild(1)
+            self.assertEqual((await history.export_history(1))["actions"], payload["actions"])
+            await history.delete_user_data(100)
+            erased = await history.export_history(1)
+            self.assertTrue(all(row["target_user_id"] is None for row in erased["observations"]))
+            self.assertTrue(all(row["account_snapshot"] is None for row in erased["observations"]))
+            self.assertTrue(all(row["activity_summary"] is None for row in erased["observations"]))
+            await history.delete_guild_data(1)
+            empty = await history.export_history(1)
+            self.assertEqual(empty["observations"], [])
+            self.assertEqual(empty["actions"], [])
+            self.assertIsNone(empty["coverage"]["synchronization"])
+
+    async def test_account_snapshot_survives_restart_and_is_erased_with_its_subject(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "moderation.sqlite"
+            store = ModerationStore(path)
+            await store.initialize()
+            item = StoredObservation(**{
+                **observation(source_kind="discord_audit", source_key="500").__dict__,
+                "account_snapshot": {"username": "old-name", "account_created_at": NOW.isoformat()},
+                "activity_summary": {"availability": "observed", "messages": 4},
+            })
+            self.assertTrue(await store.append(item))
+            reopened = ModerationStore(path)
+            await reopened.initialize()
+            self.assertFalse(await reopened.append(replace(item, account_snapshot=None, activity_summary=None)))
+            self.assertEqual((await reopened.observations(1))[0].account_snapshot, item.account_snapshot)
+            self.assertEqual((await reopened.observations(1))[0].activity_summary, item.activity_summary)
+            await reopened.delete_user(100)
+            retained = (await reopened.observations(1))[0]
+            self.assertIsNone(retained.target_user_id)
+            self.assertIsNone(retained.account_snapshot)
+            self.assertIsNone(retained.activity_summary)
+
     async def test_duplicate_source_observation_is_idempotent(self):
       with TemporaryDirectory() as directory:
         history = NHModerationHistory(Path(directory) / "moderation.sqlite")
@@ -369,6 +460,7 @@ class ModerationHistoryTests(unittest.IsolatedAsyncioTestCase):
                 source_kind="red_modlog",
                 source_key="10",
                 credited_moderator_hint=55,
+                executor_user_id=55,
                 attribution_hint="human_direct",
                 reason="private reason",
             )
@@ -380,6 +472,11 @@ class ModerationHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [(row.label, row.count) for row in chart.rows], [("Unknown", 1)]
         )
+        exported = await history.export_history(1)
+        self.assertIsNone(exported["observations"][0]["executor_user_id"])
+        self.assertIsNone(exported["observations"][0]["credited_moderator_hint"])
+        self.assertIsNone(exported["observations"][0]["reason"])
+        self.assertIsNone(exported["actions"][0]["credited_moderator_id"])
 
     async def test_user_deletion_removes_id_from_snapshot_source_key(self):
       with TemporaryDirectory() as directory:

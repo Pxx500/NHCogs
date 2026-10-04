@@ -198,6 +198,24 @@ class ActivityStore:
                 self._get_user_stats_sync, guild_id, user_id, end_date_utc, days
             )
 
+    async def get_member_activity_summary(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        start_date_utc: date,
+        end_date_utc: date,
+    ) -> dict:
+        """Summarize retained observations, not a member's lifetime activity."""
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._get_member_activity_summary_sync,
+                guild_id,
+                user_id,
+                start_date_utc,
+                end_date_utc,
+            )
+
     async def get_user_channel_stats(
         self,
         guild_id: int,
@@ -830,6 +848,28 @@ class ActivityStore:
             TopChannel(int(channel_id), int(count), index + 1)
             for index, (channel_id, count) in enumerate(rows)
         ]
+
+    def _get_member_activity_summary_sync(
+        self, guild_id: int, user_id: int, start_date_utc: date, end_date_utc: date
+    ) -> dict:
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT SUM(message_count), COUNT(DISTINCT date_utc), COUNT(DISTINCT channel_id)
+                FROM activity_user_channel_day
+                WHERE guild_id = ? AND user_id = ? AND date_utc BETWEEN ? AND ?
+                """,
+                (guild_id, user_id, start_date_utc.isoformat(), end_date_utc.isoformat()),
+            ).fetchone()
+        return {
+            "messages": row[0],
+            "active_days": row[1] if row[0] is not None else None,
+            "distinct_channels": row[2] if row[0] is not None else None,
+            "availability": "observed" if row[0] is not None else "no_data",
+            # Sparse counters do not establish uninterrupted collection, even
+            # when a retained guild summary exists for every day in the window.
+            "coverage": "unknown",
+        }
 
     def _get_user_stats_sync(
         self, guild_id: int, user_id: int, end_date_utc: date, days: int

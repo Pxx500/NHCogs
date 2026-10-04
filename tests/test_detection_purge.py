@@ -70,8 +70,6 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                     "review_channel": None,
                     "spam_enabled": True,
                     "spam_action": "review",
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -123,8 +121,6 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                         "dry_run": False,
                         "review_channel": None,
                         "spam_enabled": False,
-                        "firstpost_enabled": False,
-                        "firstpost_collect_enabled": False,
                     },
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
@@ -169,7 +165,6 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                 self.assertEqual(cog._publish_detection_case.await_count, 2)
                 message.delete.assert_awaited_once()
                 cog._handle_spam_message.assert_not_awaited()
-                cog._handle_firstpost_message.assert_not_awaited()
                 cog._handle_imagescan_detector_message.assert_not_awaited()
                 stat_names = [call.args[1] for call in cog._increment_stat.await_args_list]
                 self.assertIn("forward_purge_delete_failures", stat_names)
@@ -207,8 +202,7 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": True,
-                    "spam_action": "review", "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
+                    "spam_action": "review",
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -238,7 +232,6 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": False,
-                    "firstpost_enabled": False, "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": True,
                     "imagescan_detector_action": "review",
                 }
@@ -303,8 +296,6 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                     "action": "ban",
                     "fallback_action": "ban",
                     "spam_enabled": False,
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "purge_backward_seconds": 300,
                     "purge_forward_seconds": 300,
                 }
@@ -361,8 +352,6 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                     "review_channel": None,
                     "spam_enabled": True,
                     "spam_action": "review",
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -528,8 +517,6 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                     "review_channel": None,
                     "spam_enabled": True,
                     "spam_action": "review",
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -598,8 +585,6 @@ class DetectionPurgeTests(DetectionPipelineTestCase):
                     "review_channel": None,
                     "spam_enabled": True,
                     "spam_action": "review",
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)

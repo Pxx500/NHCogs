@@ -48,6 +48,35 @@ def loaded_nhmoderation():
 
 
 class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
+    async def test_gateway_ban_retains_profile_and_available_activity(self):
+        with loaded_nhmoderation() as module:
+            with TemporaryDirectory() as directory:
+                activity = {"messages": 5, "active_days": 2, "distinct_channels": 1,
+                            "availability": "observed", "coverage": "unknown"}
+                nhmisc = SimpleNamespace(get_member_activity_summary=mock.AsyncMock(return_value=activity))
+                subject = module.NHModeration(
+                    SimpleNamespace(get_cog=lambda name: nhmisc if name == "NHMisc" else None),
+                    _operational_support(),
+                )
+                subject.history = module.NHModerationHistory(Path(directory) / "moderation.sqlite")
+                await subject.history.initialize()
+                subject._mark_operational_recovered = mock.AsyncMock()
+                subject._report_background_error = mock.AsyncMock()
+                guild = SimpleNamespace(id=10)
+                user = SimpleNamespace(id=175928847299117063, name="captured-name", nick="member-name")
+                await subject.on_member_ban(guild, user)
+                exported = await subject.history.export_history(10)
+                retained = exported["observations"][0]
+                self.assertEqual(retained["account_snapshot"]["nickname"], "member-name")
+                self.assertEqual(retained["activity_summary"], activity)
+                nhmisc.get_member_activity_summary.side_effect = RuntimeError("store unavailable")
+                await subject.on_member_ban(guild, user)
+                exported = await subject.history.export_history(10)
+                self.assertEqual(len(exported["observations"]), 2)
+                self.assertIsNone(exported["observations"][1]["activity_summary"])
+                self.assertEqual(exported["observations"][1]["activity_availability"], "unavailable")
+                subject._report_background_error.assert_awaited_once()
+
     async def test_maintenance_commands_inherit_manage_messages_permission(self):
         with loaded_nhmoderation() as module:
 

@@ -7166,6 +7166,39 @@ class NHMisc(commands.Cog):
         except discord.HTTPException:
             log.exception("Failed to send activity summary to channel %s", channel.id)
 
+    async def get_member_activity_summary(
+        self, guild_id: int, user_id: int, *, now: datetime | None = None
+    ) -> dict:
+        """Return observed counts within the configured UTC detail-retention window.
+
+        The current day is partial. Collection gaps are unknown and missing
+        user detail is not evidence of zero activity. Channels count parent
+        channels, including any activity in their threads. No Discord history
+        is fetched and the daily report channel does not control collection.
+        """
+        captured_at = now or datetime.now(timezone.utc)
+        if captured_at.tzinfo is None:
+            captured_at = captured_at.replace(tzinfo=timezone.utc)
+        captured_at = captured_at.astimezone(timezone.utc)
+        days = max(
+            1, int(await self.config.guild_from_id(guild_id).activity_detail_retention_days())
+        )
+        start_date = captured_at.date() - timedelta(days=days - 1)
+        summary = await self._activity_store.get_member_activity_summary(
+            guild_id,
+            user_id,
+            start_date_utc=start_date,
+            end_date_utc=captured_at.date(),
+        )
+        return {
+            **summary,
+            "window_start": datetime.combine(
+                start_date, datetime_time.min, tzinfo=timezone.utc
+            ).isoformat(),
+            "window_end": captured_at.isoformat(),
+            "captured_at": captured_at.isoformat(),
+        }
+
     async def _apply_activity_detail_retention(self, guild_id: int, days: int) -> None:
         if days < 1:
             return

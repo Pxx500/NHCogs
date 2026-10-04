@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import secrets
 from dataclasses import dataclass
@@ -10,11 +11,14 @@ from datetime import datetime, timedelta, timezone
 
 import discord
 
+from NHCogs.account_snapshot import account_snapshot
+
 from . import joinwatch_publication, joinwatch_state
 from .captcha import CaptchaPreparation, CaptchaQuestion, generate_challenge
 
 MAX_ATTEMPTS = 2
 PREPARED_ENROLLMENT_CAPACITY = 32
+log = logging.getLogger("red.Honeypot")
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +43,117 @@ class JoinwatchVerification:
         self._deleted_challenges: set[tuple] = set()
         self._group_locks: dict[int, asyncio.Lock] = {}
         self._cancelled_waves: set[tuple[int, str]] = set()
+
+    async def capture_enrollment(self, member, entry):
+        """Capture available context before restriction without fetching Discord data."""
+        if entry.get("history"):
+            return
+        now = datetime.now(timezone.utc)
+        entry.setdefault("incident_id", secrets.token_hex(16))
+        profile = account_snapshot(member)
+        activity_owner = self.cog.bot.get_cog("NHMisc")
+        activity = {"availability": "unavailable", "messages": None, "active_days": None,
+                    "distinct_channels": None, "captured_at": now.isoformat(),
+                    "window_start": None, "window_end": None, "coverage": None}
+        if activity_owner is not None:
+            try:
+                activity = await activity_owner.get_member_activity_summary(member.guild.id, member.id, now=now)
+            except Exception:
+                log.exception("Could not capture JoinWatch activity context")
+        first_join = None
+        try:
+            first_join = await asyncio.to_thread(
+                self.cog._case_store.get_joinwatch_observation, member.guild.id, member.id
+            )
+        except Exception:
+            log.exception("Could not capture retained first-join context")
+        entry["history"] = {
+            "captured_at": now.isoformat(), "history_origin": "enrollment",
+            "profile": profile, "activity": activity,
+            "first_join": ({key: first_join.get(key) for key in ("first_joined_at", "imported")}
+                           if first_join is not None else None),
+            "enrolled_at": now.isoformat(), "original_deadline": entry.get("expires_at"),
+        }
+
+    @staticmethod
+    def event(entry, kind, *, now=None):
+        entry.setdefault("incident_id", secrets.token_hex(16))
+        entry.setdefault("history_events", []).append({
+            "event_id": secrets.token_hex(16), "incident_id": entry["incident_id"],
+            "kind": kind, "occurred_at": (now or datetime.now(timezone.utc)).isoformat(),
+            "failures": entry.get("failures", 0), "stage": entry.get("stage", 0),
+        })
+
+    async def _archive(self, guild, user_id, entry):
+        entry.setdefault("incident_id", secrets.token_hex(16))
+        entry.setdefault("history", {
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "history_origin": "adopted_active_state", "profile": None, "activity": None,
+            "first_join": None, "enrolled_at": entry.get("applied_at"),
+            "original_deadline": entry.get("expires_at"),
+        })
+        record = {**entry["history"], "incident_id": entry["incident_id"],
+                  "guild_id": str(guild.id), "user_id": str(user_id),
+                  "outcome": entry.get("history_terminal", "pending")}
+        for key in ("source", "wave_id", "reasons", "failures", "stage", "captcha_enabled",
+                    "applied_at", "expires_at", "completed_at", "independent_restriction",
+                    "completion_reason", "modlog_case_number", "punishment_started_at", "pre_action"):
+            record[key] = entry.get(key)
+        record["test"] = bool(entry.get("test"))
+        for key in ("role_id", "enrollment_moderator", "completion_moderator"):
+            record[key] = str(entry[key]) if entry.get(key) is not None else None
+        try:
+            await asyncio.to_thread(self.cog._case_store.save_verification_history,
+                                    record, entry.get("history_events", []))
+        except Exception as error:
+            log.exception("Could not settle JoinWatch history for guild %s", guild.id)
+            try:
+                await self.cog._record_operational_failure(
+                    guild.id, "joinwatch_history", f"Verification history settlement failed: {error}")
+            except Exception:
+                log.exception("Could not report JoinWatch history storage failure")
+            return False
+        entry.pop("history_events", None)
+        return True
+
+    async def persist_history(self, guild, user_id, entry, *, store_name="joinwatch_pending_roles"):
+        """Save retryable history with the existing incident, then settle off-thread."""
+        entry.setdefault("incident_id", secrets.token_hex(16))
+        config_store = getattr(self.cog.config.guild(guild), store_name)
+        async with config_store() as entries:
+            entries[str(user_id)] = dict(entry)
+        settled = await self._archive(guild, user_id, entry)
+        async with config_store() as entries:
+            if entries.get(str(user_id), {}).get("incident_id") == entry["incident_id"]:
+                entries[str(user_id)] = dict(entry)
+        return settled
+
+    async def finish(self, guild, user_id, entry, outcome, *, store_name="joinwatch_pending_roles", retain_pending=False):
+        """Remember a terminal fact before cleanup. Never repeat a Discord effect for logging."""
+        entry.setdefault("incident_id", secrets.token_hex(16))
+        if not entry.get("history_terminal"):
+            entry["history_terminal"] = outcome
+            entry["completed_at"] = datetime.now(timezone.utc).isoformat()
+            self.event(entry, "completed")
+        if not await self.persist_history(guild, user_id, entry, store_name=store_name):
+            return False
+        if retain_pending:
+            return True
+        async with getattr(self.cog.config.guild(guild), store_name)() as entries:
+            if entries.get(str(user_id), {}).get("incident_id") == entry["incident_id"]:
+                entries.pop(str(user_id), None)
+        return True
+
+    async def export_history(self, guild_id):
+        return await asyncio.to_thread(self.cog._case_store.export_verification_history, guild_id)
+
+    async def _infrastructure_failure(self, member, entry, kind):
+        key = f"{kind}:{entry.get('failures', 0)}:{entry.get('stage', 0)}"
+        errors = entry.setdefault("history_errors", [])
+        if key not in errors:
+            errors.append(key)
+            self.event(entry, kind)
+            await self._save(member, entry)
 
     async def _settings(self, guild) -> dict:
         config = self.cog.config.guild(guild)
@@ -78,6 +193,7 @@ class JoinwatchVerification:
             if expected is not None and (current is None or current.get("incident_id") != expected):
                 return False
             entries[str(member.id)] = dict(entry)
+        await self.persist_history(member.guild, member.id, entry)
         return True
 
     @staticmethod
@@ -191,10 +307,14 @@ class JoinwatchVerification:
                 entry = self._planned.get(key)
                 if entry is not None and entry.get("source") == "wave" and entry.get("wave_id") == wave_id:
                     discarded.append(self._planned.pop(key))
+                cancel_assignment = False
                 async with self.cog.config.guild(guild).joinwatch_pending_role_assignments() as assignments:
                     entry = assignments.get(str(key[1]))
                     if entry is not None and entry.get("source") == "wave" and entry.get("wave_id") == wave_id:
-                        discarded.append(assignments.pop(str(key[1])))
+                        discarded.append(dict(entry))
+                        cancel_assignment = True
+                if cancel_assignment:
+                    await joinwatch_state.delete_pending_assignment(self.cog, guild, key[1])
                 for entry in discarded:
                     preparation_key = (guild.id, key[1], entry["incident_id"], entry.get("failures", 0))
                     self._deleted_challenges.add(preparation_key)
@@ -234,6 +354,7 @@ class JoinwatchVerification:
                     "member_id": member.id,
                 }
             )
+            await self.capture_enrollment(member, entry)
             self._planned[key] = entry
             await joinwatch_state.store_pending_assignment(
                 self.cog, member, entry["role_id"], now,
@@ -244,7 +365,7 @@ class JoinwatchVerification:
                 await member.add_roles(role, reason="Automated account status update.")
             except discord.HTTPException as error:
                 if getattr(error, "status", None) in (400, 403, 404):
-                    await joinwatch_state.delete_pending_assignment(self.cog, member.guild, member.id)
+                    await joinwatch_state.delete_pending_assignment(self.cog, member.guild, member.id, outcome="action_failed")
                     await self._audit(member, entry, "Restriction application failed")
                 else:
                     await self._audit(member, entry, "Restriction outcome needs moderator review")
@@ -256,6 +377,7 @@ class JoinwatchVerification:
                     "effect_at": datetime.now(timezone.utc).isoformat(),
                 }
             )
+            self.event(entry, "enrolled")
             await self._save(member, entry)
             await joinwatch_state.delete_pending_assignment(self.cog, member.guild, member.id)
             self._planned.pop(key, None)
@@ -290,6 +412,7 @@ class JoinwatchVerification:
         incident.setdefault("reasons", ["age"])
         incident.setdefault("failures", 0)
         incident.setdefault("stage", 0)
+        await self.capture_enrollment(member, incident)
         if "challenge" not in incident:
             incident["challenge"] = [generate_challenge(), generate_challenge()]
         self.preparation.request(self._key(member, incident), incident["challenge"])
@@ -404,6 +527,8 @@ class JoinwatchVerification:
         now = now or datetime.now(timezone.utc)
         async with joinwatch_state.member_lock(self.cog, member.guild.id, member.id):
             entry = await self._entry(member)
+            if entry is not None and entry.get("history_terminal"):
+                return self._result("complete_restricted" if entry.get("independent_restriction") else "complete", entry)
             if entry is None or not entry.get("captcha_enabled"):
                 return VerificationResult("unavailable")
             if member.bot or await self.cog._is_protected_member(member):
@@ -423,6 +548,7 @@ class JoinwatchVerification:
             await self._save(member, entry)
             if questions is None:
                 if self.preparation.failed(key):
+                    await self._infrastructure_failure(member, entry, "preparation_failed")
                     await self._audit(member, entry, "Image preparation failed")
                     return self._result("error", entry)
                 self.preparation.request(key, entry["challenge"], priority=0)
@@ -435,6 +561,7 @@ class JoinwatchVerification:
             ):
                 entry["session_id"] = secrets.token_hex(16)
                 entry["session_expires_at"] = (now + timedelta(minutes=5)).isoformat()
+                self.event(entry, "started", now=now)
                 await self._save(member, entry, expected=entry["incident_id"])
             return self._result(
                 "question",
@@ -484,6 +611,7 @@ class JoinwatchVerification:
                 entry.pop("challenge", None)
                 if entry["failures"] < MAX_ATTEMPTS:
                     entry["challenge"] = [generate_challenge(), generate_challenge()]
+                self.event(entry, "locked" if entry["failures"] == MAX_ATTEMPTS else "incorrect", now=now)
                 await self._save(member, entry, expected=entry["incident_id"])
                 self.preparation.forget(old_key)
                 if entry["failures"] < MAX_ATTEMPTS:
@@ -495,12 +623,14 @@ class JoinwatchVerification:
                 )
             if stage == 0:
                 entry["stage"] = 1
+                self.event(entry, "stage_passed", now=now)
                 await self._save(member, entry, expected=entry["incident_id"])
                 return self._result(
                     "question", entry, question=questions[1], session_id=session_id, stage=1
                 )
             entry["verification_state"] = "release_pending"
             entry["completion_outcome"] = "passed"
+            self.event(entry, "passed", now=now)
             await self._save(member, entry, expected=entry["incident_id"])
             return await self._release_locked(member, entry)
 
@@ -540,10 +670,12 @@ class JoinwatchVerification:
         retained = await self._independent_role_reason(member, entry["role_id"])
         if role is not None and role in member.roles and not retained:
             if self.cog._missing_role_assignment_permission(member.guild, role):
+                await self._infrastructure_failure(member, entry, "release_failed")
                 return self._result("release_pending", entry)
             try:
                 await member.remove_roles(role, reason="Account verification completed.")
             except discord.HTTPException:
+                await self._infrastructure_failure(member, entry, "release_failed")
                 await self._audit(member, entry, "Restriction release failed")
                 return self._result("release_pending", entry)
         if not entry.get("test") and entry.get("completion_outcome") == "passed":
@@ -552,12 +684,9 @@ class JoinwatchVerification:
                     "incident_id": entry["incident_id"],
                     "completed_at": datetime.now(timezone.utc).isoformat(),
                 }
-        async with self.cog.config.guild(member.guild).joinwatch_pending_roles() as entries:
-            current = entries.get(str(member.id))
-            if current is None or current.get("incident_id") != entry["incident_id"]:
-                return VerificationResult("stale")
-            entries.pop(str(member.id))
+        entry["independent_restriction"] = retained
         await joinwatch_state.delete_pending_assignment(self.cog, member.guild, member.id)
+        await self.finish(member.guild, member.id, entry, entry.get("completion_outcome", "manual"))
         self.preparation.forget(self._key(member, entry))
         await self._audit(
             member,
@@ -638,8 +767,11 @@ class JoinwatchVerification:
                     incident_id is not None and entry.get("incident_id") != incident_id
                 ):
                     return VerificationResult("stale")
-                entries.pop(str(user_id))
+                entry = dict(entry)
             await joinwatch_state.delete_pending_assignment(self.cog, guild, user_id)
+            entry["completion_moderator"] = moderator_id
+            entry["completion_reason"] = reason
+            await self.finish(guild, user_id, entry, outcome)
             self.preparation.forget(
                 (guild.id, user_id, entry.get("incident_id"), entry.get("failures", 0))
             )
@@ -736,8 +868,11 @@ class JoinwatchVerification:
     async def restore(self):
         queued = []
         for guild in self.cog.bot.guilds:
+            await self.settle_history(guild, adopt=True)
             settings = await self._settings(guild)
             for user_id, entry in settings.get("joinwatch_pending_roles", {}).items():
+                if entry.get("history_terminal"):
+                    continue
                 member = guild.get_member(int(user_id))
                 if member is None:
                     continue
@@ -748,6 +883,24 @@ class JoinwatchVerification:
                 if entry.get("effect_at"):
                     await self._record_enrollment(guild, entry)
         self._start_fill(queued)
+
+    async def settle_history(self, guild, *, adopt=False):
+        settings = await self._settings(guild)
+        for store_name in ("joinwatch_pending_role_assignments", "joinwatch_pending_roles"):
+            for user_id, saved in settings.get(store_name, {}).items():
+                if not (adopt or saved.get("history_terminal") or saved.get("history_events")
+                        or saved.get("punishment_started_at")):
+                    continue
+                async with joinwatch_state.member_lock(self.cog, guild.id, int(user_id)):
+                    current = await self.cog.config.guild(guild).get_raw(store_name, user_id, default=None)
+                    if current is None:
+                        continue
+                    entry = dict(current)
+                    if entry.get("history_terminal") or entry.get("punishment_started_at"):
+                        await self.finish(guild, int(user_id), entry,
+                                          entry.get("history_terminal", "action_uncertain"), store_name=store_name)
+                    else:
+                        await self.persist_history(guild, int(user_id), entry, store_name=store_name)
 
     async def enable_existing(self, guild) -> int:
         """Explicit moderator admission of existing timers, never a startup action."""
@@ -817,6 +970,22 @@ class JoinwatchVerification:
                             self._deleted_challenges.add(key)
                             self.preparation.forget(key)
                 self._planned.pop((guild.id, user_id), None)
+            # Remove actor references from active state as well as the archive.
+            # Otherwise the next outcome update would restore the erased identity.
+            for name in ("joinwatch_pending_roles", "joinwatch_pending_role_assignments"):
+                config_store = getattr(self.cog.config.guild(guild), name)
+                saved = await self.cog.config.guild(guild).get_raw(name, default={})
+                for member_id in tuple(saved):
+                    async with (
+                        joinwatch_state.member_lock(self.cog, guild.id, int(member_id)),
+                        config_store() as entries,
+                    ):
+                        current = entries.get(member_id, {})
+                        for key in ("enrollment_moderator", "completion_moderator"):
+                            if current.get(key) == user_id:
+                                current[key] = None
+                                current["completion_reason"] = None
+        await asyncio.to_thread(self.cog._case_store.delete_verification_history, user_id=user_id)
 
     async def delete_guild_data(self, guild):
         config = self.cog.config.guild(guild)
@@ -835,6 +1004,7 @@ class JoinwatchVerification:
         for key in tuple(self._planned):
             if key[0] == guild.id:
                 self._planned.pop(key)
+        await asyncio.to_thread(self.cog._case_store.delete_verification_history, guild_id=guild.id)
 
     async def close(self):
         self._planned.clear()

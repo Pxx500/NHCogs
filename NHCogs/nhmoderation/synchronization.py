@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Any
 from uuid import uuid4
 
+from ..account_snapshot import account_snapshot
 from .history import NHModerationHistory
 from .models import ModerationObservation
 
@@ -120,6 +121,7 @@ def audit_observation(
         occurred_at=_datetime(getattr(entry, "created_at", None)),
         observed_at=observed_at,
         reason=reason,
+        account_snapshot=account_snapshot(getattr(entry, "target", None)),
     )
 
 
@@ -158,6 +160,10 @@ def modlog_observation(
         reason=reason,
         expiry_at=_datetime(getattr(case, "until", None)),
         channel_id=_id(channel),
+        account_snapshot=(
+            account_snapshot(getattr(case, "user", None))
+            if _red_id(getattr(case, "user", None)) is not None else None
+        ),
     )
 
 
@@ -319,6 +325,7 @@ class ModerationSynchronizer:
                         observed_at=started_at,
                         reason=getattr(entry, "reason", None),
                         import_batch_id=run.run_id,
+                        account_snapshot=account_snapshot(user),
                     )
                 )
             await self._history.ingest_batch(
@@ -464,6 +471,7 @@ class ModerationSynchronizer:
                         observed_at=started_at,
                         reason=getattr(entry, "reason", None),
                         import_batch_id=run_id,
+                        account_snapshot=account_snapshot(user),
                     )
                 )
             completed_at = self._clock()

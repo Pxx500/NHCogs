@@ -37,7 +37,7 @@ Enable the privileged Server Members and Message Content intents. Configure tech
 
 ### Main detection
 
-Groups: `[p]honeypot honeypot`, `[p]honeypot honeypot roles`, `[p]honeypot honeypot keywords`, `[p]honeypot honeypot keywords attachments`, `[p]honeypot firstpost`, `[p]honeypot spam`, `[p]honeypot purge`
+Groups: `[p]honeypot honeypot`, `[p]honeypot honeypot roles`, `[p]honeypot honeypot keywords`, `[p]honeypot honeypot keywords attachments`, `[p]honeypot spam`, `[p]honeypot purge`
 
 | Command | What it does |
 |---|---|
@@ -58,9 +58,6 @@ Groups: `[p]honeypot honeypot`, `[p]honeypot honeypot roles`, `[p]honeypot honey
 | `[p]honeypot honeypot keywords attachments remove <pattern>` | Remove a filename-base regex |
 | `[p]honeypot honeypot keywords attachments list` | List filename patterns |
 | `[p]honeypot honeypot keywords attachments reset` | Restore default patterns |
-| `[p]honeypot firstpost toggle [true/false]` | Enforce first-observed-message detection |
-| `[p]honeypot firstpost warmup [true/false]` | Record first senders without enforcement |
-| `[p]honeypot firstpost action [review/kick/ban/none]` | First-post action: review, kick, ban, none |
 | `[p]honeypot spam toggle [true/false]` | Detect repeats across channels |
 | `[p]honeypot spam action [review/kick/ban/none]` | Spam action: review, kick, ban, none |
 | `[p]honeypot spam window [seconds]` | Matching window, 3–60 seconds |
@@ -68,7 +65,9 @@ Groups: `[p]honeypot honeypot`, `[p]honeypot honeypot roles`, `[p]honeypot honey
 | `[p]honeypot purge backward [seconds]` | Backward deletion window, 60–3600 seconds |
 | `[p]honeypot purge forward [seconds]` | Forward window, 0–300 seconds. Zero disables it |
 
-Detection combines account age, scam phrases, attachment counts and filenames, and enabled image matching. Firstpost warmup and enforcement are mutually exclusive. Spam detection requires matching messages with attachments or scam phrases. The main switch does not control JoinWatch, bait roles, or GIF interception.
+Detection combines account age, scam phrases, attachment counts and filenames, and enabled image matching. Spam detection requires matching messages with attachments or scam phrases. The main switch does not control JoinWatch, bait roles, or GIF interception.
+
+Firstpost detection and its commands have been retired. Existing firstpost configuration keys are pruned on load. Historical cases, pending case operations, and aggregate statistics remain intact. The old `firstpost_seen.sqlite` file and claim table are left untouched, but the detector no longer reads or writes them. An attachment-heavy first message no longer triggers firstpost, and enabled image scanning can evaluate it when no remaining detector has already selected an action.
 
 ### Channels
 
@@ -247,7 +246,6 @@ Groups: `[p]honeypot stats`, `[p]honeypot config`
 | `[p]honeypot config channel` | Destinations and scopes |
 | `[p]honeypot config punishment` | Punishment settings |
 | `[p]honeypot config purge` | Purge windows |
-| `[p]honeypot config firstpost` | First-post settings |
 | `[p]honeypot config imagescan` | Image detector settings |
 | `[p]honeypot config spam` | Spam settings |
 | `[p]honeypot config review` | Review settings |
@@ -293,3 +291,7 @@ Settings and counters are per server. Cases, operations, first-observed senders,
 Captured case files are temporary. Selected TP and FP samples remain in the image dataset under its retention settings. Red user-data deletion and guild removal remove matching records and evidence, with unavailable Discord deletions queued for retry. Developers declare channel routing in [channel_routing.py](channel_routing.py).
 
 JoinWatch keeps active incident and attempt metadata and verification outcomes in guild Config. Auxiliary first-observed joins and frozen wave execution state use the existing case SQLite store, outside the configuration read by message detectors. Current challenge images and answers are retained only with their active check, not in audit logs or evidence archives. Live first-join observations and settled waves are retained for 90 days. Imported history remains explicitly retained for historical analysis. User-data deletion removes the corresponding observations, results, and wave references. Leaving a guild clears pending JoinWatch work and verification history so rejoining doesn't revive stale enforcement.
+
+JoinWatch also retains enrollment context and factual outcomes in the case SQLite store after active timers and waves are removed. This includes account metadata, available activity totals from NHMisc, source and wave ID, attempt events, and completion, rollback or timer punishment. Existing active timers are adopted as partial history without changing their deadlines. Missing activity is unknown, not zero. No CAPTCHA answers, session tokens or images enter this archive. Retained verification history has no automatic expiry and follows Red user-data deletion and guild removal.
+
+With NHModeration loaded, moderators can use `[p]nhmod history export` in a private moderator channel to export these records together with observed bans, retained detection context and first joins. See [NHModeration](../nhmoderation/README.md#private-history-export). A solved CAPTCHA isn't proof of a human account, and a ban isn't a confirmed scam label. Compare completed cohorts with their pending counts, and exclude tests and rollbacks from enforcement results.

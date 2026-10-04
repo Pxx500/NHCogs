@@ -5,6 +5,7 @@ import types
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from importlib import util
 from pathlib import Path
@@ -61,6 +62,30 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.store = DetectionCaseStore(self.database_path)
         self.store.initialize()
 
+    def test_active_case_keeps_first_available_context_with_actual_capture_time(self):
+        created_at = datetime(2026, 10, 4, 12, tzinfo=timezone.utc)
+        captured_at = created_at + timedelta(hours=1)
+        first = self.store.append_message(self.message(40, created_at), ())
+        enriched = replace(
+            self.message(41, captured_at),
+            account_snapshot={"username": "first_available"},
+            activity_summary={"availability": "observed", "messages": 5, "captured_at": captured_at.isoformat()},
+            context_captured_at=captured_at,
+        )
+        second = self.store.append_message(enriched, ())
+        self.assertEqual(second.case.case_id, first.case.case_id)
+        self.store.append_message(replace(
+            enriched, message_id=42, created_at=captured_at + timedelta(minutes=1),
+            account_snapshot={"username": "later_profile"},
+            activity_summary={"availability": "observed", "messages": 7},
+            context_captured_at=captured_at + timedelta(minutes=1),
+        ), ())
+        record = DetectionCaseStore(self.database_path).export_detection_history(10)[0]
+        self.assertEqual(record["account_snapshot"], enriched.account_snapshot)
+        self.assertEqual(record["activity_summary"], enriched.activity_summary)
+        self.assertEqual(record["context_captured_at"], captured_at.isoformat())
+        self.assertEqual(record["created_at"], created_at.isoformat())
+
     def test_initialize_sets_the_detection_schema_version_on_an_empty_database(self):
         with closing(sqlite3.connect(self.database_path)) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
@@ -71,14 +96,18 @@ class DetectionCaseStoreTests(unittest.TestCase):
                 )
             }
 
-        self.assertEqual(version, 6)
+        self.assertEqual(version, 7)
         self.assertIn("detection_cases", tables)
         self.assertIn("detection_attachments", tables)
         self.assertIn("public_daily_stats", tables)
 
     def test_initialize_preserves_current_schema_data_when_backfilling_version(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
-        stored_case = self.store.append_message(self.message(40, now), ()).case
+        stored_case = self.store.append_message(
+            self.message(40, now),
+            (DetectionSignal("firstpost", "Historical first post", ActionIntent.REVIEW, True, {}),),
+            ((OperationType.MESSAGE_PROCESS, "message-process:{case_id}:{sequence}"),),
+        ).case
         with closing(sqlite3.connect(self.database_path)) as connection, connection:
             connection.execute("PRAGMA user_version = 0")
 
@@ -91,7 +120,9 @@ class DetectionCaseStoreTests(unittest.TestCase):
 
         self.assertEqual(snapshot.case.case_id, stored_case.case_id)
         self.assertEqual(snapshot.messages[0].message_id, 40)
-        self.assertEqual(version, 6)
+        self.assertEqual(snapshot.signals[0].signal.detector, "firstpost")
+        self.assertEqual(snapshot.operations[0].status, OperationStatus.PENDING)
+        self.assertEqual(version, 7)
 
     def test_initialize_preserves_timeline_publications_from_previous_schema(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
@@ -535,7 +566,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertIn("description", columns)
         self.assertIn("spoiler", columns)
         self.assertEqual(row, ("legacy.png", None, 0))
-        self.assertEqual(version, 6)
+        self.assertEqual(version, 7)
 
     def test_projection_endpoint_survives_store_restart(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
@@ -1792,29 +1823,6 @@ class DetectionCaseStoreTests(unittest.TestCase):
             ["evidence_cleanup"],
         )
 
-    def test_append_atomically_claims_firstpost_signal_with_initial_outbox(self):
-        now = datetime.now(timezone.utc)
-        firstpost = DetectionSignal(
-            "firstpost", "suspicious first message", ActionIntent.REVIEW, True, {}
-        )
-
-        appended = self.store.append_message(
-            self.message(92, now),
-            (firstpost,),
-            (("message_process", "process:{case_id}:{sequence}"),),
-            claim_firstpost=True,
-        )
-        snapshot = self.store.get_case(appended.case.case_id)
-
-        self.assertTrue(appended.firstpost_claimed)
-        self.assertEqual(
-            [record.signal.detector for record in snapshot.signals],
-            ["firstpost"],
-        )
-        self.assertEqual(
-            [operation.operation_type for operation in snapshot.operations],
-            ["message_process"],
-        )
 
     def test_failed_operation_is_only_claimed_when_retry_is_due(self):
         created_at = datetime(2026, 7, 13, 12, tzinfo=timezone.utc)

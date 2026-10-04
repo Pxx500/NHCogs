@@ -47,8 +47,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                     "dry_run": False,
                     "review_channel": None,
                     "spam_enabled": False,
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -87,8 +85,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": True,
-                    "spam_action": "review", "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
+                    "spam_action": "review",
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -250,8 +247,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                         "dry_run": False,
                         "review_channel": None,
                         "spam_enabled": False,
-                        "firstpost_enabled": False,
-                        "firstpost_collect_enabled": False,
                     },
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
@@ -303,8 +298,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                         "dry_run": False,
                         "review_channel": None,
                         "spam_enabled": False,
-                        "firstpost_enabled": False,
-                        "firstpost_collect_enabled": False,
                     },
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
@@ -360,8 +353,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                         "dry_run": False,
                         "review_channel": None,
                         "spam_enabled": False,
-                        "firstpost_enabled": False,
-                        "firstpost_collect_enabled": False,
                     },
                 )
                 capture_cog._scan_all_case_message_images = mock.AsyncMock()
@@ -446,8 +437,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                         "dry_run": False,
                         "review_channel": None,
                         "spam_enabled": False,
-                        "firstpost_enabled": False,
-                        "firstpost_collect_enabled": False,
                     },
                 )
                 cog._imagescan_load_samples = mock.AsyncMock(return_value=[])
@@ -529,8 +518,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                         "review_channel": None,
                         "review_enabled": True,
                         "spam_enabled": False,
-                        "firstpost_enabled": False,
-                        "firstpost_collect_enabled": False,
                     },
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
@@ -563,8 +550,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                         "dry_run": False,
                         "review_channel": None,
                         "spam_enabled": False,
-                        "firstpost_enabled": False,
-                        "firstpost_collect_enabled": False,
                     },
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
@@ -632,8 +617,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                         "dry_run": False,
                         "review_channel": None,
                         "spam_enabled": False,
-                        "firstpost_enabled": False,
-                        "firstpost_collect_enabled": False,
                     },
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
@@ -683,8 +666,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                         "dry_run": False,
                         "review_channel": None,
                         "spam_enabled": False,
-                        "firstpost_enabled": False,
-                        "firstpost_collect_enabled": False,
                     },
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
@@ -740,8 +721,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                         "dry_run": True,
                         "review_channel": None,
                         "spam_enabled": False,
-                        "firstpost_enabled": False,
-                        "firstpost_collect_enabled": False,
                     },
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
@@ -774,8 +753,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                         "dry_run": False,
                         "review_channel": None,
                         "spam_enabled": False,
-                        "firstpost_enabled": False,
-                        "firstpost_collect_enabled": False,
                     },
                 )
                 cog._scan_all_case_message_images = mock.AsyncMock()
@@ -846,7 +823,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                         ),
                     ),
                     (),
-                    lambda signals: (("message_process", "message-process:{case_id}:{sequence}"),),
+                    (("message_process", "message-process:{case_id}:{sequence}"),),
                 )
                 operation = next(
                     item
@@ -948,8 +925,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                     "review_channel": None,
                     "spam_enabled": True,
                     "spam_action": "review",
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": False,
                 }
                 self._configure_public_boundary(cog, config)
@@ -1103,8 +1078,7 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 self._configure_public_boundary(
                     cog, {"enabled": True, "review_enabled": True,
                           "dry_run": False,
-                          "review_channel": None, "spam_enabled": False,
-                          "firstpost_enabled": False, "firstpost_collect_enabled": False}
+                          "review_channel": None, "spam_enabled": False}
                 )
                 cog._imagescan_load_samples = mock.AsyncMock(side_effect=RuntimeError("model unavailable"))
                 cog._publish_detection_case = mock.AsyncMock()
@@ -1138,8 +1112,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                         "dry_run": False,
                         "review_channel": None,
                         "spam_enabled": False,
-                        "firstpost_enabled": False,
-                        "firstpost_collect_enabled": False,
                         "imagescan_detector_threshold": 20,
                     },
                 )
@@ -1274,7 +1246,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 config = {
                     "enabled": True, "dry_run": False,
                     "review_channel": None, "spam_enabled": False,
-                    "firstpost_enabled": False, "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": True,
                     "imagescan_detector_action": "review",
                     "imagescan_detector_threshold": 20,
@@ -1347,8 +1318,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                     "dry_run": False,
                     "review_channel": None,
                     "spam_enabled": False,
-                    "firstpost_enabled": False,
-                    "firstpost_collect_enabled": False,
                     "imagescan_detector_enabled": True,
                     "imagescan_detector_action": "review",
                     "imagescan_detector_threshold": 20,

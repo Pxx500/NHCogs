@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
+from tests.test_joinwatch_rejoin import _RawGuildConfig
 
 
 class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
@@ -60,6 +61,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                 role.id = 501
                 role.mention = "<@&501>"
                 me = SimpleNamespace(
+                    id=999,
                     guild_permissions=SimpleNamespace(
                         manage_roles=True,
                         kick_members=True,
@@ -171,7 +173,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                     "joinwatch_pending_role_assignments": assignments,
                     "joinwatch_pending_roles": roles,
                 }
-                guild_config = SimpleNamespace(
+                guild_config = _RawGuildConfig(
                     all=mock.AsyncMock(return_value=raw_config),
                     joinwatch_pending_role_assignments=lambda: self._Store(assignments),
                     joinwatch_pending_roles=lambda: self._Store(roles),
@@ -183,6 +185,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                 bot.is_mod = mock.AsyncMock(return_value=False)
                 bot.is_admin = mock.AsyncMock(return_value=False)
                 cog = honeypot.Honeypot(bot, _operational_support())
+                cog._case_store.initialize()
                 cog.config = SimpleNamespace(guild=lambda _guild: guild_config)
                 cog._record_daily_stat = mock.AsyncMock()
 
@@ -190,7 +193,10 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                     mock.patch.object(
                         honeypot.discord,
                         "utils",
-                        SimpleNamespace(format_dt=lambda value, style: value.isoformat()),
+                        SimpleNamespace(
+                            format_dt=lambda value, style: value.isoformat(),
+                            snowflake_time=honeypot.discord.utils.snowflake_time,
+                        ),
                         create=True,
                     ),
                     mock.patch.object(
@@ -201,7 +207,7 @@ class JoinwatchRetryTests(unittest.IsolatedAsyncioTestCase):
                     mock.patch.object(
                         honeypot.modlog,
                         "create_case",
-                        new=mock.AsyncMock(),
+                        new=mock.AsyncMock(return_value=None),
                         create=True,
                     ),
                 ):

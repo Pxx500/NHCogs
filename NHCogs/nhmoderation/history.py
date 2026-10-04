@@ -171,6 +171,11 @@ class NHModerationHistory:
     async def status(self, guild_id: int) -> SynchronizationState:
         return await self._store.sync_state(guild_id)
 
+    async def export_history(self, guild_id: int) -> dict:
+        """Read one guild consistently. Action IDs are local to this export only."""
+        async with self._guild_locks[guild_id]:
+            return await self._store.export_history(guild_id)
+
     @staticmethod
     def utc_now() -> datetime:
         return datetime.now(timezone.utc)

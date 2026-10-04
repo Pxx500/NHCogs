@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
@@ -118,7 +119,15 @@ def _migration_1(connection: sqlite3.Connection) -> None:
             connection.execute(statement)
 
 
-MIGRATIONS = (_migration_1,)
+def _migration_2(connection: sqlite3.Connection) -> None:
+    connection.execute("ALTER TABLE moderation_observations ADD COLUMN account_snapshot TEXT")
+
+
+def _migration_3(connection: sqlite3.Connection) -> None:
+    connection.execute("ALTER TABLE moderation_observations ADD COLUMN activity_summary TEXT")
+
+
+MIGRATIONS = (_migration_1, _migration_2, _migration_3)
 
 
 class ModerationStore:
@@ -303,32 +312,28 @@ class ModerationStore:
 
     def _append_sync(self, item: StoredObservation) -> bool:
         with closing(self._connect()) as connection, connection:
-            cursor = connection.execute(
-                """INSERT OR IGNORE INTO moderation_observations
-                   (guild_id, source_kind, source_key, action_hint, target_user_id,
-                    executor_user_id, credited_moderator_hint, attribution_hint,
-                    occurred_at, observed_at, reason, expiry_at, channel_id,
-                    import_batch_id, source_payload_version)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    item.guild_id,
-                    item.source_kind,
-                    item.source_key,
-                    item.action_hint,
-                    item.target_user_id,
-                    item.executor_user_id,
-                    item.credited_moderator_hint,
-                    item.attribution_hint,
-                    _timestamp(item.occurred_at),
-                    _timestamp(item.observed_at),
-                    item.reason,
-                    _timestamp(item.expiry_at),
-                    item.channel_id,
-                    item.import_batch_id,
-                    item.source_payload_version,
-                ),
-            )
-            return cursor.rowcount > 0
+            return self._insert_observation(connection, item)
+
+    @staticmethod
+    def _insert_observation(connection: sqlite3.Connection, item: StoredObservation) -> bool:
+        cursor = connection.execute(
+            """INSERT OR IGNORE INTO moderation_observations
+               (guild_id, source_kind, source_key, action_hint, target_user_id,
+                executor_user_id, credited_moderator_hint, attribution_hint,
+                occurred_at, observed_at, reason, expiry_at, channel_id,
+                import_batch_id, source_payload_version, account_snapshot, activity_summary)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                item.guild_id, item.source_kind, item.source_key, item.action_hint,
+                item.target_user_id, item.executor_user_id, item.credited_moderator_hint,
+                item.attribution_hint, _timestamp(item.occurred_at), _timestamp(item.observed_at),
+                item.reason, _timestamp(item.expiry_at), item.channel_id, item.import_batch_id,
+                item.source_payload_version,
+                json.dumps(item.account_snapshot) if item.account_snapshot is not None else None,
+                json.dumps(item.activity_summary) if item.activity_summary is not None else None,
+            ),
+        )
+        return cursor.rowcount > 0
 
     async def append_batch(
         self,
@@ -348,32 +353,7 @@ class ModerationStore:
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             for item in items:
-                cursor = connection.execute(
-                    """INSERT OR IGNORE INTO moderation_observations
-                       (guild_id, source_kind, source_key, action_hint, target_user_id,
-                        executor_user_id, credited_moderator_hint, attribution_hint,
-                        occurred_at, observed_at, reason, expiry_at, channel_id,
-                        import_batch_id, source_payload_version)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        item.guild_id,
-                        item.source_kind,
-                        item.source_key,
-                        item.action_hint,
-                        item.target_user_id,
-                        item.executor_user_id,
-                        item.credited_moderator_hint,
-                        item.attribution_hint,
-                        _timestamp(item.occurred_at),
-                        _timestamp(item.observed_at),
-                        item.reason,
-                        _timestamp(item.expiry_at),
-                        item.channel_id,
-                        item.import_batch_id,
-                        item.source_payload_version,
-                    ),
-                )
-                inserted += int(cursor.rowcount > 0)
+                inserted += int(self._insert_observation(connection, item))
         return inserted
 
     async def update_sync_state(
@@ -503,6 +483,8 @@ class ModerationStore:
                 channel_id=row["channel_id"],
                 import_batch_id=row["import_batch_id"],
                 source_payload_version=row["source_payload_version"],
+                account_snapshot=json.loads(row["account_snapshot"]) if row["account_snapshot"] else None,
+                activity_summary=json.loads(row["activity_summary"]) if row["activity_summary"] else None,
             )
             for row in rows
         ]
@@ -606,6 +588,82 @@ class ModerationStore:
     async def delete_user(self, user_id: int) -> set[int]:
         return await asyncio.to_thread(self._delete_user_sync, user_id)
 
+    async def export_history(self, guild_id: int) -> dict:
+        return await asyncio.to_thread(self._export_history_sync, guild_id)
+
+    def _export_history_sync(self, guild_id: int) -> dict:
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN")
+            observations = [dict(row) for row in connection.execute(
+                "SELECT * FROM moderation_observations WHERE guild_id = ? ORDER BY observation_id",
+                (guild_id,),
+            )]
+            actions = [dict(row) for row in connection.execute(
+                "SELECT * FROM moderation_actions WHERE guild_id = ? ORDER BY action_id",
+                (guild_id,),
+            )]
+            links: dict[int, list[str]] = {}
+            for row in connection.execute(
+                """SELECT links.action_id, links.observation_id
+                   FROM moderation_action_observations AS links
+                   JOIN moderation_actions AS actions USING (action_id)
+                   WHERE actions.guild_id = ? ORDER BY links.observation_id""",
+                (guild_id,),
+            ):
+                links.setdefault(row["action_id"], []).append(str(row["observation_id"]))
+            state_row = connection.execute(
+                "SELECT * FROM moderation_sync_state WHERE guild_id = ?", (guild_id,),
+            ).fetchone()
+            read_at = datetime.now(timezone.utc).isoformat()
+
+        id_fields = {
+            "guild_id", "target_user_id", "executor_user_id", "credited_moderator_hint",
+            "credited_moderator_id", "channel_id", "observation_id", "audit_ban_cursor",
+            "audit_unban_cursor", "red_modlog_cursor",
+        }
+        for item in observations:
+            item["activity_summary"] = (
+                json.loads(item["activity_summary"]) if item["activity_summary"] else None
+            )
+            item["activity_availability"] = (
+                item["activity_summary"]["availability"] if item["activity_summary"] else "unavailable"
+            )
+            item["account_snapshot"] = (
+                json.loads(item["account_snapshot"]) if item["account_snapshot"] else None
+            )
+            item["snapshot_observed_at"] = (
+                item["observed_at"] if item["account_snapshot"] is not None else None
+            )
+            item["snapshot_source"] = (
+                item["source_kind"] if item["account_snapshot"] is not None else None
+            )
+        for number, item in enumerate(actions, 1):
+            item["observation_ids"] = links[item["action_id"]]
+            item["action_id"] = str(number)
+        state = dict(state_row) if state_row is not None else None
+        if state is not None:
+            state["historical_gap"] = bool(state["historical_gap"])
+        for item in [*observations, *actions, *([state] if state is not None else [])]:
+            for key in id_fields & item.keys():
+                if item[key] is not None:
+                    item[key] = str(item[key])
+        return {
+            "schema_version": 1,
+            "guild_id": str(guild_id),
+            "read_at": read_at,
+            "observations": observations,
+            "actions": actions,
+            "coverage": {
+                "first_observed_at": min(
+                    (item["observed_at"] for item in observations), default=None
+                ),
+                "available_sources": sorted({item["source_kind"] for item in observations}),
+                "synchronization": state,
+                "action_ids": "export_local",
+                "snapshot_timing": "observation_time_not_action_time",
+            },
+        }
+
     def _delete_user_sync(self, user_id: int) -> set[int]:
         with closing(self._connect()) as connection, connection:
             guild_ids = {
@@ -623,6 +681,8 @@ class ModerationStore:
                        WHEN source_kind = 'discord_ban_snapshot' AND target_user_id = ?
                          THEN 'deleted:' || observation_id ELSE source_key END,
                      target_user_id = CASE WHEN target_user_id = ? THEN NULL ELSE target_user_id END,
+                     account_snapshot = CASE WHEN target_user_id = ? THEN NULL ELSE account_snapshot END,
+                     activity_summary = CASE WHEN target_user_id = ? THEN NULL ELSE activity_summary END,
                      executor_user_id = CASE WHEN executor_user_id = ? THEN NULL ELSE executor_user_id END,
                      credited_moderator_hint = CASE
                        WHEN credited_moderator_hint = ? THEN NULL ELSE credited_moderator_hint END,
@@ -634,6 +694,8 @@ class ModerationStore:
                    WHERE target_user_id = ? OR executor_user_id = ?
                       OR credited_moderator_hint = ?""",
                 (
+                    user_id,
+                    user_id,
                     user_id,
                     user_id,
                     user_id,

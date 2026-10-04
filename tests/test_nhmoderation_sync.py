@@ -9,21 +9,52 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
+from tests.harness import _isolated_honeypot_modules
 from tests.storage_loader import load_shared_storage
 
 load_shared_storage()
 
 from NHCogs.nhmoderation.history import NHModerationHistory  # noqa: E402
 from NHCogs.nhmoderation.models import BanChartQuery  # noqa: E402
-from NHCogs.nhmoderation.synchronization import (  # noqa: E402
-    ModerationSynchronizer,
-    SyncMode,
-    modlog_observation,
-    next_weekly_reconciliation,
-)
+
+with TemporaryDirectory() as _module_directory, _isolated_honeypot_modules(Path(_module_directory)):
+    from NHCogs.account_snapshot import account_snapshot
+    from NHCogs.nhmoderation.synchronization import (
+        ModerationSynchronizer,
+        SyncMode,
+        audit_observation,
+        modlog_observation,
+        next_weekly_reconciliation,
+    )
 
 
 class ModerationSynchronizationTests(unittest.IsolatedAsyncioTestCase):
+    def test_sparse_account_uses_snowflake_without_inventing_profile(self):
+        user_id = 175928847299117063
+        snapshot = account_snapshot(user_id)
+        self.assertEqual(snapshot["account_created_at"], "2016-04-30T11:18:25.796000+00:00")
+        self.assertEqual(snapshot["account_created_at_source"], "discord_snowflake")
+        self.assertIsNone(snapshot["username"])
+        self.assertIsNone(snapshot["guild_joined_at"])
+        for invalid in (None, 0, -1, True, "not-an-id", 1 << 64):
+            self.assertIsNone(account_snapshot(invalid))
+
+    async def test_audit_capture_keeps_available_profile_without_inventing_join_date(self):
+        created = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        now = datetime(2026, 10, 4, tzinfo=timezone.utc)
+        entry = SimpleNamespace(
+            id=500, created_at=created, user=SimpleNamespace(id=55), reason="scam review",
+            target=SimpleNamespace(id=100, name="captured-name", created_at=created, bot=False),
+        )
+        item = audit_observation(1, entry, "ban", 999, now)
+        self.assertEqual(item.account_snapshot["username"], "captured-name")
+        self.assertEqual(item.account_snapshot["account_created_at"], created.isoformat())
+        self.assertIsNone(item.account_snapshot["guild_joined_at"])
+        self.assertEqual(item.reason, "scam review")
+        self.assertNotIn("avatar", item.account_snapshot)
+        self.assertEqual(item.occurred_at, created)
+        self.assertEqual(item.observed_at, now)
+
     async def test_incremental_sync_reuses_committed_cursors(self):
         with TemporaryDirectory() as directory:
             history = NHModerationHistory(Path(directory) / "moderation.sqlite")
@@ -149,6 +180,38 @@ class ModerationSynchronizationTests(unittest.IsolatedAsyncioTestCase):
             await synchronizer.synchronize(guild, SyncMode.REPAIR)
 
             snapshot_fetcher.assert_awaited_once_with(guild)
+
+    async def test_initial_and_repair_snapshots_preserve_each_observed_profile(self):
+        with TemporaryDirectory() as directory:
+            history = NHModerationHistory(Path(directory) / "moderation.sqlite")
+            await history.initialize()
+            first = datetime(2026, 8, 28, tzinfo=timezone.utc)
+            later = datetime(2026, 10, 4, tzinfo=timezone.utc)
+            clock = mock.Mock(return_value=first)
+            snapshot_fetcher = mock.AsyncMock(return_value=[
+                SimpleNamespace(user=SimpleNamespace(id=175928847299117063, name="old-name")),
+            ])
+            synchronizer = ModerationSynchronizer(
+                history, bot_user_id=999, clock=clock,
+                audit_fetcher=mock.AsyncMock(return_value=[]),
+                modlog_fetcher=mock.AsyncMock(return_value=[]),
+                snapshot_fetcher=snapshot_fetcher,
+            )
+            await synchronizer.synchronize(SimpleNamespace(id=10), SyncMode.INITIAL)
+            clock.return_value = later
+            snapshot_fetcher.return_value = [SimpleNamespace(
+                user=SimpleNamespace(id=175928847299117063, name="new-name"),
+            )]
+            await synchronizer.synchronize(SimpleNamespace(id=10), SyncMode.REPAIR)
+            exported = await history.export_history(10)
+            self.assertEqual(len(exported["actions"]), 1)
+            self.assertIsNone(exported["actions"][0]["occurred_at"])
+            snapshots = exported["observations"]
+            self.assertEqual([row["account_snapshot"]["username"] for row in snapshots],
+                             ["old-name", "new-name"])
+            self.assertEqual([row["snapshot_observed_at"] for row in snapshots],
+                             [first.isoformat(), later.isoformat()])
+
 
     async def test_completed_initial_migration_is_a_noop(self):
         with TemporaryDirectory() as directory:

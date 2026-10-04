@@ -26,9 +26,9 @@ class MessageProcessHandlerSeamTests(unittest.IsolatedAsyncioTestCase):
     ):
         cog._case_store.initialize()
         planned = (
-            (lambda signals: (("message_process", "message-process:{case_id}:{sequence}"),))
+            (("message_process", "message-process:{case_id}:{sequence}"),)
             if with_operation
-            else (lambda signals: ())
+            else ()
         )
         return cog._case_store.append_message(
             honeypot.NewMessage(

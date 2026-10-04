@@ -424,7 +424,6 @@ class CaseLifecycleTests(CaseExpiryTestCase):
                 )
 
                 restarted = honeypot.Honeypot(_Bot(), _operational_support())
-                restarted._init_firstpost_seen_store = _async_noop
                 restarted._init_imagescan_store = _async_noop
                 restarted._restore_pending_reviews = _async_noop
                 restored_statuses = []

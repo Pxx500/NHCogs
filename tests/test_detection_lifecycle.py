@@ -46,7 +46,6 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     joinwatch_auto_role_loop=Loop(running=False),
                     joinwatch_wave_loop=Loop(),
                     purge_cache_cleanup_loop=Loop(),
-                    firstpost_seen_flush_loop=Loop(),
                     detection_case_loop=Loop(),
                     detection_reconciliation_loop=Loop(),
                     _daily_stats_task=pending_task,
@@ -71,7 +70,6 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     "honeypot_channel": 456,
                     "imagescan_channel": 789,
                 }
-                cog._init_firstpost_seen_store = _async_noop
                 cog._init_imagescan_store = _async_noop
                 cog._run_detection_reconciliation = _async_noop
                 cog._restore_detection_case_views = _async_noop
@@ -353,9 +351,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 stale_config = StaleConfig()
                 cog.config = stale_config
                 cog._case_store = Store()
-                cog._init_firstpost_seen_store = _async_noop
                 cog._init_imagescan_store = _async_noop
-                cog._flush_firstpost_seen_authors = _async_noop
 
                 await cog.cog_load()
                 try:
@@ -414,7 +410,6 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         return ()
 
                 cog._case_store = Store()
-                cog._init_firstpost_seen_store = _async_noop
                 cog._init_imagescan_store = _async_noop
 
                 self.assertEqual(cog._detection_case_db_path, data_path / "detection_cases.sqlite")
@@ -451,7 +446,6 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 for loop_name in (
                     "joinwatch_auto_role_loop",
                     "purge_cache_cleanup_loop",
-                    "firstpost_seen_flush_loop",
                     "detection_case_loop",
                     "detection_reconciliation_loop",
                 ):
@@ -474,10 +468,8 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     finally:
                         restore_cleanup_finished.set()
 
-                cog._init_firstpost_seen_store = _async_noop
                 cog._init_imagescan_store = _async_noop
                 cog._restore_detection_case_views = restore_until_cancelled
-                cog._flush_firstpost_seen_authors = _async_noop
 
                 await cog.cog_load()
                 restore_task = cog._case_restore_task
@@ -492,7 +484,6 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     for loop_name in (
                         "joinwatch_auto_role_loop",
                         "purge_cache_cleanup_loop",
-                        "firstpost_seen_flush_loop",
                         "detection_case_loop",
                         "detection_reconciliation_loop",
                     ):
@@ -529,10 +520,8 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         await cleanup_release.wait()
                         cleanup_finished.set()
 
-                cog._init_firstpost_seen_store = _async_noop
                 cog._init_imagescan_store = _async_noop
                 cog._restore_detection_case_views = _async_noop
-                cog._flush_firstpost_seen_authors = _async_noop
                 await cog.cog_load()
                 loop_task = asyncio.create_task(loop_until_cancelled())
                 cog.detection_reconciliation_loop.task = loop_task
@@ -592,9 +581,7 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                         return ()
 
                 cog._case_store = Store()
-                cog._init_firstpost_seen_store = _async_noop
                 cog._init_imagescan_store = _async_noop
-                cog._flush_firstpost_seen_authors = _async_noop
 
                 with mock.patch.object(honeypot.log, "error") as log_error:
                     await cog.cog_load()
