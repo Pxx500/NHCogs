@@ -139,6 +139,70 @@ def _make_runtime(honeypot, *, random_delay: bool):
 
 
 class JoinwatchRejoinTests(unittest.IsolatedAsyncioTestCase):
+    async def test_join_alert_does_not_offer_captcha_without_enrollment(self):
+        for reason in ("autorole_disabled", "protected", "missing_permission"):
+            with self.subTest(reason=reason), TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+                runtime = _make_runtime(honeypot, random_delay=False)
+                config = await runtime.cog.config.guild(runtime.guild).all()
+                config["joinwatch_captcha_enabled"] = True
+                config["joinwatch_auto_role_enabled"] = reason != "autorole_disabled"
+                runtime.cog._is_protected_member = mock.AsyncMock(return_value=reason == "protected")
+                runtime.cog._missing_role_assignment_permission = mock.Mock(
+                    return_value="Missing role permission" if reason == "missing_permission" else None
+                )
+                runtime.cog._record_operational_failure = mock.AsyncMock()
+                with (
+                    mock.patch.object(honeypot.discord, "Embed", _Embed),
+                    mock.patch.object(honeypot.discord, "Color", SimpleNamespace(orange=lambda: None)),
+                    mock.patch.object(runtime.cog._joinwatch_verification.preparation, "request"),
+                ):
+                    await runtime.cog.on_member_join(runtime.member)
+                self.assertEqual(runtime.pending_assignments, {})
+                self.assertEqual(runtime.pending_roles, {})
+                runtime.member.add_roles.assert_not_awaited()
+                fields = runtime.alert_channel.send.await_args.kwargs["embed"].fields
+                self.assertNotIn("CAPTCHA:", [field.name for field in fields])
+
+    async def test_join_alert_keeps_captcha_status_when_scheduled_role_is_applied(self):
+        for captcha_enabled in (False, True):
+            with self.subTest(captcha_enabled=captcha_enabled), TemporaryDirectory() as directory:
+                with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                    runtime = _make_runtime(honeypot, random_delay=True)
+                    runtime.cog.bot.guilds = [runtime.guild]
+                    config = await runtime.cog.config.guild(runtime.guild).all()
+                    config["joinwatch_captcha_enabled"] = captcha_enabled
+                    with (
+                        mock.patch.object(honeypot.discord, "Embed", _Embed),
+                        mock.patch.object(
+                            honeypot.discord, "Color",
+                            SimpleNamespace(orange=mock.Mock(return_value=None)),
+                        ),
+                        mock.patch.object(
+                            honeypot.discord.utils, "format_dt",
+                            lambda value, style: value.isoformat(), create=True,
+                        ),
+                        mock.patch.object(runtime.cog._joinwatch_verification.preparation, "request"),
+                    ):
+                        await runtime.cog.on_member_join(runtime.member)
+                        runtime.pending_assignments["200"]["apply_at"] = (
+                            datetime.now(timezone.utc) - timedelta(minutes=1)
+                        ).isoformat()
+                        await honeypot.joinwatch.joinwatch_auto_role_loop(runtime.cog)
+
+                    self.assertIn(runtime.role, runtime.member.roles)
+                    self.assertIn("200", runtime.pending_roles)
+                    runtime.alert_channel.send.assert_awaited_once()
+                    runtime.partial_message.edit.assert_awaited_once()
+                    for message_call in (
+                        runtime.alert_channel.send.await_args,
+                        runtime.partial_message.edit.await_args,
+                    ):
+                        fields = message_call.kwargs["embed"].fields
+                        self.assertEqual(
+                            [field.value for field in fields if field.name == "CAPTCHA:"],
+                            ["Awaiting verification"] if captcha_enabled else [],
+                        )
+
     async def test_delayed_first_application_counts_once_after_early_rejoin_then_restore(self):
         with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
             runtime = _make_runtime(honeypot, random_delay=True)

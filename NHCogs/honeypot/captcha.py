@@ -16,7 +16,7 @@ SHAPES = ("triangles", "circles", "squares")
 @dataclass(frozen=True, slots=True)
 class CaptchaQuestion:
     prompt: str
-    image_png: bytes = field(repr=False)
+    image_webp: bytes = field(repr=False)
 
 
 def generate_challenge() -> dict:
@@ -68,7 +68,7 @@ def render_challenge(descriptor: dict) -> CaptchaQuestion:
             else:
                 draw.rectangle((x, y, x + 42, y + 42), fill="#334c81", outline="#172235", width=2)
     output = io.BytesIO()
-    image.save(output, format="PNG")
+    image.save(output, format="WEBP", lossless=True)
     prompt = f"Which tile contains exactly {descriptor['count']} {descriptor['target']}?"
     return CaptchaQuestion(prompt, output.getvalue())
 
