@@ -139,6 +139,30 @@ def _make_runtime(honeypot, *, random_delay: bool):
 
 
 class JoinwatchRejoinTests(unittest.IsolatedAsyncioTestCase):
+    async def test_join_alert_does_not_offer_captcha_without_enrollment(self):
+        for reason in ("autorole_disabled", "protected", "missing_permission"):
+            with self.subTest(reason=reason), TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+                runtime = _make_runtime(honeypot, random_delay=False)
+                config = await runtime.cog.config.guild(runtime.guild).all()
+                config["joinwatch_captcha_enabled"] = True
+                config["joinwatch_auto_role_enabled"] = reason != "autorole_disabled"
+                runtime.cog._is_protected_member = mock.AsyncMock(return_value=reason == "protected")
+                runtime.cog._missing_role_assignment_permission = mock.Mock(
+                    return_value="Missing role permission" if reason == "missing_permission" else None
+                )
+                runtime.cog._record_operational_failure = mock.AsyncMock()
+                with (
+                    mock.patch.object(honeypot.discord, "Embed", _Embed),
+                    mock.patch.object(honeypot.discord, "Color", SimpleNamespace(orange=lambda: None)),
+                    mock.patch.object(runtime.cog._joinwatch_verification.preparation, "request"),
+                ):
+                    await runtime.cog.on_member_join(runtime.member)
+                self.assertEqual(runtime.pending_assignments, {})
+                self.assertEqual(runtime.pending_roles, {})
+                runtime.member.add_roles.assert_not_awaited()
+                fields = runtime.alert_channel.send.await_args.kwargs["embed"].fields
+                self.assertNotIn("CAPTCHA:", [field.name for field in fields])
+
     async def test_join_alert_keeps_captcha_status_when_scheduled_role_is_applied(self):
         for captcha_enabled in (False, True):
             with self.subTest(captcha_enabled=captcha_enabled), TemporaryDirectory() as directory:
