@@ -606,6 +606,12 @@ def _isolated_honeypot_modules(data_path: Path):
 
     discord.File = _File
 
+    class _ImageEmbed:
+        def set_image(self, *, url):
+            self.image = SimpleNamespace(url=url)
+
+    discord.Embed = _ImageEmbed
+
     class _ContextMenu:
         def __init__(self, *, name, callback):
             self.name = name

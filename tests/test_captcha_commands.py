@@ -59,6 +59,9 @@ class CaptchaCommandTests(unittest.IsolatedAsyncioTestCase):
                     await owner.rollback(guild, record["id"], 42, True, rollback["confirmation_token"])
                 self.assertEqual(lifecycle.entries, entries)
                 self.assertEqual(lifecycle.releases, [])
+                click.edit_original_response.assert_not_awaited()
+                for call in click.response.defer.await_args_list:
+                    self.assertFalse(call.kwargs.get("thinking", False))
 
     async def test_protected_member_can_practice_twice_without_changing_existing_restrictions(self):
         with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -217,6 +220,7 @@ class CaptchaCommandTests(unittest.IsolatedAsyncioTestCase):
                             permissions=SimpleNamespace(manage_messages=channel_allowed),
                             guild=SimpleNamespace(id=10), channel=object(),
                             response=SimpleNamespace(defer=mock.AsyncMock()),
+                            followup=SimpleNamespace(send=mock.AsyncMock()),
                             edit_original_response=mock.AsyncMock(),
                             message=SimpleNamespace(edit=mock.AsyncMock()),
                         )
@@ -228,6 +232,7 @@ class CaptchaCommandTests(unittest.IsolatedAsyncioTestCase):
                         else:
                             owner.pause.assert_not_awaited()
                             click.message.edit.assert_not_awaited()
+                            self.assertTrue(click.followup.send.await_args.kwargs["ephemeral"])
 
     async def test_verify_restoration_registers_shared_persistent_handler_without_publication(self):
         with TemporaryDirectory() as directory:

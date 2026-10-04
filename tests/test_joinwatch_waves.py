@@ -240,30 +240,39 @@ class JoinwatchWaveTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.wait_for(tick, timeout=5)
                 await lifecycle.close()
 
-    async def test_rollback_of_preparing_wave_allows_same_candidates_in_new_wave(self):
-        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
-            groups = importlib.import_module("NHCogs.honeypot.joinwatch_groups")
-            waves = importlib.import_module("NHCogs.honeypot.joinwatch_waves")
-            cog, guild, cfg, lifecycle, ids, now, _, _, _ = _real_lifecycle_fixture(honeypot, groups, directory)
-            try:
-                owner = waves.JoinwatchWaves(cog)
-                criteria = groups.GroupCriteria(3, 15, 6)
-                old = await owner.preview(guild, criteria, 42, now=now)
-                await owner.confirm(guild, old["id"], 42, True, now=now)
-                await owner.tick(guild, now=now)
-                self.assertEqual(await cfg.joinwatch_pending_roles(), {})
-                rollback = await owner.rollback_preview(guild, old["id"], 42, True, now=now)
-                await owner.rollback(guild, old["id"], 42, True, rollback["confirmation_token"], now=now)
-                new = await owner.preview(guild, criteria, 42, now=now)
-                await owner.confirm(guild, new["id"], 42, True, now=now)
-                await owner.tick(guild, now=now)
-                await lifecycle.preparation.wait()
-                await owner.tick(guild, now=now + timedelta(seconds=15))
-                active = await cfg.joinwatch_pending_roles()
-                self.assertEqual(set(active), {str(uid) for uid in ids})
-                self.assertTrue(all(entry["wave_id"] == new["id"] for entry in active.values()))
-            finally:
-                await lifecycle.close()
+    async def test_rollback_allows_same_candidates_in_new_wave(self):
+        for completed in (False, True):
+            with self.subTest(completed=completed), TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+                groups = importlib.import_module("NHCogs.honeypot.joinwatch_groups")
+                waves = importlib.import_module("NHCogs.honeypot.joinwatch_waves")
+                cog, guild, cfg, lifecycle, ids, now, _, _, _ = _real_lifecycle_fixture(honeypot, groups, directory)
+                try:
+                    owner = waves.JoinwatchWaves(cog)
+                    criteria = groups.GroupCriteria(3, 15, 6)
+                    old = await owner.preview(guild, criteria, 42, now=now)
+                    await owner.confirm(guild, old["id"], 42, True, now=now)
+                    await owner.tick(guild, now=now)
+                    if completed:
+                        await lifecycle.preparation.wait()
+                        await owner.tick(guild, now=now + timedelta(seconds=15))
+                        self.assertEqual((await owner.status(guild, old["id"]))["status"], "completed")
+                        self.assertEqual(set(await cfg.joinwatch_pending_roles()), {str(uid) for uid in ids})
+                    else:
+                        self.assertEqual(await cfg.joinwatch_pending_roles(), {})
+                    rollback = await owner.rollback_preview(guild, old["id"], 42, True, now=now)
+                    await owner.rollback(guild, old["id"], 42, True, rollback["confirmation_token"], now=now)
+                    self.assertEqual(await cfg.joinwatch_pending_roles(), {})
+                    self.assertEqual(await cfg.joinwatch_verified_members(), {})
+                    new = await owner.preview(guild, criteria, 42, now=now)
+                    await owner.confirm(guild, new["id"], 42, True, now=now)
+                    await owner.tick(guild, now=now)
+                    await lifecycle.preparation.wait()
+                    await owner.tick(guild, now=now + timedelta(seconds=15))
+                    active = await cfg.joinwatch_pending_roles()
+                    self.assertEqual(set(active), {str(uid) for uid in ids})
+                    self.assertTrue(all(entry["wave_id"] == new["id"] for entry in active.values()))
+                finally:
+                    await lifecycle.close()
 
     async def test_live_criteria_preview_without_history_changes_only_confirmed_future_settings(self):
         with TemporaryDirectory() as directory:

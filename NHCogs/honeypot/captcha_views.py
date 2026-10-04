@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import secrets
+import time
+from datetime import datetime, timezone
 
 import discord
 
@@ -12,12 +15,44 @@ from .captcha import generate_challenge, render_challenge
 
 VERIFY_CUSTOM_ID = "honeypot:captcha:verify"
 PANEL_TEXT = "Complete the quick check below to lift your account restriction."
+log = logging.getLogger("red.Honeypot.captcha")
+
+
+async def _acknowledge(interaction, *, thinking=False) -> None:
+    started = time.perf_counter()
+    age_ms = (datetime.now(timezone.utc) - interaction.created_at).total_seconds() * 1000
+    log.info("CAPTCHA received: interaction=%s guild=%s user=%s age_ms=%.0f",
+             interaction.id, interaction.guild_id, interaction.user.id, age_ms)
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=thinking)
+    except Exception:
+        log.exception("CAPTCHA acknowledgement failed: interaction=%s elapsed_ms=%.0f",
+                      interaction.id, (time.perf_counter() - started) * 1000)
+        raise
+    log.info("CAPTCHA acknowledged: interaction=%s elapsed_ms=%.0f",
+             interaction.id, (time.perf_counter() - started) * 1000)
+
+
+async def _edit_response(interaction, **payload) -> None:
+    started = time.perf_counter()
+    log.info("CAPTCHA reply sending: interaction=%s", interaction.id)
+    try:
+        await interaction.edit_original_response(**payload)
+    except Exception:
+        log.exception("CAPTCHA reply failed: interaction=%s elapsed_ms=%.0f",
+                      interaction.id, (time.perf_counter() - started) * 1000)
+        raise
+    log.info("CAPTCHA reply sent: interaction=%s elapsed_ms=%.0f",
+             interaction.id, (time.perf_counter() - started) * 1000)
 
 
 def _question_payload(question, stage: int) -> dict:
+    embed = discord.Embed()
+    embed.set_image(url="attachment://quick-check.webp")
     return {
         "content": f"Quick check: {stage + 1} of 2\n{question.prompt}",
-        "attachments": [discord.File(io.BytesIO(question.image_png), filename="quick-check.png")],
+        "attachments": [discord.File(io.BytesIO(question.image_webp), filename="quick-check.webp")],
+        "embed": embed,
     }
 
 
@@ -34,10 +69,12 @@ def _deadline_text(result) -> str:
 async def show_result(cog, interaction, result) -> None:
     """Update the same private reply without exposing operational metadata."""
     view = None
+    embed = None
     attachments = []
     if result.status == "question":
         payload = _question_payload(result.question, result.stage)
         content, attachments = payload["content"], payload["attachments"]
+        embed = payload["embed"]
         view = CaptchaQuestionView(cog, interaction.guild.id, interaction.user.id, result)
     elif result.status == "incorrect":
         content = "That answer wasn't correct. You can try one more full check."
@@ -62,8 +99,9 @@ async def show_result(cog, interaction, result) -> None:
         content = "We couldn't complete your check. Please DM a moderator for help." + _deadline_text(result)
     else:
         content = "A check isn't available for your restriction. Please DM a moderator for help."
-    await interaction.edit_original_response(
+    await _edit_response(interaction,
         content=content,
+        embed=embed,
         attachments=attachments,
         view=view,
         allowed_mentions=discord.AllowedMentions.none(),
@@ -73,7 +111,7 @@ async def show_result(cog, interaction, result) -> None:
 async def _current_cog(interaction):
     cog = interaction.client.get_cog("Honeypot")
     if cog is None:
-        await interaction.edit_original_response(content="Verification is temporarily unavailable. Please try Verify again shortly", view=None, attachments=[])
+        await _edit_response(interaction, content="Verification is temporarily unavailable. Please try Verify again shortly", view=None, attachments=[], embed=None)
     return cog
 
 
@@ -89,8 +127,10 @@ class CaptchaView(discord.ui.View):
     """Keep unexpected failures private while reporting them to maintainers."""
 
     async def on_error(self, interaction, error, item) -> None:
+        log.error("CAPTCHA handler failed: interaction=%s", interaction.id,
+                  exc_info=(type(error), error, error.__traceback__))
         self.cog._support.schedule_error(source="Honeypot", action="CAPTCHA interaction", error=error)
-        await interaction.edit_original_response(content="We couldn't complete your check. Please DM a moderator for help", view=None, attachments=[], allowed_mentions=discord.AllowedMentions.none())
+        await _edit_response(interaction, content="We couldn't complete your check. Please DM a moderator for help", view=None, attachments=[], embed=None, allowed_mentions=discord.AllowedMentions.none())
 
 
 class CaptchaPracticeView(CaptchaView):
@@ -121,19 +161,19 @@ class CaptchaPracticeView(CaptchaView):
 
     async def answer(self, interaction, choice=None) -> None:
         invitation = self.questions is None and self.failures == 0
-        await interaction.response.defer(ephemeral=True, thinking=invitation)
+        await _acknowledge(interaction, thinking=invitation)
         if interaction.guild is None or interaction.guild.id != self.guild_id or interaction.user.id != self.user_id:
             if invitation:
-                await interaction.edit_original_response(content="This practice is for the selected member only")
+                await _edit_response(interaction, content="This practice is for the selected member only")
             return
         if self._consumed:
             if invitation:
-                await interaction.edit_original_response(content="This practice has already started. Use your private question reply")
+                await _edit_response(interaction, content="This practice has already started. Use your private question reply")
             return
         # Claim before rendering so simultaneous clicks cannot start extra attempts.
         self._consumed = True
         next_view = None
-        payload = {"content": "Practice passed! No roles or restrictions were changed", "attachments": []}
+        payload = {"content": "Practice passed! No roles or restrictions were changed", "attachments": [], "embed": None}
         if self.questions is None:
             def prepare():
                 return tuple((item["answer"], render_challenge(item)) for item in (generate_challenge(), generate_challenge()))
@@ -150,7 +190,7 @@ class CaptchaPracticeView(CaptchaView):
             next_view = CaptchaPracticeView(self.cog, self.guild_id, self.user_id, questions=self.questions, stage=1, failures=self.failures)
         if next_view is not None and next_view.questions is not None:
             payload = _question_payload(next_view.questions[next_view.stage][1], next_view.stage)
-        await interaction.edit_original_response(**payload, view=next_view, allowed_mentions=discord.AllowedMentions.none())
+        await _edit_response(interaction, **payload, view=next_view, allowed_mentions=discord.AllowedMentions.none())
         self.stop()
 
 
@@ -166,9 +206,9 @@ class VerifyPanelView(CaptchaView):
 
     async def verify(self, interaction) -> None:
         # thinking=True creates a private reply rather than updating the public panel.
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await _acknowledge(interaction, thinking=True)
         if interaction.guild is None:
-            await interaction.edit_original_response(content="Use Verify in the server.")
+            await _edit_response(interaction, content="Use Verify in the server.")
             return
         await _start(interaction)
 
@@ -182,7 +222,7 @@ class CaptchaRetryView(CaptchaView):
         self.add_item(button)
 
     async def retry(self, interaction) -> None:
-        await interaction.response.defer(ephemeral=True)
+        await _acknowledge(interaction)
         if interaction.guild is None or interaction.guild.id != self.guild_id or interaction.user.id != self.user_id:
             return
         await _start(interaction)
@@ -207,7 +247,7 @@ class CaptchaQuestionView(CaptchaView):
             self.add_item(button)
 
     async def answer(self, interaction, choice: int) -> None:
-        await interaction.response.defer(ephemeral=True)
+        await _acknowledge(interaction)
         if interaction.guild is None or interaction.guild.id != self.guild_id or interaction.user.id != self.user_id:
             return
         async with self._lock:
