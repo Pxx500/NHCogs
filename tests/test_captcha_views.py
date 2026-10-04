@@ -16,6 +16,9 @@ from tests.test_joinwatch_verification import _runtime
 
 def interaction(user_id=20, guild_id=10, *, cog=None):
     return SimpleNamespace(
+        id=12345,
+        guild_id=guild_id,
+        created_at=datetime.now(timezone.utc),
         client=SimpleNamespace(get_cog=lambda name: cog if name == "Honeypot" else None),
         user=SimpleNamespace(id=user_id),
         guild=SimpleNamespace(id=guild_id),
@@ -70,7 +73,10 @@ class CaptchaViewTests(unittest.IsolatedAsyncioTestCase):
             with mock.patch.object(captcha.random, "SystemRandom", return_value=rng):
                 click = interaction()
                 await invitation.children[0].callback(click)
-                first = click.edit_original_response.await_args.kwargs["view"]
+                payload = click.edit_original_response.await_args.kwargs
+                self.assertEqual(payload["embed"].image.url, "attachment://quick-check.webp")
+                self.assertEqual(payload["attachments"][0].filename, "quick-check.webp")
+                first = payload["view"]
                 click = interaction()
                 await first.children[2].callback(click)
                 second = click.edit_original_response.await_args.kwargs["view"]
@@ -90,6 +96,7 @@ class CaptchaViewTests(unittest.IsolatedAsyncioTestCase):
                 result = click.edit_original_response.await_args.kwargs
                 self.assertIsNone(result["view"])
                 self.assertEqual(result["attachments"], [])
+                self.assertIsNone(result["embed"])
                 self.assertIn("attempts", result["content"])
                 self.assertIn("No restrictions", result["content"])
 
@@ -107,10 +114,26 @@ class CaptchaViewTests(unittest.IsolatedAsyncioTestCase):
                 cog = SimpleNamespace(_joinwatch_verification=owner)
                 click.client.get_cog = lambda name: cog
                 panel = views.VerifyPanelView(cog)
-                await panel.children[0].callback(click)
+                with self.assertLogs("red.Honeypot.captcha", level="INFO") as captured:
+                    await panel.children[0].callback(click)
+                for event in ("received", "acknowledged", "reply sending", "reply sent"):
+                    self.assertTrue(any(f"CAPTCHA {event}:" in line for line in captured.output))
                 owner.start.assert_awaited_once_with(click.user)
                 click.edit_original_response.assert_awaited_once()
                 self.assertIn("preparing", click.edit_original_response.await_args.kwargs["content"].lower())
+
+    async def test_failed_acknowledgement_is_logged_before_question_work(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)):
+            views = importlib.import_module("NHCogs.honeypot.captcha_views")
+            click = interaction()
+            click.response.defer.side_effect = RuntimeError("Connection lost")
+            owner = SimpleNamespace(start=mock.AsyncMock())
+            panel = views.VerifyPanelView(SimpleNamespace(_joinwatch_verification=owner))
+            with self.assertLogs("red.Honeypot.captcha", level="INFO") as captured:
+                with self.assertRaisesRegex(RuntimeError, "Connection lost"):
+                    await panel.children[0].callback(click)
+            self.assertTrue(any("acknowledgement failed" in line for line in captured.output))
+            owner.start.assert_not_awaited()
 
     async def test_question_is_private_numbered_and_rejects_other_participants(self):
         with TemporaryDirectory() as directory:
@@ -126,14 +149,14 @@ class CaptchaViewTests(unittest.IsolatedAsyncioTestCase):
                 wrong = interaction(user_id=21)
                 await view.children[0].callback(wrong)
                 owner.submit.assert_not_awaited()
-                wrong.response.defer.assert_awaited_once_with(ephemeral=True)
+                wrong.response.defer.assert_awaited_once_with(ephemeral=True, thinking=False)
 
     async def test_parallel_answers_consume_only_one_stage_and_update_the_private_reply(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
                 views = importlib.import_module("NHCogs.honeypot.captcha_views")
                 started, finish = asyncio.Event(), asyncio.Event()
-                result = SimpleNamespace(status="question", session_id="next-session", stage=1, incident_id="same-incident", question=SimpleNamespace(prompt="Count circles", image_png=b"png"))
+                result = SimpleNamespace(status="question", session_id="next-session", stage=1, incident_id="same-incident", question=SimpleNamespace(prompt="Count circles", image_webp=b"webp"))
 
                 async def submit(*args):
                     started.set()
@@ -148,13 +171,14 @@ class CaptchaViewTests(unittest.IsolatedAsyncioTestCase):
                 await started.wait()
                 duplicate = asyncio.create_task(view.children[1].callback(second))
                 await asyncio.sleep(0)
-                second.response.defer.assert_awaited_once_with(ephemeral=True)
+                second.response.defer.assert_awaited_once_with(ephemeral=True, thinking=False)
                 finish.set()
                 await asyncio.gather(pending, duplicate)
                 owner.submit.assert_awaited_once_with(first.user, "first-session", 0, 0)
                 first.edit_original_response.assert_awaited_once()
                 self.assertIn("2 of 2", first.edit_original_response.await_args.kwargs["content"])
-                self.assertEqual(first.edit_original_response.await_args.kwargs["attachments"][0].filename, "quick-check.png")
+                self.assertEqual(first.edit_original_response.await_args.kwargs["attachments"][0].filename, "quick-check.webp")
+                self.assertEqual(first.edit_original_response.await_args.kwargs["embed"].image.url, "attachment://quick-check.webp")
                 second.edit_original_response.assert_not_awaited()
 
     async def test_exhausted_attempts_show_dm_and_real_deadline_without_controls(self):

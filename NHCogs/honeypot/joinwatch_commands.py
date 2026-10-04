@@ -515,7 +515,7 @@ def _can_manage(interaction, owner_id, cog) -> bool:
 class ModeratorConfirmationView(discord.ui.View):
     async def on_error(self, interaction, error, item) -> None:
         self.cog._support.schedule_error(source="Honeypot", action="JoinWatch confirmation", error=error)
-        await interaction.edit_original_response(content="The operation couldn't be completed. Check the moderator log before retrying", view=None, allowed_mentions=discord.AllowedMentions.none())
+        await interaction.followup.send(content="The operation couldn't be completed. Check the moderator log before retrying", ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
 
 class CriteriaConfirmationView(ModeratorConfirmationView):
@@ -571,9 +571,9 @@ class WaveControlView(ModeratorConfirmationView):
             self.add_item(button)
 
     async def control(self, interaction, action):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(ephemeral=True, thinking=action == "rollback")
         if not _can_manage(interaction, self.owner_id, self.cog):
-            await interaction.edit_original_response(content="Only the moderator who opened this wave can control it, with Manage Messages in a private channel.")
+            await interaction.followup.send(content="Only the moderator who opened this wave can control it, with Manage Messages in a private channel.", ephemeral=True)
             return
         owner = self.cog._joinwatch_waves
         try:
@@ -583,10 +583,9 @@ class WaveControlView(ModeratorConfirmationView):
                 return
             record = await getattr(owner, action)(interaction.guild, self.wave_id, interaction.user.id, True)
         except ValueError as error:
-            await interaction.edit_original_response(content=str(error), allowed_mentions=discord.AllowedMentions.none())
+            await interaction.followup.send(content=str(error), ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
             return
         await interaction.message.edit(embed=wave_embed(record), view=WaveControlView(self.cog, record), allowed_mentions=discord.AllowedMentions.none())
-        await interaction.edit_original_response(content=f"Wave state: {record['status']}")
 
 
 class WaveRollbackView(ModeratorConfirmationView):

@@ -27,9 +27,9 @@ class CaptchaTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(matches, [descriptor["answer"]])
                 question = captcha.render_challenge(descriptor)
                 self.assertNotIn("answer", question.prompt)
-                with Image.open(io.BytesIO(question.image_png)) as image:
+                with Image.open(io.BytesIO(question.image_webp)) as image:
                     self.assertEqual(image.size, (900, 620))
-                    self.assertEqual(image.format, "PNG")
+                    self.assertEqual(image.format, "WEBP")
 
     async def test_preparation_deduplicates_and_refuses_work_above_capacity(self):
         with TemporaryDirectory() as directory:
