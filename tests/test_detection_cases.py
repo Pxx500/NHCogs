@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import sys
 import types
@@ -70,7 +71,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
                 )
             }
 
-        self.assertEqual(version, 5)
+        self.assertEqual(version, 6)
         self.assertIn("detection_cases", tables)
         self.assertIn("detection_attachments", tables)
         self.assertIn("public_daily_stats", tables)
@@ -90,7 +91,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
 
         self.assertEqual(snapshot.case.case_id, stored_case.case_id)
         self.assertEqual(snapshot.messages[0].message_id, 40)
-        self.assertEqual(version, 5)
+        self.assertEqual(version, 6)
 
     def test_initialize_preserves_timeline_publications_from_previous_schema(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
@@ -182,6 +183,54 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertEqual(snapshot.publication_message_id, 400)
         self.assertTrue(reopened.record_wave_enrollment(100, occurred_at, "new"))
         self.assertEqual(reopened.get_daily_stats(100, occurred_at.date()).wave_guests, 1)
+
+    def test_rolled_back_wave_guests_are_retracted_once_from_original_day(self):
+        enrolled_at = datetime(2026, 10, 3, 23, 59, tzinfo=timezone.utc)
+        self.store.record_wave_enrollment(100, enrolled_at, "old-attempt")
+        self.store.record_wave_enrollment(200, enrolled_at, "old-attempt")
+        self.store.record_daily_stat(100, enrolled_at, "joinwatch_bans")
+        wave = {"id": "old-wave", "status": "rolling_back", "entries": {
+            "20": {"incident_id": "old-attempt", "status": "releasing"},
+        }}
+        self.store.save_joinwatch_wave(100, wave)
+        self.assertEqual(self.store.get_daily_stats(100, enrolled_at.date()).wave_guests, 1)
+        wave["entries"]["20"]["status"] = "released"
+        self.store.save_joinwatch_wave(100, wave)
+        self.store.save_joinwatch_wave(100, wave)
+        self.assertEqual(self.store.get_daily_stats(100, enrolled_at.date()).wave_guests, 0)
+        self.assertEqual(self.store.get_daily_stats(100, enrolled_at.date()).joinwatch_bans, 1)
+        self.assertEqual(self.store.get_daily_stats(200, enrolled_at.date()).wave_guests, 1)
+        self.assertFalse(self.store.record_wave_enrollment(100, enrolled_at, "old-attempt"))
+        next_day = enrolled_at + timedelta(minutes=2)
+        self.store.record_wave_enrollment(100, next_day, "new-attempt-same-member")
+        self.assertEqual(self.store.get_daily_stats(100, next_day.date()).wave_guests, 1)
+
+    def test_upgrade_reconciles_previously_rolled_back_test_rounds(self):
+        enrolled_at = datetime(2026, 10, 4, 12, tzinfo=timezone.utc)
+        entries = {}
+        for index in range(214):
+            incident_id = f"attempt-{index}"
+            self.store.record_wave_enrollment(100, enrolled_at, incident_id)
+            if index < 113:
+                entries[str(index)] = {"incident_id": incident_id, "status": "released"}
+        wave = {"id": "old-wave", "status": "rolled_back", "entries": entries}
+        # Persist the old version's state, where rollback didn't adjust statistics.
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
+            connection.execute(
+                "INSERT INTO joinwatch_waves (guild_id, wave_id, record) VALUES (?, ?, ?)",
+                (100, wave["id"], json.dumps(wave)),
+            )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(public_wave_enrollments)")}
+            if "rolled_back" in columns:
+                connection.execute("ALTER TABLE public_wave_enrollments DROP COLUMN rolled_back")
+            connection.execute("PRAGMA user_version = 5")
+        self.assertEqual(self.store.get_daily_stats(100, enrolled_at.date()).wave_guests, 214)
+        reopened = DetectionCaseStore(self.database_path)
+        reopened.initialize()
+        self.assertEqual(reopened.get_daily_stats(100, enrolled_at.date()).wave_guests, 101)
+        reopened.initialize()
+        reopened.save_joinwatch_wave(100, wave)
+        self.assertEqual(reopened.get_daily_stats(100, enrolled_at.date()).wave_guests, 101)
 
     def test_daily_stats_can_observe_a_zero_activity_day(self):
         report_date = date(2026, 8, 19)
@@ -486,7 +535,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertIn("description", columns)
         self.assertIn("spoiler", columns)
         self.assertEqual(row, ("legacy.png", None, 0))
-        self.assertEqual(version, 5)
+        self.assertEqual(version, 6)
 
     def test_projection_endpoint_survives_store_restart(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)

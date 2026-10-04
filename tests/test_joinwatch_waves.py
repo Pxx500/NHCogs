@@ -319,12 +319,19 @@ class JoinwatchWaveTests(unittest.IsolatedAsyncioTestCase):
                         await owner.tick(guild, now=now + timedelta(seconds=15))
                         self.assertEqual((await owner.status(guild, old["id"]))["status"], "completed")
                         self.assertEqual(set(await cfg.joinwatch_pending_roles()), {str(uid) for uid in ids})
+                        report_dates = {datetime.fromisoformat(entry["effect_at"]).date()
+                                        for entry in (await cfg.joinwatch_pending_roles()).values()}
+                        self.assertEqual(sum(cog._case_store.get_daily_stats(guild.id, day).wave_guests
+                                             for day in report_dates), len(ids))
                     else:
                         self.assertEqual(await cfg.joinwatch_pending_roles(), {})
                     rollback = await owner.rollback_preview(guild, old["id"], 42, True, now=now)
                     await owner.rollback(guild, old["id"], 42, True, rollback["confirmation_token"], now=now)
                     self.assertEqual(await cfg.joinwatch_pending_roles(), {})
                     self.assertEqual(await cfg.joinwatch_verified_members(), {})
+                    if completed:
+                        self.assertEqual(sum(cog._case_store.get_daily_stats(guild.id, day).wave_guests
+                                             for day in report_dates), 0)
                     new = await owner.preview(guild, criteria, 42, now=now)
                     await owner.confirm(guild, new["id"], 42, True, now=now)
                     await owner.tick(guild, now=now)
