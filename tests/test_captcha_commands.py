@@ -3,6 +3,7 @@
 import copy
 import importlib
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -12,15 +13,58 @@ from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
 from tests.test_captcha_views import interaction
 from tests.test_daily_stats import _Embed
 from tests.test_joinwatch_verification import _runtime
+from tests.test_joinwatch_waves import _fixture
 from tests.test_settings_commands import _OverviewEmbed, _ScalarSetting
 
 
 class CaptchaCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wave_controls_toggle_and_finish_without_releasing_accounts(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            groups = importlib.import_module("NHCogs.honeypot.joinwatch_groups")
+            waves = importlib.import_module("NHCogs.honeypot.joinwatch_waves")
+            cog, guild, _, lifecycle, _, now, _, _ = _fixture(groups, count=3)
+            owner = waves.JoinwatchWaves(cog)
+            cog._joinwatch_waves = owner
+            cog._channel_is_private = lambda *args: True
+            record = await owner.preview(guild, groups.GroupCriteria(3, 15, 6), 42, now=now)
+            record = await owner.confirm(guild, record["id"], 42, True, now=now)
+            view = honeypot.joinwatch_commands.WaveControlView(cog, record)
+            self.assertEqual([button.label for button in view.children], ["Pause", "Rollback"])
+            click = SimpleNamespace(user=SimpleNamespace(id=42), guild=guild, channel=object(),
+                                    permissions=SimpleNamespace(manage_messages=True),
+                                    response=SimpleNamespace(defer=mock.AsyncMock()),
+                                    edit_original_response=mock.AsyncMock(), message=SimpleNamespace(edit=mock.AsyncMock()))
+            with mock.patch.object(honeypot.discord, "Embed", _OverviewEmbed):
+                with self.assertRaises(ValueError):
+                    await owner.finish(guild, record["id"], 42, True)
+                await view.children[0].callback(click)
+                paused = click.message.edit.await_args.kwargs["view"]
+                self.assertEqual([button.label for button in paused.children], ["Resume", "Rollback"])
+                await paused.children[0].callback(click)
+                self.assertEqual([button.label for button in click.message.edit.await_args.kwargs["view"].children], ["Pause", "Rollback"])
+                await owner.tick(guild, now=now)
+                record = await owner.status(guild, record["id"])
+                completed = honeypot.joinwatch_commands.WaveControlView(cog, record)
+                self.assertEqual([button.label for button in completed.children], ["Rollback", "Mark finished"])
+                rollback = await owner.rollback_preview(guild, record["id"], 42, True)
+                entries = copy.deepcopy(lifecycle.entries)
+                await completed.children[1].callback(click)
+                self.assertEqual(click.message.edit.await_args.kwargs["view"].children, [])
+                restored = await waves.JoinwatchWaves(cog).restore(guild)
+                self.assertEqual(restored[0]["status"], "finished")
+                self.assertEqual(honeypot.joinwatch_commands.WaveControlView(cog, restored[0]).children, [])
+                with self.assertRaises(ValueError):
+                    await owner.rollback_preview(guild, record["id"], 42, True)
+                with self.assertRaises(ValueError):
+                    await owner.rollback(guild, record["id"], 42, True, rollback["confirmation_token"])
+                self.assertEqual(lifecycle.entries, entries)
+                self.assertEqual(lifecycle.releases, [])
+
     async def test_protected_member_can_practice_twice_without_changing_existing_restrictions(self):
         with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
             runtime = _runtime(honeypot)
             runtime.cog._is_protected_member.return_value = True
-            runtime.cog._channel_is_private = lambda *args: True
+            runtime.cog._channel_is_private = lambda *args: False
             runtime.cog._joinwatch_verification = runtime.owner
             original = copy.deepcopy(runtime.raw)
             ctx = SimpleNamespace(guild=runtime.member.guild, channel=object(), author=SimpleNamespace(id=99), send=mock.AsyncMock())
@@ -113,18 +157,33 @@ class CaptchaCommandTests(unittest.IsolatedAsyncioTestCase):
                 owner.inspect.assert_not_awaited()
                 self.assertIn("private", ctx.send.await_args.args[0].lower())
 
-    async def test_sample_stats_can_be_sent_in_public_without_reading_configuration(self):
+    async def test_stats_preview_uses_current_guild_day_and_shows_zero_fields_without_publishing(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = SimpleNamespace(guild=mock.Mock(side_effect=AssertionError("Protected config read")))
-                ctx = SimpleNamespace(send=mock.AsyncMock())
-                with mock.patch.object(honeypot.discord, "Embed", _Embed), mock.patch.object(honeypot.discord, "Color", SimpleNamespace(blue=lambda: 1)):
+                cog._case_store.initialize()
+                now = datetime(2026, 10, 4, 12, tzinfo=timezone.utc)
+                cog._case_store.record_daily_stat(10, now, "detections")
+                for _ in range(3):
+                    cog._case_store.record_daily_stat(10, now - timedelta(days=1), "detections")
+                    cog._case_store.record_daily_stat(99, now, "detections")
+                before = cog._case_store.get_daily_stats(10, now.date())
+                ctx = SimpleNamespace(guild=SimpleNamespace(id=10), send=mock.AsyncMock())
+                with mock.patch.object(honeypot.daily_stats, "datetime", SimpleNamespace(now=lambda tz: now)), mock.patch.object(honeypot.discord, "Embed", _Embed), mock.patch.object(honeypot.discord, "Color", SimpleNamespace(blue=lambda: 1)):
+                    await cog.honeypot_stats_preview(ctx)
+                    embed = ctx.send.await_args.kwargs['embed']
+                    self.assertEqual(embed.title, "Daily summary preview - 2026-10-04 UTC")
+                    self.assertIn("Detections: 1\n", embed.fields[0].value)
+                    self.assertIn("Extra party guests", embed.fields[1].value)
+                    self.assertTrue(embed.fields[1].value.endswith(": 0"))
+                    self.assertEqual(cog._case_store.get_daily_stats(10, now.date()), before)
+                    cog._case_store.record_wave_enrollment(10, now, "actual-wave-entry")
+                    before = cog._case_store.get_daily_stats(10, now.date())
                     await cog.honeypot_stats_preview(ctx)
                 embed = ctx.send.await_args.kwargs['embed']
-                self.assertEqual(embed.title, "Daily summary preview (sample data)")
-                self.assertIn("Extra party guests", embed.fields[1].value)
-                self.assertIn(": 40", embed.fields[1].value)
+                self.assertTrue(embed.fields[1].value.endswith(": 1"))
+                self.assertEqual(cog._case_store.get_daily_stats(10, now.date()), before)
                 self.assertFalse(ctx.send.await_args.kwargs['allowed_mentions'].users)
 
     async def test_criteria_confirmation_checks_owner_and_current_permissions(self):
@@ -149,7 +208,7 @@ class CaptchaCommandTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 for guild_allowed, channel_allowed in ((False, True), (True, False)):
                     with self.subTest(guild_allowed=guild_allowed, channel_allowed=channel_allowed):
-                        record = {"id": "wave", "moderator_id": 20, "status": "paused", "criteria": {"minimum_accounts": 5, "join_window_minutes": 15, "creation_distance_hours": 6}}
+                        record = {"id": "wave", "moderator_id": 20, "status": "running", "criteria": {"minimum_accounts": 5, "join_window_minutes": 15, "creation_distance_hours": 6}}
                         owner = SimpleNamespace(pause=mock.AsyncMock(return_value=record))
                         cog = SimpleNamespace(_joinwatch_waves=owner, _channel_is_private=lambda *args: True)
                         view = honeypot.joinwatch_commands.WaveControlView(cog, record)

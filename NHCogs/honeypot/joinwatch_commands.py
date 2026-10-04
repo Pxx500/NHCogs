@@ -556,10 +556,12 @@ class WaveControlView(ModeratorConfirmationView):
         super().__init__(timeout=None)
         self.cog, self.wave_id = cog, record["id"]
         self.owner_id = record["moderator_id"]
-        preview = record.get("status") == "preview"
-        labels = [(f"Start wave ({record.get('new', 0)})", "confirm"), ("Cancel", "cancel")] if preview else [("Pause", "pause"), ("Resume", "resume"), ("Rollback", "rollback")]
-        if record.get("status") in {"cancelled", "rolled_back"}:
-            labels = []
+        labels = {
+            "preview": [(f"Start wave ({record.get('new', 0)})", "confirm"), ("Cancel", "cancel")],
+            "running": [("Pause", "pause"), ("Rollback", "rollback")],
+            "paused": [("Resume", "resume"), ("Rollback", "rollback")],
+            "completed": [("Rollback", "rollback"), ("Mark finished", "finish")],
+        }.get(record.get("status"), [])
         for label, action in labels:
             button = discord.ui.Button(label=label, style=discord.ButtonStyle.danger if action == "rollback" else discord.ButtonStyle.secondary, custom_id=f"honeypot:wave:{self.wave_id}:{action}")
 
