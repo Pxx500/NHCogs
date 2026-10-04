@@ -186,6 +186,39 @@ def _real_lifecycle_fixture(honeypot, groups, directory, *, count=3):
 
 
 class JoinwatchWaveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_notification_failure_keeps_batch_cooldown_after_resume(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            groups = importlib.import_module("NHCogs.honeypot.joinwatch_groups")
+            waves = importlib.import_module("NHCogs.honeypot.joinwatch_waves")
+            cog, guild, cfg, lifecycle, _, now, sent, _, _ = _real_lifecycle_fixture(
+                honeypot, groups, directory, count=10
+            )
+            owner = waves.JoinwatchWaves(cog)
+            channel = guild.get_channel(88)
+            send = channel.send
+            channel.send = AsyncMock(side_effect=ConnectionError("Invitation outcome unknown"))
+            guild.get_channel = lambda _: channel
+            try:
+                record = await owner.preview(guild, groups.GroupCriteria(3, 15, 6), 42, now=now)
+                await owner.confirm(guild, record["id"], 42, True, now=now)
+                await owner.tick(guild, now=now)
+                await lifecycle.preparation.wait()
+                with self.assertRaises(ConnectionError):
+                    await owner.tick(guild, now=now + timedelta(seconds=5))
+                self.assertEqual(len(await cfg.joinwatch_pending_roles()), 5)
+                await owner.resume(guild, record["id"], 42, True)
+                channel.send = send
+                await owner.tick(guild, now=now + timedelta(seconds=10))
+                await lifecycle.preparation.wait()
+                await owner.tick(guild, now=now + timedelta(seconds=14))
+                self.assertEqual(len(await cfg.joinwatch_pending_roles()), 5)
+                self.assertEqual(sent, [])
+                await owner.tick(guild, now=now + timedelta(seconds=20))
+                self.assertEqual(len(await cfg.joinwatch_pending_roles()), 10)
+                self.assertEqual(len(sent), 1)
+            finally:
+                await lifecycle.close()
+
     async def test_real_preparation_does_not_add_a_second_batch_cooldown(self):
         with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
             groups = importlib.import_module("NHCogs.honeypot.joinwatch_groups")

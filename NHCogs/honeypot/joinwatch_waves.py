@@ -221,7 +221,7 @@ class JoinwatchWaves:
                 await self._save(guild, record)
             return list(records.values())
 
-    async def _advance(self, guild, wave_id, uid, *, activate=True):
+    async def _advance(self, guild, wave_id, uid, *, activate=True, now=None):
         lifecycle = self.cog._joinwatch_verification
         member = guild.get_member(int(uid))
         result_status = "absent" if member is None else (await lifecycle.eligibility(member)).status
@@ -257,6 +257,7 @@ class JoinwatchWaves:
             await lifecycle.check_configuration(guild)
             # Persist before any role effect. A crash here is never silently retried.
             entry.update(status="enrolling", incident_id=prepared.incident_id)
+            record["last_batch_at"] = (now or datetime.now(timezone.utc)).isoformat()
             await self._save(guild, record)
             result = await lifecycle.enroll_prepared(member, source="wave", reasons=("group",), wave_id=wave_id)
             if result.status == "enrolled":
@@ -290,7 +291,7 @@ class JoinwatchWaves:
                 break
         return selected
 
-    async def _notify(self, guild, wave_id) -> bool:
+    async def _notify(self, guild, wave_id, *, now=None) -> bool:
         async with self._lock(guild):
             record = await self.status(guild, wave_id)
             if record["status"] != "running":
@@ -310,6 +311,7 @@ class JoinwatchWaves:
                 return False
             for uid in selected:
                 record["entries"][uid]["status"] = "notifying"
+            record["last_batch_at"] = (now or datetime.now(timezone.utc)).isoformat()
             await self._save(guild, record)
             content = " ".join(f"<@{uid}>" for uid in selected) + "\n" + NOTIFICATION_TEXT
             kwargs = {"allowed_mentions": discord.AllowedMentions(
@@ -354,8 +356,8 @@ class JoinwatchWaves:
             try:
                 activated = False
                 for uid in queued:
-                    activated = await self._advance(guild, record["id"], uid, activate=not cooling_down) or activated
-                notified = await self._notify(guild, record["id"]) if not cooling_down else False
+                    activated = await self._advance(guild, record["id"], uid, activate=not cooling_down, now=now) or activated
+                notified = await self._notify(guild, record["id"], now=now) if not cooling_down else False
             except Exception:
                 async with self._lock(guild):
                     failed = await self.status(guild, record["id"])
