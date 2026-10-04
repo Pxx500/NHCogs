@@ -22,10 +22,7 @@ from .joinwatch_groups import (
 WAVE_BATCH_SIZE = 5
 WAVE_INTERVAL_SECONDS = 15
 WAVE_RETENTION_DAYS = 90
-NOTIFICATION_TEXT = (
-    "Your account has been flagged as a possible spam account. "
-    "Please complete the CAPTCHA below to lift this restriction"
-)
+NOTIFICATION_TEXT = "Please complete the verification below"
 CRITICAL_CONFIGURATION = (
     "joinwatch_auto_role_id", "joinwatch_auto_role_timer_minutes", "joinwatch_auto_role_action",
     "joinwatch_auto_role_enabled",
@@ -157,6 +154,20 @@ class JoinwatchWaves:
             if record["status"] == "running":
                 record["status"] = "paused"
                 await self._save(guild, record)
+            return record
+
+    async def finish(self, guild, wave_id, moderator_id, can_manage_messages, *, now=None):
+        """Close a completed wave's controls without settling its member restrictions."""
+        async with self._lock(guild):
+            record = await self.status(guild, wave_id)
+            self._authorize(record, moderator_id, can_manage_messages)
+            if record["status"] == "finished":
+                return record
+            if record["status"] != "completed":
+                raise ValueError("Wait for the wave to complete before marking it finished")
+            record["status"] = "finished"
+            record.pop("rollback", None)
+            await self._save(guild, record)
             return record
 
     async def resume(self, guild, wave_id, moderator_id, can_manage_messages, *, now=None):
@@ -305,7 +316,7 @@ class JoinwatchWaves:
             # The same persistent Verify handler handles invitations and the main panel.
             kwargs["view"] = VerifyPanelView(self.cog)
             try:
-                message = await channel.send(content, **kwargs)
+                message = await channel.send(content, delete_after=25, **kwargs)
             except Exception:
                 for uid in selected:
                     record["entries"][uid].update(status="uncertain", reason="notification_outcome_unknown")
@@ -363,6 +374,8 @@ class JoinwatchWaves:
         async with self._lock(guild):
             record = await self.status(guild, wave_id)
             self._authorize(record, moderator_id, can_manage_messages)
+            if record["status"] == "finished":
+                raise ValueError("This wave is finished and can no longer be rolled back")
             targets = []
             for uid, entry in record["entries"].items():
                 active = await self.cog._joinwatch_verification.inspect_id(guild, int(uid))
@@ -380,6 +393,8 @@ class JoinwatchWaves:
         async with self._lock(guild):
             record = await self.status(guild, wave_id)
             self._authorize(record, moderator_id, can_manage_messages)
+            if record["status"] == "finished":
+                raise ValueError("This wave is finished and can no longer be rolled back")
             rollback = record.get("rollback")
             if not rollback or rollback["token"] != confirmation_token or utc_timestamp(rollback["expires_at"]) <= (now or datetime.now(timezone.utc)):
                 raise ValueError("Rollback confirmation expired or changed")
@@ -441,7 +456,7 @@ class JoinwatchWaves:
             owned_waves = {entry.get("wave_id") for entry in active_roles.values()}
             stale = [key for key, record in records.items()
                      if key not in owned_waves and ((record["status"] in {"preview", "cancelled"} and utc_timestamp(record["expires_at"]) < observed)
-                     or (record["status"] in {"completed", "rolled_back"} and utc_timestamp(record.get("completed_at", record["created_at"])) < cutoff))]
+                     or (record["status"] in {"completed", "finished", "rolled_back"} and utc_timestamp(record.get("completed_at", record["created_at"])) < cutoff))]
             for key in stale:
                 await asyncio.to_thread(self.cog._case_store.delete_joinwatch_wave, guild.id, key)
             return len(stale)

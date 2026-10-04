@@ -188,6 +188,8 @@ For protected members, `captcha test` instead offers a Try CAPTCHA button usable
 
 CAPTCHA updates the existing private JoinWatch alert instead of posting each event separately. If there is no alert, the JoinWatch publisher creates one in the configured CAPTCHA log channel. Its message reference survives reloads with the incident. Verify panels are rebound on cog reload, and active question/retry buttons use the current cog.
 
+New wave invitations include the member mentions, a short verification prompt, and Verify. They are scheduled for deletion after 25 seconds, leaving the permanent panel and member timers unchanged. Old invitations aren't cleaned up. Pending invitation deletions don't survive a full bot restart.
+
 An explicit `joinwatch captcha true` also admits existing valid JoinWatch timers, including entries created while CAPTCHA was off. It reports the admitted count and prepares questions in the bounded background queue. Role assignments, deadlines, already used attempts, and existing question progress stay unchanged. Repeating `true` doesn't reset checks. Startup restoration alone doesn't adopt unknown old timers.
 
 Group criteria support 2–100000 distinct accounts, a 1–1440 minute join window, and a 1–8760 hour creation-distance window. They compare creation dates against each triggering account, not a chain of similarities. A rejoin doesn't add another participant. Absent and banned historical participants still count toward the original cohort. Only current, eligible, unprotected members receive restrictions.
@@ -196,7 +198,7 @@ Automatic group-only checks default to at most 50 active or reserved entries and
 
 Criteria changes show the previous and proposed values, data completeness, current matches, already handled accounts, exclusions, and new eligible accounts. Confirm and Cancel belong to the moderator who opened the preview, with Manage Messages checked again at the click. Expired or stale previews cannot change settings. Confirming criteria changes future joins only, not historical members.
 
-`wave` is a leaf command. It saves a fixed candidate list, sends a private candidate attachment, and offers Start wave with the new-account count. Start rechecks eligibility and never grows the saved list. The private progress message has persistent Pause, Resume, and Rollback controls. Pause stops new role assignments and invitations, not existing ban deadlines or participants' ability to pass. Restart pauses unfinished waves until explicit Resume. Rollback needs a second confirmation and settles only that wave's own reasons and timers, keeping independent moderation restrictions. Invitations name at most five newly restricted members every 15 seconds and use the same Verify handler. Uncertain sends are never silently repeated.
+`wave` is a leaf command. It saves a fixed candidate list, sends a private candidate attachment, and offers Start wave with the new-account count. Start rechecks eligibility and never grows the saved list. The private progress message shows Pause while running and Resume while paused, next to Rollback. After completion it shows Rollback and Mark finished. Mark finished permanently closes the controls without changing roles, timers, or CAPTCHA access. Pause stops new role assignments and invitations, not existing ban deadlines or participants' ability to pass. Restart pauses unfinished waves until explicit Resume. Rollback needs a second confirmation and settles only that wave's own reasons and timers, keeping independent moderation restrictions. Invitations name at most five newly restricted members every 15 seconds and use the same Verify handler. Uncertain sends are never silently repeated.
 
 History imports accept version 1 JSON, at most 20 MiB per file and 200000 observations in total. Top-level fields are `version`, `guild_id`, `source`, `generated_at`, `range_start`, `range_end`, `complete`, and `observations`. Each observation contains `user_id` and `first_joined_at`. IDs are Discord IDs as decimal strings. Dates are UTC ISO timestamps. The source range must contain the observed first joins and end no later than generation. Imported rows preserve the earliest observed first join, including absent or banned participants. Import is idempotent and doesn't infer historical first joins from a member's current rejoin date. Keep these history files private.
 
@@ -232,7 +234,7 @@ Groups: `[p]honeypot stats`, `[p]honeypot config`
 | Command | What it does |
 |---|---|
 | `[p]honeypot stats show` | Show aggregate server statistics |
-| `[p]honeypot stats preview` | Send a sample daily summary in the invocation channel without changing counters or publication state |
+| `[p]honeypot stats preview` | Preview this server's current UTC-day statistics in the invocation channel, including zero fields, without changing counters or publication state |
 | `[p]honeypot stats channel [channel/clear]` | Daily summary destination |
 | `[p]honeypot modstats` | Moderator counters and current workload |
 | `[p]honeypot doctor` | Privately check configuration, permissions, and runtime health |
@@ -253,7 +255,7 @@ Groups: `[p]honeypot stats`, `[p]honeypot config`
 
 Daily summaries are published at 00:05 UTC for the completed UTC day. They contain detections, automated bans, manual bans, JoinWatch shadowbans, and JoinWatch bans. Only completed effects count, not failed actions, dry runs, or retries. Historical totals are not backfilled into dated statistics. Clearing the destination disables publication.
 
-Historical wave enrollments add `Extra party guests` with the configured `boubs_ultra` emoji only on days with a positive count. This counts unique accounts actually restricted by an approved wave, not bans, previews, pings, tests, or already enrolled members. Ordinary JoinWatch entries remain in their existing line. `stats preview` uses the same renderer with 40 sample wave accounts and the title `Daily summary preview (sample data)`. It can be posted publicly by a moderator and never changes the real counters or schedule.
+Historical wave enrollments add `Extra party guests` with the configured `boubs_ultra` emoji only on days with a positive count. This counts unique accounts actually restricted by an approved wave, not bans, previews, pings, tests, or already enrolled members. Ordinary JoinWatch entries remain in their existing line. `stats preview` uses the same renderer with real counters for the current UTC day, not the previous completed day. It also shows normally hidden zero-count fields, including `Extra party guests: 0`, without inventing sample values. It can be posted publicly by a moderator and never changes the counters or publication schedule.
 
 ### Research and maintenance
 

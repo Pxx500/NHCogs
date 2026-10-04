@@ -77,9 +77,6 @@ async def restore_panels(cog) -> None:
 
 
 async def test(cog, ctx, member) -> None:
-    if not _private(cog, ctx):
-        await ctx.send("Run this command in a private moderator channel")
-        return
     if member.bot:
         await ctx.send("Bots can't take the CAPTCHA test", allowed_mentions=discord.AllowedMentions.none())
         return

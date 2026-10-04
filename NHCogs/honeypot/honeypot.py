@@ -2694,8 +2694,8 @@ class Honeypot(Cog):
     @honeypot_stats_group.command(name="preview")
     @commands.has_permissions(manage_messages=True)
     async def honeypot_stats_preview(self, ctx: commands.Context) -> None:
-        """Show a sample daily report without writing real statistics"""
-        await ctx.send(embed=daily_stats.build_preview_embed(bot=self.bot), allowed_mentions=discord.AllowedMentions.none())
+        """Preview today's UTC report with real counts, including zero fields"""
+        await ctx.send(embed=await daily_stats.build_preview_embed(self, ctx.guild), allowed_mentions=discord.AllowedMentions.none())
 
     @debug.command(name="resetstats")
     @commands.has_permissions(manage_messages=True)

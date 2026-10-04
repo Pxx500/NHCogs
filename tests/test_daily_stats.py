@@ -59,32 +59,6 @@ class DailyStatsPublisherTests(unittest.IsolatedAsyncioTestCase):
                 bot.get_emoji.assert_called_once_with(1136376151485468803)
                 bot.fetch_emoji.assert_not_awaited()
 
-    async def test_preview_renders_sample_wave_guests_without_changing_real_stats(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                store = honeypot.DetectionCaseStore(Path(directory) / "daily.sqlite")
-                store.initialize()
-                report_date = date(2026, 10, 3)
-                before = store.get_daily_stats(100, report_date)
-                bot = SimpleNamespace(get_emoji=mock.Mock(return_value=None))
-                with (
-                    mock.patch.object(honeypot.daily_stats.discord, "Embed", _Embed),
-                    mock.patch.object(
-                        honeypot.daily_stats.discord,
-                        "Color",
-                        SimpleNamespace(blue=mock.Mock(return_value="blue")),
-                    ),
-                ):
-                    preview = honeypot.daily_stats.build_preview_embed(bot=bot)
-
-                self.assertEqual(preview.title, "Daily summary preview (sample data)")
-                self.assertEqual([field.name for field in preview.fields], ["Honeypot", "JoinWatch"])
-                self.assertIn(
-                    "Extra party guests <:boubs_ultra:1136376151485468803>: 40",
-                    preview.fields[1].value,
-                )
-                self.assertEqual(store.get_daily_stats(100, report_date), before)
-
     async def test_schedule_becomes_due_at_five_minutes_after_midnight_utc(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -143,8 +117,6 @@ class DailyStatsPublisherTests(unittest.IsolatedAsyncioTestCase):
                         SimpleNamespace(blue=mock.Mock(return_value="blue")),
                     ),
                 ):
-                    preview = honeypot.daily_stats.build_preview_embed(bot=cog.bot)
-                    self.assertEqual(preview.title, "Daily summary preview (sample data)")
                     self.assertIsNone(
                         store.get_daily_stats(100, date(2026, 8, 19)).publication_message_id
                     )
