@@ -814,11 +814,21 @@ class DetectionCaseStore:
                    )"""
             )
 
+        def migrate_schema_5(connection: sqlite3.Connection) -> None:
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(public_wave_enrollments)")}
+            if "rolled_back" not in columns:
+                connection.execute(
+                    "ALTER TABLE public_wave_enrollments "
+                    "ADD COLUMN rolled_back INTEGER NOT NULL DEFAULT 0"
+                )
+            for row in connection.execute("SELECT guild_id, record FROM joinwatch_waves").fetchall():
+                self._retract_wave_guests(connection, row["guild_id"], json.loads(row["record"]))
+
         with closing(self._connect()) as connection:
             apply_migrations(
                 connection,
                 (migrate_schema_0, migrate_schema_1, migrate_schema_2,
-                 migrate_schema_3, migrate_schema_4),
+                 migrate_schema_3, migrate_schema_4, migrate_schema_5),
                 label="detection case storage",
             )
 
@@ -863,6 +873,32 @@ class DetectionCaseStore:
                    VALUES (?, ?, ?)
                    ON CONFLICT(guild_id, wave_id) DO UPDATE SET record = excluded.record""",
                 (guild_id, wave_id, serialized),
+            )
+            self._retract_wave_guests(connection, guild_id, record)
+
+    @staticmethod
+    def _retract_wave_guests(connection: sqlite3.Connection, guild_id: int, record: Mapping) -> None:
+        """Correct each confirmed rollback once, on its original enrollment day."""
+        for entry in record.get("entries", {}).values():
+            if entry.get("status") != "released":
+                continue
+            identity = (guild_id, entry.get("incident_id"))
+            row = connection.execute(
+                """SELECT occurred_at FROM public_wave_enrollments
+                   WHERE guild_id = ? AND enrollment_id = ? AND rolled_back = 0""",
+                identity,
+            ).fetchone()
+            if row is None:
+                continue
+            connection.execute(
+                "UPDATE public_wave_enrollments SET rolled_back = 1 "
+                "WHERE guild_id = ? AND enrollment_id = ?",
+                identity,
+            )
+            connection.execute(
+                """UPDATE public_daily_stats SET wave_guests = wave_guests - 1
+                   WHERE guild_id = ? AND date_utc = ?""",
+                (guild_id, _from_timestamp(row["occurred_at"]).date().isoformat()),
             )
 
     def delete_joinwatch_wave(self, guild_id: int, wave_id: str) -> None:
