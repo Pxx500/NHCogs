@@ -135,7 +135,10 @@ class AchievementReconciliationRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.guild.fetch_member.await_count, 2)
 
     async def test_role_hierarchy_failure_is_counted_as_skipped(self):
-        self.member.top_role.position = 100
+        unavailable_role = SimpleNamespace(
+            id=nhmisc.GATE_TIER_ROLE_IDS[0], managed=False, position=100,
+        )
+        self.guild.get_role = lambda _: unavailable_role
         self.guild.fetch_member.side_effect = None
         self.guild.fetch_member.return_value = self.member
         await self.cog.on_resumed()
@@ -143,11 +146,35 @@ class AchievementReconciliationRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.channel.pings[0])
         self.assertIn("Members skipped: 1", self.channel.messages[0].content)
         self.assertIn(
-            "10 Gate: _UserFeedbackCheckFailure: I cannot restore this member's Gate roles due to hierarchy",
+            "10 Gate: _UserFeedbackCheckFailure: Gate roles are configured incorrectly",
             self.channel.messages[0].content,
         )
         self.assertIn("Retrying <t:", self.channel.messages[0].content)
         self.member.edit.assert_not_awaited()
+
+    async def test_reconciliation_restores_gate_below_bot_for_higher_ranked_member(self):
+        staff_role = SimpleNamespace(id=500, managed=False, position=101)
+        roles = {
+            role_id: SimpleNamespace(id=role_id, managed=False, position=position)
+            for position, role_id in enumerate(nhmisc.GATE_TIER_ROLE_IDS, start=1)
+        }
+        roles[staff_role.id] = staff_role
+        self.member.roles = [staff_role]
+        self.member.top_role = staff_role
+        self.guild.get_role = roles.get
+        self.guild.fetch_member.side_effect = None
+        self.guild.fetch_member.return_value = self.member
+
+        await self.cog.on_resumed()
+
+        self.member.edit.assert_awaited_once()
+        self.assertEqual(
+            {role.id for role in self.member.edit.await_args.kwargs["roles"]},
+            {staff_role.id, nhmisc.GATE_TIER_ROLE_IDS[0]},
+        )
+        self.assertIn("Members corrected: 1", self.channel.messages[0].content)
+        self.assertIn("Members skipped: 0", self.channel.messages[0].content)
+        self.assertNotIn("Retrying", self.channel.messages[0].content)
 
     async def test_aborted_pass_is_reported_and_retried(self):
         self.cog._achievement_store.list_definitions.side_effect = [OSError("database unavailable"), ()]

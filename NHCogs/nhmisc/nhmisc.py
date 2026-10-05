@@ -538,10 +538,6 @@ def _plan_gate_revoke_roles(guild, member, current_count: int) -> tuple:
     if not 1 <= current_count <= len(GATE_TIER_ROLE_IDS):
         raise commands.UserFeedbackCheckFailure("Stored Gate progress is invalid")
     _validate_gate_increment_configuration(guild)
-    if member.top_role.position >= guild.me.top_role.position:
-        raise commands.UserFeedbackCheckFailure(
-            "I cannot manage this user's Gate role"
-        )
     current_role_ids = tuple(role.id for role in member.roles)
     current_gate_role_ids = {
         role_id for role_id in current_role_ids if role_id in GATE_TIER_ROLE_IDS
@@ -1310,8 +1306,6 @@ class NHMisc(commands.Cog):
         }
         if set(desired_role_ids) == current_assignable:
             return False
-        if member.top_role.position >= guild.me.top_role.position:
-            raise commands.UserFeedbackCheckFailure("I cannot restore this member's Gate roles due to hierarchy")
         desired_roles = [guild.get_role(role_id) for role_id in desired_role_ids]
         if any(role is None for role in desired_roles):
             raise commands.UserFeedbackCheckFailure(
@@ -2586,7 +2580,6 @@ class NHMisc(commands.Cog):
         try:
             projected_roles = self._validate_achievement_role_projection(
                 source_message.guild,
-                selected_members,
                 selected_definitions,
             )
         except commands.UserFeedbackCheckFailure as error:
@@ -3621,7 +3614,6 @@ class NHMisc(commands.Cog):
         try:
             projected_roles = self._validate_achievement_role_projection(
                 interaction.guild,
-                view.members,
                 selected_definitions,
             )
         except commands.UserFeedbackCheckFailure as error:
@@ -3690,7 +3682,6 @@ class NHMisc(commands.Cog):
     @staticmethod
     def _validate_achievement_role_projection(
         guild: discord.Guild,
-        members: tuple,
         definitions: tuple,
     ) -> tuple:
         role_ids = tuple(
@@ -3713,10 +3704,6 @@ class NHMisc(commands.Cog):
         ):
             raise commands.UserFeedbackCheckFailure(
                 "Achievement roles are configured incorrectly"
-            )
-        if any(member.top_role.position >= bot_member.top_role.position for member in members):
-            raise commands.UserFeedbackCheckFailure(
-                "One or more selected users are above my role"
             )
         return roles
 
@@ -5551,8 +5538,6 @@ class NHMisc(commands.Cog):
         grant_solo: bool = False,
         extra_role_ids: tuple[int, ...] = (),
     ) -> str | None:
-        if member.top_role.position >= guild.me.top_role.position:
-            return "hierarchy"
         desired_role_ids = build_role_ids_for_target(
             (role.id for role in member.roles),
             target_role_id,

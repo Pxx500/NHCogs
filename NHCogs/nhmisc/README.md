@@ -206,6 +206,16 @@ new Gate role. The completion message used for the increment is stored as the ne
 proof. Manual Gate role changes are reverted; Gate progress must be changed through the
 bot.
 
+The bot needs Manage Roles and must sit above every Gate tier role and any linked
+achievement roles it changes. Users can hold other roles above the bot. Increment,
+revoke, achievement grants, and role reconciliation preserve those unrelated roles.
+
+**Role hierarchy:** A moderator above the bot can still receive or lose a Gate role
+below the bot. Role updates must compare the changed roles with the bot's role, rather
+than reject the member based on their highest role. Discord uses member hierarchy for
+kicking, banning, and nickname changes. See the
+[Discord permission hierarchy](https://docs.discord.com/developers/topics/permissions#permission-hierarchy).
+
 ## Gate Revoke
 
 ```ini
