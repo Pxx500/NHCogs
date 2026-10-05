@@ -297,13 +297,13 @@ class GateIncrementExecutionTests(unittest.IsolatedAsyncioTestCase):
         finally:
             connection.close()
 
-    async def test_claimed_member_is_edited_once_with_fixed_target(self):
+    async def test_higher_ranked_member_is_edited_once_with_fixed_gate_target(self):
         role_by_id = {
             role_id: SimpleNamespace(id=role_id, managed=False, position=position)
             for position, role_id in enumerate(nhmisc.GATE_TIER_ROLE_IDS, start=1)
         }
         default_role = SimpleNamespace(id=0, managed=False, position=0)
-        unrelated_role = SimpleNamespace(id=50, managed=False, position=1)
+        unrelated_role = SimpleNamespace(id=50, managed=False, position=101)
         solo_role = SimpleNamespace(
             id=nhmisc.SINGLEPLAYER_GATE_COMPLETED_ROLE_ID,
             managed=False,
@@ -1574,7 +1574,7 @@ class GateIncrementRecoveryReportingTests(unittest.IsolatedAsyncioTestCase):
 
 
 def _pending_stargate_user_ids(path):
-    with sqlite3.connect(path) as connection:
+    with contextlib.closing(sqlite3.connect(path)) as connection:
         rows = connection.execute(
             """
             SELECT user_id FROM achievement_awards

@@ -830,7 +830,7 @@ class VerificationLifecycleTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await runtime.owner.close()
 
-    async def test_success_retries_release_without_resolving_again(self):
+    async def test_restore_retries_release_after_member_becomes_protected(self):
         with (
             TemporaryDirectory() as directory,
             _isolated_honeypot_modules(Path(directory)) as honeypot,
@@ -850,10 +850,15 @@ class VerificationLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 runtime.member.remove_roles.side_effect = lambda role, **_kw: (
                     runtime.member.roles.remove(role)
                 )
-                self.assertEqual((await runtime.owner.start(runtime.member)).status, "complete")
+                staff_role = SimpleNamespace(id=99)
+                runtime.member.roles.append(staff_role)
+                runtime.cog._is_protected_member.return_value = True
+
+                await runtime.owner.restore()
+
                 self.assertNotIn("20", runtime.raw["joinwatch_pending_roles"])
                 self.assertIn("20", runtime.raw["joinwatch_verified_members"])
-                self.assertEqual(runtime.member.roles, [])
+                self.assertEqual(runtime.member.roles, [staff_role])
             finally:
                 await runtime.owner.close()
 
