@@ -1548,6 +1548,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_generic_grant_stores_source_ids_and_projects_role(self):
         default_role = SimpleNamespace(id=0, position=0)
+        staff_role = SimpleNamespace(id=500, managed=False, position=20)
         solo_role = SimpleNamespace(
             id=nhmisc.SINGLEPLAYER_GATE_COMPLETED_ROLE_ID,
             managed=False,
@@ -1557,8 +1558,8 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             id=10,
             display_name="Player",
             bot=False,
-            top_role=SimpleNamespace(position=1),
-            roles=[default_role],
+            top_role=staff_role,
+            roles=[default_role, staff_role],
             edit=mock.AsyncMock(),
         )
         guild = SimpleNamespace(
@@ -1569,7 +1570,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
             ),
             default_role=default_role,
             get_member=lambda user_id: member if user_id == member.id else None,
-            get_role=lambda role_id: solo_role if role_id == solo_role.id else default_role,
+            get_role={role.id: role for role in (default_role, staff_role, solo_role)}.get,
         )
         result_message = SimpleNamespace(id=31)
         source = SimpleNamespace(
@@ -1638,7 +1639,7 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             {role.id for role in member.edit.await_args.kwargs["roles"]},
-            {solo_role.id},
+            {staff_role.id, solo_role.id},
         )
         interaction.delete_original_response.assert_awaited_once_with()
         cog._send_moderation_log.assert_awaited_once()

@@ -531,10 +531,10 @@ class JoinwatchVerification:
                 return self._result("complete_restricted" if entry.get("independent_restriction") else "complete", entry)
             if entry is None or not entry.get("captcha_enabled"):
                 return VerificationResult("unavailable")
-            if member.bot or await self.cog._is_protected_member(member):
-                return self._result("protected", entry)
             if entry.get("verification_state") == "release_pending":
                 return await self._release_locked(member, entry)
+            if member.bot or await self.cog._is_protected_member(member):
+                return self._result("protected", entry)
             if not entry.get("test") and datetime.fromisoformat(entry["expires_at"]) <= now:
                 return self._result("unavailable", entry)
             if entry.get("failures", 0) >= MAX_ATTEMPTS:

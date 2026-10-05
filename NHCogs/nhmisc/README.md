@@ -206,6 +206,10 @@ new Gate role. The completion message used for the increment is stored as the ne
 proof. Manual Gate role changes are reverted; Gate progress must be changed through the
 bot.
 
+The bot needs Manage Roles and must sit above every Gate tier role and any linked
+achievement roles it changes. Users can hold other roles above the bot. Increment,
+revoke, achievement grants, and role reconciliation preserve those unrelated roles.
+
 ## Gate Revoke
 
 ```ini

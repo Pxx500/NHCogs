@@ -350,9 +350,11 @@ class GateRevokeExecutionTests(unittest.IsolatedAsyncioTestCase):
             ordinals=(1, 2, 3),
             selected_ordinal=2,
         )
+        member.top_role.position = 101
 
         await cog._confirm_gate_revoke(interaction, view, compact=False)
 
+        member.edit.assert_awaited_once()
         changed_role_ids = {role.id for role in member.edit.await_args_list[0].kwargs["roles"]}
         self.assertEqual(
             changed_role_ids,
