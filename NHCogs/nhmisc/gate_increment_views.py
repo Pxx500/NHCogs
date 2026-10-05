@@ -7,6 +7,8 @@ import discord
 if TYPE_CHECKING:
     from .nhmisc import NHMisc
 
+WARNING_USER_LIMIT = 25
+
 class GateIncrementReviewView(discord.ui.View):
     def __init__(
         self,
@@ -16,6 +18,7 @@ class GateIncrementReviewView(discord.ui.View):
         candidates: tuple[Any, ...],
         *,
         custom_achievements: tuple[Any, ...] = (),
+        snapshot: Any = None,
         ephemeral: bool,
     ) -> None:
         super().__init__(timeout=300)
@@ -33,6 +36,7 @@ class GateIncrementReviewView(discord.ui.View):
             if candidate.target_role_id is not None
         }
         self.solo_gater_enabled = False
+        self.replace_snapshot(snapshot)
         self._configure_select()
         self._configure_achievement_select()
         self._configure_solo_toggle()
@@ -66,6 +70,14 @@ class GateIncrementReviewView(discord.ui.View):
         self.selected_custom_achievement_keys.intersection_update(live_keys)
         self._configure_achievement_select()
 
+    def replace_snapshot(self, snapshot: Any) -> None:
+        self.snapshot = snapshot
+        can_retry = snapshot is not None and snapshot.operation.state != "completed"
+        if can_retry and self.retry not in self.children:
+            self.add_item(self.retry)
+        elif not can_retry and self.retry in self.children:
+            self.remove_item(self.retry)
+
     def render_embed(self, *, notice: str | None = None) -> discord.Embed:
         selectable_count = sum(
             candidate.target_role_id is not None for candidate in self.candidates
@@ -76,34 +88,9 @@ class GateIncrementReviewView(discord.ui.View):
             "",
         ]
         for candidate in self.candidates:
-            if (
-                candidate.target_role_id is not None
-                and candidate.user_id not in self.selected_user_ids
-            ):
+            if candidate.target_role_id is None or candidate.user_id not in self.selected_user_ids:
                 continue
-            current = (
-                f"<@&{candidate.current_gate_role_ids[-1]}>"
-                if candidate.current_gate_role_ids
-                else "No Gate"
-            )
-            if candidate.target_role_id is None:
-                lines.append(
-                    f"⛔ <@{candidate.user_id}> {current} maximum tier"
-                )
-            else:
-                lines.append(
-                    f"<@{candidate.user_id}> {current} → "
-                    f"<@&{candidate.target_role_id}>"
-                )
-                if (
-                    candidate.target_ordinal is not None
-                    and candidate.target_ordinal != candidate.highest_ordinal + 1
-                ):
-                    lines.append(
-                        f"⚠️ <@{candidate.user_id}> will fill missing Stargate "
-                        f"{candidate.target_ordinal} instead of adding Stargate "
-                        f"{candidate.highest_ordinal + 1}"
-                    )
+            lines.extend(self._candidate_lines(candidate))
         if len(self.selected_user_ids) == 1:
             selected = next(
                 candidate
@@ -124,11 +111,45 @@ class GateIncrementReviewView(discord.ui.View):
             )
         if notice:
             lines.extend(("", notice))
-        return discord.Embed(
+        embed = discord.Embed(
             title="Gate increment review",
             description="\n".join(lines),
             color=discord.Color.blue(),
         )
+        self._add_unavailable_fields(embed)
+        return embed
+
+    def _add_unavailable_fields(self, embed: discord.Embed) -> None:
+        warnings: dict[str, list[int]] = {}
+        for candidate in self.candidates:
+            if candidate.target_role_id is not None:
+                continue
+            if candidate.previous_state == "completed":
+                label = "Already received a Gate from this message"
+            elif candidate.previous_state is not None:
+                label = "Unfinished grants from this message"
+            else:
+                label = "Maximum Gate tier"
+            warnings.setdefault(label, []).append(candidate.user_id)
+        for label, user_ids in warnings.items():
+            value = ", ".join(f"<@{user_id}>" for user_id in user_ids[:WARNING_USER_LIMIT])
+            if len(user_ids) > WARNING_USER_LIMIT:
+                value += f" and {len(user_ids) - WARNING_USER_LIMIT} more"
+            embed.add_field(name=label, value=value, inline=False)
+
+    @staticmethod
+    def _candidate_lines(candidate: Any) -> list[str]:
+        current = (
+            f"<@&{candidate.current_gate_role_ids[-1]}>"
+            if candidate.current_gate_role_ids else "No Gate"
+        )
+        lines = [f"<@{candidate.user_id}> {current} → <@&{candidate.target_role_id}>"]
+        if candidate.target_ordinal is not None and candidate.target_ordinal != candidate.highest_ordinal + 1:
+            lines.append(
+                "⚠️ will fill missing Stargate "
+                f"{candidate.target_ordinal} instead of adding Stargate {candidate.highest_ordinal + 1}"
+            )
+        return lines
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.opener_id:
@@ -218,6 +239,18 @@ class GateIncrementReviewView(discord.ui.View):
         _button: discord.ui.Button,
     ) -> None:
         await self.cog._refresh_gate_increment_review(interaction, self)
+
+    @discord.ui.button(
+        label="Retry unfinished users",
+        style=discord.ButtonStyle.primary,
+        row=2,
+    )
+    async def retry(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        await self.cog._resume_gate_increment_review(interaction, self)
 
     @discord.ui.button(
         label="☐ Solo Gater",
@@ -351,86 +384,3 @@ class GateIncrementReviewView(discord.ui.View):
     def _disable_controls(self) -> None:
         for child in self.children:
             child.disabled = True
-
-
-class GateIncrementExistingView(discord.ui.View):
-    def __init__(
-        self,
-        cog: NHMisc,
-        source_message: discord.Message,
-        opener_id: int,
-        snapshot: Any,
-        *,
-        ephemeral: bool,
-    ) -> None:
-        super().__init__(timeout=300)
-        self.cog = cog
-        self.source_message = source_message
-        self.opener_id = opener_id
-        self.snapshot = snapshot
-        self.ephemeral = ephemeral
-        self.message: discord.Message | None = None
-
-    def render_embed(self) -> discord.Embed:
-        return discord.Embed(
-            title="Existing Gate increment",
-            description=self.cog._format_gate_increment_operation(self.snapshot),
-            color=discord.Color.orange(),
-        )
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.opener_id:
-            return True
-        await interaction.response.send_message(
-            "Only the moderator who opened this review can control it",
-            ephemeral=True,
-        )
-        return False
-
-    async def on_timeout(self) -> None:
-        if self.message is None:
-            return
-        if not self.ephemeral:
-            try:
-                await self.message.delete()
-                return
-            except discord.HTTPException:
-                pass
-        for child in self.children:
-            child.disabled = True
-        try:
-            await self.message.edit(view=self)
-        except discord.HTTPException:
-            pass
-
-    @discord.ui.button(
-        label="Resume stored operation",
-        style=discord.ButtonStyle.primary,
-    )
-    async def resume(
-        self,
-        interaction: discord.Interaction,
-        _button: discord.ui.Button,
-    ) -> None:
-        await self.cog._resume_gate_increment_review(interaction, self)
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(
-        self,
-        interaction: discord.Interaction,
-        _button: discord.ui.Button,
-    ) -> None:
-        self.stop()
-        if self.ephemeral:
-            await interaction.response.edit_message(
-                content="Gate increment recovery cancelled",
-                embed=None,
-                view=None,
-            )
-            return
-        await interaction.response.defer()
-        if self.message is not None:
-            try:
-                await self.message.delete()
-            except discord.HTTPException:
-                pass

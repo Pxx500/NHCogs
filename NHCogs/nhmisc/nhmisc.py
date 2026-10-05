@@ -60,6 +60,7 @@ from .forum_autopin import ForumAutopinService, ForumChannelConverter, is_forum_
 from .gate_increment_store import (
     AchievementDefinitionConflict,
     GateIncrementAchievementPlan,
+    GateIncrementBusy,
     GateIncrementMemberPlan,
     GateIncrementSnapshot,
     GateIncrementStore,
@@ -183,6 +184,7 @@ class GateIncrementCandidate:
     target_ordinal: int | None = None
     highest_ordinal: int = 0
     has_solo_gater: bool = False
+    previous_state: MemberState | None = None
 
 
 ACHIEVEMENT_RETRY_SECONDS = 60 * 60
@@ -470,10 +472,31 @@ def _validate_gate_increment_output_limits(
     plans: tuple[GateIncrementMemberPlan, ...],
     achievements: tuple[GateIncrementAchievementPlan, ...],
     owned_keys_by_user: dict[int, set[str]] | None = None,
+    *,
+    snapshot: GateIncrementSnapshot | None = None,
 ) -> None:
     owned_keys_by_user = owned_keys_by_user or {}
     public_lines = []
     log_lines = []
+    if snapshot is not None:
+        for member in snapshot.members:
+            if member.state is not MemberState.COMPLETED or member.user_id is None:
+                continue
+            awards = [f"<@&{member.target_role_id}>"]
+            log_awards = []
+            if member.solo_awarded:
+                awards.append(f"<@&{SINGLEPLAYER_GATE_COMPLETED_ROLE_ID}>")
+                log_awards.append("Solo Gater")
+            labels = _gate_increment_custom_award_labels(snapshot, member)
+            awards.extend(labels)
+            log_awards.extend(labels)
+            public_lines.append(f"<@{member.user_id}> " + " ".join(awards))
+            if not member.moderation_logged:
+                gate_number = GATE_TIER_ROLE_IDS.index(member.target_role_id) + 1
+                log_line = f"<@{member.user_id}> Gate {gate_number}"
+                if log_awards:
+                    log_line += " + " + " + ".join(log_awards)
+                log_lines.append(log_line)
     for plan in plans:
         achievement_labels = tuple(
             f"<@&{achievement.role_id}>"
@@ -508,8 +531,8 @@ def _validate_gate_increment_output_limits(
     )
     if max(len(public_content), len(log_content)) > DISCORD_MESSAGE_CONTENT_LIMIT:
         raise commands.UserFeedbackCheckFailure(
-            "The selected Gate increment is too large for one Discord message. "
-            "Select fewer users or achievements"
+            "The combined Gate increment is too large for one Discord message. "
+            "Select fewer users or achievements, or use a new source message"
         )
 
 
@@ -4791,30 +4814,12 @@ class NHMisc(commands.Cog):
             existing = await self._retry_gate_increment_publication(
                 source_message, existing
             )
-            if existing.operation.state is OperationState.COMPLETED:
-                await interaction.edit_original_response(
-                    content=self._format_gate_increment_operation(existing),
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-            else:
-                view = self._create_existing_gate_increment_view(
-                    source_message,
-                    interaction.user.id,
-                    existing,
-                    ephemeral=True,
-                )
-                await interaction.edit_original_response(
-                    embed=view.render_embed(),
-                    view=view,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-                view.message = await interaction.original_response()
-            return
 
         try:
             view = await self._create_gate_increment_review(
                 source_message,
                 interaction.user.id,
+                snapshot=existing,
                 ephemeral=True,
             )
         except commands.UserFeedbackCheckFailure as error:
@@ -4832,10 +4837,11 @@ class NHMisc(commands.Cog):
         source_message: discord.Message,
         opener_id: int,
         *,
+        snapshot: GateIncrementSnapshot | None = None,
         ephemeral: bool,
     ):
         _validate_gate_increment_configuration(source_message.guild)
-        candidates = await self._fetch_gate_increment_candidates(source_message)
+        candidates = await self._fetch_gate_increment_candidates(source_message, snapshot)
         self._validate_gate_increment_candidate_count(candidates)
         definitions = _gate_increment_custom_achievement_definitions(
             await self._achievement_store.list_definitions(source_message.guild.id)
@@ -4848,24 +4854,7 @@ class NHMisc(commands.Cog):
             opener_id,
             candidates,
             custom_achievements=definitions,
-            ephemeral=ephemeral,
-        )
-
-    def _create_existing_gate_increment_view(
-        self,
-        source_message: discord.Message,
-        opener_id: int,
-        snapshot: GateIncrementSnapshot,
-        *,
-        ephemeral: bool,
-    ):
-        from .gate_increment_views import GateIncrementExistingView
-
-        return GateIncrementExistingView(
-            self,
-            source_message,
-            opener_id,
-            snapshot,
+            snapshot=snapshot,
             ephemeral=ephemeral,
         )
 
@@ -4887,9 +4876,8 @@ class NHMisc(commands.Cog):
             )
         if operation.state is OperationState.COMPLETED:
             return (
-                "⚠️ **GATE INCREMENT BLOCKED**\n"
-                "This message was already processed\n"
-                f"{operation.completed_count} users were updated successfully"
+                "**Gate increment recorded**\n"
+                f"{operation.completed_count} users already received a Gate from this message"
             )
         return (
             "⚠️ **GATE INCREMENT PARTIALLY COMPLETED**\n"
@@ -4935,7 +4923,7 @@ class NHMisc(commands.Cog):
                 return
             await self._publish_gate_increment_moderation_log(
                 source_message,
-                snapshot.operation.moderator_id or interaction.user.id,
+                  interaction.user.id,
                 snapshot,
             )
             published = await self._publish_gate_increment_result(
@@ -4971,7 +4959,10 @@ class NHMisc(commands.Cog):
                 self._gate_increment_key(view.source_message)
             )
             _validate_gate_increment_configuration(source_message.guild)
-            candidates = await self._fetch_gate_increment_candidates(source_message)
+            snapshot = await self._gate_increment_store.get_operation(
+                self._gate_increment_key(source_message)
+            )
+            candidates = await self._fetch_gate_increment_candidates(source_message, snapshot)
             self._validate_gate_increment_candidate_count(candidates)
             definitions = _gate_increment_custom_achievement_definitions(
                 await self._achievement_store.list_definitions(source_message.guild.id)
@@ -4993,6 +4984,7 @@ class NHMisc(commands.Cog):
             )
             return
         view.source_message = source_message
+        view.replace_snapshot(snapshot)
         view.replace_candidates(candidates)
         view.replace_custom_achievements(definitions)
         await interaction.edit_original_response(
@@ -5008,8 +5000,12 @@ class NHMisc(commands.Cog):
                 self._gate_increment_key(view.source_message)
             )
             _validate_gate_increment_configuration(source_message.guild)
+            snapshot = await self._gate_increment_store.get_operation(
+                self._gate_increment_key(source_message)
+            )
+            view.replace_snapshot(snapshot)
             live_candidates = await self._fetch_gate_increment_candidates(
-                source_message
+                source_message, snapshot
             )
             self._validate_gate_increment_candidate_count(live_candidates)
             live_achievements = _gate_increment_custom_achievement_definitions(
@@ -5145,6 +5141,7 @@ class NHMisc(commands.Cog):
                 plans,
                 selected_achievements,
                 owned_keys_by_user,
+                snapshot=view.snapshot,
             )
         except commands.UserFeedbackCheckFailure as error:
             await interaction.edit_original_response(
@@ -5196,6 +5193,14 @@ class NHMisc(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
+        except GateIncrementBusy:
+            await interaction.edit_original_response(
+                content=None,
+                embed=view.render_embed(notice="This message is being processed. Try again when it finishes"),
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
         if not claim.created:
             existing = await self._gate_increment_store.get_operation(key)
             await self._finish_gate_increment_review(
@@ -5208,10 +5213,14 @@ class NHMisc(commands.Cog):
         snapshot = await self._execute_gate_increment_operation(
             source_message,
             interaction.user.id,
+            selected_user_ids={plan.user_id for plan in plans},
+        )
+        selected_members = tuple(
+            member for member in snapshot.members if member.user_id in view.selected_user_ids
         )
         completed_members = tuple(
             member_plan
-            for member_plan in snapshot.members
+            for member_plan in selected_members
             if member_plan.state is MemberState.COMPLETED
         )
         moderation_log_delivered = await self._publish_gate_increment_moderation_log(
@@ -5219,7 +5228,7 @@ class NHMisc(commands.Cog):
             interaction.user.id,
             snapshot,
         )
-        skipped_members = len(snapshot.members) - len(completed_members)
+        skipped_members = len(selected_members) - len(completed_members)
         if skipped_members:
             await self._send_error_notice(
                 source_message.guild,
@@ -5300,10 +5309,24 @@ class NHMisc(commands.Cog):
         return True
 
     async def _fetch_gate_increment_candidates(
-        self, source_message: discord.Message
+        self, source_message: discord.Message, snapshot: GateIncrementSnapshot | None = None,
     ) -> tuple[GateIncrementCandidate, ...]:
         candidates = []
+        previous_members = {
+            member.user_id: member for member in snapshot.members
+        } if snapshot is not None else {}
         for user_id in _gate_increment_candidate_ids(source_message):
+            previous = previous_members.get(user_id)
+            if previous is not None:
+                candidates.append(GateIncrementCandidate(
+                    user_id=user_id,
+                    display_name="",
+                    current_gate_role_ids=(),
+                    current_tier=None,
+                    target_role_id=None,
+                    previous_state=previous.state,
+                ))
+                continue
             try:
                 member = await source_message.guild.fetch_member(user_id)
             except discord.NotFound:
@@ -5355,7 +5378,7 @@ class NHMisc(commands.Cog):
                     ),
                 )
             )
-            if len(candidates) > MAX_GATE_INCREMENT_CANDIDATES:
+            if sum(candidate.target_role_id is not None for candidate in candidates) > MAX_GATE_INCREMENT_CANDIDATES:
                 break
         return tuple(candidates)
 
@@ -5367,7 +5390,7 @@ class NHMisc(commands.Cog):
             raise commands.UserFeedbackCheckFailure(
                 "This message has no eligible users to increment"
             )
-        if len(candidates) > MAX_GATE_INCREMENT_CANDIDATES:
+        if sum(candidate.target_role_id is not None for candidate in candidates) > MAX_GATE_INCREMENT_CANDIDATES:
             raise commands.UserFeedbackCheckFailure(
                 f"This message contains more than {MAX_GATE_INCREMENT_CANDIDATES} "
                 "users. Gate increment supports at most "
@@ -5425,6 +5448,8 @@ class NHMisc(commands.Cog):
         self,
         source_message: discord.Message,
         moderator_id: int,
+        *,
+        selected_user_ids: set[int] | None = None,
     ) -> GateIncrementSnapshot:
         key = self._gate_increment_key(source_message)
         token = uuid4().hex
@@ -5441,6 +5466,8 @@ class NHMisc(commands.Cog):
                 raise RuntimeError("Gate increment operation disappeared")
             for member_plan in snapshot.members:
                 if member_plan.state is MemberState.COMPLETED:
+                    continue
+                if selected_user_ids is not None and member_plan.user_id not in selected_user_ids:
                     continue
                 await self._recover_gate_increment_member(
                     source_message.guild,

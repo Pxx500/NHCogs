@@ -44,6 +44,10 @@ class AchievementDefinitionConflict(RuntimeError):
     pass
 
 
+class GateIncrementBusy(RuntimeError):
+    pass
+
+
 class OperationState(str, Enum):
     APPLYING = "applying"
     COMPLETED = "completed"
@@ -102,6 +106,8 @@ class GateIncrementSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class ClaimResult:
+    """New recipient reservations, including additions to an existing source."""
+
     created: bool
     operation: GateIncrementOperation
 
@@ -440,80 +446,55 @@ class GateIncrementStore:
             try:
                 row = connection.execute(
                     """
-                    SELECT *
-                    FROM gate_increment_operations
-                    WHERE guild_id = ? AND channel_id = ?
-                        AND source_message_id = ?
+                    SELECT * FROM gate_increment_operations
+                    WHERE guild_id = ? AND channel_id = ? AND source_message_id = ?
                     """,
                     (key.guild_id, key.channel_id, key.message_id),
                 ).fetchone()
-                created = row is None
-                if row is None:
-                    for achievement in custom_achievements:
-                        definition_row = connection.execute(
+                if row is not None:
+                    recorded_users = {
+                        member["user_id"] for member in connection.execute(
+                            "SELECT user_id FROM gate_increment_members WHERE operation_id = ?",
+                            (row["operation_id"],),
+                        )
+                    }
+                    member_plans = tuple(
+                        plan for plan in member_plans if plan.user_id not in recorded_users
+                    )
+                created = row is None or bool(member_plans)
+                if created:
+                    if row is not None and (
+                        row["state"] == OperationState.APPLYING.value
+                        or row["lease_token"] is not None
+                        or row["publication_token"] is not None
+                    ):
+                        raise GateIncrementBusy("This message is already being processed")
+                    if row is None:
+                        cursor = connection.execute(
                             """
-                            SELECT display_name, kind, role_id, grantable
-                            FROM achievement_definitions
-                            WHERE guild_id = ? AND achievement_key = ?
+                            INSERT INTO gate_increment_operations (
+                                guild_id, channel_id, source_message_id,
+                                moderator_id, created_at, updated_at, state, selected_count
+                            ) VALUES (?, ?, ?, ?, ?, ?, 'applying', 0)
                             """,
-                            (key.guild_id, achievement.key),
-                        ).fetchone()
-                        if (
-                            definition_row is None
-                            or definition_row["display_name"]
-                            != achievement.display_name
-                            or definition_row["kind"] != "boolean"
-                            or definition_row["role_id"] != achievement.role_id
-                            or not bool(definition_row["grantable"])
-                        ):
-                            raise AchievementDefinitionConflict(achievement.key)
-                    cursor = connection.execute(
+                            (key.guild_id, key.channel_id, key.message_id,
+                             moderator_id, now, now),
+                        )
+                        operation_id = int(cursor.lastrowid)
+                    else:
+                        operation_id = int(row["operation_id"])
+                    self._store_achievements_sync(connection, operation_id, key, custom_achievements)
+                    next_position = connection.execute(
                         """
-                        INSERT INTO gate_increment_operations (
-                            guild_id,
-                            channel_id,
-                            source_message_id,
-                            moderator_id,
-                            created_at,
-                            updated_at,
-                            state,
-                            selected_count
-                        ) VALUES (?, ?, ?, ?, ?, ?, 'applying', ?)
+                        SELECT COALESCE(MAX(position) + 1, 0)
+                        FROM gate_increment_members WHERE operation_id = ?
                         """,
-                        (
-                            key.guild_id,
-                            key.channel_id,
-                            key.message_id,
-                            moderator_id,
-                            now,
-                            now,
-                            len(member_plans),
-                        ),
-                    )
-                    operation_id = int(cursor.lastrowid)
-                    connection.executemany(
-                        """
-                        INSERT INTO gate_increment_achievements (
-                            operation_id, achievement_key, display_name,
-                            role_id, position
-                        ) VALUES (?, ?, ?, ?, ?)
-                        """,
-                        (
-                            (
-                                operation_id,
-                                achievement.key,
-                                achievement.display_name,
-                                achievement.role_id,
-                                position,
-                            )
-                            for position, achievement in enumerate(custom_achievements)
-                        ),
-                    )
-                    for plan in member_plans:
+                        (operation_id,),
+                    ).fetchone()[0]
+                    for position, plan in enumerate(member_plans, start=next_position):
                         ordinal_rows = connection.execute(
                             """
-                            SELECT ordinal
-                            FROM achievement_awards
+                            SELECT ordinal FROM achievement_awards
                             WHERE guild_id = ? AND user_id = ?
                                 AND achievement_key = 'stargate_completed'
                                 AND state IN ('pending', 'active')
@@ -522,113 +503,124 @@ class GateIncrementStore:
                         ).fetchall()
                         occupied_ordinals = set()
                         for ordinal_row in ordinal_rows:
-                            ordinal = ordinal_row["ordinal"]
-                            if ordinal is None:
+                            if ordinal_row["ordinal"] is None:
                                 raise RuntimeError("Stored Stargate ordinal is missing")
-                            occupied_ordinals.add(int(ordinal))
+                            occupied_ordinals.add(int(ordinal_row["ordinal"]))
                         next_ordinal = 1
                         while next_ordinal in occupied_ordinals:
                             next_ordinal += 1
-                        if (
-                            plan.target_ordinal is not None
-                            and plan.target_ordinal != next_ordinal
-                        ):
+                        if plan.target_ordinal is not None and plan.target_ordinal != next_ordinal:
                             raise GateProgressConflict(plan.user_id)
                         connection.execute(
                             """
                             INSERT INTO achievement_awards (
                                 guild_id, user_id, achievement_key, ordinal,
-                                awarded_at, source_channel_id,
-                                source_message_id, gate_operation_id, state
-                            ) VALUES (?, ?, 'stargate_completed', ?, ?, ?, ?, ?,
-                                'pending')
+                                awarded_at, source_channel_id, source_message_id,
+                                gate_operation_id, state
+                            ) VALUES (?, ?, 'stargate_completed', ?, ?, ?, ?, ?, 'pending')
+                            """,
+                            (key.guild_id, plan.user_id, next_ordinal, now,
+                             key.channel_id, key.message_id, operation_id),
+                        )
+                        boolean_keys = [achievement.key for achievement in custom_achievements]
+                        if plan.grant_solo:
+                            boolean_keys.append("solo_gater")
+                        connection.executemany(
+                            """
+                            INSERT OR IGNORE INTO achievement_awards (
+                                guild_id, user_id, achievement_key, awarded_at,
+                                source_channel_id, source_message_id, gate_operation_id, state
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
                             """,
                             (
-                                key.guild_id,
-                                plan.user_id,
-                                next_ordinal,
-                                now,
-                                key.channel_id,
-                                key.message_id,
-                                operation_id,
+                                (key.guild_id, plan.user_id, achievement_key, now,
+                                 key.channel_id, key.message_id, operation_id)
+                                for achievement_key in boolean_keys
                             ),
                         )
-                        if plan.grant_solo:
-                            connection.execute(
-                                """
-                                INSERT OR IGNORE INTO achievement_awards (
-                                    guild_id, user_id, achievement_key,
-                                    awarded_at, source_channel_id,
-                                    source_message_id, gate_operation_id, state
-                                ) VALUES (?, ?, 'solo_gater', ?, ?, ?, ?,
-                                    'pending')
-                                """,
-                                (
-                                    key.guild_id,
-                                    plan.user_id,
-                                    now,
-                                    key.channel_id,
-                                    key.message_id,
-                                    operation_id,
-                                ),
-                            )
-                        for achievement in custom_achievements:
-                            connection.execute(
-                                """
-                                INSERT OR IGNORE INTO achievement_awards (
-                                    guild_id, user_id, achievement_key,
-                                    awarded_at, source_channel_id,
-                                    source_message_id, gate_operation_id, state
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
-                                """,
-                                (
-                                    key.guild_id,
-                                    plan.user_id,
-                                    achievement.key,
-                                    now,
-                                    key.channel_id,
-                                    key.message_id,
-                                    operation_id,
-                                ),
-                            )
-                    connection.executemany(
+                        connection.execute(
+                            """
+                            INSERT INTO gate_increment_members (
+                                operation_id, position, user_id, expected_gate_role_ids,
+                                target_role_id, state, grant_solo
+                            ) VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                            """,
+                            (operation_id, position, plan.user_id,
+                             json.dumps(plan.expected_gate_role_ids),
+                             plan.target_role_id, int(plan.grant_solo)),
+                        )
+                    connection.execute(
                         """
-                        INSERT INTO gate_increment_members (
-                            operation_id,
-                            position,
-                            user_id,
-                            expected_gate_role_ids,
-                            target_role_id,
-                            state,
-                            grant_solo
-                        ) VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                        UPDATE gate_increment_operations
+                        SET state = 'applying', selected_count = selected_count + ?,
+                            updated_at = ?
+                        WHERE operation_id = ?
                         """,
-                        (
-                            (
-                                operation_id,
-                                position,
-                                plan.user_id,
-                                json.dumps(plan.expected_gate_role_ids),
-                                plan.target_role_id,
-                                int(plan.grant_solo),
-                            )
-                            for position, plan in enumerate(member_plans)
-                        ),
+                        (len(member_plans), now, operation_id),
                     )
                     row = connection.execute(
                         "SELECT * FROM gate_increment_operations WHERE operation_id = ?",
                         (operation_id,),
                     ).fetchone()
-                else:
-                    operation_id = int(row["operation_id"])
                 connection.commit()
             except Exception:
                 connection.rollback()
                 raise
+        return ClaimResult(created=created, operation=self._operation_from_row(row))
 
-        return ClaimResult(
-            created=created,
-            operation=self._operation_from_row(row),
+    def _store_achievements_sync(
+        self, connection: sqlite3.Connection, operation_id: int, key: SourceMessageKey,
+        custom_achievements: tuple[GateIncrementAchievementPlan, ...],
+    ) -> None:
+        for achievement in custom_achievements:
+            definition_row = connection.execute(
+                """
+                SELECT display_name, kind, role_id, grantable
+                FROM achievement_definitions
+                WHERE guild_id = ? AND achievement_key = ?
+                """,
+                (key.guild_id, achievement.key),
+            ).fetchone()
+            if (
+                definition_row is None
+                or definition_row["display_name"] != achievement.display_name
+                or definition_row["kind"] != "boolean"
+                or definition_row["role_id"] != achievement.role_id
+                or not bool(definition_row["grantable"])
+            ):
+                raise AchievementDefinitionConflict(achievement.key)
+        existing_achievements = {
+            stored["achievement_key"]: stored
+            for stored in connection.execute(
+                "SELECT * FROM gate_increment_achievements WHERE operation_id = ?",
+                (operation_id,),
+            )
+        }
+        for achievement in custom_achievements:
+            stored = existing_achievements.get(achievement.key)
+            if stored is not None and (
+                stored["display_name"] != achievement.display_name
+                or stored["role_id"] != achievement.role_id
+            ):
+                raise AchievementDefinitionConflict(achievement.key)
+        new_achievements = tuple(
+            achievement for achievement in custom_achievements
+            if achievement.key not in existing_achievements
+        )
+        next_position = max(
+            (stored["position"] for stored in existing_achievements.values()), default=-1,
+        ) + 1
+        connection.executemany(
+            """
+            INSERT INTO gate_increment_achievements (
+                operation_id, achievement_key, display_name, role_id, position
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                (operation_id, achievement.key, achievement.display_name,
+                 achievement.role_id, position)
+                for position, achievement in enumerate(new_achievements, start=next_position)
+            ),
         )
 
     def _get_operation_sync(
