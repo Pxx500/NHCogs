@@ -199,9 +199,15 @@ result. The selector supports up to 25 custom achievements. A selection that wou
 fit in one Discord message is rejected before any roles or awards change. Gate 6 users
 remain visible but cannot be selected.
 
-The action requires Manage Messages and uses a durable one-use source lock. A second
-message cannot reserve the same member's next Gate while an earlier increment is still
-pending. Successful users are publicly pinged beside a non-pinging mention of their
+The action requires Manage Messages. Each user can receive only one Gate from the same
+source message. Reopening the action warns which users already received their Gate and
+keeps them out of the selector, while users left out earlier can still be added. Previously
+unsuccessful grants keep their saved plan and use **Retry unfinished users**. Confirming
+new users does not retry those older grants. The existing congratulations message is
+updated with newly successful recipients.
+
+A second message cannot reserve the same member's next Gate while an earlier increment
+is still pending. Successful users appear beside a non-pinging mention of their
 new Gate role. The completion message used for the increment is stored as the new Gate's
 proof. Manual Gate role changes are reverted; Gate progress must be changed through the
 bot.
@@ -231,9 +237,9 @@ role always follows the number of remaining Gates; `Solo Gater` and unrelated ro
 left unchanged. Successful reviews disappear silently, while a non-pinging audit is sent
 to the configured private moderator action channel.
 
-The original completion message remains marked as already processed. If a Gate was
-revoked by mistake, restore it from a new correction message through the normal Gate
-increment action.
+Revoking a Gate does not allow that user to receive another Gate from the same source.
+Other users can still be added from it. If a Gate was revoked by mistake, restore it from
+a new correction message through the normal Gate increment action.
 
 ## Add Gate Proof
 

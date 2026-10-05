@@ -146,7 +146,7 @@ class GateIncrementPlanningTests(unittest.TestCase):
 
         self.assertIn("<@1>", description)
         self.assertNotIn("<@2>", description)
-        self.assertIn("<@3>", description)
+        self.assertIn("<@3>", view.render_embed().fields[0].value)
         self.assertIn(
             "will fill missing Stargate 2 instead of adding Stargate 5",
             description,
@@ -624,7 +624,7 @@ class GateIncrementExecutionTests(unittest.IsolatedAsyncioTestCase):
         persisted = await self.store.get_operation(key)
         self.assertEqual(persisted.operation.result_message_id, 125)
 
-    async def test_recovery_updates_the_single_existing_congratulations_message(self):
+    async def test_recovery_and_added_recipients_update_one_congratulations_message(self):
         key = nhmisc.SourceMessageKey(120, 121, 122)
         target_role_id = nhmisc.GATE_TIER_ROLE_IDS[0]
         self._insert_definitions(120, ("flawless", "Flawless", None))
@@ -670,13 +670,20 @@ class GateIncrementExecutionTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(
                 await cog._publish_gate_increment_result(source, completed)
             )
+            await self.store.claim(
+                key, 123, (nhmisc.GateIncrementMemberPlan(127, (), target_role_id),),
+            )
+            await self.store.mark_member_completed(key, 2)
+            extended = await self.store.finalize_operation(key)
+            self.assertTrue(await cog._publish_gate_increment_result(source, extended))
 
         source.reply.assert_awaited_once()
-        channel.get_partial_message.assert_called_once_with(result.id)
-        result.edit.assert_awaited_once()
+        self.assertEqual(channel.get_partial_message.call_args_list, [mock.call(result.id)] * 2)
+        self.assertEqual(result.edit.await_count, 2)
         updated_content = result.edit.await_args.kwargs["content"]
         self.assertIn("<@124>", updated_content)
         self.assertIn("<@125>", updated_content)
+        self.assertIn("<@127>", updated_content)
         self.assertEqual(updated_content.count("🎉 **Congratulations!**"), 1)
 
     async def test_recovery_logs_only_newly_completed_members(self):
@@ -893,6 +900,7 @@ class GateIncrementReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         )
         error = RuntimeError("definitions unavailable")
         cog = object.__new__(nhmisc.NHMisc)
+        cog._gate_increment_store = SimpleNamespace(get_operation=mock.AsyncMock(return_value=None))
         cog._achievement_store = SimpleNamespace(
             is_bootstrapped=mock.AsyncMock(return_value=True),
             list_definitions=mock.AsyncMock(side_effect=error),
@@ -971,6 +979,7 @@ class GateIncrementReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         cog._validate_gate_increment_candidate_count = mock.Mock()
         cog._gate_increment_store = SimpleNamespace(
             claim=mock.AsyncMock(return_value=SimpleNamespace(created=True)),
+            get_operation=mock.AsyncMock(return_value=None),
             mark_moderation_logged=mock.AsyncMock(),
         )
         cog._execute_gate_increment_operation = mock.AsyncMock(return_value=snapshot)
@@ -1043,7 +1052,8 @@ class GateIncrementReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         cog._fetch_gate_increment_candidates = mock.AsyncMock(return_value=(candidate,))
         cog._validate_gate_increment_candidate_count = mock.Mock()
         cog._gate_increment_store = SimpleNamespace(
-            claim=mock.AsyncMock(return_value=SimpleNamespace(created=True))
+            claim=mock.AsyncMock(return_value=SimpleNamespace(created=True)),
+            get_operation=mock.AsyncMock(return_value=None),
         )
         cog._execute_gate_increment_operation = mock.AsyncMock(return_value=snapshot)
         cog._publish_gate_increment_result = mock.AsyncMock(return_value=True)
@@ -1098,7 +1108,8 @@ class GateIncrementReviewCallbackTests(unittest.IsolatedAsyncioTestCase):
         cog._fetch_gate_increment_candidates = mock.AsyncMock(return_value=(candidate,))
         cog._validate_gate_increment_candidate_count = mock.Mock()
         cog._gate_increment_store = SimpleNamespace(
-            claim=mock.AsyncMock(return_value=SimpleNamespace(created=True))
+            claim=mock.AsyncMock(return_value=SimpleNamespace(created=True)),
+            get_operation=mock.AsyncMock(return_value=None),
         )
         cog._execute_gate_increment_operation = mock.AsyncMock(return_value=snapshot)
         cog._publish_gate_increment_result = mock.AsyncMock(return_value=True)
@@ -1164,6 +1175,144 @@ class GateIncrementReviewOutcomeTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _interaction():
         return GateIncrementReviewCallbackTests._interaction()
+
+    async def _existing_source_review(self, *, completed_ids, failed_ids=(), new_ids=()):
+        _ensure_gate_increment_views()
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "achievements.sqlite"
+        awards = nhmisc.AchievementStore(path)
+        store = nhmisc.GateIncrementStore(path)
+        await awards.initialize()
+        await store.initialize()
+        guild = _manageable_gate_guild()
+        default_role = SimpleNamespace(id=0)
+        guild.default_role = default_role
+        user_ids = sorted(set(completed_ids) | set(failed_ids) | set(new_ids))
+        members = {
+            user_id: _EditableMember(
+                user_id,
+                [guild.get_role(nhmisc.GATE_TIER_ROLE_IDS[0])]
+                if user_id in completed_ids else [default_role],
+                top_role=SimpleNamespace(position=1),
+            ) for user_id in user_ids
+        }
+        guild.fetch_member = mock.AsyncMock(side_effect=members.get)
+        source = SimpleNamespace(
+            id=3, guild=guild, channel=SimpleNamespace(id=2), author=members[user_ids[0]],
+            raw_mentions=tuple(user_ids[1:]), webhook_id=None,
+            jump_url="https://discord.com/channels/1/2/3",
+        )
+        key = nhmisc.SourceMessageKey(1, 2, 3)
+        initial_ids = (*completed_ids, *failed_ids)
+        await store.claim(key, 99, tuple(
+            nhmisc.GateIncrementMemberPlan(user_id, (), nhmisc.GATE_TIER_ROLE_IDS[0])
+            for user_id in initial_ids
+        ))
+        for position, user_id in enumerate(initial_ids):
+            if user_id in completed_ids:
+                await store.mark_member_completed(key, position)
+            else:
+                await store.mark_member_failed(key, position, "forbidden")
+        await store.finalize_operation(key)
+        cog = object.__new__(nhmisc.NHMisc)
+        cog._gate_increment_store = store
+        cog._achievement_store = SimpleNamespace(
+            get_active_stargates=awards.get_active_stargates,
+            list_definitions=mock.AsyncMock(return_value=()),
+            is_bootstrapped=mock.AsyncMock(return_value=True),
+        )
+        cog._retry_gate_increment_publication = mock.AsyncMock(side_effect=lambda _source, snapshot: snapshot)
+        cog._fetch_gate_increment_source = mock.AsyncMock(return_value=source)
+        cog._require_private_moderation_log_channel = mock.AsyncMock()
+        cog._send_moderation_log = mock.AsyncMock(return_value=True)
+        cog._publish_gate_increment_result = mock.AsyncMock(return_value=True)
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=99), response=SimpleNamespace(defer=mock.AsyncMock()),
+            edit_original_response=mock.AsyncMock(), original_response=mock.AsyncMock(),
+            delete_original_response=mock.AsyncMock(),
+        )
+        return SimpleNamespace(cog=cog, awards=awards, store=store, source=source,
+                               interaction=interaction, members=members)
+
+    async def test_completed_message_reopens_review_for_only_new_recipients(self):
+        fixture = await self._existing_source_review(completed_ids=(10,), new_ids=(11,))
+        await fixture.cog._gate_increment_context_action_after_defer(fixture.interaction, fixture.source)
+        payload = fixture.interaction.edit_original_response.await_args.kwargs
+        self.assertIn("view", payload)
+        view = payload["view"]
+        self.assertEqual(view.selected_user_ids, {11})
+        warning = view.render_embed().fields[0]
+        self.assertEqual(warning.name, "Already received a Gate from this message")
+        self.assertIn("<@10>", warning.value)
+        await view.confirm.callback(fixture.interaction)
+        self.assertEqual(fixture.members[10].edits, [])
+        self.assertEqual(len(fixture.members[11].edits), 1)
+        self.assertEqual(len(await fixture.awards.get_active_stargates(1, 10)), 1)
+        self.assertEqual(len(await fixture.awards.get_active_stargates(1, 11)), 1)
+
+    async def test_new_recipients_and_retry_use_separate_controls(self):
+        fixture = await self._existing_source_review(
+            completed_ids=(11,), failed_ids=(10,), new_ids=(12,),
+        )
+        await fixture.cog._gate_increment_context_action_after_defer(fixture.interaction, fixture.source)
+        view = fixture.interaction.edit_original_response.await_args.kwargs["view"]
+        self.assertEqual(view.selected_user_ids, {12})
+        self.assertIn(view.retry, view.children)
+        warnings = {field.name: field.value for field in view.render_embed().fields}
+        self.assertIn("<@10>", warnings["Unfinished grants from this message"])
+
+        await view.confirm.callback(fixture.interaction)
+
+        self.assertEqual(fixture.members[10].edits, [])
+        self.assertEqual(fixture.members[11].edits, [])
+        self.assertEqual(len(fixture.members[12].edits), 1)
+        await fixture.cog._gate_increment_context_action_after_defer(fixture.interaction, fixture.source)
+        view = fixture.interaction.edit_original_response.await_args.kwargs["view"]
+        self.assertEqual(view.selected_user_ids, set())
+
+        await view.retry.callback(fixture.interaction)
+
+        self.assertEqual(len(fixture.members[10].edits), 1)
+        self.assertEqual(fixture.members[11].edits, [])
+        self.assertEqual(len(fixture.members[12].edits), 1)
+        for user_id in (10, 11, 12):
+            self.assertEqual(len(await fixture.awards.get_active_stargates(1, user_id)), 1)
+
+    async def test_previous_recipients_do_not_consume_new_recipient_slots(self):
+        fixture = await self._existing_source_review(
+            completed_ids=tuple(range(10, 35)), new_ids=(35,),
+        )
+
+        await fixture.cog._gate_increment_context_action_after_defer(fixture.interaction, fixture.source)
+
+        payload = fixture.interaction.edit_original_response.await_args.kwargs
+        self.assertIn("view", payload)
+        view = payload["view"]
+        self.assertEqual(view.selected_user_ids, {35})
+        self.assertEqual(len(view.candidate_select.options), 1)
+        await view.confirm.callback(fixture.interaction)
+        self.assertEqual(len(fixture.members[35].edits), 1)
+
+    async def test_adding_recipients_checks_the_combined_congratulations_size(self):
+        fixture = await self._existing_source_review(
+            completed_ids=tuple(range(10, 20)), new_ids=(20,),
+        )
+        key = nhmisc.SourceMessageKey(1, 2, 3)
+        await fixture.store.mark_moderation_logged(key, tuple(range(10)))
+        old_content = "🎉 **Congratulations!**\n" + "\n".join(
+            f"<@{user_id}> <@&{nhmisc.GATE_TIER_ROLE_IDS[0]}>" for user_id in range(10, 20)
+        )
+        await fixture.cog._gate_increment_context_action_after_defer(fixture.interaction, fixture.source)
+        view = fixture.interaction.edit_original_response.await_args.kwargs["view"]
+
+        with mock.patch.object(nhmisc, "DISCORD_MESSAGE_CONTENT_LIMIT", len(old_content) + 1):
+            await view.confirm.callback(fixture.interaction)
+
+        self.assertEqual(fixture.members[20].edits, [])
+        self.assertEqual(await fixture.awards.get_active_stargates(1, 20), ())
+        payload = fixture.interaction.edit_original_response.await_args.kwargs
+        self.assertIn("too large", payload["embed"].description)
 
     async def test_review_lists_author_then_mentions_without_bots_or_duplicates(self):
         _ensure_gate_increment_views()

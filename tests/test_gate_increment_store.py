@@ -81,6 +81,75 @@ class GateIncrementStoreTests(unittest.IsolatedAsyncioTestCase):
             second.operation.moderator_id,
         )
 
+    async def test_completed_source_accepts_only_new_recipients(self):
+        key = gate_increment_store.SourceMessageKey(1, 2, 3)
+        first = await self.first_store.claim(
+            key, 10, (gate_increment_store.GateIncrementMemberPlan(4, (), 5),),
+        )
+        await self.first_store.mark_member_completed(key, 0)
+        await self.first_store.finalize_operation(key)
+
+        added = await self.second_store.claim(key, 11, (
+            gate_increment_store.GateIncrementMemberPlan(4, (5,), 6),
+            gate_increment_store.GateIncrementMemberPlan(7, (), 5),
+        ))
+
+        self.assertTrue(added.created)
+        self.assertEqual(added.operation.operation_id, first.operation.operation_id)
+        reopened = gate_increment_store.GateIncrementStore(self.path)
+        snapshot = await reopened.get_operation(key)
+        self.assertEqual(snapshot.operation.selected_count, 2)
+        self.assertEqual(
+            [(member.user_id, member.target_role_id, member.state) for member in snapshot.members],
+            [(4, 5, gate_increment_store.MemberState.COMPLETED),
+             (7, 5, gate_increment_store.MemberState.PENDING)],
+        )
+
+    async def test_active_execution_or_publication_cannot_be_extended(self):
+        for index, lease in enumerate(("reservation", "execution", "publication")):
+            with self.subTest(lease=lease):
+                key = gate_increment_store.SourceMessageKey(1, 2, 3 + index)
+                user_id = 4 + index
+                await self.first_store.claim(
+                    key, 10, (gate_increment_store.GateIncrementMemberPlan(user_id, (), 5),),
+                )
+                if lease == "reservation":
+                    acquired = True
+                elif lease == "execution":
+                    acquired = await self.first_store.acquire_execution_lease(key, "executor")
+                else:
+                    await self.first_store.mark_member_completed(key, 0)
+                    await self.first_store.finalize_operation(key)
+                    acquired = await self.first_store.acquire_publication_lease(key, "publisher")
+                self.assertTrue(acquired)
+                with self.assertRaisesRegex(RuntimeError, "already being processed"):
+                    await self.second_store.claim(
+                        key, 11, (gate_increment_store.GateIncrementMemberPlan(7, (), 5),),
+                    )
+                snapshot = await self.first_store.get_operation(key)
+                self.assertEqual([member.user_id for member in snapshot.members], [user_id])
+
+    async def test_repeated_additions_keep_every_selected_achievement(self):
+        self._insert_definitions(("a", "A", None), ("b", "B", None), ("c", "C", None))
+        key = gate_increment_store.SourceMessageKey(20, 21, 22)
+        definitions = {
+            key: gate_increment_store.GateIncrementAchievementPlan(key, key.upper())
+            for key in ("a", "b", "c")
+        }
+        for position, selected_keys in enumerate((("a",), ("a", "b"), ("c",))):
+            await self.first_store.claim(
+                key, 99,
+                (gate_increment_store.GateIncrementMemberPlan(30 + position, (), 5),),
+                tuple(definitions[key] for key in selected_keys),
+            )
+            await self.first_store.mark_member_completed(key, position)
+            await self.first_store.finalize_operation(key)
+
+        snapshot = await self.first_store.get_operation(key)
+        self.assertEqual([achievement.key for achievement in snapshot.custom_achievements], ["a", "b", "c"])
+        self.assertEqual([member.custom_achievement_keys for member in snapshot.members],
+                         [("a",), ("a", "b"), ("c",)])
+
     async def test_different_messages_cannot_reserve_same_member_ordinal(self):
         first_key = gate_increment_store.SourceMessageKey(1, 2, 30)
         second_key = gate_increment_store.SourceMessageKey(1, 2, 31)
