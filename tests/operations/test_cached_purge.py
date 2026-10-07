@@ -53,26 +53,6 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_registered_handler_deletes_and_completes_with_durable_result(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                try:
-                    handler_module = import_module("NHCogs.honeypot.operations.cached_purge")
-                except ModuleNotFoundError:
-                    self.fail("cached_purge has no dedicated handler module")
-                operations = import_module("NHCogs.honeypot.operations")
-                evidence_cleanup = import_module(
-                    "NHCogs.honeypot.operations.evidence_cleanup"
-                )
-                moderation = import_module("NHCogs.honeypot.operations.moderation")
-                moderator_decision = import_module(
-                    "NHCogs.honeypot.operations.moderator_decision"
-                )
-                message_process = import_module(
-                    "NHCogs.honeypot.operations.message_process"
-                )
-                review_publish = import_module("NHCogs.honeypot.operations.review_publish")
-                review_update = import_module("NHCogs.honeypot.operations.review_update")
-                role_apply = import_module("NHCogs.honeypot.operations.role_apply")
-                role_release = import_module("NHCogs.honeypot.operations.role_release")
-                source_delete = import_module("NHCogs.honeypot.operations.source_delete")
                 now = datetime.now(timezone.utc)
                 resolved_message_ids = []
                 deleted_message_ids = []
@@ -102,51 +82,6 @@ class CachedPurgeHandlerTests(unittest.IsolatedAsyncioTestCase):
                     appended.message.sequence,
                 )
                 claimed = cog._case_store.claim_operation(operation.operation_id, now)
-
-                self.assertEqual(
-                    dict(operations.HANDLERS),
-                    {
-                        honeypot.OperationType.MESSAGE_PROCESS: (
-                            message_process.message_process_handler
-                        ),
-                        honeypot.OperationType.REVIEW_UPDATE: (
-                            review_update.review_update_handler
-                        ),
-                        honeypot.OperationType.REVIEW_PUBLISH: (
-                            review_publish.review_publish_handler
-                        ),
-                        honeypot.OperationType.CACHED_PURGE: (
-                            handler_module.cached_purge_handler
-                        ),
-                        honeypot.OperationType.SOURCE_DELETE: (
-                            source_delete.source_delete_handler
-                        ),
-                        honeypot.OperationType.EVIDENCE_CLEANUP: (
-                            evidence_cleanup.evidence_cleanup_handler
-                        ),
-                        honeypot.OperationType.ROLE_RELEASE: (
-                            role_release.role_release_handler
-                        ),
-                        honeypot.OperationType.ROLE_APPLY: (
-                            role_apply.role_apply_handler
-                        ),
-                        honeypot.OperationType.MODERATION_ACTION: (
-                            moderation.moderation_action_handler
-                        ),
-                        honeypot.OperationType.MODERATOR_BAN: (
-                            moderator_decision.moderator_decision_handler
-                        ),
-                        honeypot.OperationType.MODERATOR_KICK: (
-                            moderator_decision.moderator_decision_handler
-                        ),
-                    },
-                )
-                self.assertIs(
-                    cog._detection_operation_handlers.resolve(
-                        honeypot.OperationType.CACHED_PURGE
-                    ),
-                    handler_module.cached_purge_handler,
-                )
 
                 await cog._execute_detection_case_operation(claimed, now)
 

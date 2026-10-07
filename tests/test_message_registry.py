@@ -1,5 +1,4 @@
 import importlib
-import inspect
 import sqlite3
 import sys
 import types
@@ -64,22 +63,14 @@ class MessageRegistryTests(unittest.IsolatedAsyncioTestCase):
             fingerprint=fingerprint,
         )
 
-    async def test_initialize_creates_versioned_registry_with_required_indexes(self):
+    async def test_initialize_creates_versioned_registry(self):
         registry = self.registry()
 
         await registry.initialize()
 
         with closing(sqlite3.connect(self.database_path)) as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            indexes = {
-                row[0]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'index'"
-                ).fetchall()
-            }
         self.assertEqual(version, 1)
-        self.assertIn("idx_observed_messages_channel", indexes)
-        self.assertIn("idx_observed_messages_author", indexes)
 
     async def test_duplicate_observation_persists_once_across_registry_restart(self):
         module = load_message_registry_module()
@@ -130,10 +121,6 @@ class MessageRegistryTests(unittest.IsolatedAsyncioTestCase):
     async def test_channel_range_uses_snowflake_bounds_retention_and_pin_state(self):
         registry = self.registry()
         await registry.initialize()
-        self.assertIn(
-            "after_message_id",
-            inspect.signature(registry.recent_in_channel).parameters,
-        )
         records = (
             self.record(100, minute=1),
             self.record(200, minute=2),

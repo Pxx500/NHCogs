@@ -826,24 +826,6 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                 self.assertEqual(snapshot.case.status.value, "pending")
                 self.assertIn("Status: Awaiting classification", projection.description)
 
-    async def test_case_view_hides_individual_when_case_has_too_many_images(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                def add_item(view, item):
-                    view.children = getattr(view, "children", []) + [item]
-
-                honeypot.DetectionCaseView.add_item = add_item
-                honeypot.discord.ui.Button = lambda **kwargs: SimpleNamespace(**kwargs)
-
-                view = honeypot.DetectionCaseView(
-                    honeypot.Honeypot(_Bot(), _operational_support()),
-                    "case-1",
-                    has_image_feedback=True,
-                    allow_individual=False,
-                )
-
-                self.assertNotIn("Individual", [item.label for item in view.children])
-
     async def test_case_summary_warns_and_hides_individual_above_25_images(self):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)

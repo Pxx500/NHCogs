@@ -432,8 +432,14 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 cog._gif_detector_remote_inspector.inspect = mock.AsyncMock(
                     return_value=True
                 )
-                original_url = "https://cdn.discordapp.com/a/anim.webp?ex=old&hm=old"
-                refreshed_url = "https://cdn.discordapp.com/a/anim.webp?ex=new&hm=new"
+                original_url = (
+                    "https://media.discordapp.net/a/anim.webp"
+                    "?format=webp&width=320&ex=old&is=old&hm=old"
+                )
+                refreshed_url = (
+                    "https://media.discordapp.net/a/anim.webp"
+                    "?format=webp&width=320&ex=new&is=new&hm=new"
+                )
                 guild = SimpleNamespace(id=1)
                 current_message = SimpleNamespace(
                     id=30,
@@ -491,7 +497,7 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     evidence_source="remote_media",
                 )
 
-    async def test_webp_fallback_rejects_different_discord_attachment_path(self):
+    async def test_webp_fallback_rejects_changed_discord_attachment_resource(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 gif_detector = import_module("NHCogs.honeypot.gif_detector")
@@ -515,9 +521,9 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     embeds=[],
                     attachments=[
                         SimpleNamespace(
-                            filename="other.webp",
+                            filename="anim.webp",
                             content_type="image/webp",
-                            url="https://cdn.discordapp.com/a/other.webp?hm=new",
+                            url="",
                             proxy_url=None,
                         )
                     ],
@@ -540,40 +546,18 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         SimpleNamespace(
                             filename="anim.webp",
                             content_type="image/webp",
-                            url="https://cdn.discordapp.com/a/anim.webp?hm=old",
+                            url=(
+                                "https://media.discordapp.net/a/anim.webp"
+                                "?format=webp&width=320&ex=old&is=old&hm=old"
+                            ),
                             proxy_url=None,
                         )
                     ],
                     content="",
                 )
 
-                with mock.patch.object(
-                    gif_detector,
-                    "_admit_message",
-                    new=mock.AsyncMock(),
-                ) as admit:
-                    await gif_detector.schedule_remote_media_fallback(cog, message)
-                    await asyncio.gather(*tuple(cog._gif_detector_tasks))
-
-                admit.assert_not_awaited()
-
-    def test_discord_webp_identity_only_ignores_signature_query_fields(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)):
-                gif_detector = import_module("NHCogs.honeypot.gif_detector")
-                original = (
-                    "https://media.discordapp.net/a/anim.webp"
-                    "?format=webp&width=320&ex=old&is=old&hm=old"
-                )
-
-                self.assertTrue(
-                    gif_detector._same_remote_media_candidate(
-                        original,
-                        "https://media.discordapp.net/a/anim.webp"
-                        "?format=webp&width=320&ex=new&is=new&hm=new",
-                    )
-                )
                 for changed in (
+                    "https://media.discordapp.net/a/other.webp?format=webp&width=320",
                     "https://media.discordapp.net/a/anim.webp?format=png&width=320",
                     "https://media.discordapp.net/a/anim.webp?format=webp&width=640",
                     "https://media.discordapp.net/a/anim.webp;other?format=webp&width=320",
@@ -581,9 +565,16 @@ class GifDetectorRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     "?format=webp&width=320&EX=resource-a",
                 ):
                     with self.subTest(changed=changed):
-                        self.assertFalse(
-                            gif_detector._same_remote_media_candidate(original, changed)
-                        )
+                        current_message.attachments[0].url = changed
+                        with mock.patch.object(
+                            gif_detector,
+                            "_admit_message",
+                            new=mock.AsyncMock(),
+                        ) as admit:
+                            await gif_detector.schedule_remote_media_fallback(cog, message)
+                            await asyncio.gather(*tuple(cog._gif_detector_tasks))
+
+                        admit.assert_not_awaited()
 
     async def test_static_webp_does_not_enter_admission_path(self):
         with TemporaryDirectory() as directory:

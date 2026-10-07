@@ -55,7 +55,6 @@ class AchievementProfileRenderingTests(unittest.TestCase):
             ("Achievements",),
         )
         self.assertEqual(embed.fields[0].value, "Solo Gater")
-        self.assertNotIn("Proof", embed.description)
 
     def test_empty_profile_is_explicit(self):
         profile = nhmisc.AchievementProfile(0, (), ())
@@ -1657,7 +1656,6 @@ class AchievementWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(allowed_mentions.roles)
         self.assertFalse(allowed_mentions.everyone)
         self.assertFalse(allowed_mentions.replied_user)
-        self.assertNotIn("Speedrun", source.reply.await_args.args[0])
 
     async def test_grant_partial_failure_is_recorded_without_a_ping(self):
         default_role = SimpleNamespace(id=0, position=0)

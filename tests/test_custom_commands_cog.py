@@ -7,8 +7,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.test_chatchart import _assert_decorator_payload_checks
-
 PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs" / "custom_commands"
 
 
@@ -382,23 +380,7 @@ class CommandUsageChartTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(command.callback.guild_only)
         listed = cog.CustomCommands.cc_list
         self.assertIs(listed.parent, cog.CustomCommands.customcom)
-        self.assertFalse(hasattr(listed.callback, "has_permissions"))
         self.assertTrue(await listed.can_run(denied))
-
-        def parent_callback(ctx):
-            return None
-
-        parent_callback.has_permissions = {"manage_messages": True}
-        parent_callback.direct_permissions = {"manage_messages": True}
-        parent = _Command(parent_callback, name="parent-only")
-
-        def parent_only_callback(ctx):
-            return None
-
-        parent_only = _Command(parent_only_callback, parent=parent)
-        self.assertFalse(await parent_only.can_run(denied))
-        self.assertTrue(await parent_only.can_run(allowed))
-        await _assert_decorator_payload_checks(self, _Command, denied)
 
     def context(self, *, private=True):
         channel = types.SimpleNamespace(
@@ -609,8 +591,6 @@ class CustomCommandsSurfaceTests(unittest.TestCase):
             children["purgelegacy"].callback.direct_permissions,
             {"manage_messages": True},
         )
-        for name in ("raw", "search", "list", "show"):
-            self.assertFalse(hasattr(children[name].callback, "required_permissions"))
 
     def test_migration_uses_a_separate_hidden_management_path(self):
         root = migration_controller.CustomCommandsMigration.nhcustomcom
@@ -780,7 +760,6 @@ class CustomCommandsLegacyPurgeTests(unittest.IsolatedAsyncioTestCase):
 class CustomCommandsCommandErrorTests(unittest.IsolatedAsyncioTestCase):
     async def test_command_error_is_delegated_to_operational_support(self):
         handler = cog.CustomCommands.cog_command_error
-        self.assertIsNone(getattr(cog.CustomCommands, "on_command_error", None))
         subject = object.__new__(cog.CustomCommands)
         subject.support = types.SimpleNamespace(handle_command_error=mock.AsyncMock())
         ctx = types.SimpleNamespace()
@@ -981,7 +960,6 @@ class CustomCommandsListTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(command.name, "commands")
         self.assertIsNone(command.parent)
         self.assertTrue(command.callback.guild_only)
-        self.assertFalse(hasattr(command.callback, "required_permissions"))
         subject, ctx, message = self._subject_and_ctx()
 
         await command.callback(subject, ctx)

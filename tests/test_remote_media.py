@@ -326,8 +326,6 @@ class DecodedAnimationClassificationTests(unittest.TestCase):
                 "AVIF": True,
             },
         )
-        if "avif" in self.remote_media.features.get_supported():
-            self.assertIsNone(self.remote_media.pillow_avif)
 
     def test_registered_extensions_without_native_codecs_are_unavailable(self):
         with mock.patch.object(

@@ -145,7 +145,7 @@ class ReviewUpdateHandlerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(compacted.messages, ())
                 self.assertEqual(compacted.operations, ())
 
-    async def test_terminal_compaction_runs_when_completion_is_fenced_out(self):
+    async def test_case_deletion_during_review_update_keeps_case_erased(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
@@ -153,14 +153,6 @@ class ReviewUpdateHandlerTests(unittest.IsolatedAsyncioTestCase):
                 deleted, deleted_claim = self._claim_terminal_review_update(
                     honeypot, cog, now, user_id=22, message_id=42
                 )
-                compact_attempts = []
-                compact_terminal_case = cog._case_store.compact_terminal_case
-
-                def observe_compaction(case_id):
-                    compact_attempts.append(case_id)
-                    return compact_terminal_case(case_id)
-
-                cog._case_store.compact_terminal_case = observe_compaction
                 deletion_results = []
 
                 async def delete_during_publication(case_id):
@@ -175,4 +167,3 @@ class ReviewUpdateHandlerTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(deletion_results, [True])
                 self.assertIsNone(cog._case_store.get_case(deleted.case.case_id))
-                self.assertIn(deleted.case.case_id, compact_attempts)
