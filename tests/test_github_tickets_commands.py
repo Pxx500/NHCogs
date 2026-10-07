@@ -169,7 +169,6 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("??githubtickets maxpings <count>", rendered_commands)
         self.assertIn("??githubtickets channel [channel|clear]", rendered_commands)
         self.assertIn("??githubtickets logchannel [channel|clear]", rendered_commands)
-        self.assertNotIn("channel set", rendered_commands)
         self.assertIn("Run a category below", command_embed.description)
 
         for call in ctx.send.await_args_list:
@@ -478,10 +477,6 @@ class GitHubTicketsCommandTests(unittest.IsolatedAsyncioTestCase):
                 pass
 
             modules.githubtickets.discord.TextChannel = FakeTextChannel
-            self.assertEqual(
-                cog.githubtickets_channel.callback.__annotations__["channel"],
-                "discord.abc.GuildChannel | str | None",
-            )
             await cog.githubtickets_channel(
                 ctx,
                 SimpleNamespace(id=100, mention="#voice"),

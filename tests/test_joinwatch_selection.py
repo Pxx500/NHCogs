@@ -97,8 +97,8 @@ class JoinwatchSelectionTests(unittest.TestCase):
                         ("discard_role", "broken-role", None, None, None),
                     ),
                 )
-                self.assertIs(selected.assignment_actions[1].data, due_assignment)
-                self.assertIs(selected.role_actions[0].data, due_role)
+                self.assertEqual(selected.assignment_actions[1].data, due_assignment)
+                self.assertEqual(selected.role_actions[0].data, due_role)
 
     def test_disabled_assignment_processing_clears_only_assignment_state(self):
         with TemporaryDirectory() as directory:

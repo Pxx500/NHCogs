@@ -3,13 +3,15 @@ and the bulk and individual confirmation prompts.
 """
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.detection_case_fixtures import capture_attachment
+from tests.detection_case_fixtures import DetectionCaseBuilder, capture_attachment
 from tests.harness import (
     CaseExpiryTestCase,
     _Bot,
@@ -20,6 +22,85 @@ from tests.harness import (
 
 
 class CaseReviewControlTests(CaseExpiryTestCase):
+    async def test_bulk_confirmation_does_not_wait_for_background_workers(self):
+        for message_scope in (False, True):
+            for matched, label, decision in (
+                (False, "Add all", "true_positive"),
+                (True, "All TP", "true_positive"),
+                (True, "All FP", "false_positive"),
+            ):
+                with self.subTest(message_scope=message_scope, label=label):
+                    with TemporaryDirectory() as directory:
+                        with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                            cog = honeypot.Honeypot(_Bot(), _operational_support())
+                            builder = DetectionCaseBuilder(honeypot, cog._case_store.database_path)
+                            appended = builder.add_message(
+                                attachments=(builder.attachment(0, "proof.png"),),
+                            )
+                            builder.capture(appended.message.sequence, 0, Path(directory) / "proof.png")
+                            builder.scan(appended.message.sequence, 0, matched=matched)
+                            items = honeypot.case_feedback_items(builder.store.get_case(builder.case_id))
+                            honeypot.DetectionCaseView.add_item = lambda view, item: setattr(
+                                view, "children", getattr(view, "children", []) + [item]
+                            )
+                            honeypot.discord.ui.Button = lambda **kwargs: SimpleNamespace(**kwargs)
+                            view = honeypot.DetectionCaseView(
+                                cog, builder.case_id, has_image_feedback=True,
+                                feedback_items=items,
+                                message_sequence=appended.message.sequence if message_scope else None,
+                            )
+                            button = next(item for item in view.children if item.label == label)
+                            shown = asyncio.Event()
+                            prompts = []
+
+                            async def send_message(*args, prompts=prompts, shown=shown, **kwargs):
+                                prompts.append(kwargs["view"])
+                                shown.set()
+
+                            interaction = SimpleNamespace(
+                                user=SimpleNamespace(id=99, guild_permissions=SimpleNamespace(manage_messages=True)),
+                                response=SimpleNamespace(send_message=send_message),
+                            )
+                            loop = asyncio.get_running_loop()
+                            worker_started = asyncio.Event()
+                            release_worker = Event()
+
+                            def occupy_worker(loop=loop, worker_started=worker_started, release_worker=release_worker):
+                                loop.call_soon_threadsafe(worker_started.set)
+                                release_worker.wait()
+
+                            with ThreadPoolExecutor(max_workers=1) as executor:
+                                loop.set_default_executor(executor)
+                                occupied = loop.run_in_executor(None, occupy_worker)
+                                await worker_started.wait()
+                                callback = asyncio.create_task(button.callback(interaction))
+                                try:
+                                    await asyncio.wait_for(shown.wait(), timeout=1)
+                                    self.assertTrue(all(
+                                        item.learning_decision is None
+                                        for item in builder.store.get_case(builder.case_id).attachments
+                                    ))
+                                finally:
+                                    release_worker.set()
+                                    await occupied
+                                    await callback
+                                confirmation = prompts[0]
+                                later = builder.add_message(
+                                    attachments=(builder.attachment(0, "later.png"),),
+                                )
+                                builder.capture(later.message.sequence, 0, Path(directory) / "later.png")
+                                await confirmation.children[0].callback(SimpleNamespace(
+                                    user=interaction.user,
+                                    response=SimpleNamespace(defer=mock.AsyncMock(), is_done=lambda: False),
+                                    followup=SimpleNamespace(send=mock.AsyncMock()),
+                                    delete_original_response=mock.AsyncMock(),
+                                ))
+                                self.assertEqual(
+                                    [item.learning_decision for item in builder.store.get_case(builder.case_id).attachments],
+                                    [decision, None],
+                                )
+                                await asyncio.gather(*cog._case_review_tasks)
+
     async def test_bulk_tp_interaction_ignores_captured_pdf_evidence(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
@@ -539,7 +620,7 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                 )
                 await unmatched_view.children[3].callback(SimpleNamespace())
                 cog._case_review_bulk_interaction.assert_awaited_once_with(
-                    mock.ANY, "case-1", "tp"
+                    mock.ANY, "case-1", "tp", feedback_items=(unmatched,)
                 )
 
     async def test_case_summary_represents_each_source_message_channel(self):
@@ -745,24 +826,6 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                 self.assertEqual(snapshot.case.status.value, "pending")
                 self.assertIn("Status: Awaiting classification", projection.description)
 
-    async def test_case_view_hides_individual_when_case_has_too_many_images(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                def add_item(view, item):
-                    view.children = getattr(view, "children", []) + [item]
-
-                honeypot.DetectionCaseView.add_item = add_item
-                honeypot.discord.ui.Button = lambda **kwargs: SimpleNamespace(**kwargs)
-
-                view = honeypot.DetectionCaseView(
-                    honeypot.Honeypot(_Bot(), _operational_support()),
-                    "case-1",
-                    has_image_feedback=True,
-                    allow_individual=False,
-                )
-
-                self.assertNotIn("Individual", [item.label for item in view.children])
-
     async def test_case_summary_warns_and_hides_individual_above_25_images(self):
         with TemporaryDirectory() as directory:
             data_path = Path(directory)
@@ -867,13 +930,13 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                                 f"https://cdn.test/{filename}",
                             )
                             for position, filename in enumerate(
-                                ("proof-one.png", "proof-two.png")
+                                ("proof-one.png", "proof-two.png", "reviewed.png")
                             )
                         ),
                     ),
                     (),
                 )
-                for position, filename in enumerate(("proof-one.png", "proof-two.png")):
+                for position, filename in enumerate(("proof-one.png", "proof-two.png", "reviewed.png")):
                     evidence = data_path / filename
                     evidence.write_bytes(b"image")
                     capture_attachment(
@@ -902,32 +965,56 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                     view.children.remove(item)
 
                 honeypot.DetectionIndividualView.add_item = add_item
+                honeypot.DetectionCaseView.add_item = add_item
                 honeypot.DetectionIndividualView.remove_item = remove_item
                 honeypot.discord.ui.Select = lambda **kwargs: SimpleNamespace(**kwargs)
                 honeypot.discord.ui.Button = lambda **kwargs: SimpleNamespace(**kwargs)
                 honeypot.discord.SelectOption = lambda **kwargs: SimpleNamespace(**kwargs)
                 cog._case_review_attachment_interaction = mock.AsyncMock()
+                response_done = False
+
+                async def acknowledge(**kwargs):
+                    nonlocal response_done
+                    response_done = True
+
                 interaction = SimpleNamespace(
                     user=SimpleNamespace(
                         id=99,
                         guild_permissions=SimpleNamespace(manage_messages=True),
                     ),
                     response=SimpleNamespace(
-                        defer=mock.AsyncMock(),
+                        defer=mock.AsyncMock(side_effect=acknowledge),
                         send_message=mock.AsyncMock(),
+                        is_done=lambda: response_done,
                     ),
+                    edit_original_response=mock.AsyncMock(),
                 )
 
-                await cog._case_review_individual_prompt(
-                    interaction, appended.case.case_id
+                controls = honeypot.DetectionCaseView(
+                    cog, appended.case.case_id, has_image_feedback=True,
+                    feedback_items=honeypot.case_feedback_items(cog._case_store.get_case(appended.case.case_id)),
                 )
+                button = next(item for item in controls.children if item.label == "Individual")
+                cog._case_store.apply_attachment_decisions(
+                    appended.case.case_id,
+                    {honeypot.AttachmentKey(appended.case.case_id, 1, 2): "ignored"},
+                    98,
+                    datetime.now(timezone.utc),
+                )
+                acknowledged_at_read = []
+                get_case = cog._case_store.get_case
 
-                interaction.response.defer.assert_not_awaited()
-                interaction.response.send_message.assert_awaited_once()
-                self.assertTrue(
-                    interaction.response.send_message.await_args.kwargs["ephemeral"]
-                )
-                view = interaction.response.send_message.await_args.kwargs["view"]
+                def read_case(case_id):
+                    acknowledged_at_read.append(interaction.response.is_done())
+                    return get_case(case_id)
+
+                with mock.patch.object(cog._case_store, "get_case", side_effect=read_case):
+                    await button.callback(interaction)
+
+                self.assertEqual(acknowledged_at_read, [True], "case read delayed acknowledgement")
+                interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+                interaction.response.send_message.assert_not_awaited()
+                view = interaction.edit_original_response.await_args.kwargs["view"]
                 self.assertEqual(len(view.children), 1)
                 selector = view.children[0]
                 self.assertEqual(

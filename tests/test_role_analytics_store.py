@@ -78,6 +78,9 @@ class RoleAnalyticsStoreTests(unittest.IsolatedAsyncioTestCase):
         not_sql, not_parameters = role_expression.compile_role_expression(
             role_expression.parse_role_expression("NOT 10")
         )
+        and_not_sql, and_not_parameters = role_expression.compile_role_expression(
+            role_expression.parse_role_expression("<@&10> AND NOT 20")
+        )
 
         self.assertEqual(
             await self.store.count_matching(123, and_sql, and_parameters), 1
@@ -91,6 +94,10 @@ class RoleAnalyticsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             await self.store.matching_user_ids(123, or_sql, or_parameters),
             (1, 2, 3),
+        )
+        self.assertEqual(
+            await self.store.matching_user_ids(123, and_not_sql, and_not_parameters),
+            (1,),
         )
 
     async def test_replace_member_is_idempotent_and_replaces_complete_role_set(self):

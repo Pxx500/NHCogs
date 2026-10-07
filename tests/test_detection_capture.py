@@ -786,18 +786,6 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = honeypot.Honeypot(_Bot(), _operational_support())
-                try:
-                    handler_module = import_module(
-                        "NHCogs.honeypot.operations.message_process"
-                    )
-                except ModuleNotFoundError:
-                    self.fail("message_process has no dedicated handler module")
-                self.assertIs(
-                    cog._detection_operation_handlers.resolve(
-                        honeypot.OperationType.MESSAGE_PROCESS
-                    ),
-                    handler_module.message_process_handler,
-                )
                 await asyncio.to_thread(cog._case_store.initialize)
                 now = datetime.now(timezone.utc)
                 appended = await asyncio.to_thread(

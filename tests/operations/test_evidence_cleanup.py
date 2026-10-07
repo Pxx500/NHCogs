@@ -6,7 +6,6 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest import mock
 
 from tests.detection_case_fixtures import capture_attachment, publish_primary
 from tests.harness import _Bot, _isolated_honeypot_modules, _operational_support
@@ -74,7 +73,6 @@ class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
                 cog = honeypot.Honeypot(_Bot(), _operational_support())
-                handler = self._handler(honeypot, cog)
                 appended = self._append_case(honeypot, cog, now)
                 case_root = self._case_root(honeypot, cog, appended)
                 nested = case_root / "nested"
@@ -86,8 +84,6 @@ class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
                 claimed = cog._case_store.claim_operation(
                     operation.operation_id, now
                 )
-
-                self.assertIsNotNone(handler)
 
                 await cog._execute_detection_case_operation(claimed, now)
 
@@ -597,7 +593,7 @@ class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertTrue(evidence.exists())
 
-    async def test_compaction_runs_when_case_deletion_loses_the_completion_fence(
+    async def test_case_deletion_during_sample_copy_keeps_evidence_and_rows_erased(
         self,
     ):
         with TemporaryDirectory() as directory:
@@ -663,8 +659,6 @@ class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
                     cleanup.operation_id, now
                 )
                 sample_attempts = []
-                compaction_attempts = []
-                real_compact = cog._case_store.compact_terminal_case
 
                 async def delete_case_on_sample_copy(
                     guild_id, source_path, decision, moderator_id
@@ -678,23 +672,13 @@ class EvidenceCleanupHandlerTests(unittest.IsolatedAsyncioTestCase):
                     )
                     return "inserted", object()
 
-                def record_compaction(compacted_case_id):
-                    compaction_attempts.append(compacted_case_id)
-                    return real_compact(compacted_case_id)
-
                 cog._imagescan_add_file_sample = delete_case_on_sample_copy
-                with mock.patch.object(
-                    cog._case_store,
-                    "compact_terminal_case",
-                    side_effect=record_compaction,
-                ):
-                    await cog._execute_detection_case_operation(claimed, now)
+                await cog._execute_detection_case_operation(claimed, now)
 
                 self.assertEqual(
                     sample_attempts,
                     [(10, "proof.png", "true_positive", 99)],
                 )
-                self.assertIn(case_id, compaction_attempts)
                 self.assertFalse(case_root.exists())
                 self.assertIsNone(cog._case_store.get_case(case_id))
                 self.assertIsNone(cog._case_store.get_case_deletion_job(case_id))

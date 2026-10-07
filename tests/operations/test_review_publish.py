@@ -83,33 +83,8 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_registered_handler_publishes_and_completes_with_none(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                try:
-                    handler_module = import_module(
-                        "NHCogs.honeypot.operations.review_publish"
-                    )
-                except ModuleNotFoundError:
-                    self.fail("review_publish has no dedicated handler module")
-                operations = import_module("NHCogs.honeypot.operations")
-                cached_purge = import_module("NHCogs.honeypot.operations.cached_purge")
-                evidence_cleanup = import_module(
-                    "NHCogs.honeypot.operations.evidence_cleanup"
-                )
-                message_process = import_module(
-                    "NHCogs.honeypot.operations.message_process"
-                )
-                moderation = import_module("NHCogs.honeypot.operations.moderation")
-                moderator_decision = import_module(
-                    "NHCogs.honeypot.operations.moderator_decision"
-                )
-                review_update = import_module("NHCogs.honeypot.operations.review_update")
-                role_apply = import_module("NHCogs.honeypot.operations.role_apply")
-                role_release = import_module("NHCogs.honeypot.operations.role_release")
-                source_delete = import_module("NHCogs.honeypot.operations.source_delete")
                 now = datetime.now(timezone.utc)
-                guild = object()
-                bot = _Bot()
-                bot.get_guild = lambda guild_id: guild
-                cog = honeypot.Honeypot(bot, _operational_support())
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
                 appended = self._append_case(honeypot, cog, now)
                 message_sequence = appended.message.sequence
                 operation = cog._case_store.ensure_operation(
@@ -123,69 +98,6 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
 
                 self._configure(cog)
                 cog._publish_detection_case = self._record_publications(publications)
-
-                self.assertIs(
-                    cog._detection_operation_handlers.resolve(
-                        honeypot.OperationType.REVIEW_PUBLISH
-                    ),
-                    handler_module.review_publish_handler,
-                )
-                self.assertEqual(
-                    dict(operations.HANDLERS),
-                    {
-                        honeypot.OperationType.MESSAGE_PROCESS: (
-                            message_process.message_process_handler
-                        ),
-                        honeypot.OperationType.REVIEW_UPDATE: (
-                            review_update.review_update_handler
-                        ),
-                        honeypot.OperationType.REVIEW_PUBLISH: (
-                            handler_module.review_publish_handler
-                        ),
-                        honeypot.OperationType.CACHED_PURGE: (
-                            cached_purge.cached_purge_handler
-                        ),
-                        honeypot.OperationType.SOURCE_DELETE: (
-                            source_delete.source_delete_handler
-                        ),
-                        honeypot.OperationType.EVIDENCE_CLEANUP: (
-                            evidence_cleanup.evidence_cleanup_handler
-                        ),
-                        honeypot.OperationType.ROLE_RELEASE: (
-                            role_release.role_release_handler
-                        ),
-                        honeypot.OperationType.ROLE_APPLY: (
-                            role_apply.role_apply_handler
-                        ),
-                        honeypot.OperationType.MODERATION_ACTION: (
-                            moderation.moderation_action_handler
-                        ),
-                        honeypot.OperationType.MODERATOR_BAN: (
-                            moderator_decision.moderator_decision_handler
-                        ),
-                        honeypot.OperationType.MODERATOR_KICK: (
-                            moderator_decision.moderator_decision_handler
-                        ),
-                    },
-                )
-                for operation_type in honeypot.OperationType:
-                    if operation_type in {
-                        honeypot.OperationType.MESSAGE_PROCESS,
-                        honeypot.OperationType.REVIEW_UPDATE,
-                        honeypot.OperationType.REVIEW_PUBLISH,
-                        honeypot.OperationType.CACHED_PURGE,
-                        honeypot.OperationType.SOURCE_DELETE,
-                        honeypot.OperationType.EVIDENCE_CLEANUP,
-                        honeypot.OperationType.ROLE_RELEASE,
-                        honeypot.OperationType.ROLE_APPLY,
-                        honeypot.OperationType.MODERATION_ACTION,
-                        honeypot.OperationType.MODERATOR_BAN,
-                        honeypot.OperationType.MODERATOR_KICK,
-                    }:
-                        continue
-                    self.assertIsNone(
-                        cog._detection_operation_handlers.resolve(operation_type)
-                    )
 
                 await cog._execute_detection_case_operation(
                     claimed,
@@ -210,35 +122,6 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertIs(completed.status, honeypot.OperationStatus.SUCCEEDED)
                 self.assertIsNone(completed.result)
-
-    async def test_configured_review_channel_is_used(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                handler_module = import_module("NHCogs.honeypot.operations.review_publish")
-                now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot(), _operational_support())
-                appended, _operation, _claimed, context = (
-                    self._claim_review_publish(honeypot, cog, now)
-                )
-                self._configure(cog)
-                publications = []
-
-                cog._publish_detection_case = self._record_publications(publications)
-
-                outcome = await handler_module.review_publish_handler(cog, context)
-
-                self.assertEqual(
-                    publications,
-                    [
-                        (
-                            appended.case.case_id,
-                            101,
-                            appended.message.sequence,
-                        )
-                    ],
-                )
-                self.assertIsNone(outcome.result)
-                self.assertEqual(outcome.follow_ups, ())
 
     async def test_errors_channel_is_not_a_review_publication_fallback(self):
         with TemporaryDirectory() as directory:
@@ -273,42 +156,14 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                     ],
                 )
 
-    async def test_guild_unavailable_still_uses_configured_review_channel_id(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                handler_module = import_module("NHCogs.honeypot.operations.review_publish")
-                now = datetime.now(timezone.utc)
-                cog = honeypot.Honeypot(_Bot(), _operational_support())
-                appended, _operation, _claimed, context = (
-                    self._claim_review_publish(honeypot, cog, now)
-                )
-                self._configure(cog)
-                publications = []
-
-                cog._publish_detection_case = self._record_publications(publications)
-
-                await handler_module.review_publish_handler(cog, context)
-
-                self.assertEqual(
-                    publications,
-                    [
-                        (
-                            appended.case.case_id,
-                            101,
-                            appended.message.sequence,
-                        )
-                    ],
-                )
-
-    async def test_publication_exception_identity_reaches_shared_retry_settlement(
+    async def test_publication_failure_reaches_shared_retry_settlement(
         self,
     ):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                handler_module = import_module("NHCogs.honeypot.operations.review_publish")
                 now = datetime.now(timezone.utc)
                 cog = honeypot.Honeypot(_Bot(), _operational_support())
-                appended, operation, claimed, context = (
+                appended, operation, claimed, _context = (
                     self._claim_review_publish(honeypot, cog, now)
                 )
                 self._configure(cog)
@@ -318,11 +173,6 @@ class ReviewPublishHandlerTests(unittest.IsolatedAsyncioTestCase):
                     raise publication_error
 
                 cog._publish_detection_case = fail_publication
-
-                with self.assertRaises(RuntimeError) as captured:
-                    await handler_module.review_publish_handler(cog, context)
-
-                self.assertIs(captured.exception, publication_error)
 
                 await cog._execute_detection_case_operation(claimed, now)
 

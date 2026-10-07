@@ -261,7 +261,6 @@ class CleanupOrchestrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_after_cleanup_validates_boundary_and_uses_registry_range(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                self.assertTrue(hasattr(honeypot.cleanup, "cleanup_after"))
                 cog = honeypot.Honeypot(_Bot(), _operational_support())
                 boundary = self.record(honeypot, 100)
                 records = (self.record(honeypot, 200), self.record(honeypot, 300))

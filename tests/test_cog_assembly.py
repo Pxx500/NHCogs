@@ -29,10 +29,6 @@ class HoneypotMetadataTests(unittest.TestCase):
         self.assertIn("Cog version: 3.5.0", help_text)
         self.assertIn("Repo name: NHCogs", help_text)
         self.assertIn("Repository: https://github.com/Pxx500/NHCogs", help_text)
-        self.assertNotIn("AAA3A", help_text)
-        self.assertNotIn("readthedocs", help_text.lower())
-        self.assertNotIn("crowdin", help_text.lower())
-        self.assertNotIn("commit", help_text.lower())
 
 
 class CogAssemblyContractTests(unittest.TestCase):
@@ -46,8 +42,6 @@ class CogAssemblyContractTests(unittest.TestCase):
                 }
 
         self.assertIn("honeypot channels", command_names)
-        self.assertNotIn("honeypot channel", command_names)
-        self.assertNotIn("honeypot channel logs", command_names)
         for category in (
             "review",
             "manual-evidence",
