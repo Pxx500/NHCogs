@@ -2000,10 +2000,11 @@ async def _case_review_individual_prompt(
     if not _case_review_has_permission(interaction):
         await _case_review_error(interaction, _("You do not have permission to review this case"))
         return
+    await interaction.response.defer(ephemeral=True, thinking=True)
     snapshot = await asyncio.to_thread(cog._case_store.get_case, case_id)
     feedback_items = tuple(
         item
-        for item in case_feedback_items(snapshot)
+        for item in (case_feedback_items(snapshot) if snapshot is not None else ())
         if item.decision is None
         and (
             message_sequence is None
@@ -2011,12 +2012,11 @@ async def _case_review_individual_prompt(
         )
     )
     if not feedback_items:
-        await _case_review_error(
-            interaction, _("No unresolved image evidence remains")
+        await interaction.edit_original_response(
+            content=_("No unresolved image evidence remains"), view=None,
         )
         return
-    await interaction.response.send_message(
-        _("Choose an image to review"),
+    await interaction.edit_original_response(
+        content=_("Choose an image to review"),
         view=DetectionIndividualView(cog, feedback_items),
-        ephemeral=True,
     )

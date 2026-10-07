@@ -43,6 +43,12 @@ class ProxySender(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class CharacterPresetSummary:
+    preset_name: str
+    display_name: str
+
+
+@dataclass(frozen=True, slots=True)
 class CharacterPreset:
     guild_id: int
     preset_name: str
@@ -173,9 +179,9 @@ class BotProxyStore:
         async with self._lock:
             return await asyncio.to_thread(self._get_character_sync, guild_id, name_key)
 
-    async def list_characters(self, guild_id: int) -> tuple[CharacterPreset, ...]:
+    async def list_character_summaries(self, guild_id: int) -> tuple[CharacterPresetSummary, ...]:
         async with self._lock:
-            return await asyncio.to_thread(self._list_characters_sync, guild_id)
+            return await asyncio.to_thread(self._list_character_summaries_sync, guild_id)
 
     async def update_character(
         self,
@@ -452,17 +458,17 @@ class BotProxyStore:
             ).fetchone()
         return self._character_from_row(row) if row is not None else None
 
-    def _list_characters_sync(self, guild_id: int) -> tuple[CharacterPreset, ...]:
+    def _list_character_summaries_sync(self, guild_id: int) -> tuple[CharacterPresetSummary, ...]:
         with self._connection() as connection:
             rows = connection.execute(
                 """
-                SELECT * FROM bot_proxy_characters
+                SELECT preset_name, display_name FROM bot_proxy_characters
                 WHERE guild_id = ?
                 ORDER BY name_key
                 """,
                 (guild_id,),
             ).fetchall()
-        return tuple(self._character_from_row(row) for row in rows)
+        return tuple(CharacterPresetSummary(row["preset_name"], row["display_name"]) for row in rows)
 
     def _update_character_sync(
         self,

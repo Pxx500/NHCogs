@@ -948,13 +948,13 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                                 f"https://cdn.test/{filename}",
                             )
                             for position, filename in enumerate(
-                                ("proof-one.png", "proof-two.png")
+                                ("proof-one.png", "proof-two.png", "reviewed.png")
                             )
                         ),
                     ),
                     (),
                 )
-                for position, filename in enumerate(("proof-one.png", "proof-two.png")):
+                for position, filename in enumerate(("proof-one.png", "proof-two.png", "reviewed.png")):
                     evidence = data_path / filename
                     evidence.write_bytes(b"image")
                     capture_attachment(
@@ -983,32 +983,56 @@ class CaseReviewControlTests(CaseExpiryTestCase):
                     view.children.remove(item)
 
                 honeypot.DetectionIndividualView.add_item = add_item
+                honeypot.DetectionCaseView.add_item = add_item
                 honeypot.DetectionIndividualView.remove_item = remove_item
                 honeypot.discord.ui.Select = lambda **kwargs: SimpleNamespace(**kwargs)
                 honeypot.discord.ui.Button = lambda **kwargs: SimpleNamespace(**kwargs)
                 honeypot.discord.SelectOption = lambda **kwargs: SimpleNamespace(**kwargs)
                 cog._case_review_attachment_interaction = mock.AsyncMock()
+                response_done = False
+
+                async def acknowledge(**kwargs):
+                    nonlocal response_done
+                    response_done = True
+
                 interaction = SimpleNamespace(
                     user=SimpleNamespace(
                         id=99,
                         guild_permissions=SimpleNamespace(manage_messages=True),
                     ),
                     response=SimpleNamespace(
-                        defer=mock.AsyncMock(),
+                        defer=mock.AsyncMock(side_effect=acknowledge),
                         send_message=mock.AsyncMock(),
+                        is_done=lambda: response_done,
                     ),
+                    edit_original_response=mock.AsyncMock(),
                 )
 
-                await cog._case_review_individual_prompt(
-                    interaction, appended.case.case_id
+                controls = honeypot.DetectionCaseView(
+                    cog, appended.case.case_id, has_image_feedback=True,
+                    feedback_items=honeypot.case_feedback_items(cog._case_store.get_case(appended.case.case_id)),
                 )
+                button = next(item for item in controls.children if item.label == "Individual")
+                cog._case_store.apply_attachment_decisions(
+                    appended.case.case_id,
+                    {honeypot.AttachmentKey(appended.case.case_id, 1, 2): "ignored"},
+                    98,
+                    datetime.now(timezone.utc),
+                )
+                acknowledged_at_read = []
+                get_case = cog._case_store.get_case
 
-                interaction.response.defer.assert_not_awaited()
-                interaction.response.send_message.assert_awaited_once()
-                self.assertTrue(
-                    interaction.response.send_message.await_args.kwargs["ephemeral"]
-                )
-                view = interaction.response.send_message.await_args.kwargs["view"]
+                def read_case(case_id):
+                    acknowledged_at_read.append(interaction.response.is_done())
+                    return get_case(case_id)
+
+                with mock.patch.object(cog._case_store, "get_case", side_effect=read_case):
+                    await button.callback(interaction)
+
+                self.assertEqual(acknowledged_at_read, [True], "case read delayed acknowledgement")
+                interaction.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+                interaction.response.send_message.assert_not_awaited()
+                view = interaction.edit_original_response.await_args.kwargs["view"]
                 self.assertEqual(len(view.children), 1)
                 selector = view.children[0]
                 self.assertEqual(

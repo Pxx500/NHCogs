@@ -56,7 +56,10 @@ class BotProxyCharacterStoreTests(unittest.IsolatedAsyncioTestCase):
             moderator_id=21,
         )
         self.assertEqual(other_guild.guild_id, 11)
-        self.assertEqual(await self.store.list_characters(10), (created,))
+        self.assertEqual(
+            await self.store.list_character_summaries(10),
+            (bot_proxy_store.CharacterPresetSummary("Narrator", "The Narrator"),),
+        )
 
     async def test_duplicate_name_is_rejected_case_insensitively(self) -> None:
         await self.store.create_character(
