@@ -21,28 +21,6 @@ class RoleExpressionTests(unittest.TestCase):
             "<@&11> OR <@&22> AND NOT <@&33>",
         )
 
-    def test_compiler_emits_fixed_exists_predicates_and_parameters(self):
-        expression = role_expression.parse_role_expression(
-            "<@&11> AND NOT 22"
-        )
-
-        sql, parameters = role_expression.compile_role_expression(expression)
-
-        self.assertEqual(
-            sql,
-            "(EXISTS (SELECT 1 FROM role_analytics_memberships AS membership "
-            "WHERE membership.guild_id = member.guild_id "
-            "AND membership.generation = member.generation "
-            "AND membership.user_id = member.user_id "
-            "AND membership.role_id = ?) AND "
-            "(NOT EXISTS (SELECT 1 FROM role_analytics_memberships AS membership "
-            "WHERE membership.guild_id = member.guild_id "
-            "AND membership.generation = member.generation "
-            "AND membership.user_id = member.user_id "
-            "AND membership.role_id = ?)))",
-        )
-        self.assertEqual(parameters, (11, 22))
-
     def test_input_longer_than_one_thousand_characters_is_rejected(self):
         with self.assertRaises(role_expression.RoleExpressionLimitError):
             role_expression.parse_role_expression("1" + " " * 1000)

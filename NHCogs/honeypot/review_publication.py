@@ -1797,28 +1797,18 @@ async def _case_review_bulk_interaction(
     *,
     confirmed: bool = False,
     expected_keys: tuple[AttachmentKey, ...] = (),
+    feedback_items: tuple[CaseFeedbackItem, ...] = (),
 ) -> bool:
     if not _case_review_has_permission(interaction):
         await _case_review_error(interaction, _("You do not have permission to review this case"))
         return False
-    snapshot = await asyncio.to_thread(cog._case_store.get_case, case_id)
-    pending_feedback = _pending_feedback_items(
-        case_feedback_items(snapshot) if snapshot is not None else ()
-    )
-    review_items = (
-        tuple(item for item in pending_feedback if item.key in set(expected_keys))
-        if confirmed and expected_keys
-        else pending_feedback
-    )
-    try:
-        validate_image_review_action(review_items, action)
-    except ValueError as error:
-        await _case_review_error(
-            interaction,
-            _(str(error)),
-        )
-        return False
     if action in {"tp", "fp"} and not confirmed:
+        pending_feedback = _pending_feedback_items(feedback_items)
+        try:
+            validate_image_review_action(pending_feedback, action)
+        except ValueError as error:
+            await _case_review_error(interaction, _(str(error)))
+            return False
         await interaction.response.send_message(
             _("Confirm this bulk image decision"),
             view=DetectionBulkConfirmationView(
@@ -1862,31 +1852,20 @@ async def _case_review_message_bulk_interaction(
     *,
     confirmed: bool = False,
     expected_keys: tuple[AttachmentKey, ...] = (),
+    feedback_items: tuple[CaseFeedbackItem, ...] = (),
 ) -> bool:
     if not _case_review_has_permission(interaction):
         await _case_review_error(
             interaction, _("You do not have permission to review this case")
         )
         return False
-    snapshot = await asyncio.to_thread(cog._case_store.get_case, case_id)
-    pending_feedback = _pending_feedback_items(
-        case_feedback_items(snapshot) if snapshot is not None else (),
-        message_sequence,
-    )
-    review_items = (
-        tuple(item for item in pending_feedback if item.key in set(expected_keys))
-        if confirmed and expected_keys
-        else pending_feedback
-    )
-    try:
-        validate_image_review_action(review_items, action)
-    except ValueError as error:
-        await _case_review_error(
-            interaction,
-            _(str(error)),
-        )
-        return False
     if action in {"tp", "fp"} and not confirmed:
+        pending_feedback = _pending_feedback_items(feedback_items, message_sequence)
+        try:
+            validate_image_review_action(pending_feedback, action)
+        except ValueError as error:
+            await _case_review_error(interaction, _(str(error)))
+            return False
         await interaction.response.send_message(
             _("Confirm this message's image decision"),
             view=DetectionBulkConfirmationView(
@@ -2021,10 +2000,11 @@ async def _case_review_individual_prompt(
     if not _case_review_has_permission(interaction):
         await _case_review_error(interaction, _("You do not have permission to review this case"))
         return
+    await interaction.response.defer(ephemeral=True, thinking=True)
     snapshot = await asyncio.to_thread(cog._case_store.get_case, case_id)
     feedback_items = tuple(
         item
-        for item in case_feedback_items(snapshot)
+        for item in (case_feedback_items(snapshot) if snapshot is not None else ())
         if item.decision is None
         and (
             message_sequence is None
@@ -2032,12 +2012,11 @@ async def _case_review_individual_prompt(
         )
     )
     if not feedback_items:
-        await _case_review_error(
-            interaction, _("No unresolved image evidence remains")
+        await interaction.edit_original_response(
+            content=_("No unresolved image evidence remains"), view=None,
         )
         return
-    await interaction.response.send_message(
-        _("Choose an image to review"),
+    await interaction.edit_original_response(
+        content=_("Choose an image to review"),
         view=DetectionIndividualView(cog, feedback_items),
-        ephemeral=True,
     )

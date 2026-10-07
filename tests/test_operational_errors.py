@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.test_chatchart import nhmisc
+from tests.test_forum_autopin import FakeConfigRoot, FakeGuild, make_support
 
 MODULE_PATH = (
     Path(__file__).parents[1] / "NHCogs" / "operational_errors.py"
@@ -325,24 +326,51 @@ class OperationalErrorReporterTests(unittest.IsolatedAsyncioTestCase):
             channel_id=200,
         )
 
-    async def test_unexpected_prefix_command_failure_is_reported(self):
-        cog = object.__new__(nhmisc.NHMisc)
-        cog._support = SimpleNamespace(handle_command_error=mock.AsyncMock())
-        error = RuntimeError("send failed")
-        ctx = SimpleNamespace(
-            guild=SimpleNamespace(id=100),
-            channel=SimpleNamespace(id=200),
-            message=SimpleNamespace(id=300),
-            command=SimpleNamespace(qualified_name="nhmisc log voice"),
-        )
+    async def test_prefix_command_failure_replies_safely_and_survives_restart(self):
+        with TemporaryDirectory() as directory:
+            guild = FakeGuild(guild_id=100)
+            bot = SimpleNamespace(
+                get_guild=lambda _guild_id: guild,
+                get_channel=guild.get_channel,
+            )
+            config = FakeConfigRoot()
+            error_config = FakeConfigRoot()
+            support = make_support(
+                bot, config, Path(directory), module=nhmisc, error_config=error_config
+            )
+            await support.cog_load()
+            cog = object.__new__(nhmisc.NHMisc)
+            cog._support = support
+            ctx = SimpleNamespace(
+                guild=guild,
+                channel=SimpleNamespace(id=200),
+                message=SimpleNamespace(id=300),
+                command=SimpleNamespace(qualified_name="nhmisc log voice"),
+                send=mock.AsyncMock(),
+            )
 
-        await nhmisc.NHMisc.cog_command_error(cog, ctx, error)
+            await nhmisc.NHMisc.cog_command_error(
+                cog, ctx, RuntimeError("private database detail")
+            )
 
-        cog._support.handle_command_error.assert_awaited_once_with(
-            ctx,
-            error,
-            source="NHMisc",
-        )
+            self.assertEqual(ctx.send.await_count, 1)
+            self.assertEqual(
+                ctx.send.await_args.args[0],
+                "Something went wrong while running this command. The error was logged.",
+            )
+            self.assertEqual(await support.operational_errors.active_count(guild.id), 1)
+
+            reopened = make_support(
+                bot, config, Path(directory), module=nhmisc, error_config=error_config
+            )
+            await reopened.cog_load()
+            self.assertEqual(await reopened.operational_errors.active_count(guild.id), 1)
+            await reopened.operational_errors.mark_action_recovered(
+                guild_id=guild.id,
+                source="NHMisc",
+                action="nhmisc log voice",
+            )
+            self.assertEqual(await reopened.operational_errors.active_count(guild.id), 0)
 
 
 if __name__ == "__main__":

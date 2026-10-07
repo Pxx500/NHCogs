@@ -166,6 +166,117 @@ class _Workspace(discord.TextChannel):
 
 
 class BotProxyWorkflowManagerTests(unittest.IsolatedAsyncioTestCase):
+    def _session(self, *, store=None, draft=None):
+        manager = manager_module.BotProxyWorkflowManager(
+            config=SimpleNamespace(),
+            store=store or SimpleNamespace(),
+            moderation_log=mock.AsyncMock(),
+            error_reporter=mock.AsyncMock(),
+        )
+        return workflow.BotProxyWorkflowSession(
+            manager,
+            active=manager_module.ActiveSession("session", 10, 20, 50),
+            guild=SimpleNamespace(id=10),
+            moderator=SimpleNamespace(id=20),
+            launcher=SimpleNamespace(),
+            thread=SimpleNamespace(id=50),
+            dashboard=SimpleNamespace(id=60, edit=mock.AsyncMock()),
+            draft=draft or manager_module.BotProxyDraft(),
+        )
+
+    def _interaction(self, *, value=None):
+        response = SimpleNamespace(acknowledged=False)
+
+        def acknowledge(*args, **kwargs):
+            response.acknowledged = True
+
+        response.defer = mock.AsyncMock(side_effect=acknowledge)
+        response.send_message = mock.AsyncMock(side_effect=acknowledge)
+        response.edit_message = mock.AsyncMock(side_effect=acknowledge)
+        response.send_modal = mock.AsyncMock(side_effect=acknowledge)
+        response.is_done = lambda: response.acknowledged
+        return SimpleNamespace(
+            data={"values": [value]},
+            response=response,
+            edit_original_response=mock.AsyncMock(),
+        )
+
+    async def test_input_buttons_acknowledge_before_deleting_previous_prompt(self):
+        for label in ("Set destination", "Set content", "Upload avatar"):
+            with self.subTest(label=label):
+                session = self._session(draft=manager_module.BotProxyDraft(
+                    identity=workflow.ProxyIdentity(
+                        manager_module.IdentityType.CHARACTER, display_name="Guide",
+                    ),
+                ))
+                interaction = self._interaction()
+                acknowledged_at_cleanup = []
+
+                async def delete_previous(interaction=interaction, observed=acknowledged_at_cleanup):
+                    observed.append(interaction.response.is_done())
+
+                previous = SimpleNamespace(delete_original_response=mock.AsyncMock(side_effect=delete_previous))
+                await session.begin_input(workflow.InputMode.CONTENT, previous)
+                view = workflow.IdentityPickerView(session, ()) if label == "Upload avatar" else session.view
+                button = next(item for item in view.children if getattr(item, "label", None) == label)
+
+                await button.callback(interaction)
+
+                self.assertEqual(acknowledged_at_cleanup, [True], "cleanup delayed acknowledgement")
+                previous.delete_original_response.assert_awaited_once()
+                self.assertTrue(interaction.response.is_done())
+                interaction.edit_original_response.assert_awaited_once()
+                self.assertEqual(session.input_mode, {
+                    "Set destination": workflow.InputMode.DESTINATION,
+                    "Set content": workflow.InputMode.CONTENT,
+                    "Upload avatar": workflow.InputMode.AVATAR,
+                }[label])
+
+    async def test_identity_picker_acknowledges_before_loading_and_refreshing(self):
+        opening = self._interaction()
+        selection = self._interaction(value="preset:Guide")
+        observed = []
+        preset = SimpleNamespace(
+            preset_name="Guide", display_name="The Guide", avatar_bytes=b"avatar",
+            avatar_media_type="image/png", avatar_sha256="digest",
+        )
+
+        async def list_presets(guild_id):
+            observed.append(("list", opening.response.is_done()))
+            return (SimpleNamespace(preset_name="Guide", display_name="The Guide"),)
+
+        async def get_preset(guild_id, preset_name):
+            observed.append(("get", selection.response.is_done()))
+            return preset
+
+        async def refresh_dashboard(**kwargs):
+            observed.append(("refresh", selection.response.is_done()))
+
+        session = self._session(store=SimpleNamespace(
+            list_character_summaries=mock.AsyncMock(side_effect=list_presets),
+            get_character=mock.AsyncMock(side_effect=get_preset),
+        ))
+        session.dashboard.edit.side_effect = refresh_dashboard
+        button = next(item for item in session.view.children if item.label == "Identity")
+
+        await button.callback(opening)
+
+        self.assertEqual(observed, [("list", True)], "preset loading delayed acknowledgement")
+        opening.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+        picker = opening.edit_original_response.await_args.kwargs["view"]
+        self.assertEqual(picker.children[0].options[2].kwargs["label"], "Guide")
+        await picker.children[0].callback(selection)
+        self.assertEqual(observed, [("list", True), ("get", True), ("refresh", True)])
+        self.assertEqual(session.draft.identity.display_name, "The Guide")
+        self.assertEqual(session.draft.identity.avatar_bytes, b"avatar")
+        self.assertEqual(selection.edit_original_response.await_args.kwargs["content"], "Character selected")
+
+        selection = self._interaction(value="bot")
+        picker = workflow.IdentityPickerView(session, ())
+        await picker.children[0].callback(selection)
+        self.assertEqual(observed[-1], ("refresh", True))
+        self.assertEqual(session.draft.identity.kind, workflow.IdentityType.BOT)
+
     async def test_disabled_manager_rejects_session_before_workspace_lookup(self) -> None:
         guild = SimpleNamespace(id=10)
         moderator = SimpleNamespace(id=20)

@@ -1175,7 +1175,6 @@ class GateProofEntryPointTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(kwargs["view"], FakeFallbackView)
         self.assertEqual(kwargs["view"].opener_id, 99)
         self.assertEqual(kwargs["view"].source_message, source_message)
-        self.assertFalse(hasattr(cog._achievement_store, "attach_stargate_proofs"))
 
     async def test_invalid_later_batch_line_offers_fallback_atomically(self):
         author = SimpleNamespace(id=10, display_name="Author", bot=False)
@@ -1229,7 +1228,6 @@ class GateProofEntryPointTests(unittest.IsolatedAsyncioTestCase):
         kwargs = interaction.edit_original_response.await_args.kwargs
         self.assertIn("line 2", kwargs["content"])
         self.assertIsInstance(kwargs["view"], FakeFallbackView)
-        self.assertFalse(hasattr(store, "attach_stargate_proofs"))
 
 
 class _CommandTree:

@@ -22,7 +22,7 @@ _ = Translator("Honeypot", __file__)
 # errors, conflicts, or confirmation prompts. Do not repeat successful actions
 # when the updated embed, content, or disabled controls already show the result.
 class DetectionCaseView(discord.ui.View):
-    """Persistent controls whose callbacks always resolve state through SQLite."""
+    """Persistent controls that revalidate decisions through SQLite on confirmation."""
 
     def __init__(
         self,
@@ -100,7 +100,7 @@ class DetectionCaseView(discord.ui.View):
             async def callback(interaction, selected=action):
                 if self.message_sequence is None:
                     await self.cog._case_review_bulk_interaction(
-                        interaction, self.case_id, selected
+                        interaction, self.case_id, selected, feedback_items=feedback_items
                     )
                 else:
                     await self.cog._case_review_message_bulk_interaction(
@@ -108,6 +108,7 @@ class DetectionCaseView(discord.ui.View):
                         self.case_id,
                         self.message_sequence,
                         selected,
+                        feedback_items=feedback_items,
                     )
 
             button.callback = callback

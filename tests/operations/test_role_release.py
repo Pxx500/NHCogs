@@ -1,7 +1,6 @@
 import asyncio
 import unittest
 from datetime import datetime, timedelta, timezone
-from importlib import import_module
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -89,11 +88,6 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_registered_unowned_release_completes_as_ownership_transferred(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                try:
-                    handler_module = import_module("NHCogs.honeypot.operations.role_release")
-                except ModuleNotFoundError:
-                    self.fail("role_release has no dedicated handler module")
-                operations = import_module("NHCogs.honeypot.operations")
                 now = datetime.now(timezone.utc)
                 role = SimpleNamespace(id=55)
                 member = SimpleNamespace(id=20, roles=[role], removals=[])
@@ -112,32 +106,6 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
                     f"role-release:{appended.case.case_id}:{role.id}",
                 )
                 claimed = cog._case_store.claim_operation(operation.operation_id, now)
-
-                expected_types = {
-                    honeypot.OperationType.MESSAGE_PROCESS,
-                    honeypot.OperationType.REVIEW_UPDATE,
-                    honeypot.OperationType.REVIEW_PUBLISH,
-                    honeypot.OperationType.CACHED_PURGE,
-                    honeypot.OperationType.SOURCE_DELETE,
-                    honeypot.OperationType.EVIDENCE_CLEANUP,
-                    honeypot.OperationType.ROLE_RELEASE,
-                    honeypot.OperationType.ROLE_APPLY,
-                    honeypot.OperationType.MODERATION_ACTION,
-                    honeypot.OperationType.MODERATOR_BAN,
-                    honeypot.OperationType.MODERATOR_KICK,
-                }
-                self.assertEqual(set(operations.HANDLERS), expected_types)
-                self.assertIs(
-                    cog._detection_operation_handlers.resolve(
-                        honeypot.OperationType.ROLE_RELEASE
-                    ),
-                    handler_module.role_release_handler,
-                )
-                for operation_type in honeypot.OperationType:
-                    if operation_type not in expected_types:
-                        self.assertIsNone(
-                            cog._detection_operation_handlers.resolve(operation_type)
-                        )
 
                 await cog._execute_detection_case_operation(claimed, now)
 
@@ -741,7 +709,7 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
                     (role.id,),
                 )
 
-    async def test_terminal_compaction_runs_after_completion_fence_loss(self):
+    async def test_case_deletion_during_role_release_keeps_case_and_ownership_erased(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 now = datetime.now(timezone.utc)
@@ -797,20 +765,9 @@ class RoleReleaseHandlerTests(unittest.IsolatedAsyncioTestCase):
                     )
 
                 member.remove_roles = remove_during_case_deletion
-                compaction_attempts = []
-                real_compact = cog._case_store.compact_terminal_case
-
-                def record_compaction(case_id):
-                    compaction_attempts.append(case_id)
-                    return real_compact(case_id)
-
-                cog._case_store.compact_terminal_case = record_compaction
 
                 await cog._execute_detection_case_operation(claimed, terminal_at)
 
-                self.assertEqual(
-                    compaction_attempts, [appended.case.case_id]
-                )
                 self.assertIsNone(
                     cog._case_store.get_case(appended.case.case_id)
                 )

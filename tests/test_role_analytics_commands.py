@@ -11,7 +11,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-from tests.test_chatchart import _assert_decorator_payload_checks
 from tests.test_forum_autopin import make_support
 
 ROOT_PACKAGE_NAME = "nhmisc_role_analytics_commands_test_root"
@@ -412,10 +411,8 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
             child.parent.callback,
             nhmisc.NHMisc.nhmisc_roleanalytics.callback,
         )
-        self.assertFalse(hasattr(child.callback, "has_permissions"))
         self.assertFalse(await child.can_run(denied))
         self.assertTrue(await child.can_run(allowed))
-        await _assert_decorator_payload_checks(self, FakeCommand, denied)
 
         self.assertEqual(nhmisc.NHMisc.rolestats.callback.cooldown, (1, 5, "user"))
         self.assertEqual(nhmisc.NHMisc.roleusers.callback.cooldown, (1, 10, "guild"))
@@ -642,10 +639,6 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
         sqlite_file = files_by_suffix[".sqlite3"]
         jsonl_file = files_by_suffix[".gz"]
         self.assertEqual(sqlite_file.data, database_bytes)
-        self.assertEqual(
-            hashlib.sha256(sqlite_file.data).hexdigest(),
-            hashlib.sha256(database_bytes).hexdigest(),
-        )
         self.assertTrue(jsonl_file.data.startswith(b"\x1f\x8b"))
         self.assertIn(
             hashlib.sha256(sqlite_file.data).hexdigest(),

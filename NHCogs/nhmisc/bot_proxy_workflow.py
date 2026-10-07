@@ -17,7 +17,7 @@ from .bot_proxy import (
     ProxyIdentity,
     SessionStatus,
 )
-from .bot_proxy_store import CharacterPreset
+from .bot_proxy_store import CharacterPreset, CharacterPresetSummary
 
 if TYPE_CHECKING:
     from .bot_proxy_manager import BotProxyWorkflowManager
@@ -210,7 +210,7 @@ class IdentityPickerView(discord.ui.View):
     def __init__(
         self,
         session: BotProxyWorkflowSession,
-        presets: tuple[CharacterPreset, ...],
+        presets: tuple[CharacterPresetSummary, ...],
         *,
         page: int = 0,
     ) -> None:
@@ -315,19 +315,25 @@ class IdentityPickerView(discord.ui.View):
 
     async def _select(self, interaction: discord.Interaction) -> None:
         value = interaction.data["values"][0]
-        if value == "bot":
-            self.session.draft.identity = ProxyIdentity(IdentityType.BOT)
-            await self.session.refresh()
-            await interaction.response.edit_message(content="Bot selected", view=None)
-            return
         if value == "one-time":
             await interaction.response.send_modal(CharacterModal(self.session))
             return
-        preset_name = value.removeprefix("preset:")
-        preset = next(item for item in self.presets if item.preset_name == preset_name)
-        self.session.set_character(preset)
+        await interaction.response.defer()
+        if value == "bot":
+            self.session.draft.identity = ProxyIdentity(IdentityType.BOT)
+            content = "Bot selected"
+        else:
+            preset_name = value.removeprefix("preset:")
+            summary = next(item for item in self.presets if item.preset_name == preset_name)
+            preset = await self.session.manager.store.get_character(
+                self.session.guild.id, summary.preset_name,
+            )
+            if preset is None:
+                raise WorkflowInputError("This character preset no longer exists")
+            self.session.set_character(preset)
+            content = "Character selected"
+        await interaction.edit_original_response(content=content, view=None)
         await self.session.refresh()
-        await interaction.response.edit_message(content="Character selected", view=None)
 
     async def _create(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(
@@ -335,8 +341,9 @@ class IdentityPickerView(discord.ui.View):
         )
 
     async def _upload(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
         await self.session.begin_input(InputMode.AVATAR, interaction)
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content="Send one image attachment in the Bot Proxy thread",
             view=None,
         )
@@ -549,29 +556,29 @@ class DashboardView(discord.ui.View):
         return allowed
 
     async def _destination(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
         await self.session.begin_input(InputMode.DESTINATION, interaction)
-        await interaction.response.send_message(
-            "Send a channel mention or ID for a standalone message, or a Discord message link for a reply",
-            ephemeral=True,
+        await interaction.edit_original_response(
+            content="Send a channel mention or ID for a standalone message, or a Discord message link for a reply",
         )
 
     async def _content(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
         await self.session.begin_input(InputMode.CONTENT, interaction)
-        await interaction.response.send_message(
-            "Send the exact text Bot Proxy should publish",
-            ephemeral=True,
+        await interaction.edit_original_response(
+            content="Send the exact text Bot Proxy should publish",
         )
 
     async def _identity(self, interaction: discord.Interaction) -> None:
         if not await self.session.enabled_for(interaction):
             return
-        presets = await self.session.manager.store.list_characters(
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        presets = await self.session.manager.store.list_character_summaries(
             self.session.guild.id
         )
-        await interaction.response.send_message(
-            "Choose an identity",
+        await interaction.edit_original_response(
+            content="Choose an identity",
             view=IdentityPickerView(self.session, presets),
-            ephemeral=True,
         )
 
     async def _help(self, interaction: discord.Interaction) -> None:

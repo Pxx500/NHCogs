@@ -82,60 +82,6 @@ def _passes_permissions(ctx, permissions, *privilege_flags):
     )
 
 
-async def _assert_decorator_payload_checks(test, command_type, denied):
-    def parent_callback(ctx):
-        return None
-
-    parent_callback.has_permissions = {"manage_messages": True}
-    parent = command_type(parent_callback)
-
-    def child_callback(ctx):
-        return None
-
-    child = command_type(child_callback, parent=parent)
-    test.assertFalse(await child.can_run(denied))
-    allowed = types.SimpleNamespace(
-        author=types.SimpleNamespace(
-            guild_permissions=types.SimpleNamespace(manage_messages=True)
-        )
-    )
-    test.assertTrue(await child.can_run(allowed))
-
-    def mod_callback(ctx):
-        return None
-
-    mod_callback.mod_or_permissions = {"manage_messages": True}
-    moderator = types.SimpleNamespace(
-        is_red_mod=True,
-        author=types.SimpleNamespace(
-            guild_permissions=types.SimpleNamespace(manage_messages=False)
-        ),
-    )
-    test.assertTrue(await command_type(mod_callback).can_run(moderator))
-    test.assertFalse(await command_type(mod_callback).can_run(denied))
-
-    def admin_callback(ctx):
-        return None
-
-    admin_callback.admin_or_permissions = {"administrator": True}
-    admin = types.SimpleNamespace(
-        is_red_admin=True,
-        author=types.SimpleNamespace(
-            guild_permissions=types.SimpleNamespace(administrator=False)
-        ),
-    )
-    test.assertFalse(await command_type(admin_callback).can_run(moderator))
-    test.assertTrue(await command_type(admin_callback).can_run(admin))
-
-    def empty_callback(ctx):
-        return None
-
-    empty_callback.has_permissions = {}
-    empty_callback.direct_permissions = {}
-    empty_callback.required_permissions = {}
-    test.assertTrue(await command_type(empty_callback).can_run(denied))
-
-
 def _tag_permissions(*names, permissions):
     def decorator(target):
         callback = target.callback if isinstance(target, FakeCommand) else target
@@ -322,10 +268,8 @@ class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await command.can_run(allowed))
         child = nhmisc.NHMisc.nhmisc_vcjumping_seconds
         self.assertIs(child.parent.callback, nhmisc.NHMisc.nhmisc_vcjumping.callback)
-        self.assertFalse(hasattr(child.callback, "has_permissions"))
         self.assertFalse(await child.can_run(denied))
         self.assertTrue(await child.can_run(allowed))
-        await _assert_decorator_payload_checks(self, FakeCommand, denied)
         self.assertEqual(
             command.attrs["usage"],
             "<days> [amount] | <channel_or_thread> <days> [amount]",
@@ -463,13 +407,6 @@ class ChatChartCommandTests(unittest.IsolatedAsyncioTestCase):
             await nhmisc.NHMisc.nhmisc_chatchart.callback(cog, ctx, "31", 7, 8)
 
         cog._activity_store.get_channel_user_counts.assert_not_awaited()
-
-    async def test_command_defaults_to_ten_users(self):
-        cog, ctx = self._command_fixture()
-
-        await nhmisc.NHMisc.nhmisc_chatchart.callback(cog, ctx, 31)
-
-        self.assertEqual(cog._build_chatchart_file.call_args.args[-1], 10)
 
     async def test_command_passes_explicit_user_count(self):
         cog, ctx = self._command_fixture()

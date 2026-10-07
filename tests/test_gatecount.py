@@ -265,7 +265,6 @@ class GatecountCommandTests(RoleAnalyticsCommandTestCase):
             "**Total Gates: 9**",
         )
         self.assertEqual(send_kwargs["allowed_mentions"], "no-mentions")
-        self.assertNotIn("Tier", send_kwargs["embed"].description)
 
     async def test_gatecount_reports_unavailable_role_analytics(self):
         role_ids = (

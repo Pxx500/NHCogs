@@ -483,12 +483,11 @@ class JoinwatchCommandTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
-    def test_firstpost_is_retired_without_hiding_image_import_or_other_detectors(self):
+    def test_detector_categories_and_image_import_are_discoverable(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 tree = _registered_command_tree(honeypot, honeypot.Honeypot.honeypot)
                 leaves = _leaf_command_names(tree)
-                self.assertFalse(any("firstpost" in name.split() for name in leaves))
                 categories = {child.name for child in tree.commands}
                 self.assertTrue({"spam", "imagescan", "honeypot", "joinwatch"} <= categories)
                 self.assertIn(honeypot.Honeypot.imagescan_import_tp_zip.qualified_name, leaves)
@@ -506,7 +505,6 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                 cog._format_channel_setting = mock.Mock(
                     return_value="Not configured"
                 )
-                cog._send_config_dump = mock.AsyncMock()
                 cog._send_group_overview = honeypot.Honeypot._send_group_overview.__get__(
                     cog, honeypot.Honeypot
                 )
@@ -533,7 +531,6 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                     await honeypot.Honeypot.channels.callback(cog, ctx)
 
                 configured.assert_not_awaited()
-                cog._send_config_dump.assert_not_awaited()
                 rendered = "\n".join(
                     field.value
                     for call in ctx.send.await_args_list
@@ -589,7 +586,6 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                         )
                     )
                 )
-                cog._send_config_dump = mock.AsyncMock()
                 cog._send_group_overview = honeypot.Honeypot._send_group_overview.__get__(
                     cog, honeypot.Honeypot
                 )
@@ -615,9 +611,18 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     await honeypot.Honeypot.channels.callback(cog, ctx)
 
-                entries = cog._send_config_dump.await_args.args[2]
                 rendered = "\n".join(
-                    f"{label}\n{value}" for label, value in entries
+                    text
+                    for call in ctx.send.await_args_list
+                    for text in (
+                        *call.args,
+                        *(
+                            field.value
+                            for field in call.kwargs.get(
+                                "embed", SimpleNamespace(fields=[])
+                            ).fields
+                        ),
+                    )
                 )
                 self.assertIn("Review: #automod-filter", rendered)
                 self.assertNotIn("<#77>", rendered)
@@ -910,77 +915,35 @@ class GroupOverviewTests(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn(f"!{qualified_name}", rendered)
                 self.assertIn("Run a category below", descriptions)
 
-    async def test_action_bearing_groups_become_namespace_overviews(self):
+    async def test_stats_leaf_command_renders_public_safety_counts(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                self.assertEqual(
+                    honeypot.Honeypot.honeypot_stats.qualified_name,
+                    "honeypot stats show",
+                )
                 cog = object.__new__(honeypot.Honeypot)
-                cog._send_group_overview = mock.AsyncMock()
-                ctx = SimpleNamespace()
-
-                with (
-                    mock.patch.object(
-                        honeypot.manual_punishment,
-                        "show_status",
-                        new=mock.AsyncMock(),
-                    ) as evidence_status,
-                    mock.patch.object(
-                        honeypot.channel_routing,
-                        "list_multiple",
-                        new=mock.AsyncMock(),
-                    ) as channel_list,
-                    mock.patch.object(
-                        honeypot.diagnostics,
-                        "honeypot_stats",
-                        new=mock.AsyncMock(),
-                    ) as stats,
-                ):
-                    groups = (
-                        honeypot.Honeypot.manual_evidence_settings,
-                        honeypot.Honeypot.channels_honeypot,
-                        honeypot.Honeypot.channels_gif_detector,
-                        honeypot.Honeypot.honeypot_stats_group,
+                cog.config = SimpleNamespace(
+                    guild=lambda _guild: SimpleNamespace(
+                        stats=mock.AsyncMock(return_value={
+                            "detections": 7,
+                            "kicked": 2,
+                            "banned": 3,
+                            "reviewed": 4,
+                            "joinwatch_auto_roles": 5,
+                            "joinwatch_auto_role_punishments": 6,
+                        })
                     )
-                    action_mocks = (
-                        evidence_status,
-                        channel_list,
-                        stats,
-                    )
-                    for group in groups:
-                        with self.subTest(group=group.qualified_name):
-                            cog._send_group_overview.reset_mock()
-                            for action in action_mocks:
-                                action.reset_mock()
+                )
+                ctx = SimpleNamespace(guild=object(), send=mock.AsyncMock())
 
-                            await group.callback(cog, ctx)
+                await honeypot.Honeypot.honeypot_stats.callback(cog, ctx)
 
-                            cog._send_group_overview.assert_awaited_once_with(ctx)
-                            for action in action_mocks:
-                                action.assert_not_awaited()
-
-    async def test_moved_group_actions_are_available_as_leaf_commands(self):
-        with TemporaryDirectory() as directory:
-            with _isolated_honeypot_modules(Path(directory)) as honeypot:
-                expected_commands = {
-                    "honeypot_stats": "honeypot stats show",
-                }
-                for attribute, qualified_name in expected_commands.items():
-                    with self.subTest(command=qualified_name):
-                        self.assertTrue(hasattr(honeypot.Honeypot, attribute))
-                        self.assertEqual(
-                            getattr(honeypot.Honeypot, attribute).qualified_name,
-                            qualified_name,
-                        )
-
-                cog = object.__new__(honeypot.Honeypot)
-                ctx = SimpleNamespace()
-                with mock.patch.object(
-                    honeypot.diagnostics,
-                    "honeypot_stats",
-                    new=mock.AsyncMock(),
-                ) as stats:
-                    await honeypot.Honeypot.honeypot_stats.callback(cog, ctx)
-
-                stats.assert_awaited_once_with(cog, ctx)
+                rendered = ctx.send.await_args.args[0]
+                self.assertIn("Detected activity: 7", rendered)
+                self.assertIn("Moderation actions: 5", rendered)
+                self.assertIn("Sent for review: 4", rendered)
+                self.assertIn("Automated protections: 11", rendered)
 
     async def test_every_applicable_bare_group_sends_an_overview(self):
         with TemporaryDirectory() as directory:

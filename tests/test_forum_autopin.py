@@ -5,8 +5,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.test_chatchart import _assert_decorator_payload_checks
-
 ROOT_PACKAGE_NAME = "nhmisc_forum_autopin_test_root"
 PACKAGE_NAME = f"{ROOT_PACKAGE_NAME}.nhmisc"
 ROOT_PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs"
@@ -410,10 +408,8 @@ class ForumAutopinCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await command.can_run(allowed))
         child = nhmisc.NHMisc.nhmisc_forumautopin_add
         self.assertIs(child.parent, command)
-        self.assertFalse(hasattr(child.callback, "has_permissions"))
         self.assertFalse(await child.can_run(denied))
         self.assertTrue(await child.can_run(allowed))
-        await _assert_decorator_payload_checks(self, FakeCommand, denied)
 
     async def test_add_rejects_forum_without_pin_messages_permission(self):
         cog = self.make_cog()

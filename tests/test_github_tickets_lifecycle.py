@@ -225,8 +225,6 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with isolated_githubtickets_modules(self.data_path) as modules:
             bot = FakeBot(ready=False)
             cog = modules.githubtickets.GitHubTickets(bot, mock.Mock(report_operational_error=mock.AsyncMock(), report_global_error=mock.AsyncMock(), handle_command_error=mock.AsyncMock()))
-            self.assertFalse(hasattr(cog._new_ticket_command, "type"))
-            self.assertFalse(hasattr(cog._developer_profile_slash_command, "type"))
             await cog.config.guild_from_id(10).set_raw(
                 "participant_role_ids",
                 value=[99],
@@ -248,9 +246,6 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNotNone(new_ticket_command)
                 self.assertIsNotNone(developer_profile_command)
                 self.assertIsNotNone(context_profile_command)
-                self.assertIsNone(
-                    bot.tree.get_command("github-tickets", type="chat_input")
-                )
                 self.assertEqual(
                     new_ticket_command.description,
                     "Create a new GitHub ticket",

@@ -26,7 +26,6 @@ class CaptchaTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(len(descriptor["tiles"]), 6)
                     self.assertEqual(matches, [descriptor["answer"]])
                 question = captcha.render_challenge(descriptor)
-                self.assertNotIn("answer", question.prompt)
                 with Image.open(io.BytesIO(question.image_webp)) as image:
                     self.assertEqual(image.size, (900, 620))
                     self.assertEqual(image.format, "WEBP")

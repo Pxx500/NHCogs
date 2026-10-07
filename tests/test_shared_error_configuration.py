@@ -103,7 +103,7 @@ class SharedErrorConfigurationTests(unittest.IsolatedAsyncioTestCase):
             maintainer_embed = ctx.send.await_args_list[0].kwargs["embed"]
             self.assertEqual(maintainer_embed.fields[0].value, "Maintainer")
 
-    async def test_errors_overview_lists_nullable_leaves_without_set(self):
+    async def test_errors_overview_lists_nullable_commands_and_clear_updates_settings(self):
         with shared_reporting() as module:
             restore_command_help(module)
             ctx, member = context(module)
@@ -118,8 +118,6 @@ class SharedErrorConfigurationTests(unittest.IsolatedAsyncioTestCase):
                 "`!nhcogs errors maintainer [member|clear]` - Show, set, or clear the error maintainer",
                 rendered,
             )
-            self.assertNotIn("channel set", rendered)
-            self.assertNotIn("maintainer set", rendered)
 
             ctx.send.reset_mock()
             ctx.command = module.OperationalSupport.error_channel

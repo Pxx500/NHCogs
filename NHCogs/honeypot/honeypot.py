@@ -1381,9 +1381,11 @@ class Honeypot(Cog):
         *,
         confirmed: bool = False,
         expected_keys: tuple[AttachmentKey, ...] = (),
+        feedback_items: tuple[CaseFeedbackItem, ...] = (),
     ) -> bool:
         return await review_publication._case_review_bulk_interaction(
-            self, interaction, case_id, action, confirmed=confirmed, expected_keys=expected_keys
+            self, interaction, case_id, action, confirmed=confirmed,
+            expected_keys=expected_keys, feedback_items=feedback_items,
         )
 
     async def _case_review_message_bulk_interaction(
@@ -1395,6 +1397,7 @@ class Honeypot(Cog):
         *,
         confirmed: bool = False,
         expected_keys: tuple[AttachmentKey, ...] = (),
+        feedback_items: tuple[CaseFeedbackItem, ...] = (),
     ) -> bool:
         return await review_publication._case_review_message_bulk_interaction(
             self,
@@ -1404,6 +1407,7 @@ class Honeypot(Cog):
             action,
             confirmed=confirmed,
             expected_keys=expected_keys,
+            feedback_items=feedback_items,
         )
 
     async def _case_review_moderation_interaction(
