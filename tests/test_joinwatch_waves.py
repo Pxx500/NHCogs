@@ -92,6 +92,9 @@ class _AuxiliaryStore:
     def save_joinwatch_history(self, guild_id, history):
         self.history = copy.deepcopy(history)
 
+    def all_observations(self, guild_id):
+        return copy.deepcopy(self.history)
+
     def get_joinwatch_waves(self, guild_id):
         return copy.deepcopy(self.waves)
 
@@ -113,7 +116,13 @@ def _fixture(groups, count=7):
     base = (int(created.timestamp() * 1000) - 1420070400000) << 22
     ids = [base + offset for offset in range(count)]
     history = groups.empty_history()
-    history["sources"] = [{"source": "test archive", "complete": True}]
+    history["sources"] = [{
+        "source": "test archive",
+        "generated_at": "2026-10-02T00:00:00+00:00",
+        "range_start": "2026-10-01T00:00:00+00:00",
+        "range_end": "2026-10-02T00:00:00+00:00",
+        "complete": True,
+    }]
     history["observations"] = {str(uid): {"first_joined_at": (now - timedelta(days=1) + timedelta(minutes=i)).isoformat(),
                                          "imported": True} for i, uid in enumerate(ids)}
     sent = []
@@ -129,7 +138,16 @@ def _fixture(groups, count=7):
     async def all_config():
         return configuration
 
+    async def get_raw(*keys, default=None):
+        raw = configuration
+        for key in keys:
+            if not isinstance(raw, dict) or key not in raw:
+                return default
+            raw = raw[key]
+        return raw
+
     cfg.all = all_config
+    cfg.get_raw = get_raw
     guild = SimpleNamespace(id=123)
     members = {uid: SimpleNamespace(id=uid, guild=guild, bot=False, roles=[]) for uid in ids}
     guild.get_member = members.get
@@ -153,7 +171,7 @@ def _real_lifecycle_fixture(honeypot, groups, directory, *, count=3):
                 "joinwatch_verified_members": cfg.joinwatch_verified_members.value}
 
     async def get_raw(*keys, default=None):
-        raw = await all_config()
+        raw = await cfg.all()
         for key in keys:
             if not isinstance(raw, dict) or key not in raw:
                 return copy.deepcopy(default)
@@ -174,10 +192,11 @@ def _real_lifecycle_fixture(honeypot, groups, directory, *, count=3):
     cog._missing_role_assignment_permission = Mock(return_value=None)
     cog._get_text_channel_or_thread = Mock(return_value=None)
     cog._get_member_or_fetch = AsyncMock(side_effect=lambda guild, uid: guild.get_member(uid))
-    history = cog._case_store.get_joinwatch_history(guild.id)
+    history = cog._case_store.all_observations(guild.id)
     cog._case_store = honeypot.DetectionCaseStore(Path(directory) / "wave.sqlite")
     cog._case_store.initialize()
-    cog._case_store.save_joinwatch_history(guild.id, history)
+    if history["observations"]:
+        cog._case_store.import_observations(guild.id, history)
     lifecycle = verification.JoinwatchVerification(cog)
     # Fake only the Discord readiness check. Enrollment and release use the real owner.
     lifecycle.check_configuration = AsyncMock()

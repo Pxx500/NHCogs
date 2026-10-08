@@ -157,8 +157,9 @@ async def _reconcile_preexisting_role(
     if owner_case_id == context.operation.case_id:
         return OperationOutcome(result=OPERATION_RESULT_ROLE_ALREADY_OWNED)
     guild = cog.bot.get_guild(context.snapshot.case.guild_id)
-    pending_roles = await cog.config.guild(guild).joinwatch_pending_roles()
-    pending = pending_roles.get(str(context.snapshot.case.user_id))
+    pending = await joinwatch_state.read_row(
+        cog, guild, context.snapshot.case.user_id, "pending_role"
+    )
     if (pending is not None and pending.get("role_id") == role_id
             and role_id not in pending.get("manual_role_reasons", [])):
         started = await asyncio.to_thread(

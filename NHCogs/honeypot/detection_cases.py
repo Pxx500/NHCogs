@@ -19,6 +19,12 @@ log = logging.getLogger(__name__)
 DAILY_STATS_METRICS = frozenset(
     {"detections", "automated_bans", "manual_bans", "shadowbans", "joinwatch_bans"}
 )
+JOINWATCH_HISTORY_ACCOUNT_LIMIT = 200_000
+JOINWATCH_HISTORY_SOURCE_LIMIT = 100
+JOINWATCH_LIVE_BACKUP_RETENTION_DAYS = 7
+_LIVE_KINDS = ("verified", "pending_role", "pending_assignment")
+_OPEN_KINDS = ("pending_role", "pending_assignment")
+_HISTORY_SOURCE_FIELDS = ("source", "generated_at", "range_start", "range_end", "complete")
 
 
 def _execute_script(connection: sqlite3.Connection, script: str) -> None:
@@ -440,6 +446,125 @@ def _from_timestamp(value: int | None) -> datetime | None:
     return datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=value)
 
 
+def _parse_join_time(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise TypeError("History timestamps must be timezone-aware ISO 8601 strings")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("Invalid history timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("History timestamps need an explicit timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _canonical_join_time(value: datetime) -> str:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("Join time needs an explicit timezone")
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _history_source_fields(source: object, guild_id: int) -> tuple[str, str, str, str, int]:
+    if not isinstance(source, Mapping):
+        raise TypeError(f"joinwatch history source for guild {guild_id} is incomplete")
+    if any(key not in source for key in _HISTORY_SOURCE_FIELDS):
+        raise ValueError(f"joinwatch history source for guild {guild_id} is incomplete")
+    label = source["source"]
+    generated_at = source["generated_at"]
+    range_start = source["range_start"]
+    range_end = source["range_end"]
+    complete = source["complete"]
+    if (
+        not isinstance(label, str)
+        or not isinstance(generated_at, str)
+        or not isinstance(range_start, str)
+        or not isinstance(range_end, str)
+        or not isinstance(complete, bool)
+    ):
+        raise TypeError(f"joinwatch history source for guild {guild_id} is incomplete")
+    return (label, generated_at, range_start, range_end, int(complete))
+
+
+def _require_live_kind(kind: str) -> None:
+    if kind not in _LIVE_KINDS:
+        raise ValueError(f"unknown joinwatch live kind: {kind}")
+
+
+def _live_user_id(key: object) -> int | None:
+    if isinstance(key, bool) or not isinstance(key, (int, str)):
+        return None
+    try:
+        user_id = int(key)
+    except ValueError:
+        return None
+    if str(user_id) != (key if isinstance(key, str) else str(key)):
+        return None
+    return user_id
+
+
+def _live_columns(kind: str, payload: Mapping) -> tuple[str | None, int | None, str | None, str]:
+    incident = payload.get("incident_id")
+    incident_id = incident if isinstance(incident, str) else None
+    role = payload.get("role_id")
+    role_id = role if isinstance(role, int) and not isinstance(role, bool) else None
+    if kind == "pending_role":
+        due = payload.get("expires_at")
+    elif kind == "pending_assignment":
+        due = payload.get("apply_at")
+    else:
+        due = None
+    due_at = due if isinstance(due, str) else None
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    return incident_id, role_id, due_at, encoded
+
+
+def _prepare_live_maps(maps: Mapping) -> dict[str, list[tuple[int, dict]]] | None:
+    """Return rows to copy, or None when Config cannot be stored unchanged."""
+    prepared: dict[str, list[tuple[int, dict]]] = {}
+    for kind in _LIVE_KINDS:
+        raw = maps.get(kind, {})
+        if not isinstance(raw, Mapping):
+            return None
+        rows: list[tuple[int, dict]] = []
+        seen: set[int] = set()
+        for key, payload in raw.items():
+            user_id = _live_user_id(key)
+            if user_id is None or user_id in seen or not isinstance(payload, dict):
+                return None
+            seen.add(user_id)
+            rows.append((user_id, payload))
+        prepared[kind] = rows
+    return prepared
+
+
+def _live_state_matches(
+    connection: sqlite3.Connection,
+    guild_id: int,
+    prepared: Mapping[str, list[tuple[int, dict]]],
+) -> bool:
+    stored: dict[str, dict[int, sqlite3.Row]] = {kind: {} for kind in _LIVE_KINDS}
+    for row in connection.execute(
+        """SELECT user_id, kind, incident_id, payload FROM joinwatch_live_state
+           WHERE guild_id = ?""",
+        (guild_id,),
+    ):
+        stored[row["kind"]][int(row["user_id"])] = row
+    for kind, rows in prepared.items():
+        actual = stored[kind]
+        if len(actual) != len(rows):
+            return False
+        for user_id, payload in rows:
+            row = actual.get(user_id)
+            if row is None or json.loads(row["payload"]) != payload:
+                return False
+            expected_incident = payload.get("incident_id")
+            if not isinstance(expected_incident, str):
+                expected_incident = None
+            if row["incident_id"] != expected_incident:
+                return False
+    return True
+
+
 def _json_value(value: object) -> object:
     if isinstance(value, Mapping):
         return {key: _json_value(item) for key, item in value.items()}
@@ -842,11 +967,76 @@ class DetectionCaseStore:
                 if name not in columns:
                     connection.execute(f"ALTER TABLE detection_case_subjects ADD COLUMN {name} {kind}")
 
+        def migrate_schema_7(connection: sqlite3.Connection) -> None:
+            # Keep joinwatch_history.history after this copy. Live reads use the rows.
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS joinwatch_history_meta (
+                       guild_id INTEGER PRIMARY KEY,
+                       revision INTEGER NOT NULL,
+                       import_revision INTEGER NOT NULL
+                   )"""
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS joinwatch_history_sources (
+                       guild_id INTEGER NOT NULL,
+                       position INTEGER NOT NULL,
+                       source TEXT NOT NULL,
+                       generated_at TEXT NOT NULL,
+                       range_start TEXT NOT NULL,
+                       range_end TEXT NOT NULL,
+                       complete INTEGER NOT NULL,
+                       PRIMARY KEY (guild_id, position)
+                   )"""
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS joinwatch_observations (
+                       guild_id INTEGER NOT NULL,
+                       user_id INTEGER NOT NULL,
+                       first_joined_at TEXT NOT NULL,
+                       imported INTEGER NOT NULL,
+                       PRIMARY KEY (guild_id, user_id)
+                   )"""
+            )
+            connection.execute(
+                """CREATE INDEX IF NOT EXISTS joinwatch_observations_by_join
+                   ON joinwatch_observations (guild_id, first_joined_at, user_id)"""
+            )
+            for row in connection.execute("SELECT guild_id, history FROM joinwatch_history"):
+                self._copy_joinwatch_history(connection, int(row["guild_id"]), row["history"])
+
+        def migrate_schema_8(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS joinwatch_live_state (
+                       guild_id INTEGER NOT NULL,
+                       user_id INTEGER NOT NULL,
+                       kind TEXT NOT NULL,
+                       incident_id TEXT,
+                       role_id INTEGER,
+                       due_at TEXT,
+                       payload TEXT NOT NULL,
+                       PRIMARY KEY (guild_id, user_id, kind)
+                   )"""
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS joinwatch_cutover (
+                       guild_id INTEGER PRIMARY KEY,
+                       source TEXT NOT NULL
+                   )"""
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS joinwatch_live_backup (
+                       guild_id INTEGER PRIMARY KEY,
+                       written_at INTEGER NOT NULL,
+                       payload TEXT NOT NULL
+                   )"""
+            )
+
         with closing(self._connect()) as connection:
             apply_migrations(
                 connection,
                 (migrate_schema_0, migrate_schema_1, migrate_schema_2,
-                 migrate_schema_3, migrate_schema_4, migrate_schema_5, migrate_schema_6),
+                 migrate_schema_3, migrate_schema_4, migrate_schema_5, migrate_schema_6,
+                 migrate_schema_7, migrate_schema_8),
                 label="detection case storage",
             )
 
@@ -943,36 +1133,358 @@ class DetectionCaseStore:
                 records.append(record)
         return records
 
-    def get_joinwatch_history(self, guild_id: int) -> dict:
+    def _copy_joinwatch_history(
+        self, connection: sqlite3.Connection, guild_id: int, payload: str
+    ) -> None:
+        """Copy one retained JSON document into rows. See Honeypot stored data."""
+        if connection.execute(
+            "SELECT 1 FROM joinwatch_history_meta WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone() is not None:
+            return
+        try:
+            document = json.loads(payload)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"joinwatch history for guild {guild_id} is not valid JSON") from error
+        if not isinstance(document, dict):
+            raise TypeError(f"joinwatch history for guild {guild_id} is not a document")
+        observations = document.get("observations", {})
+        sources = document.get("sources", [])
+        if not isinstance(observations, dict) or not isinstance(sources, list):
+            raise TypeError(f"joinwatch history for guild {guild_id} is not a document")
+        revision = document.get("revision", 0)
+        import_revision = document.get("import_revision", 0)
+        if (
+            isinstance(revision, bool) or not isinstance(revision, int)
+            or isinstance(import_revision, bool) or not isinstance(import_revision, int)
+        ):
+            raise TypeError(f"joinwatch history revisions for guild {guild_id} are invalid")
+        connection.execute(
+            """INSERT INTO joinwatch_history_meta (guild_id, revision, import_revision)
+               VALUES (?, ?, ?)""",
+            (guild_id, revision, import_revision),
+        )
+        for position, source in enumerate(sources):
+            connection.execute(
+                """INSERT INTO joinwatch_history_sources (
+                       guild_id, position, source, generated_at, range_start, range_end, complete
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (guild_id, position, *_history_source_fields(source, guild_id)),
+            )
+        copied_ids: list[int] = []
+        for key, row in observations.items():
+            if not isinstance(key, str) or not isinstance(row, dict):
+                raise TypeError(f"joinwatch history for guild {guild_id} has an invalid observation")
+            try:
+                user_id = int(key)
+            except ValueError as error:
+                raise ValueError(
+                    f"joinwatch history for guild {guild_id} has an invalid observation"
+                ) from error
+            if "first_joined_at" not in row:
+                raise ValueError(f"joinwatch history for guild {guild_id} has an invalid observation")
+            connection.execute(
+                """INSERT INTO joinwatch_observations (
+                       guild_id, user_id, first_joined_at, imported
+                   ) VALUES (?, ?, ?, ?)""",
+                (
+                    guild_id,
+                    user_id,
+                    _canonical_join_time(_parse_join_time(row["first_joined_at"])),
+                    int(bool(row.get("imported"))),
+                ),
+            )
+            copied_ids.append(user_id)
+        copied = connection.execute(
+            "SELECT COUNT(*) FROM joinwatch_observations WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()[0]
+        source_count = connection.execute(
+            "SELECT COUNT(*) FROM joinwatch_history_sources WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()[0]
+        if copied != len(observations) or source_count != len(sources) or len(copied_ids) != len(set(copied_ids)):
+            raise ValueError(
+                f"joinwatch history copy for guild {guild_id} counted {copied} observations, "
+                f"expected {len(observations)}"
+            )
+
+    def _ensure_history_meta(self, connection: sqlite3.Connection, guild_id: int) -> sqlite3.Row:
+        connection.execute(
+            """INSERT INTO joinwatch_history_meta (guild_id, revision, import_revision)
+               VALUES (?, 0, 0)
+               ON CONFLICT(guild_id) DO NOTHING""",
+            (guild_id,),
+        )
+        return connection.execute(
+            "SELECT revision, import_revision FROM joinwatch_history_meta WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+
+    def _history_sources(self, connection: sqlite3.Connection, guild_id: int) -> list[dict[str, object]]:
+        return [
+            {
+                "source": row["source"],
+                "generated_at": row["generated_at"],
+                "range_start": row["range_start"],
+                "range_end": row["range_end"],
+                "complete": bool(row["complete"]),
+            }
+            for row in connection.execute(
+                """SELECT source, generated_at, range_start, range_end, complete
+                   FROM joinwatch_history_sources WHERE guild_id = ? ORDER BY position""",
+                (guild_id,),
+            )
+        ]
+
+    def record_first_join(self, guild_id: int, user_id: int, joined_at: datetime) -> bool:
+        """Record a member's earliest live join. See Honeypot stored data."""
+        stamp = _canonical_join_time(joined_at)
+        member_id = int(user_id)
+        with closing(self._connect()) as connection, connection:
+            existing = connection.execute(
+                "SELECT 1 FROM joinwatch_observations WHERE guild_id = ? AND user_id = ?",
+                (guild_id, member_id),
+            ).fetchone()
+            if existing is not None:
+                return False
+            count = connection.execute(
+                "SELECT COUNT(*) FROM joinwatch_observations WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()[0]
+            if count >= JOINWATCH_HISTORY_ACCOUNT_LIMIT:
+                raise ValueError("History account limit reached. No observations were discarded")
+            connection.execute(
+                """INSERT INTO joinwatch_observations (
+                       guild_id, user_id, first_joined_at, imported
+                   ) VALUES (?, ?, ?, 0)""",
+                (guild_id, member_id, stamp),
+            )
+            self._ensure_history_meta(connection, guild_id)
+            connection.execute(
+                "UPDATE joinwatch_history_meta SET revision = revision + 1 WHERE guild_id = ?",
+                (guild_id,),
+            )
+        return True
+
+    def observations_since(
+        self, guild_id: int, since: datetime
+    ) -> tuple[tuple[int, str], ...]:
+        """Return joins at or after `since`, ordered by time. See Honeypot stored data."""
+        stamp = _canonical_join_time(since)
         with closing(self._connect()) as connection:
-            row = connection.execute(
-                "SELECT history FROM joinwatch_history WHERE guild_id = ?",
+            rows = connection.execute(
+                """SELECT user_id, first_joined_at FROM joinwatch_observations
+                   WHERE guild_id = ? AND first_joined_at >= ?
+                   ORDER BY first_joined_at, user_id""",
+                (guild_id, stamp),
+            ).fetchall()
+        return tuple((int(row["user_id"]), row["first_joined_at"]) for row in rows)
+
+    def count_observations(self, guild_id: int) -> int:
+        """Count retained joins without loading the history payloads."""
+        with closing(self._connect()) as connection:
+            return connection.execute(
+                "SELECT COUNT(*) FROM joinwatch_observations WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()[0]
+
+    def all_observations(self, guild_id: int) -> dict:
+        """Assemble the history document from rows. See Honeypot stored data."""
+        with closing(self._connect()) as connection:
+            meta = connection.execute(
+                "SELECT revision, import_revision FROM joinwatch_history_meta WHERE guild_id = ?",
                 (guild_id,),
             ).fetchone()
-        if row is None:
-            return {
-                "version": 1, "revision": 0, "import_revision": 0,
-                "sources": [], "observations": {},
+            sources = self._history_sources(connection, guild_id)
+            observations = {
+                str(row["user_id"]): {
+                    "first_joined_at": row["first_joined_at"],
+                    "imported": bool(row["imported"]),
+                }
+                for row in connection.execute(
+                    """SELECT user_id, first_joined_at, imported FROM joinwatch_observations
+                       WHERE guild_id = ? ORDER BY user_id""",
+                    (guild_id,),
+                )
             }
-        return json.loads(row["history"])
+        return {
+            "version": 1,
+            "revision": 0 if meta is None else int(meta["revision"]),
+            "import_revision": 0 if meta is None else int(meta["import_revision"]),
+            "sources": sources,
+            "observations": observations,
+        }
+
+    def import_observations(self, guild_id: int, normalized: Mapping) -> dict:
+        """Merge a normalized import. See Honeypot stored data."""
+        incoming_sources = list(normalized["sources"])
+        incoming_observations = dict(normalized["observations"])
+        with closing(self._connect()) as connection, connection:
+            meta = self._ensure_history_meta(connection, guild_id)
+            changed = False
+            sources = self._history_sources(connection, guild_id)
+            for source in incoming_sources:
+                fields = _history_source_fields(source, guild_id)
+                comparable = {
+                    "source": fields[0],
+                    "generated_at": fields[1],
+                    "range_start": fields[2],
+                    "range_end": fields[3],
+                    "complete": bool(fields[4]),
+                }
+                if comparable in sources:
+                    continue
+                if len(sources) >= JOINWATCH_HISTORY_SOURCE_LIMIT:
+                    raise ValueError(
+                        "History source limit reached. Review retained history before another import"
+                    )
+                connection.execute(
+                    """INSERT INTO joinwatch_history_sources (
+                           guild_id, position, source, generated_at, range_start, range_end, complete
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (guild_id, len(sources), *fields),
+                )
+                sources.append(comparable)
+                changed = True
+            count = connection.execute(
+                "SELECT COUNT(*) FROM joinwatch_observations WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()[0]
+            for key, row in incoming_observations.items():
+                user_id = int(key)
+                incoming_at = _parse_join_time(row["first_joined_at"])
+                current = connection.execute(
+                    """SELECT first_joined_at, imported FROM joinwatch_observations
+                       WHERE guild_id = ? AND user_id = ?""",
+                    (guild_id, user_id),
+                ).fetchone()
+                imported = int(bool(row.get("imported")))
+                if current is None:
+                    if count >= JOINWATCH_HISTORY_ACCOUNT_LIMIT:
+                        raise ValueError(
+                            "History account limit reached. No observations were discarded"
+                        )
+                    connection.execute(
+                        """INSERT INTO joinwatch_observations (
+                               guild_id, user_id, first_joined_at, imported
+                           ) VALUES (?, ?, ?, ?)""",
+                        (guild_id, user_id, _canonical_join_time(incoming_at), imported),
+                    )
+                    count += 1
+                    changed = True
+                    continue
+                if incoming_at < _parse_join_time(current["first_joined_at"]):
+                    connection.execute(
+                        """UPDATE joinwatch_observations
+                           SET first_joined_at = ?, imported = ?
+                           WHERE guild_id = ? AND user_id = ?""",
+                        (_canonical_join_time(incoming_at), imported, guild_id, user_id),
+                    )
+                    changed = True
+                elif imported and not current["imported"]:
+                    connection.execute(
+                        """UPDATE joinwatch_observations SET imported = 1
+                           WHERE guild_id = ? AND user_id = ?""",
+                        (guild_id, user_id),
+                    )
+                    changed = True
+            revision = int(meta["revision"])
+            import_revision = int(meta["import_revision"])
+            if changed:
+                revision += 1
+                import_revision += 1
+                connection.execute(
+                    """UPDATE joinwatch_history_meta
+                       SET revision = ?, import_revision = ? WHERE guild_id = ?""",
+                    (revision, import_revision, guild_id),
+                )
+        return {
+            "imported": len(incoming_observations),
+            "total": count,
+            "revision": revision,
+            **incoming_sources[0],
+        }
+
+    def prune_live_observations(self, guild_id: int, cutoff: datetime) -> int:
+        """Delete non-imported joins older than `cutoff`. See Honeypot stored data."""
+        stamp = _canonical_join_time(cutoff)
+        with closing(self._connect()) as connection, connection:
+            deleted = connection.execute(
+                """DELETE FROM joinwatch_observations
+                   WHERE guild_id = ? AND imported = 0 AND first_joined_at < ?""",
+                (guild_id, stamp),
+            )
+            if deleted.rowcount:
+                self._ensure_history_meta(connection, guild_id)
+                connection.execute(
+                    "UPDATE joinwatch_history_meta SET revision = revision + 1 WHERE guild_id = ?",
+                    (guild_id,),
+                )
+        return int(deleted.rowcount)
+
+    def delete_observation(self, guild_id: int, user_id: int) -> None:
+        """Delete one account's first join. See Honeypot stored data."""
+        member_id = int(user_id)
+        with closing(self._connect()) as connection, connection:
+            deleted = connection.execute(
+                "DELETE FROM joinwatch_observations WHERE guild_id = ? AND user_id = ?",
+                (guild_id, member_id),
+            )
+            self._remove_history_snapshot_account(connection, guild_id, str(member_id))
+            if deleted.rowcount == 0:
+                return
+            self._ensure_history_meta(connection, guild_id)
+            connection.execute(
+                """UPDATE joinwatch_history_meta
+                   SET revision = revision + 1, import_revision = import_revision + 1
+                   WHERE guild_id = ?""",
+                (guild_id,),
+            )
+
+    # TODO(cleanup PR #148): after validating the normalized history rollout,
+    # drop legacy joinwatch_history JSON in a NEW schema migration. Remove this
+    # helper, its delete_observation call, and legacy-table deletion from
+    # clear_joinwatch_auxiliary. Keep historical schema migrations and the
+    # copy helpers they need so older databases can still upgrade.
+    # Update runtime snapshot tests and stored-data docs/info.json.
+    def _remove_history_snapshot_account(
+        self, connection: sqlite3.Connection, guild_id: int, member_id: str
+    ) -> None:
+        row = connection.execute(
+            "SELECT history FROM joinwatch_history WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+        if row is None:
+            return
+        try:
+            document = json.loads(row["history"])
+        except json.JSONDecodeError as error:
+            raise ValueError(f"joinwatch history for guild {guild_id} is not valid JSON") from error
+        if not isinstance(document, dict):
+            raise TypeError(f"joinwatch history for guild {guild_id} is not a document")
+        observations = document.get("observations", {})
+        if not isinstance(observations, dict):
+            raise TypeError(f"joinwatch history for guild {guild_id} is not a document")
+        if member_id not in observations:
+            return
+        del observations[member_id]
+        connection.execute(
+            "UPDATE joinwatch_history SET history = ? WHERE guild_id = ?",
+            (json.dumps(_json_value(document), separators=(",", ":")), guild_id),
+        )
 
     def get_joinwatch_observation(self, guild_id: int, user_id: int) -> dict | None:
-        """Read one retained join without decoding the server archive into Python objects."""
+        """Read one retained join. See Honeypot stored data."""
         with closing(self._connect()) as connection:
             row = connection.execute(
-                "SELECT json_extract(history, ?) FROM joinwatch_history WHERE guild_id = ?",
-                (f'$.observations."{int(user_id)}"', guild_id),
+                """SELECT first_joined_at, imported FROM joinwatch_observations
+                   WHERE guild_id = ? AND user_id = ?""",
+                (guild_id, int(user_id)),
             ).fetchone()
-        return json.loads(row[0]) if row is not None and row[0] is not None else None
-
-    def save_joinwatch_history(self, guild_id: int, history: Mapping) -> None:
-        serialized = json.dumps(_json_value(history), separators=(",", ":"))
-        with closing(self._connect()) as connection, connection:
-            connection.execute(
-                """INSERT INTO joinwatch_history (guild_id, history) VALUES (?, ?)
-                   ON CONFLICT(guild_id) DO UPDATE SET history = excluded.history""",
-                (guild_id, serialized),
-            )
+        if row is None:
+            return None
+        return {"first_joined_at": row["first_joined_at"], "imported": bool(row["imported"])}
 
     def get_joinwatch_waves(self, guild_id: int) -> dict[str, dict]:
         with closing(self._connect()) as connection:
@@ -1031,8 +1543,282 @@ class DetectionCaseStore:
     def clear_joinwatch_auxiliary(self, guild_id: int) -> None:
         """Delete auxiliary history and waves, leaving punishments and stats alone."""
         with closing(self._connect()) as connection, connection:
+            connection.execute("DELETE FROM joinwatch_observations WHERE guild_id = ?", (guild_id,))
+            connection.execute("DELETE FROM joinwatch_history_sources WHERE guild_id = ?", (guild_id,))
+            connection.execute("DELETE FROM joinwatch_history_meta WHERE guild_id = ?", (guild_id,))
             connection.execute("DELETE FROM joinwatch_history WHERE guild_id = ?", (guild_id,))
             connection.execute("DELETE FROM joinwatch_waves WHERE guild_id = ?", (guild_id,))
+
+    def cutover_source(self, guild_id: int) -> str | None:
+        """Read the per-guild live-state marker. See Honeypot stored data."""
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT source FROM joinwatch_cutover WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()
+        return None if row is None else row["source"]
+
+    def clear_cutover(self, guild_id: int) -> None:
+        """Return one guild to Config as the live-state source. See Honeypot stored data."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute("DELETE FROM joinwatch_live_state WHERE guild_id = ?", (guild_id,))
+            connection.execute("DELETE FROM joinwatch_cutover WHERE guild_id = ?", (guild_id,))
+
+    def get(self, guild_id: int, user_id: int, kind: str) -> dict | None:
+        """Read one JoinWatch live row. See Honeypot stored data."""
+        _require_live_kind(kind)
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """SELECT payload FROM joinwatch_live_state
+                   WHERE guild_id = ? AND user_id = ? AND kind = ?""",
+                (guild_id, int(user_id), kind),
+            ).fetchone()
+        return None if row is None else json.loads(row["payload"])
+
+    def rows_for_member(self, guild_id: int, user_id: int) -> dict[str, dict]:
+        """Read every live row for one member. See Honeypot stored data."""
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """SELECT kind, payload FROM joinwatch_live_state
+                   WHERE guild_id = ? AND user_id = ?""",
+                (guild_id, int(user_id)),
+            ).fetchall()
+        return {row["kind"]: json.loads(row["payload"]) for row in rows}
+
+    def is_verified(self, guild_id: int, user_id: int) -> bool:
+        """Report whether this member has a verified row. See Honeypot stored data."""
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """SELECT 1 FROM joinwatch_live_state
+                   WHERE guild_id = ? AND user_id = ? AND kind = 'verified'""",
+                (guild_id, int(user_id)),
+            ).fetchone()
+        return row is not None
+
+    def upsert(
+        self,
+        guild_id: int,
+        user_id: int,
+        kind: str,
+        payload: Mapping,
+        *,
+        expected_incident_id: str | None = None,
+        compare: bool = False,
+    ) -> bool:
+        """Write one live row. A compare refuses a different incident. See Honeypot stored data."""
+        _require_live_kind(kind)
+        incident_id, role_id, due_at, encoded = _live_columns(kind, payload)
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                if compare:
+                    current = connection.execute(
+                        """SELECT incident_id FROM joinwatch_live_state
+                           WHERE guild_id = ? AND user_id = ? AND kind = ?""",
+                        (guild_id, int(user_id), kind),
+                    ).fetchone()
+                    if current is None or current["incident_id"] != expected_incident_id:
+                        connection.rollback()
+                        return False
+                connection.execute(
+                    """INSERT INTO joinwatch_live_state (
+                           guild_id, user_id, kind, incident_id, role_id, due_at, payload
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(guild_id, user_id, kind) DO UPDATE SET
+                           incident_id = excluded.incident_id,
+                           role_id = excluded.role_id,
+                           due_at = excluded.due_at,
+                           payload = excluded.payload""",
+                    (guild_id, int(user_id), kind, incident_id, role_id, due_at, encoded),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return True
+
+    def delete(
+        self,
+        guild_id: int,
+        user_id: int,
+        kind: str,
+        expected_incident_id: str | None = None,
+        compare: bool = False,
+    ) -> bool:
+        """Delete one live row. A compare refuses a different incident. See Honeypot stored data."""
+        _require_live_kind(kind)
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                if compare:
+                    current = connection.execute(
+                        """SELECT incident_id FROM joinwatch_live_state
+                           WHERE guild_id = ? AND user_id = ? AND kind = ?""",
+                        (guild_id, int(user_id), kind),
+                    ).fetchone()
+                    if current is None or current["incident_id"] != expected_incident_id:
+                        connection.rollback()
+                        return False
+                connection.execute(
+                    """DELETE FROM joinwatch_live_state
+                       WHERE guild_id = ? AND user_id = ? AND kind = ?""",
+                    (guild_id, int(user_id), kind),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return True
+
+    def list_open(self, guild_id: int) -> dict[str, dict[str, dict]]:
+        """List pending rows for the timer and restore. See Honeypot stored data."""
+        maps = {kind: {} for kind in _OPEN_KINDS}
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """SELECT user_id, kind, payload FROM joinwatch_live_state
+                   WHERE guild_id = ? AND kind IN ('pending_role', 'pending_assignment')
+                   ORDER BY user_id""",
+                (guild_id,),
+            ).fetchall()
+        for row in rows:
+            maps[row["kind"]][str(row["user_id"])] = json.loads(row["payload"])
+        return maps
+
+    def counts(self, guild_id: int) -> dict[str, int]:
+        """Count live rows by kind. See Honeypot stored data."""
+        totals = dict.fromkeys(_LIVE_KINDS, 0)
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """SELECT kind, COUNT(*) AS total FROM joinwatch_live_state
+                   WHERE guild_id = ? GROUP BY kind""",
+                (guild_id,),
+            ).fetchall()
+        for row in rows:
+            if row["kind"] in totals:
+                totals[row["kind"]] = int(row["total"])
+        return totals
+
+    def config_maps(self, guild_id: int) -> dict[str, dict[str, dict]]:
+        """Return the three Config-shaped live maps. See Honeypot stored data."""
+        maps = {kind: {} for kind in _LIVE_KINDS}
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """SELECT user_id, kind, payload FROM joinwatch_live_state
+                   WHERE guild_id = ? ORDER BY kind, user_id""",
+                (guild_id,),
+            ).fetchall()
+        for row in rows:
+            maps[row["kind"]][str(row["user_id"])] = json.loads(row["payload"])
+        return maps
+
+    def live_guild_ids(self, user_id: int) -> list[int]:
+        """List guilds that still have live rows for one member. See Honeypot stored data."""
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """SELECT DISTINCT guild_id FROM joinwatch_live_state
+                   WHERE user_id = ? ORDER BY guild_id""",
+                (int(user_id),),
+            ).fetchall()
+        return [int(row["guild_id"]) for row in rows]
+
+    def pending_guild_ids(self) -> list[int]:
+        """List guilds that still have pending live rows. See Honeypot stored data."""
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """SELECT DISTINCT guild_id FROM joinwatch_live_state
+                   WHERE kind IN ('pending_role', 'pending_assignment')
+                   ORDER BY guild_id"""
+            ).fetchall()
+        return [int(row["guild_id"]) for row in rows]
+
+    def delete_guild(self, guild_id: int) -> None:
+        """Delete one guild's live rows, marker, and backup. See Honeypot stored data."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                "DELETE FROM joinwatch_live_state WHERE guild_id = ?",
+                (guild_id,),
+            )
+            connection.execute("DELETE FROM joinwatch_cutover WHERE guild_id = ?", (guild_id,))
+            connection.execute(
+                "DELETE FROM joinwatch_live_backup WHERE guild_id = ?",
+                (guild_id,),
+            )
+
+    def replace_from_config(self, guild_id: int, maps: Mapping, *, now: datetime | None = None) -> bool:
+        """Replace live rows from Config when the copy matches, and keep a one-time backup.
+
+        See Honeypot stored data. An empty Config is refused so it cannot replace SQLite.
+        """
+        if all(not maps.get(kind) for kind in _LIVE_KINDS):
+            return False
+        prepared = _prepare_live_maps(maps)
+        if prepared is None:
+            return False
+        moment = now or datetime.now(timezone.utc)
+        backup = json.dumps(
+            {kind: maps.get(kind, {}) for kind in _LIVE_KINDS},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    "DELETE FROM joinwatch_live_state WHERE guild_id = ?",
+                    (guild_id,),
+                )
+                for kind, rows in prepared.items():
+                    for user_id, payload in rows:
+                        incident_id, role_id, due_at, encoded = _live_columns(kind, payload)
+                        connection.execute(
+                            """INSERT INTO joinwatch_live_state (
+                                   guild_id, user_id, kind, incident_id, role_id, due_at, payload
+                               ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                            (guild_id, user_id, kind, incident_id, role_id, due_at, encoded),
+                        )
+                if not _live_state_matches(connection, guild_id, prepared):
+                    connection.rollback()
+                    return False
+                connection.execute(
+                    """INSERT INTO joinwatch_live_backup (guild_id, written_at, payload)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(guild_id) DO NOTHING""",
+                    (guild_id, _to_timestamp(moment), backup),
+                )
+                connection.execute(
+                    """INSERT INTO joinwatch_cutover (guild_id, source) VALUES (?, 'sqlite')
+                       ON CONFLICT(guild_id) DO UPDATE SET source = excluded.source""",
+                    (guild_id,),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return True
+
+    # TODO(cleanup PR #148): once Config rollback is retired and backups expire,
+    # drop joinwatch_live_backup in a NEW schema migration. Remove live_backup,
+    # expire_live_backups, their callers, and backup writes in replace_from_config.
+    # Keep historical schema migrations and adapt the one-way upgrade importer.
+    # Update backup-only tests and stored-data docs/info.json.
+    def live_backup(self, guild_id: int) -> dict | None:
+        """Read the one-time Config backup for one guild. See Honeypot stored data."""
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT payload FROM joinwatch_live_backup WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()
+        return None if row is None else json.loads(row["payload"])
+
+    def expire_live_backups(self, now: datetime) -> int:
+        """Delete Config backups older than the retention window. See Honeypot stored data."""
+        cutoff = _to_timestamp(now - timedelta(days=JOINWATCH_LIVE_BACKUP_RETENTION_DAYS))
+        with closing(self._connect()) as connection, connection:
+            result = connection.execute(
+                "DELETE FROM joinwatch_live_backup WHERE written_at < ?",
+                (cutoff,),
+            )
+            return result.rowcount
 
     def record_daily_stat(
         self,

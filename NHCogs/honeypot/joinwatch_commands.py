@@ -207,7 +207,7 @@ async def joinwatch_bantimers(cog, ctx: commands.Context) -> None:
         return
     raw_config = await cog.config.guild(ctx.guild).all()
     guild_settings = GuildSettings.from_mapping(raw_config)
-    pending_roles = guild_settings.joinwatch_pending_roles
+    pending_roles = (await joinwatch_state.open_maps(cog, ctx.guild))["pending_role"]
     role = ctx.guild.get_role(guild_settings.joinwatch_auto_role_id)
     role_members = role.members if role is not None else []
     without_timer = sorted(
@@ -385,6 +385,7 @@ async def config_joinwatch(cog, ctx: commands.Context) -> None:
         return
     raw_config = await cog.config.guild(ctx.guild).all()
     guild_settings = GuildSettings.from_mapping(raw_config)
+    live_counts = await joinwatch_state.live_counts(cog, ctx.guild)
     lines = [
         _("Joinwatch:"),
         f"  {_('Enabled')}: {cog._format_bool_setting(guild_settings.joinwatch_enabled)}",
@@ -399,8 +400,8 @@ async def config_joinwatch(cog, ctx: commands.Context) -> None:
         f"  {_('Action')}: {guild_settings.joinwatch_auto_role_action.value}",
         f"  {_('Randomized delay')}: {cog._format_bool_setting(guild_settings.joinwatch_auto_role_random_delay_enabled)}",
         f"  {_('Delay range')}: {_('{min} to {max} minutes').format(min=guild_settings.joinwatch_auto_role_random_delay_min_minutes, max=guild_settings.joinwatch_auto_role_random_delay_max_minutes)}",
-        f"  {_('Pending role applications')}: {len(guild_settings.joinwatch_pending_role_assignments)}",
-        f"  {_('Active joinwatch timers')}: {len(guild_settings.joinwatch_pending_roles)}",
+        f"  {_('Pending role applications')}: {live_counts['pending_assignment']}",
+        f"  {_('Active joinwatch timers')}: {live_counts['pending_role']}",
         f"  CAPTCHA for new joins: {str(guild_settings.joinwatch_captcha_enabled).lower()}",
         f"  Group rule: {str(guild_settings.joinwatch_groups_enabled).lower()}",
         f"  Group criteria: {guild_settings.joinwatch_groups_minimum_accounts} accounts / {guild_settings.joinwatch_groups_join_window_minutes} minutes / {guild_settings.joinwatch_groups_creation_distance_hours} hours",

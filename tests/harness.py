@@ -228,6 +228,20 @@ class _LoopStub:
         return function
 
 
+def _mapping_get_raw(source):
+    """Read one stored value the way a partial guild config stub must."""
+
+    async def get_raw(*keys, default=None):
+        raw = source
+        for key in keys:
+            if not isinstance(raw, dict) or key not in raw:
+                return default
+            raw = raw[key]
+        return raw
+
+    return get_raw
+
+
 class _GuildConfig:
     def __init__(self, defaults, values, stats):
         self._defaults = defaults
@@ -1068,10 +1082,15 @@ class DetectionPipelineTestCase(unittest.IsolatedAsyncioTestCase):
     def _configure_public_boundary(cog, config):
         cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
         cog._message_registry._initialize_sync()
+        reader = _mapping_get_raw(config)
         cog.config = SimpleNamespace(
-            guild=lambda guild: SimpleNamespace(all=mock.AsyncMock(return_value=config)),
+            guild=lambda guild: SimpleNamespace(
+                all=mock.AsyncMock(return_value=config),
+                get_raw=reader,
+            ),
             guild_from_id=lambda guild_id: SimpleNamespace(
-                all=mock.AsyncMock(return_value=config)
+                all=mock.AsyncMock(return_value=config),
+                get_raw=reader,
             ),
         )
         cog._is_protected_member = mock.AsyncMock(return_value=False)
