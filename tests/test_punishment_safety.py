@@ -811,8 +811,17 @@ class BaitRoleSafetyTests(unittest.IsolatedAsyncioTestCase):
             "baitrole_action": "ban",
             "joinwatch_pending_roles": pending_roles,
         }
+        async def get_raw(*keys, default=None):
+            raw = raw_config
+            for key in keys:
+                if not isinstance(raw, dict) or key not in raw:
+                    return default
+                raw = raw[key]
+            return raw
+
         guild_config = SimpleNamespace(
             all=mock.AsyncMock(return_value=raw_config),
+            get_raw=get_raw,
             joinwatch_pending_roles=lambda: _Store(pending_roles),
             stats=lambda: _Store(stats),
         )
