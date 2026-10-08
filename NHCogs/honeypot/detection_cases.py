@@ -1676,29 +1676,6 @@ class DetectionCaseStore:
             maps[row["kind"]][str(row["user_id"])] = json.loads(row["payload"])
         return maps
 
-    def list_due(self, guild_id: int, kind: str, now: datetime) -> list[dict]:
-        """List one kind of row whose deadline is due. See Honeypot stored data."""
-        _require_live_kind(kind)
-        moment = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
-        due: list[dict] = []
-        with closing(self._connect()) as connection:
-            rows = connection.execute(
-                """SELECT due_at, payload FROM joinwatch_live_state
-                   WHERE guild_id = ? AND kind = ? AND due_at IS NOT NULL
-                   ORDER BY due_at, user_id""",
-                (guild_id, kind),
-            ).fetchall()
-        for row in rows:
-            try:
-                deadline = datetime.fromisoformat(row["due_at"])
-            except ValueError:
-                continue
-            if deadline.tzinfo is None:
-                deadline = deadline.replace(tzinfo=timezone.utc)
-            if deadline <= moment:
-                due.append(json.loads(row["payload"]))
-        return due
-
     def counts(self, guild_id: int) -> dict[str, int]:
         """Count live rows by kind. See Honeypot stored data."""
         totals = dict.fromkeys(_LIVE_KINDS, 0)
