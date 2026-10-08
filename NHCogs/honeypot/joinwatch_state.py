@@ -715,19 +715,28 @@ async def reschedule_pending_roles(
 ) -> tuple[tuple[dict[str, typing.Any], int, datetime], ...]:
     updates: list[tuple[dict[str, typing.Any], int, datetime]] = []
     pending_roles = (await open_maps(cog, guild))["pending_role"]
-    for member_key, data in pending_roles.items():
+    for member_key in tuple(pending_roles):
         try:
-            role_id = int(data["role_id"])
-            if data.get("applied_at") is not None:
-                applied_at = datetime.fromisoformat(data["applied_at"])
-            else:
-                old_expires_at = datetime.fromisoformat(data["expires_at"])
-                applied_at = old_expires_at - timedelta(minutes=old_timer_minutes)
-        except (KeyError, TypeError, ValueError):
+            member_id = int(member_key)
+        except (TypeError, ValueError):
             continue
-        expires_at = applied_at + timedelta(minutes=new_timer_minutes)
-        data["applied_at"] = applied_at.isoformat()
-        data["expires_at"] = expires_at.isoformat()
-        await write_row(cog, guild, int(member_key), "pending_role", data)
-        updates.append((dict(data), role_id, expires_at))
+        async with member_lock(cog, guild.id, member_id):
+            data = await read_row(cog, guild, member_id, "pending_role")
+            if data is None:
+                continue
+            try:
+                role_id = int(data["role_id"])
+                if data.get("applied_at") is not None:
+                    applied_at = datetime.fromisoformat(data["applied_at"])
+                else:
+                    old_expires_at = datetime.fromisoformat(data["expires_at"])
+                    applied_at = old_expires_at - timedelta(minutes=old_timer_minutes)
+            except (KeyError, TypeError, ValueError):
+                continue
+            expires_at = applied_at + timedelta(minutes=new_timer_minutes)
+            data["applied_at"] = applied_at.isoformat()
+            data["expires_at"] = expires_at.isoformat()
+            await write_row(cog, guild, member_id, "pending_role", data)
+            published = (dict(data), role_id, expires_at)
+        updates.append(published)
     return tuple(updates)
