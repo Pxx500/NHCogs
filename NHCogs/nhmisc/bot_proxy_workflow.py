@@ -145,6 +145,7 @@ class CharacterModal(discord.ui.Modal):
                 str(self.avatar_url.value).strip()
             )
             async with self.session.manager.enabled_operation(self.session.guild):
+                self.session.require_enabled()
                 self.session.ensure_character_allowed()
                 if self.save_preset:
                     preset_name = str(self.preset_name.value)
@@ -442,6 +443,7 @@ class ConfirmDeleteCharacterView(discord.ui.View):
             return
         await interaction.response.defer(ephemeral=True)
         async with self.session.manager.enabled_operation(self.session.guild):
+            self.session.require_enabled()
             deleted = await self.session.manager.store.delete_character(
                 guild_id=self.session.guild.id,
                 preset_name=self.preset.preset_name,
@@ -729,6 +731,7 @@ class BotProxyWorkflowSession:
         self._timeout_task: asyncio.Task[None] | None = None
         self._publish_lock = asyncio.Lock()
         self._publishing = False
+        self._data_deleted = False
         self._preview_draft: BotProxyDraft | None = None
         self._preview_message: discord.Message | None = None
         self._preview_control: discord.Message | None = None
@@ -751,6 +754,8 @@ class BotProxyWorkflowSession:
         self._timeout_task = asyncio.create_task(self._expire())
 
     def require_enabled(self) -> None:
+        if self._data_deleted:
+            raise WorkflowInputError("Bot Proxy session is closed after user-data deletion")
         self.manager.require_enabled_now(self.guild.id)
 
     async def enabled_for(self, interaction: discord.Interaction) -> bool:
@@ -839,6 +844,8 @@ class BotProxyWorkflowSession:
         )
 
     async def refresh(self) -> None:
+        if self._data_deleted:
+            return
         self.touch()
         previous_view = self.view
         self.view = DashboardView(self)
@@ -851,6 +858,8 @@ class BotProxyWorkflowSession:
         )
 
     async def handle_message(self, message: discord.Message) -> bool:
+        if self._data_deleted:
+            return False
         if message.author.id != self.opener_id or self.input_mode is None:
             return False
         self.touch()
@@ -945,6 +954,7 @@ class BotProxyWorkflowSession:
             raise WorkflowInputError("Send exactly one image attachment")
         loaded = await self.manager.load_avatar_attachment(message.attachments[0])
         async with self.manager.enabled_operation(self.guild):
+            self.require_enabled()
             identity = self.draft.identity
             if identity.kind is not IdentityType.CHARACTER:
                 raise WorkflowInputError("Choose a character before uploading an avatar")
@@ -1115,6 +1125,7 @@ class BotProxyWorkflowSession:
     ) -> bool:
         try:
             async with self.manager.enabled_operation(self.guild):
+                self.require_enabled()
                 channel = await self.manager.resolve_publish_channel(
                     self.guild,
                     draft.destination,

@@ -588,6 +588,28 @@ class ModerationStore:
     async def delete_user(self, user_id: int) -> set[int]:
         return await asyncio.to_thread(self._delete_user_sync, user_id)
 
+    async def minimize_user(self, user_id: int) -> set[int]:
+        """Remove optional profiles while keeping operational moderation identity."""
+        return await asyncio.to_thread(self._minimize_user_sync, user_id)
+
+    def _minimize_user_sync(self, user_id: int) -> set[int]:
+        with closing(self._connect()) as connection, connection:
+            guild_ids = {
+                row[0] for row in connection.execute(
+                    "SELECT DISTINCT guild_id FROM moderation_observations WHERE target_user_id = ?",
+                    (user_id,),
+                )
+            }
+            # Account and activity snapshots belong to the target. A moderator's
+            # request must not erase another member's reason or evidence.
+            connection.execute(
+                """UPDATE moderation_observations SET
+                     account_snapshot = NULL, activity_summary = NULL
+                   WHERE target_user_id = ?""",
+                (user_id,),
+            )
+        return guild_ids
+
     async def export_history(self, guild_id: int) -> dict:
         return await asyncio.to_thread(self._export_history_sync, guild_id)
 

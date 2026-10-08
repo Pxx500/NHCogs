@@ -7,6 +7,8 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
+from tests.storage_loader import load_shared_storage
+
 NHMISC_PATH = Path(__file__).resolve().parents[1] / "NHCogs" / "nhmisc" / "nhmisc.py"
 
 
@@ -83,6 +85,7 @@ class _Cog:
 
 
 def _load_nhmisc():
+    load_shared_storage()
     discord = types.ModuleType("discord")
     discord.Color = _Color
     discord.Embed = _Embed

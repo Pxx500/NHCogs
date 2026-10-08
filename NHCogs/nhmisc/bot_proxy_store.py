@@ -12,6 +12,7 @@ from pathlib import Path
 
 MAX_AVATAR_BYTES = 2 * 1024 * 1024
 MAX_CHARACTER_NAME_LENGTH = 80
+DELETED_USER_ID = 0
 ALLOWED_AVATAR_MEDIA_TYPES = frozenset(
     {"image/gif", "image/jpeg", "image/png", "image/webp"}
 )
@@ -147,6 +148,34 @@ class BotProxyStore:
     async def initialize(self) -> None:
         async with self._lock:
             await asyncio.to_thread(self._initialize_sync)
+
+    async def delete_user_data(self, user_id: int) -> None:
+        """Erase owned presets and personal attribution, preserving sent messages."""
+        async with self._lock:
+            await asyncio.to_thread(self._delete_user_data_sync, user_id)
+
+    def _delete_user_data_sync(self, user_id: int) -> None:
+        with self._connection() as connection, connection:
+            connection.execute("PRAGMA secure_delete = ON")
+            connection.execute(
+                "DELETE FROM bot_proxy_characters WHERE created_by = ?", (user_id,)
+            )
+            connection.execute(
+                "UPDATE bot_proxy_characters SET updated_by = ? WHERE updated_by = ?",
+                (DELETED_USER_ID, user_id),
+            )
+            connection.execute(
+                "DELETE FROM bot_proxy_active_sessions WHERE moderator_id = ?", (user_id,)
+            )
+            for column in ("moderator_id", "edited_by", "deleted_by"):
+                connection.execute(
+                    f"UPDATE bot_proxy_messages SET {column} = ? WHERE {column} = ?",
+                    (DELETED_USER_ID, user_id),
+                )
+            connection.execute(
+                "UPDATE bot_proxy_message_events SET moderator_id = ? WHERE moderator_id = ?",
+                (DELETED_USER_ID, user_id),
+            )
 
     async def create_character(
         self,

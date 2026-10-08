@@ -4,7 +4,7 @@ import asyncio
 import logging
 import re
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -65,6 +65,8 @@ class BotProxyWorkflowManager:
         self._state_locks: dict[int, asyncio.Lock] = {}
         self._disabled_guild_ids: set[int] = set()
         self._session_sequences: dict[tuple[int, int], int] = {}
+        self._deleting_user_ids: set[int] = set()
+        self._user_data_lock = asyncio.Lock()
         self._moderation_log = moderation_log
         self._error_reporter = error_reporter
         self._avatar_loader = avatar_loader
@@ -74,6 +76,47 @@ class BotProxyWorkflowManager:
             *(session.finish(SessionStatus.RELOADED) for session in tuple(self.sessions.values())),
             return_exceptions=True,
         )
+
+    async def delete_user_data(self, user_id: int) -> None:
+        """Drain admitted writes and revoke old controls before erasing user data."""
+        async with self._user_data_lock:
+            self._deleting_user_ids.add(user_id)
+            sessions = tuple(
+                session for session in self.sessions.values()
+                if session.opener_id == user_id
+            )
+            for session in sessions:
+                session._data_deleted = True
+            try:
+                # All preset saves and publications use these locks. Do not hold
+                # them while finishing sessions, which also takes a publish lock.
+                async with AsyncExitStack() as stack:
+                    for guild_id in sorted(self._state_locks):
+                        await stack.enter_async_context(self._state_locks[guild_id])
+                    await self.store.delete_user_data(user_id)
+                for session in sessions:
+                    try:
+                        await session.finish(SessionStatus.CANCELLED)
+                    except Exception as error:  # noqa: BLE001
+                        await self.report_session_error(
+                            session, error, action="close deleted-user Bot Proxy session",
+                        )
+                    finally:
+                        self.sessions.pop(session.active.session_id, None)
+                        self.registry.remove(session.active.session_id)
+                        session.draft = BotProxyDraft()
+                        session.input_mode = None
+                        session._preview_draft = None
+                self._session_sequences = {
+                    key: value for key, value in self._session_sequences.items()
+                    if key[1] != user_id
+                }
+            finally:
+                self._deleting_user_ids.discard(user_id)
+
+    def _require_user_available(self, user_id: int) -> None:
+        if user_id in self._deleting_user_ids:
+            raise WorkflowInputError("Bot Proxy user data is being deleted")
 
     def _state_lock(self, guild_id: int) -> asyncio.Lock:
         return self._state_locks.setdefault(guild_id, asyncio.Lock())
@@ -136,7 +179,9 @@ class BotProxyWorkflowManager:
         *,
         destination: ProxyDestination | None = None,
     ) -> BotProxyWorkflowSession:
+        self._require_user_available(moderator.id)
         async with self._state_lock(guild.id):
+            self._require_user_available(moderator.id)
             if not await self._enabled_locked(guild):
                 raise WorkflowInputError("Bot Proxy is disabled")
             return await self._create_session(
@@ -178,6 +223,7 @@ class BotProxyWorkflowManager:
         )
         recorded = False
         try:
+            self._require_user_available(moderator.id)
             await self.store.record_active_session(
                 ActiveSessionRecord(
                     session_id=active.session_id,
@@ -190,6 +236,7 @@ class BotProxyWorkflowManager:
                 )
             )
             recorded = True
+            self._require_user_available(moderator.id)
             self.registry.add(active)
             self.sessions[active.session_id] = session
             await session.refresh()

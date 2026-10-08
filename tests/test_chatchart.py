@@ -11,6 +11,8 @@ from unittest import mock
 from matplotlib.figure import Figure
 from PIL import Image
 
+from tests.storage_loader import load_shared_storage
+
 ROOT_PACKAGE_NAME = "nhmisc_chatchart_test_root"
 PACKAGE_NAME = f"{ROOT_PACKAGE_NAME}.nhmisc"
 ROOT_PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs"
@@ -142,6 +144,7 @@ ALLOWED_MENTIONS_NONE = object()
 
 
 def load_nhmisc_module():
+    load_shared_storage()
     discord = types.ModuleType("discord")
     discord.Forbidden = type("Forbidden", (Exception,), {})
     discord.HTTPException = type("HTTPException", (Exception,), {})

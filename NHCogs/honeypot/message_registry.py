@@ -292,6 +292,7 @@ class MessageRegistry:
         fingerprint: str,
         *,
         since_utc: datetime,
+        through_utc: datetime | None = None,
     ) -> int:
         async with self._lock:
             return await asyncio.to_thread(
@@ -300,6 +301,7 @@ class MessageRegistry:
                 author_id,
                 fingerprint,
                 since_utc,
+                through_utc,
             )
 
     def _matching_channel_count_sync(
@@ -308,18 +310,24 @@ class MessageRegistry:
         author_id: int,
         fingerprint: str,
         since_utc: datetime,
+        through_utc: datetime | None = None,
     ) -> int:
+        upper_bound = " AND created_at_utc <= ?" if through_utc is not None else ""
+        parameters = [guild_id, author_id, fingerprint, _to_timestamp(since_utc)]
+        if through_utc is not None:
+            parameters.append(_to_timestamp(through_utc))
         with closing(connect(self.database_path)) as connection:
             row = connection.execute(
-                """
+                f"""
                 SELECT COUNT(DISTINCT channel_id)
                 FROM observed_messages
                 WHERE guild_id = ?
                   AND author_id = ?
                   AND fingerprint = ?
                   AND created_at_utc >= ?
+                  {upper_bound}
                 """,
-                (guild_id, author_id, fingerprint, _to_timestamp(since_utc)),
+                parameters,
             ).fetchone()
         return int(row[0])
 

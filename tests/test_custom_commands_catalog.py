@@ -129,6 +129,39 @@ class CustomCommandCatalogTests(unittest.IsolatedAsyncioTestCase):
             await target.import_all((command,))
             self.assertEqual((await target.get(100, "limited")).access, command.access)
 
+    async def test_metadata_redaction_preserves_active_access_and_command_behavior(self):
+        with TemporaryDirectory() as directory:
+            store = catalog.CustomCommandCatalog(Path(directory) / "commands.sqlite")
+            await store.initialize()
+            created = await store.create(
+                guild_id=100, name="personal", author_id=200, author_name="Creator",
+                responses=(catalog.ResponseDraft("hello", weight=250),),
+                cooldowns={"member": 60},
+                access=catalog.AccessRules(user_ids=(200,), hide_preview=True),
+            )
+            edited = await store.edit(
+                guild_id=100, name="personal", expected_revision=created.revision,
+                editor_id=200, editor_name="Creator",
+            )
+
+            self.assertEqual(await store.redact_user(200, redact_access=False), 2)
+            stored = await store.get(100, "personal")
+            self.assertEqual(stored.author_id, catalog.DELETED_USER_ID)
+            self.assertEqual(stored.author_name, catalog.DELETED_USER_NAME)
+            self.assertEqual(stored.editors[0].user_id, catalog.DELETED_USER_ID)
+            self.assertEqual(stored.editors[0].display_name, catalog.DELETED_USER_NAME)
+            self.assertEqual(stored.access, edited.access)
+            self.assertTrue(stored.access.allows(
+                user_id=200, role_ids=set(), channel_id=10, private=False,
+            ))
+            self.assertFalse(stored.access.allows(
+                user_id=300, role_ids=set(), channel_id=10, private=False,
+            ))
+            self.assertEqual(stored.responses, edited.responses)
+            self.assertEqual(stored.cooldowns, edited.cooldowns)
+            self.assertEqual(stored.revision, edited.revision)
+            self.assertEqual(await store.redact_user(200, redact_access=False), 0)
+
     async def test_stale_edit_cannot_replace_response_or_access(self):
         with TemporaryDirectory() as directory:
             store = catalog.CustomCommandCatalog(Path(directory) / "commands.sqlite")

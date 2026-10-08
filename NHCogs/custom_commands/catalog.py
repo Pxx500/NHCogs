@@ -741,10 +741,11 @@ class CustomCommandCatalog:
                 (guild_id, name),
             )
 
-    async def redact_user(self, user_id: int) -> int:
-        return await asyncio.to_thread(self._redact_user_sync, user_id)
+    async def redact_user(self, user_id: int, *, redact_access: bool = True) -> int:
+        """Redact attribution and optionally anonymize individual access IDs."""
+        return await asyncio.to_thread(self._redact_user_sync, user_id, redact_access)
 
-    def _redact_user_sync(self, user_id: int) -> int:
+    def _redact_user_sync(self, user_id: int, redact_access: bool) -> int:
         with closing(self._connect()) as connection, connection:
             author_result = connection.execute(
                 """UPDATE custom_commands SET author_id = ?, author_name = ?
@@ -799,6 +800,8 @@ class CustomCommandCatalog:
                        WHERE guild_id = ? AND command_name = ? AND user_id = ?""",
                     (editor["guild_id"], editor["command_name"], user_id),
                 )
+            if not redact_access:
+                return author_result.rowcount + len(editor_rows)
             redacted_accesses = 0
             for row in tuple(connection.execute("SELECT * FROM custom_command_access")):
                 allowed = json.loads(row["user_ids"])

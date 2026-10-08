@@ -435,13 +435,13 @@ class CustomCommands(commands.Cog):
         requester: Literal["discord_deleted_user", "owner", "user", "user_strict"],
         user_id: int,
     ) -> None:
-        if requester == "discord_deleted_user":
-            await redact_custom_command_user_data(
-                self.catalog,
-                self._legacy_config,
-                self._data_root / "migration",
-                user_id,
-            )
+        await redact_custom_command_user_data(
+            self.catalog,
+            self._legacy_config,
+            self._data_root / "migration",
+            user_id,
+            redact_access=requester == "discord_deleted_user",
+        )
 
     async def cog_command_error(
         self,

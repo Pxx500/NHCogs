@@ -407,20 +407,19 @@ async def _imagescan_create_dump_archives(cog, guild_id: int) -> tuple[Path, lis
     files_root = data_root / "files"
     data_root.mkdir(parents=True, exist_ok=True)
     zip_root.mkdir(parents=True, exist_ok=True)
-    rows = await _imagescan_export_rows(cog, guild_id)
+    async with cog._imagescan_db_lock:
+        rows, samples = await asyncio.to_thread(
+            cog._imagescan_store.export_guild_snapshot,
+            guild_id,
+            data_root / "imagescan.sqlite",
+        )
     with (data_root / "imagescan.jsonl").open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-    async with cog._imagescan_db_lock:
-        samples = await asyncio.to_thread(
-            cog._imagescan_store.export_samples, guild_id
-        )
-    if cog._imagescan_db_path.exists():
-        shutil.copy2(cog._imagescan_db_path, data_root / "imagescan.sqlite")
     source_files_root = cog._imagescan_files_path / str(guild_id)
     if source_files_root.exists():
         for source in source_files_root.rglob("*"):
-            if not source.is_file():
+            if not source.is_file() or not is_imagescan_sample_path_safe(source_files_root, source):
                 continue
             target = files_root / str(guild_id) / source.relative_to(source_files_root)
             target.parent.mkdir(parents=True, exist_ok=True)

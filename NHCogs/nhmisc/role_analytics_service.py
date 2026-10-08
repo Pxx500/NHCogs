@@ -8,6 +8,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from NHCogs.gateway_capabilities import GatewayCapabilityUnavailable, require
+
 from .role_analytics_store import (
     MemberSnapshot,
     RoleAnalyticsStore,
@@ -21,6 +23,10 @@ class SyncAlreadyRunningError(RuntimeError):
 
 class MemberIntentRequiredError(RuntimeError):
     """Raised when the privileged members intent is unavailable."""
+
+
+class MemberCacheUnavailableError(MemberIntentRequiredError):
+    """Raised when a complete member snapshot cannot be obtained."""
 
 
 class AnalyticsDisabledError(RuntimeError):
@@ -79,15 +85,15 @@ class RoleAnalyticsService:
             state = await self._store.get_state(guild_id)
             if not manual and not state.enabled:
                 raise AnalyticsDisabledError("Role analytics are disabled")
-            if not bool(
-                getattr(getattr(self._bot, "intents", None), "members", False)
-            ):
+            try:
+                require(self._bot, "members")
+            except GatewayCapabilityUnavailable as error:
                 await self._store.set_status(
                     guild_id,
-                    SyncStatus.FAILED,
+                    SyncStatus.RETRYING,
                     "missing_members_intent",
                 )
-                raise MemberIntentRequiredError("The members intent is required")
+                raise MemberIntentRequiredError("The members intent is required") from error
 
             started = self._monotonic()
             needs_member_request = force_fresh or not bool(guild.chunked)
@@ -115,6 +121,7 @@ class RoleAnalyticsService:
                     self._last_full_request[guild_id] = self._monotonic()
                     await guild.chunk(cache=True)
 
+                self._require_complete_members(guild)
                 default_role_id = int(guild.default_role.id)
                 members = tuple(
                     self._snapshot_member(member, default_role_id)
@@ -125,6 +132,7 @@ class RoleAnalyticsService:
                     generation,
                     members,
                 )
+                self._require_complete_members(guild)
                 await self._replay_and_activate(
                     guild_id,
                     generation,
@@ -138,7 +146,7 @@ class RoleAnalyticsService:
                     source=source,
                     elapsed_seconds=self._monotonic() - started,
                 )
-            except Exception:
+            except Exception as error:
                 async with self._event_locks[guild_id]:
                     self._sync_generations.pop(guild_id, None)
                     self._event_queues[guild_id].clear()
@@ -146,10 +154,24 @@ class RoleAnalyticsService:
                     await self._store.discard_generation(guild_id, generation)
                 await self._store.set_status(
                     guild_id,
-                    SyncStatus.FAILED,
-                    "sync_failed",
+                    SyncStatus.RETRYING if isinstance(error, MemberIntentRequiredError) else SyncStatus.FAILED,
+                    "members_unavailable" if isinstance(error, MemberIntentRequiredError) else "sync_failed",
                 )
                 raise
+
+    def _require_complete_members(self, guild: Any) -> None:
+        try:
+            require(self._bot, "members")
+        except GatewayCapabilityUnavailable as error:
+            raise MemberIntentRequiredError("The members intent is unavailable") from error
+        reported_count = getattr(guild, "member_count", len(guild.members))
+        if (
+            getattr(guild, "unavailable", False)
+            or not guild.chunked
+            or reported_count is None
+            or len(guild.members) != reported_count
+        ):
+            raise MemberCacheUnavailableError("The member cache is incomplete")
 
     async def member_joined(
         self,
@@ -213,6 +235,7 @@ class RoleAnalyticsService:
                     "Role analytics reconciliation requires members intent for guild %s",
                     guild.id,
                 )
+                self.schedule_guild_retry(guild, 30.0)
             except Exception:
                 self._log.exception(
                     "Role analytics reconciliation failed for guild %s",
@@ -276,8 +299,10 @@ class RoleAnalyticsService:
                 await asyncio.sleep(next_delay)
                 try:
                     return await self.sync_guild(guild, manual=False)
-                except (AnalyticsDisabledError, MemberIntentRequiredError):
+                except AnalyticsDisabledError:
                     return None
+                except MemberIntentRequiredError:
+                    next_delay = 30.0
                 except FullMemberRequestCooldownError as error:
                     next_delay = error.retry_after
                 except Exception:
@@ -379,6 +404,10 @@ class RoleAnalyticsService:
                 events = tuple(self._event_queues[guild_id])
                 self._event_queues[guild_id].clear()
                 if not events:
+                    try:
+                        require(self._bot, "members")
+                    except GatewayCapabilityUnavailable as error:
+                        raise MemberIntentRequiredError("The members intent is unavailable") from error
                     await self._store.activate_generation(
                         guild_id,
                         generation,

@@ -154,6 +154,34 @@ async def is_verified(cog, guild, user_id: int) -> bool:
         return await _read_locked(cog, guild, user_id, "verified") is not None
 
 
+async def redact_member_context(cog, guild, user_id: int) -> None:
+    """Remove optional snapshots from live and residual state without releasing roles."""
+    async with _source_lock(cog):
+        store = getattr(cog, "_case_store", None)
+        if store is not None and hasattr(store, "rows_for_member"):
+            rows = await asyncio.to_thread(store.rows_for_member, int(guild.id), int(user_id))
+            for kind, entry in rows.items():
+                if isinstance(entry.get("history"), dict):
+                    entry["history"]["profile"] = None
+                    entry["history"]["activity"] = None
+                    await finish_thread(store.upsert, int(guild.id), int(user_id), kind, entry)
+        for name in _KIND_CONFIG.values():
+            accessor = getattr(cog.config.guild(guild), name, None)
+            if accessor is None:
+                continue
+            async with accessor() as entries:
+                entry = entries.get(str(user_id))
+                if isinstance(entry, dict) and isinstance(entry.get("history"), dict):
+                    entry["history"]["profile"] = None
+                    entry["history"]["activity"] = None
+
+
+async def redact_sqlite_user_context(cog, user_id: int) -> None:
+    """Scrub all live and backup copies while excluding concurrent rollback."""
+    async with _source_lock(cog):
+        await finish_thread(cog._case_store.redact_joinwatch_live_user_context, int(user_id))
+
+
 async def write_row(
     cog,
     guild,

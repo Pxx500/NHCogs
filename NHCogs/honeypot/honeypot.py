@@ -26,6 +26,7 @@ from . import (
     diagnostics,
     gif_detector,
     imagescan,
+    intent_backlog,
     joinwatch,
     joinwatch_commands,
     joinwatch_state,
@@ -205,6 +206,8 @@ class Honeypot(Cog):
         self._message_registry = MessageRegistry(
             cog_data_path(self) / "message_registry.sqlite"
         )
+        self._intent_backlog = intent_backlog.IntentBacklog(cog_data_path(self) / "intent_backlog.sqlite")
+        self._intent_backlog_task: asyncio.Task | None = None
         self._research_dump_jobs: dict[int, _ResearchDumpRun] = {}
         self._imagescan_db_path = cog_data_path(self) / "imagescan.sqlite"
         self._imagescan_files_path = cog_data_path(self) / "imagescan_files"
@@ -238,7 +241,13 @@ class Honeypot(Cog):
     async def red_delete_data_for_user(
         self, *, requester: typing.Any, user_id: int
     ) -> None:
-        """Delete retained message and detection-case data for a Red user."""
+        """Remove optional context or run Red's stronger explicit deletion scope."""
+        if requester not in {"user", "user_strict", "owner", "discord_deleted_user"}:
+            raise ValueError("Unsupported user-data deletion requester")
+        if requester in {"user", "user_strict"}:
+            await asyncio.to_thread(self._case_store.redact_user_case_context, user_id)
+            await self._joinwatch_verification.redact_user_context(user_id)
+            return
         await self._delete_retained_data_scope(
             self._message_registry.forget_user,
             self._case_store.plan_user_case_deletion,
@@ -983,6 +992,7 @@ class Honeypot(Cog):
         await self._prune_unknown_guild_config()
         await self._init_imagescan_store()
         await self._message_registry.initialize()
+        await self._intent_backlog.initialize()
         self._detection_case_files_path.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(self._case_store.initialize)
         await joinwatch_state.cutover_live_state(self)
@@ -1004,6 +1014,10 @@ class Honeypot(Cog):
             lambda task: self._observe_background_task(task, "daily statistics publisher")
         )
         self._manual_punishment.register()
+        self._intent_backlog_task = asyncio.create_task(intent_backlog.worker(self))
+        self._intent_backlog_task.add_done_callback(
+            lambda task: self._observe_background_task(task, "deferred message processing")
+        )
 
     def runtime_health_issues(self) -> tuple[str, ...]:
         issues = []
@@ -1063,6 +1077,8 @@ class Honeypot(Cog):
         await asyncio.gather(*(run.task for run in dump_runs), return_exceptions=True)
 
     async def cog_unload(self) -> None:
+        await self._cancel_owned_task(self._intent_backlog_task)
+        self._intent_backlog_task = None
         await self._stop_research_dumps()
         loops = (
             self.joinwatch_auto_role_loop,
@@ -1440,6 +1456,8 @@ class Honeypot(Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
+        if await intent_backlog.queue_if_unavailable(self, message):
+            return None
         admission_lock = None
         if (
             message.guild is not None

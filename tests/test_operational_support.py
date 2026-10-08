@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import tempfile
 import unittest
@@ -18,6 +19,46 @@ from tests.test_forum_autopin import (
 
 
 class OperationalSupportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fresh_gateway_grants_pause_and_restore_dependent_work(self):
+        self.bot.intents = SimpleNamespace(members=True, presences=True, message_content=True)
+        flags = SimpleNamespace(
+            gateway_guild_members=True, gateway_guild_members_limited=False,
+            gateway_presence=True, gateway_presence_limited=False,
+            gateway_message_content=True, gateway_message_content_limited=False,
+        )
+        self.bot.application_flags = flags
+        self.bot.application_info = mock.AsyncMock(return_value=SimpleNamespace(flags=flags))
+        module = sys.modules[self.support.__class__.__module__]
+        await self.support._refresh_gateway_grants()
+        self.assertTrue(module.available(self.bot, "members"))
+
+        denied = SimpleNamespace(**dict.fromkeys(vars(flags), False))
+        self.bot.application_info.return_value = SimpleNamespace(flags=denied)
+        await self.support._refresh_gateway_grants()
+        self.assertFalse(module.available(self.bot, "members"))
+        self.assertFalse(module.available(self.bot, "message_content"))
+        self.bot.application_info.side_effect = RuntimeError("temporary API outage")
+        with self.assertRaises(RuntimeError):
+            await self.support._refresh_gateway_grants()
+        self.assertFalse(module.available(self.bot, "members"))
+
+        self.bot.application_info.side_effect = None
+        self.bot.application_info.return_value = SimpleNamespace(flags=flags)
+        await self.support._refresh_gateway_grants()
+        self.assertTrue(module.available(self.bot, "members"))
+
+    async def test_gateway_monitor_is_cancelled_when_support_unloads(self):
+        ready = asyncio.Event()
+        self.bot.wait_until_ready = mock.AsyncMock(side_effect=ready.wait)
+        self.bot.application_info = mock.AsyncMock()
+        await self.support.cog_load()
+        task = self.support._gateway_task
+        await asyncio.sleep(0)
+        await self.support.cog_unload()
+        self.assertTrue(task.cancelled())
+        self.assertIsNone(self.support._gateway_task)
+        self.bot.application_info.assert_not_awaited()
+
     def test_error_configuration_is_separate_from_cog_settings(self):
         old_config = FakeConfigRoot()
         common_config = FakeConfigRoot()

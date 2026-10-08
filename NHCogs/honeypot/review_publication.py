@@ -56,6 +56,8 @@ log = logging.getLogger("red.Honeypot")
 
 DETECTION_CAPTURE_DEADLINE_SECONDS = 20.0
 DETECTION_CAPTURE_CONCURRENCY = 4
+DETECTION_PUBLICATION_FOLLOWER_WAIT_SECONDS = 5.0
+DETECTION_PUBLICATION_FOLLOWER_POLL_SECONDS = 0.05
 _TIMELINE_VIEW_UNSET = object()
 
 
@@ -839,7 +841,9 @@ async def _retry_detection_orphan_publications(cog) -> None:
 async def _acquire_case_timeline_publication(
     cog, publication, *, replace_message_id: int | None = None
 ):
-    for _attempt in range(20):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + DETECTION_PUBLICATION_FOLLOWER_WAIT_SECONDS
+    while loop.time() < deadline:
         claimed = await asyncio.to_thread(
             cog._case_store.claim_timeline_publication,
             publication.logical_key,
@@ -863,7 +867,10 @@ async def _acquire_case_timeline_publication(
             raise KeyError(publication.logical_key)
         if current.state == "published":
             return current, False
-        await asyncio.sleep(0)
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        await asyncio.sleep(min(DETECTION_PUBLICATION_FOLLOWER_POLL_SECONDS, remaining))
     raise RuntimeError("timeline publication claim is unavailable")
 
 
@@ -1565,8 +1572,9 @@ async def _publish_detection_case_serial(
             )
             raise
     else:
-        for _attempt in range(20):
-            await asyncio.sleep(0)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + DETECTION_PUBLICATION_FOLLOWER_WAIT_SECONDS
+        while loop.time() < deadline:
             snapshot = await asyncio.to_thread(cog._case_store.get_case, case_id)
             if snapshot is not None and snapshot.case.review_message_id is not None:
                 winner_channel = await cog._fetch_text_channel_or_thread(
@@ -1579,6 +1587,10 @@ async def _publish_detection_case_serial(
                     await winner_message.edit(embed=embed, view=view)
                     summary_message = winner_message
                 break
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(DETECTION_PUBLICATION_FOLLOWER_POLL_SECONDS, remaining))
     snapshot = await asyncio.to_thread(cog._case_store.get_case, case_id)
     if summary_message is None and snapshot.case.review_message_id is not None:
         destination = await cog._fetch_text_channel_or_thread(
