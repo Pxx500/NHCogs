@@ -334,6 +334,43 @@ def _not_found(code):
     return error
 
 
+async def _two_expired_next_clicks(next_button):
+    release = asyncio.Event()
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+
+    async def first_edit(**_kwargs):
+        first_started.set()
+        await second_started.wait()
+        await release.wait()
+        raise _not_found(10062)
+
+    async def second_edit(**_kwargs):
+        second_started.set()
+        await release.wait()
+        raise _not_found(10062)
+
+    first = asyncio.create_task(
+        next_button.callback(
+            types.SimpleNamespace(
+                response=types.SimpleNamespace(edit_message=first_edit)
+            )
+        )
+    )
+    await first_started.wait()
+    second = asyncio.create_task(
+        next_button.callback(
+            types.SimpleNamespace(
+                response=types.SimpleNamespace(edit_message=second_edit)
+            )
+        )
+    )
+    await second_started.wait()
+    release.set()
+    await first
+    await second
+
+
 class CommandUsageChartTests(unittest.IsolatedAsyncioTestCase):
     async def test_private_thread_access_and_output_privacy(self):
         for public_output, manager, member, allowed in (
@@ -1116,6 +1153,91 @@ class CustomCommandsListTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(view.children[0].disabled)
         self.assertTrue(next_button.disabled)
 
+    async def test_two_overlapping_expired_next_clicks_stay_on_the_original_page(self):
+        subject, ctx, _message = self._subject_and_ctx(command_count=31)
+        await cog.CustomCommands.cc_list.callback(subject, ctx)
+        view = ctx.send.await_args.kwargs["view"]
+
+        await _two_expired_next_clicks(view.children[2])
+
+        self.assertTrue(view.children[0].disabled)
+        self.assertFalse(view.children[2].disabled)
+        follow = types.SimpleNamespace(
+            response=types.SimpleNamespace(edit_message=mock.AsyncMock())
+        )
+        await view.children[2].callback(follow)
+        self.assertEqual(
+            follow.response.edit_message.await_args.kwargs["embed"].footer,
+            "Page 2/3",
+        )
+
+    async def test_two_overlapping_expired_next_clicks_stay_on_the_accepted_page(self):
+        subject, ctx, _message = self._subject_and_ctx(command_count=60)
+        await cog.CustomCommands.cc_list.callback(subject, ctx)
+        view = ctx.send.await_args.kwargs["view"]
+        accepted = types.SimpleNamespace(
+            response=types.SimpleNamespace(edit_message=mock.AsyncMock())
+        )
+        await view.children[2].callback(accepted)
+        self.assertEqual(
+            accepted.response.edit_message.await_args.kwargs["embed"].footer,
+            "Page 2/4",
+        )
+
+        await _two_expired_next_clicks(view.children[2])
+
+        follow = types.SimpleNamespace(
+            response=types.SimpleNamespace(edit_message=mock.AsyncMock())
+        )
+        await view.children[2].callback(follow)
+        self.assertEqual(
+            follow.response.edit_message.await_args.kwargs["embed"].footer,
+            "Page 3/4",
+        )
+
+    async def test_older_success_after_a_newer_expired_click_stays_visible(self):
+        subject, ctx, _message = self._subject_and_ctx(command_count=60)
+        await cog.CustomCommands.cc_list.callback(subject, ctx)
+        view = ctx.send.await_args.kwargs["view"]
+        next_button = view.children[2]
+        older_started = asyncio.Event()
+        release_older = asyncio.Event()
+
+        async def older_edit(**_kwargs):
+            older_started.set()
+            await release_older.wait()
+
+        async def newer_edit(**_kwargs):
+            raise _not_found(10062)
+
+        older = asyncio.create_task(
+            next_button.callback(
+                types.SimpleNamespace(
+                    response=types.SimpleNamespace(edit_message=older_edit)
+                )
+            )
+        )
+        await older_started.wait()
+        newer = asyncio.create_task(
+            next_button.callback(
+                types.SimpleNamespace(
+                    response=types.SimpleNamespace(edit_message=newer_edit)
+                )
+            )
+        )
+        await newer
+        release_older.set()
+        await older
+
+        follow = types.SimpleNamespace(
+            response=types.SimpleNamespace(edit_message=mock.AsyncMock())
+        )
+        await next_button.callback(follow)
+        self.assertEqual(
+            follow.response.edit_message.await_args.kwargs["embed"].footer,
+            "Page 3/4",
+        )
+
     async def test_unrelated_list_not_found_is_still_reported(self):
         subject, ctx, message = self._subject_and_ctx()
         subject.support = types.SimpleNamespace(
@@ -1162,6 +1284,8 @@ class CustomCommandsListTests(unittest.IsolatedAsyncioTestCase):
             "Could not update the command list. The error was reported",
             ephemeral=True,
         )
+
+    async def test_list_controls_are_invoker_owned_and_disappear_on_timeout(self):
         subject, ctx, message = self._subject_and_ctx()
         subject._report_view_timeout_error = mock.AsyncMock()
         await cog.CustomCommands.cc_list.callback(subject, ctx)

@@ -51,24 +51,34 @@ def _is_unknown_interaction(error: BaseException) -> bool:
     )
 
 
+def _newer_turn_pending(view, turn: int) -> bool:
+    return any(pending > turn for pending in view._inflight_turns)
+
+
 async def _turn_pager_page(view, interaction: discord.Interaction, *, page: int) -> None:
-    previous = view._page
+    view._next_turn += 1
+    turn = view._next_turn
+    view._inflight_turns.add(turn)
     view._page = page
-    view._page_turn = getattr(view, "_page_turn", 0) + 1
-    turn = view._page_turn
     view._update_navigation_buttons()
     try:
         await interaction.response.edit_message(
-            embed=view._pages[view._page],
+            embed=view._pages[page],
             view=view,
         )
     except Exception as error:
-        # A newer click owns the page. This failed click must not rewind it.
-        if view._page_turn == turn:
-            view._page = previous
+        view._inflight_turns.discard(turn)
+        if not _newer_turn_pending(view, turn):
+            view._page = view._accepted_page
             view._update_navigation_buttons()
         if not _is_unknown_interaction(error):
             raise
+        return
+    view._inflight_turns.discard(turn)
+    view._accepted_page = page
+    if not _newer_turn_pending(view, turn):
+        view._page = page
+        view._update_navigation_buttons()
 
 
 class CommandListView(discord.ui.View):
@@ -84,6 +94,9 @@ class CommandListView(discord.ui.View):
         self._requester_id = requester_id
         self._pages = pages
         self._page = 0
+        self._accepted_page = 0
+        self._inflight_turns: set[int] = set()
+        self._next_turn = 0
         self.message: discord.Message | None = None
         self._previous_button = discord.ui.Button(
             label="Previous",
@@ -191,6 +204,9 @@ class RawResponseView(discord.ui.View):
         self._requester_id = requester_id
         self._pages = pages
         self._page = 0
+        self._accepted_page = 0
+        self._inflight_turns: set[int] = set()
+        self._next_turn = 0
         self.message: discord.Message | None = None
         self._previous_button = discord.ui.Button(
             label="Previous",
