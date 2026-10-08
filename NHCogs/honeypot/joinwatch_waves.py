@@ -19,6 +19,7 @@ from .joinwatch_groups import (
     historical_matches,
     utc_timestamp,
 )
+from .settings import DEFAULTS
 
 WAVE_BATCH_SIZE = 5
 WAVE_INTERVAL_SECONDS = 10
@@ -46,8 +47,11 @@ class JoinwatchWaves:
         return self._locks.setdefault(guild.id, asyncio.Lock())
 
     async def _configuration(self, guild):
-        settings = await self.cog.config.guild(guild).all()
-        return {name: settings.get(name) for name in CRITICAL_CONFIGURATION}
+        group = self.cog.config.guild(guild)
+        return {
+            name: await group.get_raw(name, default=DEFAULTS[name])
+            for name in CRITICAL_CONFIGURATION
+        }
 
     async def _records(self, guild):
         return await asyncio.to_thread(self.cog._case_store.get_joinwatch_waves, guild.id)

@@ -252,7 +252,7 @@ class JoinWatchLiveStateTests(unittest.IsolatedAsyncioTestCase):
                 "pending_role": {"20": entry},
                 "pending_assignment": {},
             }))
-            cog._case_store.delete_user(20)
+            cog._case_store.delete(100, 20, "pending_role")
             self.assertIsNone(cog._case_store.get(100, 20, "pending_role"))
             self.assertEqual(cog._case_store.live_backup(100)["pending_role"]["20"], entry)
             cog._case_store.delete_guild(100)
@@ -402,17 +402,9 @@ def _lock_held(cog, guild_id, member_id) -> bool:
 
 
 def _open_delete_window(store, cog, opened, release, held_box):
-    real_delete_user = store.delete_user
     real_delete = store.delete
     armed = {"done": False}
     loop = asyncio.get_running_loop()
-
-    def delete_user(user_id):
-        real_delete_user(user_id)
-        held_box["held"] = _lock_held(cog, 100, int(user_id))
-        loop.call_soon_threadsafe(opened.set)
-        if not held_box["held"]:
-            release.wait()
 
     def delete(guild_id, user_id, kind, expected_incident_id=None, compare=False):
         result = real_delete(guild_id, user_id, kind, expected_incident_id, compare)
@@ -424,7 +416,6 @@ def _open_delete_window(store, cog, opened, release, held_box):
                 release.wait()
         return result
 
-    store.delete_user = delete_user
     store.delete = delete
 
 
@@ -961,22 +952,6 @@ class JoinWatchMigrationRaceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(untouched["completion_reason"])
             self.assertEqual(untouched["stage"], 1)
             self.assertEqual(untouched["incident_id"], "other")
-
-    async def test_delete_user_does_not_rewrite_other_live_rows(self):
-        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
-            cog = _cog(honeypot, directory, _maps())
-            store = cog._case_store
-            kept = _entry(enrollment_moderator=30, completion_moderator=30, completion_reason="noted")
-            store.upsert(100, 20, "pending_role", kept)
-            store.upsert(100, 30, "pending_role", _entry(incident_id="gone"))
-            store.delete_user(30)
-            self.assertIsNone(store.get(100, 30, "pending_role"))
-            survivor = store.get(100, 20, "pending_role")
-            self.assertEqual(survivor["enrollment_moderator"], 30)
-            self.assertEqual(survivor["completion_moderator"], 30)
-            self.assertEqual(survivor["completion_reason"], "noted")
-            self.assertEqual(survivor["stage"], 1)
-
 
 class JoinWatchCutoverAlertTests(unittest.IsolatedAsyncioTestCase):
     async def test_cutover_alert_does_not_block_live_writes(self):

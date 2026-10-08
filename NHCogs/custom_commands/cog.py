@@ -41,6 +41,44 @@ FUZZY_MATCH_THRESHOLD = 60
 INTERACTIVE_VIEW_TIMEOUT_SECONDS = 30
 COMMAND_NOT_FOUND_MESSAGE = "That custom command doesn't exist"
 DISCORD_SNOWFLAKE_MIN_DIGITS = 15
+UNKNOWN_INTERACTION_CODE = 10062
+
+
+def _is_unknown_interaction(error: BaseException) -> bool:
+    return (
+        isinstance(error, discord.NotFound)
+        and getattr(error, "code", None) == UNKNOWN_INTERACTION_CODE
+    )
+
+
+def _newer_turn_pending(view, turn: int) -> bool:
+    return any(pending > turn for pending in view._inflight_turns)
+
+
+async def _turn_pager_page(view, interaction: discord.Interaction, *, page: int) -> None:
+    view._next_turn += 1
+    turn = view._next_turn
+    view._inflight_turns.add(turn)
+    view._page = page
+    view._update_navigation_buttons()
+    try:
+        await interaction.response.edit_message(
+            embed=view._pages[page],
+            view=view,
+        )
+    except Exception as error:
+        view._inflight_turns.discard(turn)
+        if not _newer_turn_pending(view, turn):
+            view._page = view._accepted_page
+            view._update_navigation_buttons()
+        if not _is_unknown_interaction(error):
+            raise
+        return
+    view._inflight_turns.discard(turn)
+    view._accepted_page = page
+    if not _newer_turn_pending(view, turn):
+        view._page = page
+        view._update_navigation_buttons()
 
 
 class CommandListView(discord.ui.View):
@@ -56,6 +94,9 @@ class CommandListView(discord.ui.View):
         self._requester_id = requester_id
         self._pages = pages
         self._page = 0
+        self._accepted_page = 0
+        self._inflight_turns: set[int] = set()
+        self._next_turn = 0
         self.message: discord.Message | None = None
         self._previous_button = discord.ui.Button(
             label="Previous",
@@ -87,26 +128,21 @@ class CommandListView(discord.ui.View):
         return False
 
     async def _previous(self, interaction: discord.Interaction) -> None:
-        self._page -= 1
-        self._update_navigation_buttons()
-        await interaction.response.edit_message(
-            embed=self._pages[self._page],
-            view=self,
-        )
+        await _turn_pager_page(self, interaction, page=self._page - 1)
 
     async def _close(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
+        try:
+            await interaction.response.defer()
+        except discord.NotFound as error:
+            if _is_unknown_interaction(error):
+                return
+            raise
         if self.message is not None:
             await self.message.delete()
         self.stop()
 
     async def _next(self, interaction: discord.Interaction) -> None:
-        self._page += 1
-        self._update_navigation_buttons()
-        await interaction.response.edit_message(
-            embed=self._pages[self._page],
-            view=self,
-        )
+        await _turn_pager_page(self, interaction, page=self._page + 1)
 
     def _update_navigation_buttons(self) -> None:
         self._previous_button.disabled = self._page == 0
@@ -129,6 +165,8 @@ class CommandListView(discord.ui.View):
         error: Exception,
         _item: discord.ui.Item[CommandListView],
     ) -> None:
+        if _is_unknown_interaction(error):
+            return
         if interaction.guild is not None:
             await self._cog.support.report_operational_error(
                 guild_id=interaction.guild.id,
@@ -166,6 +204,9 @@ class RawResponseView(discord.ui.View):
         self._requester_id = requester_id
         self._pages = pages
         self._page = 0
+        self._accepted_page = 0
+        self._inflight_turns: set[int] = set()
+        self._next_turn = 0
         self.message: discord.Message | None = None
         self._previous_button = discord.ui.Button(
             label="Previous",
@@ -191,20 +232,10 @@ class RawResponseView(discord.ui.View):
         return False
 
     async def _previous(self, interaction: discord.Interaction) -> None:
-        self._page -= 1
-        self._update_navigation_buttons()
-        await interaction.response.edit_message(
-            embed=self._pages[self._page],
-            view=self,
-        )
+        await _turn_pager_page(self, interaction, page=self._page - 1)
 
     async def _next(self, interaction: discord.Interaction) -> None:
-        self._page += 1
-        self._update_navigation_buttons()
-        await interaction.response.edit_message(
-            embed=self._pages[self._page],
-            view=self,
-        )
+        await _turn_pager_page(self, interaction, page=self._page + 1)
 
     def _update_navigation_buttons(self) -> None:
         self._previous_button.disabled = self._page == 0
@@ -229,6 +260,8 @@ class RawResponseView(discord.ui.View):
         error: Exception,
         _item: discord.ui.Item[RawResponseView],
     ) -> None:
+        if _is_unknown_interaction(error):
+            return
         if interaction.guild is not None:
             await self._cog.support.report_operational_error(
                 guild_id=interaction.guild.id,

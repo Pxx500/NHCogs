@@ -328,6 +328,49 @@ cog, migration_controller = load_cog_module()
 AccessRules = sys.modules[f"{cog.__package__}.catalog"].AccessRules
 
 
+def _not_found(code):
+    error = cog.discord.NotFound(f"error code: {code}")
+    error.code = code
+    return error
+
+
+async def _two_expired_next_clicks(next_button):
+    release = asyncio.Event()
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+
+    async def first_edit(**_kwargs):
+        first_started.set()
+        await second_started.wait()
+        await release.wait()
+        raise _not_found(10062)
+
+    async def second_edit(**_kwargs):
+        second_started.set()
+        await release.wait()
+        raise _not_found(10062)
+
+    first = asyncio.create_task(
+        next_button.callback(
+            types.SimpleNamespace(
+                response=types.SimpleNamespace(edit_message=first_edit)
+            )
+        )
+    )
+    await first_started.wait()
+    second = asyncio.create_task(
+        next_button.callback(
+            types.SimpleNamespace(
+                response=types.SimpleNamespace(edit_message=second_edit)
+            )
+        )
+    )
+    await second_started.wait()
+    release.set()
+    await first
+    await second
+
+
 class CommandUsageChartTests(unittest.IsolatedAsyncioTestCase):
     async def test_private_thread_access_and_output_privacy(self):
         for public_output, manager, member, allowed in (
@@ -1024,6 +1067,224 @@ class CustomCommandsListTests(unittest.IsolatedAsyncioTestCase):
         interaction.response.defer.assert_awaited_once()
         message.delete.assert_awaited_once()
 
+    async def test_expired_list_click_keeps_the_current_page_and_stays_quiet(self):
+        subject, ctx, message = self._subject_and_ctx()
+        subject.support = types.SimpleNamespace(
+            report_operational_error=mock.AsyncMock()
+        )
+        await cog.CustomCommands.cc_list.callback(subject, ctx)
+        view = ctx.send.await_args.kwargs["view"]
+        previous, close, next_button = view.children
+        expired = _not_found(10062)
+        failed = types.SimpleNamespace(
+            is_done=lambda: False,
+            edit_message=mock.AsyncMock(side_effect=expired),
+            defer=mock.AsyncMock(side_effect=expired),
+            send_message=mock.AsyncMock(),
+        )
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=100),
+            channel=types.SimpleNamespace(id=10),
+            response=failed,
+            followup=types.SimpleNamespace(send=mock.AsyncMock()),
+        )
+
+        await next_button.callback(interaction)
+        await close.callback(interaction)
+        await view.on_error(interaction, expired, next_button)
+
+        self.assertTrue(previous.disabled)
+        self.assertFalse(next_button.disabled)
+        message.delete.assert_not_awaited()
+        subject.support.report_operational_error.assert_not_awaited()
+        failed.send_message.assert_not_awaited()
+        interaction.followup.send.assert_not_awaited()
+
+        failed.edit_message = mock.AsyncMock()
+        await next_button.callback(interaction)
+        self.assertEqual(
+            failed.edit_message.await_args.kwargs["embed"].footer,
+            "Page 2/2",
+        )
+        self.assertFalse(previous.disabled)
+        self.assertTrue(next_button.disabled)
+
+        failed.edit_message = mock.AsyncMock(side_effect=expired)
+        await previous.callback(interaction)
+        self.assertFalse(previous.disabled)
+        self.assertTrue(next_button.disabled)
+
+        failed.edit_message = mock.AsyncMock()
+        await previous.callback(interaction)
+        self.assertEqual(
+            failed.edit_message.await_args.kwargs["embed"].footer,
+            "Page 1/2",
+        )
+
+    async def test_older_expired_list_click_does_not_rewind_a_newer_page(self):
+        subject, ctx, _message = self._subject_and_ctx(command_count=31)
+        await cog.CustomCommands.cc_list.callback(subject, ctx)
+        view = ctx.send.await_args.kwargs["view"]
+        next_button = view.children[2]
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def stale_edit(**_kwargs):
+            started.set()
+            await release.wait()
+            raise _not_found(10062)
+
+        stale = types.SimpleNamespace(
+            response=types.SimpleNamespace(edit_message=stale_edit)
+        )
+        fresh = types.SimpleNamespace(
+            response=types.SimpleNamespace(edit_message=mock.AsyncMock())
+        )
+        older = asyncio.create_task(next_button.callback(stale))
+        await started.wait()
+        await next_button.callback(fresh)
+        release.set()
+        await older
+
+        self.assertEqual(
+            fresh.response.edit_message.await_args.kwargs["embed"].footer,
+            "Page 3/3",
+        )
+        self.assertFalse(view.children[0].disabled)
+        self.assertTrue(next_button.disabled)
+
+    async def test_two_overlapping_expired_next_clicks_stay_on_the_original_page(self):
+        subject, ctx, _message = self._subject_and_ctx(command_count=31)
+        await cog.CustomCommands.cc_list.callback(subject, ctx)
+        view = ctx.send.await_args.kwargs["view"]
+
+        await _two_expired_next_clicks(view.children[2])
+
+        self.assertTrue(view.children[0].disabled)
+        self.assertFalse(view.children[2].disabled)
+        follow = types.SimpleNamespace(
+            response=types.SimpleNamespace(edit_message=mock.AsyncMock())
+        )
+        await view.children[2].callback(follow)
+        self.assertEqual(
+            follow.response.edit_message.await_args.kwargs["embed"].footer,
+            "Page 2/3",
+        )
+
+    async def test_two_overlapping_expired_next_clicks_stay_on_the_accepted_page(self):
+        subject, ctx, _message = self._subject_and_ctx(command_count=60)
+        await cog.CustomCommands.cc_list.callback(subject, ctx)
+        view = ctx.send.await_args.kwargs["view"]
+        accepted = types.SimpleNamespace(
+            response=types.SimpleNamespace(edit_message=mock.AsyncMock())
+        )
+        await view.children[2].callback(accepted)
+        self.assertEqual(
+            accepted.response.edit_message.await_args.kwargs["embed"].footer,
+            "Page 2/4",
+        )
+
+        await _two_expired_next_clicks(view.children[2])
+
+        follow = types.SimpleNamespace(
+            response=types.SimpleNamespace(edit_message=mock.AsyncMock())
+        )
+        await view.children[2].callback(follow)
+        self.assertEqual(
+            follow.response.edit_message.await_args.kwargs["embed"].footer,
+            "Page 3/4",
+        )
+
+    async def test_older_success_after_a_newer_expired_click_stays_visible(self):
+        subject, ctx, _message = self._subject_and_ctx(command_count=60)
+        await cog.CustomCommands.cc_list.callback(subject, ctx)
+        view = ctx.send.await_args.kwargs["view"]
+        next_button = view.children[2]
+        older_started = asyncio.Event()
+        release_older = asyncio.Event()
+
+        async def older_edit(**_kwargs):
+            older_started.set()
+            await release_older.wait()
+
+        async def newer_edit(**_kwargs):
+            raise _not_found(10062)
+
+        older = asyncio.create_task(
+            next_button.callback(
+                types.SimpleNamespace(
+                    response=types.SimpleNamespace(edit_message=older_edit)
+                )
+            )
+        )
+        await older_started.wait()
+        newer = asyncio.create_task(
+            next_button.callback(
+                types.SimpleNamespace(
+                    response=types.SimpleNamespace(edit_message=newer_edit)
+                )
+            )
+        )
+        await newer
+        release_older.set()
+        await older
+
+        follow = types.SimpleNamespace(
+            response=types.SimpleNamespace(edit_message=mock.AsyncMock())
+        )
+        await next_button.callback(follow)
+        self.assertEqual(
+            follow.response.edit_message.await_args.kwargs["embed"].footer,
+            "Page 3/4",
+        )
+
+    async def test_unrelated_list_not_found_is_still_reported(self):
+        subject, ctx, message = self._subject_and_ctx()
+        subject.support = types.SimpleNamespace(
+            report_operational_error=mock.AsyncMock()
+        )
+        message.id = 300
+        await cog.CustomCommands.cc_list.callback(subject, ctx)
+        view = ctx.send.await_args.kwargs["view"]
+        missing = _not_found(10008)
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=100),
+            channel=types.SimpleNamespace(id=10),
+            response=types.SimpleNamespace(
+                is_done=lambda: False,
+                edit_message=mock.AsyncMock(side_effect=missing),
+                defer=mock.AsyncMock(side_effect=missing),
+                send_message=mock.AsyncMock(),
+            ),
+            followup=types.SimpleNamespace(send=mock.AsyncMock()),
+        )
+
+        with self.assertRaises(cog.discord.NotFound) as caught:
+            await view.children[2].callback(interaction)
+        self.assertIs(caught.exception, missing)
+        self.assertTrue(view.children[0].disabled)
+        self.assertFalse(view.children[2].disabled)
+
+        with self.assertRaises(cog.discord.NotFound) as close_caught:
+            await view.children[1].callback(interaction)
+        self.assertIs(close_caught.exception, missing)
+        message.delete.assert_not_awaited()
+
+        await view.on_error(interaction, missing, view.children[2])
+
+        subject.support.report_operational_error.assert_awaited_once_with(
+            guild_id=100,
+            source="CustomCommands",
+            action="browse custom command list",
+            error=missing,
+            channel_id=10,
+            message_id=300,
+        )
+        interaction.response.send_message.assert_awaited_once_with(
+            "Could not update the command list. The error was reported",
+            ephemeral=True,
+        )
+
     async def test_list_controls_are_invoker_owned_and_disappear_on_timeout(self):
         subject, ctx, message = self._subject_and_ctx()
         subject._report_view_timeout_error = mock.AsyncMock()
@@ -1276,6 +1537,48 @@ class CustomCommandsRawTests(unittest.IsolatedAsyncioTestCase):
         interaction.response.send_message.assert_awaited_once_with(
             "Could not change the page. The error was reported",
             ephemeral=True,
+        )
+
+    async def test_expired_raw_page_click_keeps_the_page_and_stays_quiet(self):
+        subject = object.__new__(cog.CustomCommands)
+        subject.support = types.SimpleNamespace(
+            report_operational_error=mock.AsyncMock()
+        )
+        view = cog.RawResponseView(
+            subject,
+            requester_id=200,
+            pages=(
+                cog.discord.Embed(description="first"),
+                cog.discord.Embed(description="second"),
+            ),
+        )
+        previous, next_button = view.children
+        expired = _not_found(10062)
+        interaction = types.SimpleNamespace(
+            guild=types.SimpleNamespace(id=100),
+            channel=types.SimpleNamespace(id=200),
+            response=types.SimpleNamespace(
+                is_done=lambda: False,
+                edit_message=mock.AsyncMock(side_effect=expired),
+                send_message=mock.AsyncMock(),
+            ),
+            followup=types.SimpleNamespace(send=mock.AsyncMock()),
+        )
+
+        await next_button.callback(interaction)
+        await view.on_error(interaction, expired, next_button)
+
+        self.assertTrue(previous.disabled)
+        self.assertFalse(next_button.disabled)
+        subject.support.report_operational_error.assert_not_awaited()
+        interaction.response.send_message.assert_not_awaited()
+        interaction.followup.send.assert_not_awaited()
+
+        interaction.response.edit_message = mock.AsyncMock()
+        await next_button.callback(interaction)
+        self.assertEqual(
+            interaction.response.edit_message.await_args.kwargs["embed"].description,
+            "second",
         )
 
     async def test_raw_uses_one_exact_transcript_when_a_response_has_a_code_fence(self):

@@ -70,6 +70,7 @@ from .settings import (
     WHITELIST_MODE_OPTIONS,
     GuildSettings,
     WhitelistModeOption,
+    read_guild_settings,
 )
 
 _ = Translator("Honeypot", __file__)
@@ -1712,8 +1713,10 @@ async def on_message(
             return
         batch_key = (message.guild.id, message.id)
         try:
-            raw_config = await cog.config.guild(message.guild).all()
-            guild_settings = GuildSettings.from_mapping(raw_config)
+            group = cog.config.guild(message.guild)
+            if await group.get_raw("enabled", default=False) is False:
+                return
+            guild_settings = await read_guild_settings(group)
             if not guild_settings.enabled:
                 return
             if await cog._is_protected_member(message.author, message.guild):

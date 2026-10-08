@@ -14,6 +14,7 @@ from tests.harness import (
     DetectionPipelineTestCase,
     _Bot,
     _isolated_honeypot_modules,
+    _mapping_get_raw,
     _operational_support,
     active_case,
 )
@@ -52,6 +53,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 stats_context.__aexit__ = mock.AsyncMock(return_value=False)
                 guild_config = SimpleNamespace(
                     all=mock.AsyncMock(return_value=config),
+                    get_raw=_mapping_get_raw(config),
                     stats=mock.Mock(return_value=stats_context),
                 )
                 cog.config = SimpleNamespace(
@@ -97,6 +99,7 @@ class DetectionActionTests(DetectionPipelineTestCase):
                 stats_context.__aexit__ = mock.AsyncMock(return_value=False)
                 guild_config = SimpleNamespace(
                     all=mock.AsyncMock(return_value=config),
+                    get_raw=_mapping_get_raw(config),
                     stats=mock.Mock(return_value=stats_context),
                 )
                 cog.config = SimpleNamespace(

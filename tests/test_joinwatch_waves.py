@@ -138,7 +138,16 @@ def _fixture(groups, count=7):
     async def all_config():
         return configuration
 
+    async def get_raw(*keys, default=None):
+        raw = configuration
+        for key in keys:
+            if not isinstance(raw, dict) or key not in raw:
+                return default
+            raw = raw[key]
+        return raw
+
     cfg.all = all_config
+    cfg.get_raw = get_raw
     guild = SimpleNamespace(id=123)
     members = {uid: SimpleNamespace(id=uid, guild=guild, bot=False, roles=[]) for uid in ids}
     guild.get_member = members.get
@@ -162,7 +171,7 @@ def _real_lifecycle_fixture(honeypot, groups, directory, *, count=3):
                 "joinwatch_verified_members": cfg.joinwatch_verified_members.value}
 
     async def get_raw(*keys, default=None):
-        raw = await all_config()
+        raw = await cfg.all()
         for key in keys:
             if not isinstance(raw, dict) or key not in raw:
                 return copy.deepcopy(default)

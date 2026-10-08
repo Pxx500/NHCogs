@@ -16,7 +16,7 @@ from NHCogs.account_snapshot import account_snapshot
 
 from . import joinwatch_publication, joinwatch_state
 from .effects import EffectStatus, ModerationOrigin
-from .settings import GuildSettings, JoinwatchAutoRoleActionOption
+from .settings import GuildSettings, JoinwatchAutoRoleActionOption, read_guild_settings
 
 _ = Translator("Honeypot", __file__)
 log = logging.getLogger("red.Honeypot")
@@ -913,8 +913,9 @@ async def _on_member_update_locked(cog, before: discord.Member, after: discord.M
         return
     if after.bot:
         return
-    raw_config = await cog.config.guild(after.guild).all()
-    guild_settings = GuildSettings.from_mapping(raw_config)
+    if {role.id for role in before.roles} == {role.id for role in after.roles}:
+        return
+    group = cog.config.guild(after.guild)
     pending_role = await joinwatch_state.read_row(cog, after.guild, after.id, "pending_role")
     if pending_role is not None:
         try:
@@ -934,6 +935,9 @@ async def _on_member_update_locked(cog, before: discord.Member, after: discord.M
                     _("Role manually removed"),
                 )
                 await cog._increment_stat(after.guild, "joinwatch_auto_roles_cleared")
+    if await group.get_raw("baitrole_enabled", default=False) is False:
+        return
+    guild_settings = await read_guild_settings(group)
     if not guild_settings.baitrole_enabled or guild_settings.baitrole_id is None:
         return
     bait_role = after.guild.get_role(guild_settings.baitrole_id)

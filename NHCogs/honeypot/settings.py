@@ -547,3 +547,26 @@ class GuildSettings:
                 raw, "baitrole_action", BaitActionOption, BaitActionOption.BAN
             ),
         )
+
+
+# Member maps grow with the guild. Hot paths must not ask the config driver for them.
+_JOINWATCH_MEMBER_MAPS = frozenset(
+    {
+        "joinwatch_pending_role_assignments",
+        "joinwatch_pending_roles",
+        "joinwatch_verified_members",
+    }
+)
+# Red merges a dict default in place. A private sentinel keeps DEFAULTS untouched.
+_UNSET = object()
+
+
+async def read_guild_settings(group) -> GuildSettings:
+    """Settings for a hot path, without the JoinWatch member maps."""
+    raw = {}
+    for key, default in DEFAULTS.items():
+        if key in _JOINWATCH_MEMBER_MAPS:
+            continue
+        value = await group.get_raw(key, default=_UNSET)
+        raw[key] = default if value is _UNSET else value
+    return GuildSettings.from_mapping(raw)

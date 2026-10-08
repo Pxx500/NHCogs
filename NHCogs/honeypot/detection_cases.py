@@ -1018,10 +1018,6 @@ class DetectionCaseStore:
                    )"""
             )
             connection.execute(
-                """CREATE INDEX IF NOT EXISTS joinwatch_live_state_due
-                   ON joinwatch_live_state (guild_id, kind, due_at)"""
-            )
-            connection.execute(
                 """CREATE TABLE IF NOT EXISTS joinwatch_cutover (
                        guild_id INTEGER PRIMARY KEY,
                        source TEXT NOT NULL
@@ -1722,14 +1718,6 @@ class DetectionCaseStore:
                    ORDER BY guild_id"""
             ).fetchall()
         return [int(row["guild_id"]) for row in rows]
-
-    def delete_user(self, user_id: int) -> None:
-        """Delete one member's live rows. See Honeypot stored data."""
-        with closing(self._connect()) as connection, connection:
-            connection.execute(
-                "DELETE FROM joinwatch_live_state WHERE user_id = ?",
-                (int(user_id),),
-            )
 
     def delete_guild(self, guild_id: int) -> None:
         """Delete one guild's live rows, marker, and backup. See Honeypot stored data."""

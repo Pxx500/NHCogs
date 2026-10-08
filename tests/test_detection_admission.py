@@ -15,6 +15,7 @@ from tests.harness import (
     _Bot,
     _Config,
     _isolated_honeypot_modules,
+    _mapping_get_raw,
     _operational_support,
     active_case,
 )
@@ -137,11 +138,11 @@ class DetectionAdmissionTests(DetectionPipelineTestCase):
                 bot.is_admin = mock.AsyncMock(return_value=False)
                 cog = honeypot.Honeypot(bot, _operational_support())
                 cog._observe_message = mock.AsyncMock()
+                config = {"enabled": "true"}
                 cog.config = SimpleNamespace(
                     guild=lambda guild: SimpleNamespace(
-                        all=mock.AsyncMock(
-                            return_value={"enabled": "true"}
-                        )
+                        all=mock.AsyncMock(return_value=config),
+                        get_raw=_mapping_get_raw(config),
                     )
                 )
                 message = self._message(honeypot, attachment_count=0)
