@@ -364,6 +364,46 @@ async def delete_sqlite_member(cog, guild_id: int, user_id: int) -> None:
             await asyncio.to_thread(store.delete, int(guild_id), int(user_id), kind)
 
 
+def _clear_moderator_fields(payload: dict, user_id: int) -> bool:
+    changed = False
+    for key in ("enrollment_moderator", "completion_moderator"):
+        if payload.get(key) in (user_id, str(user_id)):
+            payload[key] = None
+            payload["completion_reason"] = None
+            changed = True
+    return changed
+
+
+async def scrub_sqlite_moderators(cog, guild_id: int, user_id: int) -> None:
+    """Clear moderator ids on pending rows from a fresh read. See Honeypot stored data."""
+    store = getattr(cog, "_case_store", None)
+    if store is None or not hasattr(store, "list_open"):
+        return
+    pending = await asyncio.to_thread(store.list_open, int(guild_id))
+    deleted = int(user_id)
+    member_ids = []
+    seen = set()
+    for entries in pending.values():
+        for member_id in entries:
+            try:
+                parsed = int(member_id)
+            except (TypeError, ValueError):
+                continue
+            if parsed == deleted or parsed in seen:
+                continue
+            seen.add(parsed)
+            member_ids.append(parsed)
+    for member_id in member_ids:
+        async with member_lock(cog, int(guild_id), member_id), _source_lock(cog):
+            for kind in ("pending_role", "pending_assignment"):
+                current = await asyncio.to_thread(store.get, int(guild_id), member_id, kind)
+                if not isinstance(current, dict) or not _clear_moderator_fields(current, deleted):
+                    continue
+                await asyncio.to_thread(
+                    partial(store.upsert, int(guild_id), member_id, kind, current)
+                )
+
+
 @dataclass(frozen=True, slots=True)
 class JoinwatchSelectedAction:
     action: typing.Literal["discard_assignment", "apply_role", "discard_role", "expire_role"]

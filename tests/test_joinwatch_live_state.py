@@ -784,6 +784,7 @@ class JoinWatchMigrationRaceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(joined)
             self.assertEqual(joined["incident_id"], "joined")
             self.assertEqual(cog.config.guilds[100]["joinwatch_pending_roles"], {})
+
     async def test_sqlite_cutover_clear_keeps_an_in_flight_export(self):
         with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
             state = honeypot.joinwatch_state
@@ -801,6 +802,7 @@ class JoinWatchMigrationRaceTests(unittest.IsolatedAsyncioTestCase):
             saved = await state.read_row(cog, guild, 20, "pending_role")
             self.assertIsNotNone(saved)
             self.assertEqual(saved["incident_id"], "incident")
+
     async def test_second_export_does_not_restore_a_deleted_member(self):
         with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
             state = honeypot.joinwatch_state
@@ -822,6 +824,7 @@ class JoinWatchMigrationRaceTests(unittest.IsolatedAsyncioTestCase):
             _removed, copied = await asyncio.gather(remove(), export_again())
             self.assertFalse(copied)
             self.assertIsNone(await state.read_row(cog, guild, 20, "pending_role"))
+
     async def test_export_after_restore_leaves_config_unchanged(self):
         with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
             state = honeypot.joinwatch_state
@@ -851,6 +854,7 @@ class JoinWatchMigrationRaceTests(unittest.IsolatedAsyncioTestCase):
             pending["stage"] = 3
             self.assertFalse(await state.restore_live_backup(cog, guild))
             self.assertEqual(cog.config.guilds[100]["joinwatch_pending_roles"]["20"]["stage"], 3)
+
     async def test_export_command_says_when_config_is_already_live(self):
         with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
             state = honeypot.joinwatch_state
@@ -880,6 +884,7 @@ class JoinWatchMigrationRaceTests(unittest.IsolatedAsyncioTestCase):
                 ],
             )
             self.assertIsNone(await state.read_row(cog, guild, 20, "pending_role"))
+
     async def test_guild_removal_does_not_restore_an_export(self):
         with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
             state = honeypot.joinwatch_state
@@ -903,3 +908,72 @@ class JoinWatchMigrationRaceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cog.config.guilds[100]["joinwatch_pending_role_assignments"], {})
             self.assertIsNone(cog._case_store.get(100, 20, "pending_role"))
             self.assertIsNone(cog._case_store.cutover_source(100))
+
+    async def test_unloaded_guilds_scrub_moderators_from_a_fresh_read(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            state = honeypot.joinwatch_state
+            kept = _entry(
+                incident_id="kept",
+                enrollment_moderator=30,
+                completion_moderator=30,
+                completion_reason="noted",
+            )
+            other = _entry(
+                incident_id="other",
+                enrollment_moderator=30,
+                completion_moderator=30,
+                completion_reason="noted",
+            )
+            cog = _cog(honeypot, directory, _maps())
+            store = cog._case_store
+            store.upsert(200, 30, "pending_role", _entry(incident_id="gone"))
+            store.upsert(200, 20, "pending_role", kept)
+            store.upsert(300, 40, "pending_role", other)
+            store.upsert(400, 30, "verified", {"incident_id": "done"})
+            with closing(sqlite3.connect(store.database_path)) as connection, connection:
+                connection.executemany(
+                    "INSERT INTO joinwatch_cutover (guild_id, source) VALUES (?, 'sqlite')",
+                    ((200,), (300,)),
+                )
+            cog.bot.guilds = [SimpleNamespace(id=100)]
+            started = asyncio.Event()
+            advanced = threading.Event()
+            _arm_unloaded_listing(store, asyncio.get_running_loop(), started, advanced)
+            module = importlib.import_module(f"{honeypot.__package__}.joinwatch_verification")
+            owner = module.JoinwatchVerification(cog)
+            try:
+                await asyncio.gather(
+                    owner.delete_user_data(30),
+                    _advance_unloaded_stage(state, cog, started, advanced),
+                )
+            finally:
+                await owner.close()
+            self.assertIsNone(store.get(200, 30, "pending_role"))
+            self.assertIsNone(store.get(400, 30, "verified"))
+            survivor = store.get(200, 20, "pending_role")
+            self.assertEqual(survivor["stage"], 2)
+            self.assertIsNone(survivor["enrollment_moderator"])
+            self.assertIsNone(survivor["completion_moderator"])
+            self.assertIsNone(survivor["completion_reason"])
+            self.assertEqual(survivor["incident_id"], "kept")
+            untouched = store.get(300, 40, "pending_role")
+            self.assertIsNone(untouched["enrollment_moderator"])
+            self.assertIsNone(untouched["completion_moderator"])
+            self.assertIsNone(untouched["completion_reason"])
+            self.assertEqual(untouched["stage"], 1)
+            self.assertEqual(untouched["incident_id"], "other")
+
+    async def test_delete_user_does_not_rewrite_other_live_rows(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            cog = _cog(honeypot, directory, _maps())
+            store = cog._case_store
+            kept = _entry(enrollment_moderator=30, completion_moderator=30, completion_reason="noted")
+            store.upsert(100, 20, "pending_role", kept)
+            store.upsert(100, 30, "pending_role", _entry(incident_id="gone"))
+            store.delete_user(30)
+            self.assertIsNone(store.get(100, 30, "pending_role"))
+            survivor = store.get(100, 20, "pending_role")
+            self.assertEqual(survivor["enrollment_moderator"], 30)
+            self.assertEqual(survivor["completion_moderator"], 30)
+            self.assertEqual(survivor["completion_reason"], "noted")
+            self.assertEqual(survivor["stage"], 1)

@@ -565,16 +565,6 @@ def _live_state_matches(
     return True
 
 
-def _scrub_live_moderators(payload: dict, user_id: int) -> bool:
-    changed = False
-    for key in ("enrollment_moderator", "completion_moderator"):
-        if payload.get(key) in (user_id, str(user_id)):
-            payload[key] = None
-            payload["completion_reason"] = None
-            changed = True
-    return changed
-
-
 def _json_value(value: object) -> object:
     if isinstance(value, Mapping):
         return {key: _json_value(item) for key, item in value.items()}
@@ -1746,37 +1736,23 @@ class DetectionCaseStore:
             ).fetchall()
         return [int(row["guild_id"]) for row in rows]
 
-    def delete_user(self, user_id: int) -> None:
-        """Delete one member's live rows and scrub moderator ids. See Honeypot stored data."""
+    def pending_guild_ids(self) -> list[int]:
+        """List guilds that still have pending live rows. See Honeypot stored data."""
         with closing(self._connect()) as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                connection.execute(
-                    "DELETE FROM joinwatch_live_state WHERE user_id = ?",
-                    (int(user_id),),
-                )
-                rows = connection.execute(
-                    """SELECT guild_id, user_id, kind, payload FROM joinwatch_live_state
-                       WHERE kind IN ('pending_role', 'pending_assignment')"""
-                ).fetchall()
-                for row in rows:
-                    payload = json.loads(row["payload"])
-                    if not _scrub_live_moderators(payload, int(user_id)):
-                        continue
-                    incident_id, role_id, due_at, encoded = _live_columns(row["kind"], payload)
-                    connection.execute(
-                        """UPDATE joinwatch_live_state
-                           SET incident_id = ?, role_id = ?, due_at = ?, payload = ?
-                           WHERE guild_id = ? AND user_id = ? AND kind = ?""",
-                        (
-                            incident_id, role_id, due_at, encoded,
-                            row["guild_id"], row["user_id"], row["kind"],
-                        ),
-                    )
-                connection.commit()
-            except Exception:
-                connection.rollback()
-                raise
+            rows = connection.execute(
+                """SELECT DISTINCT guild_id FROM joinwatch_live_state
+                   WHERE kind IN ('pending_role', 'pending_assignment')
+                   ORDER BY guild_id"""
+            ).fetchall()
+        return [int(row["guild_id"]) for row in rows]
+
+    def delete_user(self, user_id: int) -> None:
+        """Delete one member's live rows. See Honeypot stored data."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                "DELETE FROM joinwatch_live_state WHERE user_id = ?",
+                (int(user_id),),
+            )
 
     def delete_guild(self, guild_id: int) -> None:
         """Delete one guild's live rows, marker, and backup. See Honeypot stored data."""

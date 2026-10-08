@@ -20,15 +20,6 @@ MAX_ATTEMPTS = 2
 PREPARED_ENROLLMENT_CAPACITY = 32
 log = logging.getLogger("red.Honeypot")
 
-def _clear_moderator_fields(payload: dict, user_id: int) -> bool:
-    changed = False
-    for key in ("enrollment_moderator", "completion_moderator"):
-        if payload.get(key) in (user_id, str(user_id)):
-            payload[key] = None
-            payload["completion_reason"] = None
-            changed = True
-    return changed
-
 
 @dataclass(frozen=True, slots=True)
 class VerificationResult:
@@ -1015,19 +1006,27 @@ class JoinwatchVerification:
             async with joinwatch_state.member_lock(self.cog, guild.id, member_id):
                 for kind in ("pending_role", "pending_assignment"):
                     current = await joinwatch_state.read_row(self.cog, guild, member_id, kind)
-                    if not isinstance(current, dict) or not _clear_moderator_fields(current, deleted):
+                    if not isinstance(current, dict) or not joinwatch_state._clear_moderator_fields(
+                        current, deleted
+                    ):
                         continue
                     await joinwatch_state.write_row(self.cog, guild, member_id, kind, current)
 
     async def _delete_unloaded_live_rows(self, user_id, seen) -> None:
         store = getattr(self.cog, "_case_store", None)
-        if store is None or not hasattr(store, "live_guild_ids"):
+        if store is None:
             return
-        for guild_id in await asyncio.to_thread(store.live_guild_ids, int(user_id)):
+        guild_ids = set()
+        if hasattr(store, "live_guild_ids"):
+            guild_ids.update(await asyncio.to_thread(store.live_guild_ids, int(user_id)))
+        if hasattr(store, "pending_guild_ids"):
+            guild_ids.update(await asyncio.to_thread(store.pending_guild_ids))
+        for guild_id in guild_ids:
             if guild_id in seen:
                 continue
             async with joinwatch_state.member_lock(self.cog, guild_id, int(user_id)):
                 await joinwatch_state.delete_sqlite_member(self.cog, guild_id, int(user_id))
+            await joinwatch_state.scrub_sqlite_moderators(self.cog, guild_id, int(user_id))
 
     def _forget_challenge(self, guild_id, user_id, entry) -> None:
         if not isinstance(entry, dict) or not entry.get("incident_id"):
@@ -1065,7 +1064,6 @@ class JoinwatchVerification:
             if store is not None and hasattr(store, "delete_guild"):
                 await asyncio.to_thread(store.delete_guild, guild.id)
         await asyncio.to_thread(self.cog._case_store.delete_verification_history, guild_id=guild.id)
-
 
     async def close(self):
         self._planned.clear()
