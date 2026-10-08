@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import importlib
+import json
 import sqlite3
+import threading
 import unittest
 from contextlib import closing
 from datetime import datetime, timezone
@@ -392,3 +395,278 @@ class JoinWatchLiveStateTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(runtime.cog._case_store.get(10, 20, "verified"))
             finally:
                 await runtime.owner.close()
+
+
+def _lock_held(cog, guild_id, member_id) -> bool:
+    owners = getattr(cog, "_joinwatch_lock_owners", None) or {}
+    return (guild_id, member_id) in owners
+
+
+def _open_delete_window(store, cog, opened, release, held_box):
+    real_delete_user = store.delete_user
+    real_delete = store.delete
+    armed = {"done": False}
+    loop = asyncio.get_running_loop()
+
+    def delete_user(user_id):
+        real_delete_user(user_id)
+        held_box["held"] = _lock_held(cog, 100, int(user_id))
+        loop.call_soon_threadsafe(opened.set)
+        if not held_box["held"]:
+            release.wait()
+
+    def delete(guild_id, user_id, kind, expected_incident_id=None, compare=False):
+        result = real_delete(guild_id, user_id, kind, expected_incident_id, compare)
+        if int(user_id) == 30 and not armed["done"]:
+            armed["done"] = True
+            held_box["held"] = _lock_held(cog, int(guild_id), int(user_id))
+            loop.call_soon_threadsafe(opened.set)
+            if not held_box["held"]:
+                release.wait()
+        return result
+
+    store.delete_user = delete_user
+    store.delete = delete
+
+
+async def _stale_privacy_writer(state, cog, guild, gate, payloads):
+    await gate["opened"].wait()
+    try:
+        if gate["held"]["held"]:
+            async with state.member_lock(cog, guild.id, 30):
+                current = await state.read_row(cog, guild, 30, "pending_role")
+                if current is not None:
+                    current["stage"] = 4
+                    await state.write_row(cog, guild, 30, "pending_role", current)
+            return
+        await state.write_row(cog, guild, 30, "pending_role", payloads["member"])
+        await state.write_row(cog, guild, 20, "pending_role", payloads["other"])
+    finally:
+        gate["release"].set()
+
+
+async def _advance_stage(state, cog, guild):
+    async with state.member_lock(cog, guild.id, 20):
+        row = await state.read_row(cog, guild, 20, "pending_role")
+        row["stage"] = 2
+        await state.write_row(cog, guild, 20, "pending_role", row)
+
+
+async def _completion_during_snapshot(honeypot, reader_name, operation_name):
+    state = honeypot.joinwatch_state
+    entry = _entry(stage=1)
+    with TemporaryDirectory() as directory:
+        cog = _cog(honeypot, directory, _maps(pending={"20": entry}))
+        assert await state.cutover_guild(cog, 100)
+        guild = SimpleNamespace(id=100)
+        snapshot = asyncio.Event()
+        finished = threading.Event()
+        loop = asyncio.get_running_loop()
+        store = cog._case_store
+        original = getattr(store, reader_name)
+
+        def read_snapshot(*args, **kwargs):
+            maps = original(*args, **kwargs)
+            lock = getattr(cog, "_joinwatch_live_source_lock", None)
+            held = lock is not None and lock.locked()
+            loop.call_soon_threadsafe(snapshot.set)
+            if not held:
+                finished.wait()
+            return maps
+
+        async def complete():
+            await snapshot.wait()
+            fresh = await state.read_row(cog, guild, 20, "pending_role")
+            fresh["stage"] = 2
+            fresh["verification_state"] = "release_pending"
+            await state.write_row(cog, guild, 20, "pending_role", fresh)
+            finished.set()
+
+        setattr(store, reader_name, read_snapshot)
+        try:
+            await asyncio.gather(getattr(state, operation_name)(cog, guild), complete())
+        finally:
+            setattr(store, reader_name, original)
+        assert store.cutover_source(100) is None
+        assert await state.cutover_guild(cog, 100)
+        return store.get(100, 20, "pending_role")
+
+
+class JoinWatchLiveRaceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reschedule_keeps_a_fresher_row_and_skips_a_deleted_one(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            state = honeypot.joinwatch_state
+            kept = _entry(applied_at="2026-10-08T15:00:00+00:00", stage=1)
+            removed = _entry(
+                applied_at="2026-10-08T15:00:00+00:00",
+                incident_id="removed",
+                stage=1,
+            )
+            cog = _cog(honeypot, directory, _maps(pending={"20": kept, "21": removed}))
+            self.assertTrue(await state.cutover_guild(cog, 100))
+            guild = SimpleNamespace(id=100)
+            snapshot = asyncio.Event()
+            mutated = asyncio.Event()
+            original = state.open_maps
+
+            async def open_maps(target, target_guild):
+                result = await original(target, target_guild)
+                if not snapshot.is_set():
+                    snapshot.set()
+                    await mutated.wait()
+                return result
+
+            async def interfere():
+                await snapshot.wait()
+                fresh = cog._case_store.get(100, 20, "pending_role")
+                fresh["stage"] = 2
+                fresh["challenge"] = _challenge(9)
+                cog._case_store.upsert(100, 20, "pending_role", fresh)
+                cog._case_store.delete(100, 21, "pending_role")
+                mutated.set()
+
+            with mock.patch.object(state, "open_maps", open_maps):
+                updates = await asyncio.gather(
+                    state.reschedule_pending_roles(cog, guild, 60, 30),
+                    interfere(),
+                )
+            saved = cog._case_store.get(100, 20, "pending_role")
+            self.assertEqual(saved["stage"], 2)
+            self.assertEqual(saved["challenge"], _challenge(9))
+            self.assertEqual(saved["applied_at"], "2026-10-08T15:00:00+00:00")
+            self.assertEqual(saved["expires_at"], "2026-10-08T15:30:00+00:00")
+            self.assertIsNone(cog._case_store.get(100, 21, "pending_role"))
+            published = updates[0]
+            self.assertEqual([item[0]["incident_id"] for item in published], ["incident"])
+            self.assertEqual(published[0][0]["stage"], 2)
+
+    async def test_alert_updates_do_not_overwrite_a_concurrent_stage(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            state = honeypot.joinwatch_state
+            entry = _entry(stage=1)
+            cog = _cog(honeypot, directory, _maps(pending={"20": entry}))
+            self.assertTrue(await state.cutover_guild(cog, 100))
+            guild = SimpleNamespace(id=100)
+            original = state.read_row
+
+            async def advance(stage, phase):
+                await phase["started"].wait()
+                try:
+                    async with state.member_lock(cog, guild.id, 20):
+                        row = await state.read_row(cog, guild, 20, "pending_role")
+                        row["stage"] = stage
+                        await state.write_row(cog, guild, 20, "pending_role", row)
+                finally:
+                    phase["release"].set()
+
+            async def run(operation, stage):
+                phase = {
+                    "arm": True,
+                    "paused": False,
+                    "started": asyncio.Event(),
+                    "release": asyncio.Event(),
+                }
+
+                async def read_row(target, target_guild, user_id, kind):
+                    row = await original(target, target_guild, user_id, kind)
+                    if (
+                        phase["arm"]
+                        and user_id == 20
+                        and row is not None
+                        and not phase["paused"]
+                    ):
+                        phase["paused"] = True
+                        phase["started"].set()
+                        if not _lock_held(target, target_guild.id, user_id):
+                            await phase["release"].wait()
+                    return row
+
+                with mock.patch.object(state, "read_row", read_row):
+                    await asyncio.gather(operation(), advance(stage, phase))
+
+            await run(
+                lambda: state.store_alert_reference(cog, guild, 20, 7, 8),
+                2,
+            )
+            saved = cog._case_store.get(100, 20, "pending_role")
+            self.assertEqual(saved["stage"], 2)
+            self.assertEqual(saved["alert_channel_id"], 7)
+            self.assertEqual(saved["alert_message_id"], 8)
+            incident = {"stage": 0}
+            await run(
+                lambda: state.disable_alert_updates(cog, guild, 20, incident=incident),
+                3,
+            )
+            saved = cog._case_store.get(100, 20, "pending_role")
+            self.assertEqual(saved["stage"], 3)
+            self.assertTrue(saved["alert_updates_disabled"])
+            self.assertEqual(saved["alert_channel_id"], 7)
+            self.assertTrue(incident["alert_updates_disabled"])
+
+    async def test_privacy_delete_does_not_restore_a_stale_write(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            state = honeypot.joinwatch_state
+            kept = _entry(incident_id="kept", stage=1)
+            kept.update(enrollment_moderator=30, completion_moderator=30, completion_reason="noted")
+            removed = _entry(incident_id="removed", stage=1)
+            cog = _cog(honeypot, directory, _maps(pending={"20": kept, "30": removed}))
+            self.assertTrue(await state.cutover_guild(cog, 100))
+            guild = SimpleNamespace(id=100)
+            cog.bot.guilds = [guild]
+            stale_member = copy.deepcopy(removed)
+            stale_member["stage"] = 4
+            stale_other = copy.deepcopy(kept)
+            stale_other["stage"] = 2
+            gate = {
+                "opened": asyncio.Event(),
+                "release": threading.Event(),
+                "held": {"held": False},
+            }
+            _open_delete_window(cog._case_store, cog, gate["opened"], gate["release"], gate["held"])
+            module = importlib.import_module(f"{honeypot.__package__}.joinwatch_verification")
+            owner = module.JoinwatchVerification(cog)
+            try:
+                await asyncio.gather(
+                    owner.delete_user_data(30),
+                    _stale_privacy_writer(
+                        state, cog, guild, gate, {"member": stale_member, "other": stale_other}
+                    ),
+                    _advance_stage(state, cog, guild),
+                )
+            finally:
+                await owner.close()
+            store = cog._case_store
+            self.assertIsNone(store.get(100, 30, "pending_role"))
+            self.assertIsNone(store.get(100, 30, "verified"))
+            survivor = store.get(100, 20, "pending_role")
+            self.assertEqual(survivor["stage"], 2)
+            self.assertIsNone(survivor["enrollment_moderator"])
+            self.assertIsNone(survivor["completion_moderator"])
+            self.assertIsNone(survivor["completion_reason"])
+            self.assertEqual(survivor["incident_id"], "kept")
+            backup = store.live_backup(100)
+            self.assertEqual(backup["pending_role"]["30"]["incident_id"], "removed")
+            self.assertEqual(backup["pending_role"]["20"]["enrollment_moderator"], 30)
+
+    async def test_export_and_restore_keep_a_completion_during_the_snapshot(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            for reader_name, operation_name in (
+                ("config_maps", "export_live_state"),
+                ("live_backup", "restore_live_backup"),
+            ):
+                with self.subTest(operation=operation_name):
+                    saved = await _completion_during_snapshot(honeypot, reader_name, operation_name)
+                    self.assertEqual(saved["stage"], 2)
+                    self.assertEqual(saved["verification_state"], "release_pending")
+
+    def test_data_statement_mentions_the_live_backup(self):
+        info = json.loads(
+            (Path(__file__).parents[1] / "NHCogs" / "honeypot" / "info.json").read_text()
+        )
+        statement = info["end_user_data_statement"]
+        self.assertIn("joinwatch_live_backup", statement)
+        self.assertIn("one-time copy of the three JoinWatch maps", statement)
+        self.assertIn("active challenge", statement)
+        self.assertIn("7 days", statement)
+        self.assertIn("not rewritten on user deletion", statement)
+        self.assertIn("leaves the guild", statement)
