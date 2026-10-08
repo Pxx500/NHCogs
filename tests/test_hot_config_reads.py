@@ -1,7 +1,10 @@
 """Hot listeners read the settings they use and leave JoinWatch member maps alone."""
 
 import asyncio
+import copy
 import importlib
+import logging
+from collections.abc import Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -13,6 +16,17 @@ from tests.harness import (
     _isolated_honeypot_modules,
     _operational_support,
 )
+
+
+def _red_nested_update(current, defaults):
+    """Red's Group.nested_update writes the stored value into the passed default."""
+    for key, value in current.items():
+        if isinstance(value, Mapping):
+            defaults[key] = _red_nested_update(value, defaults.get(key, {}))
+        else:
+            defaults[key] = copy.deepcopy(value)
+    return defaults
+
 
 _MEMBER_MAPS = (
     "joinwatch_pending_role_assignments",
@@ -36,6 +50,7 @@ class _RecordingGroup:
     def __init__(self, values):
         self.values = values
         self.reads = []
+        self.defaults = []
         self.all_calls = 0
 
     async def all(self):
@@ -43,12 +58,16 @@ class _RecordingGroup:
         return self.values
 
     async def get_raw(self, *keys, default=None):
+        """Match Red: a dict default is merged in place, and a non-dict stored value errors."""
         self.reads.append(keys)
+        self.defaults.append(default)
         raw = self.values
         for key in keys:
             if not isinstance(raw, dict) or key not in raw:
                 return default
             raw = raw[key]
+        if isinstance(default, dict):
+            return _red_nested_update(raw, default)
         return raw
 
     def joinwatch_pending_roles(self):
@@ -226,6 +245,63 @@ class HotConfigReadTests(DetectionPipelineTestCase):
                 self.assertEqual(second["joinwatch_auto_role_id"], 78)
                 self.assertEqual(group.all_calls, 0)
                 self.assertEqual(group.full_map_reads(), [])
+
+    async def test_guild_settings_do_not_leak_between_guilds(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)):
+                settings = importlib.import_module("NHCogs.honeypot.settings")
+                stats_default = settings.DEFAULTS["stats"]
+                roles_default = settings.DEFAULTS["manual_punishment_roles"]
+                stats_before = copy.deepcopy(stats_default)
+                roles_before = copy.deepcopy(roles_default)
+                first_group = _RecordingGroup(
+                    {
+                        "stats": {"detections": 4, "leaked": 1},
+                        "manual_punishment_roles": {
+                            "15": {
+                                "role_id": 15,
+                                "source_channel_ids": [4],
+                                "notification_channel_id": 5,
+                            }
+                        },
+                    }
+                )
+                first = await settings.read_guild_settings(first_group)
+                self.assertEqual(first.stats["detections"], 4)
+                self.assertEqual(first.stats["leaked"], 1)
+                self.assertEqual(first.manual_punishment_roles[15].role_id, 15)
+
+                second_group = _RecordingGroup({})
+                second = await settings.read_guild_settings(second_group)
+
+                self.assertNotIn("leaked", second.stats)
+                self.assertEqual(second.stats["detections"], 0)
+                self.assertEqual(second.manual_punishment_roles, {})
+                self.assertIs(settings.DEFAULTS["stats"], stats_default)
+                self.assertEqual(settings.DEFAULTS["stats"], stats_before)
+                self.assertIs(settings.DEFAULTS["manual_punishment_roles"], roles_default)
+                self.assertEqual(settings.DEFAULTS["manual_punishment_roles"], roles_before)
+                self.assertTrue(
+                    all(not isinstance(default, (dict, list)) for default in second_group.defaults)
+                )
+
+    async def test_stored_null_or_list_mapping_falls_back(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)):
+                settings = importlib.import_module("NHCogs.honeypot.settings")
+                stats_before = copy.deepcopy(settings.DEFAULTS["stats"])
+                for stored in (None, [1, 2]):
+                    with self.subTest(stored=stored):
+                        group = _RecordingGroup(
+                            {"stats": stored, "manual_punishment_roles": stored}
+                        )
+                        with self.assertLogs("red.Honeypot", level=logging.WARNING) as captured:
+                            parsed = await settings.read_guild_settings(group)
+                        self.assertEqual(parsed.stats, stats_before)
+                        self.assertEqual(parsed.manual_punishment_roles, {})
+                        self.assertTrue(any("stats" in message for message in captured.output))
+                        self.assertEqual(settings.DEFAULTS["stats"], stats_before)
+                        self.assertEqual(settings.DEFAULTS["manual_punishment_roles"], {})
 
     def _message_cog(self, honeypot, values):
         cog = honeypot.Honeypot(_Bot(), _operational_support())
