@@ -880,3 +880,26 @@ class JoinWatchMigrationRaceTests(unittest.IsolatedAsyncioTestCase):
                 ],
             )
             self.assertIsNone(await state.read_row(cog, guild, 20, "pending_role"))
+    async def test_guild_removal_does_not_restore_an_export(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            state = honeypot.joinwatch_state
+            cog = _cog(honeypot, directory, _maps(pending={"20": _entry()}))
+            self.assertTrue(await state.cutover_guild(cog, 100))
+            guild = SimpleNamespace(id=100)
+            opened = asyncio.Event()
+            release = asyncio.Event()
+            _arm_config_clear(cog, opened, release, pause_at=3, before=False)
+            module = importlib.import_module(f"{honeypot.__package__}.joinwatch_verification")
+            owner = module.JoinwatchVerification(cog)
+            try:
+                await asyncio.gather(
+                    owner.delete_guild_data(guild),
+                    _export_when_open(state, cog, guild, opened, release),
+                )
+            finally:
+                await owner.close()
+            self.assertEqual(cog.config.guilds[100]["joinwatch_pending_roles"], {})
+            self.assertEqual(cog.config.guilds[100]["joinwatch_verified_members"], {})
+            self.assertEqual(cog.config.guilds[100]["joinwatch_pending_role_assignments"], {})
+            self.assertIsNone(cog._case_store.get(100, 20, "pending_role"))
+            self.assertIsNone(cog._case_store.cutover_source(100))

@@ -1037,33 +1037,35 @@ class JoinwatchVerification:
         self.preparation.forget(key)
 
     async def delete_guild_data(self, guild):
-        config = self.cog.config.guild(guild)
         names = (
             "joinwatch_pending_roles",
             "joinwatch_pending_role_assignments",
             "joinwatch_verified_members",
         )
         store = getattr(self.cog, "_case_store", None)
-        if (
-            store is not None
-            and hasattr(store, "config_maps")
-            and await joinwatch_state._sqlite_source(self.cog, guild.id)
-        ):
-            for entries in (await asyncio.to_thread(store.config_maps, guild.id)).values():
-                for user_id, entry in entries.items():
-                    self._forget_challenge(guild.id, user_id, entry)
-        for name in names:
-            entries = await config.get_raw(name, default={})
-            if isinstance(entries, dict):
-                for user_id, entry in entries.items():
-                    self._forget_challenge(guild.id, user_id, entry)
-            await config.clear_raw(name)
-        for key in tuple(self._planned):
-            if key[0] == guild.id:
-                self._planned.pop(key)
-        if store is not None and hasattr(store, "delete_guild"):
-            await asyncio.to_thread(store.delete_guild, guild.id)
+        async with joinwatch_state._source_lock(self.cog):
+            config = self.cog.config.guild(guild)
+            if (
+                store is not None
+                and hasattr(store, "config_maps")
+                and await joinwatch_state._sqlite_source(self.cog, guild.id)
+            ):
+                for entries in (await asyncio.to_thread(store.config_maps, guild.id)).values():
+                    for user_id, entry in entries.items():
+                        self._forget_challenge(guild.id, user_id, entry)
+            for name in names:
+                entries = await config.get_raw(name, default={})
+                if isinstance(entries, dict):
+                    for user_id, entry in entries.items():
+                        self._forget_challenge(guild.id, user_id, entry)
+                await config.clear_raw(name)
+            for key in tuple(self._planned):
+                if key[0] == guild.id:
+                    self._planned.pop(key)
+            if store is not None and hasattr(store, "delete_guild"):
+                await asyncio.to_thread(store.delete_guild, guild.id)
         await asyncio.to_thread(self.cog._case_store.delete_verification_history, guild_id=guild.id)
+
 
     async def close(self):
         self._planned.clear()
