@@ -1,8 +1,5 @@
 """Guard work that depends on privileged Gateway data."""
 
-import json
-import os
-from pathlib import Path
 from typing import Any
 
 GRANT_FLAGS = {
@@ -51,22 +48,3 @@ def update_grants(bot: Any, flags: Any) -> None:
         if known:
             grants[capability] = any(known)
     bot._nhcogs_gateway_grants = grants
-
-
-def signal_full_intent_recovery(bot: Any, flags: Any) -> bool:
-    """Ask the external launcher to reconnect only after full approval returns."""
-    marker = os.environ.get("NHC0GS_GATEWAY_RECOVERY_PATH")
-    requested = os.environ.get("NHC0GS_GATEWAY_RECOVERY_INTENTS", "")
-    capabilities = tuple(key for key in requested.split(",") if key)
-    if not marker or not capabilities or any(key not in GRANT_FLAGS for key in capabilities):
-        return False
-    if not all(getattr(flags, GRANT_FLAGS[key][0], False) for key in capabilities):
-        return False
-    intents = getattr(bot, "intents", None)
-    if not any(getattr(intents, key, None) is False for key in capabilities):
-        return False
-    path = Path(marker)
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps({"approved": capabilities}), encoding="utf-8")
-    temporary.replace(path)
-    return True

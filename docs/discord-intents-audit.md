@@ -127,9 +127,9 @@ The [English form draft](discord-intents-form-draft.md) must be checked against 
 
 The shared capability guard blocks dependent work when the requested mask is disabled,
 approval is denied, or the required state is unknown. OperationalSupport refreshes
-application flags every 30 seconds. The external launcher handles a rejected Gateway
-connection by restarting the same instance with privileged intents disabled. It returns
-to the original mask after full approval, stopping the old process first.
+application flags every 30 seconds while the bot is running. These changes do not manage
+Red startup, change its requested intents, or reconnect it after a rejected Gateway
+connection. They protect NHCogs work in the connected application.
 
 Received messages requiring unavailable content are retained as a metadata-only queue
 for up to 14 days. The worker fetches only observed message IDs after restoration.
@@ -141,9 +141,9 @@ gets a fresh response window after a long pause without duplicating a known sent
 Known actions that can use REST without privileged intents remain usable. Events never
 delivered by Discord and content deleted before capture cannot be reconstructed.
 
-Final local validation for the combined safety and privacy correction: 1741 tests passed,
-1 skipped, and 459 subtests passed. Ruff and diff checks passed. Deployment is still an
-administrator action, described in [the runbook](intent-loss-runbook.md).
+Regression tests cover data-request handling, preserved moderation evidence, deferred
+capture, and known REST actions. [The behavior checklist](intent-loss-runbook.md)
+describes NHCogs validation and its limits.
 
 - CustomCommands: catalog.py, cog.py, migration.py, migration_controller.py, and the catalog, cog, and migration tests
 - Bot Proxy: bot_proxy_store.py, bot_proxy_manager.py, bot_proxy_workflow.py, nhmisc.py, and store, workflow, and deletion-hook tests

@@ -14,7 +14,6 @@ from .command_overview import channel_is_private, send_group_overview
 from .gateway_capabilities import (
     GRANT_FLAGS,
     available,
-    signal_full_intent_recovery,
     update_grants,
 )
 from .operational_errors import OperationalErrorReporter, OperationalFailure
@@ -100,8 +99,6 @@ class OperationalSupport(commands.Cog):
             else:
                 log.warning("Gateway %s data unavailable. Dependent work remains pending", key)
         self._gateway_states = current
-        if signal_full_intent_recovery(self.bot, flags):
-            log.info("Full privileged-intent approval restored. Signalled the fallback launcher")
 
     async def _watch_gateway_grants(self) -> None:
         wait_until_ready = getattr(self.bot, "wait_until_ready", None)

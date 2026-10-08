@@ -1,11 +1,7 @@
 import importlib.util
-import json
-import os
-import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest import mock
 
 
 def load_capabilities():
@@ -57,28 +53,6 @@ class GatewayCapabilitiesTests(unittest.TestCase):
         self.assertTrue(self.module.available(self.bot, "members"))
         self.bot.intents.members = False
         self.assertFalse(self.module.available(self.bot, "members"))
-
-    def test_recovery_requires_full_grants_and_preserves_requested_subset(self):
-        with tempfile.TemporaryDirectory() as directory:
-            marker = Path(directory) / "recovery.json"
-            environment = {
-                "NHC0GS_GATEWAY_RECOVERY_PATH": str(marker),
-                "NHC0GS_GATEWAY_RECOVERY_INTENTS": "members,message_content",
-            }
-            self.bot.intents.members = False
-            self.bot.intents.message_content = False
-            with mock.patch.dict(os.environ, environment):
-                self.flags.gateway_guild_members = False
-                self.flags.gateway_guild_members_limited = True
-                self.assertFalse(self.module.signal_full_intent_recovery(self.bot, self.flags))
-                self.assertFalse(marker.exists())
-                self.flags.gateway_guild_members = True
-                self.flags.gateway_presence = False
-                self.assertTrue(self.module.signal_full_intent_recovery(self.bot, self.flags))
-                self.assertEqual(json.loads(marker.read_text())['approved'], [
-                    "members", "message_content",
-                ])
-                self.assertFalse(marker.with_name(marker.name + ".tmp").exists())
 
     def test_unknown_capability_is_rejected_without_enabling_it(self):
         with self.assertRaises(ValueError):

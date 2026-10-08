@@ -140,6 +140,7 @@ Show a safe, prepared test message without a bot mention, automatic detection, a
 
 - Confirm Application ID, installed guilds, loaded cogs, running version, enabled intents, and the actual review deadline
 - Deploy and verify the scoped data-control fixes
+- Check NHCogs behavior when required Gateway data is unavailable using the [behavior checklist](intent-loss-runbook.md). This does not verify Red startup or connection recovery
 - Confirm the privacy contact, publish an accurate policy, and link it in Portal and the application
 - Resolve moderation-evidence and reference-retention questions without indiscriminately removing sanctions or the required dataset
 - Confirm hosting and backup safeguards and the scope of exported copies
