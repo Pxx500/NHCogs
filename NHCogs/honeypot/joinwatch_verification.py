@@ -104,8 +104,8 @@ class JoinwatchVerification:
         for key in ("role_id", "enrollment_moderator", "completion_moderator"):
             record[key] = str(entry[key]) if entry.get(key) is not None else None
         try:
-            await asyncio.to_thread(self.cog._case_store.save_verification_history,
-                                    record, entry.get("history_events", []))
+            await joinwatch_state.finish_thread(self.cog._case_store.save_verification_history,
+                                               record, entry.get("history_events", []))
         except Exception as error:
             log.exception("Could not settle JoinWatch history for guild %s", guild.id)
             try:
