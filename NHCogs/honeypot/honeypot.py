@@ -694,8 +694,7 @@ class Honeypot(Cog):
         member_id: int,
         role_id: int,
     ) -> bool:
-        pending_roles = await self.config.guild(guild).joinwatch_pending_roles()
-        pending_role = pending_roles.get(str(member_id))
+        pending_role = await joinwatch_state.read_row(self, guild, member_id, "pending_role")
         if pending_role is None:
             return False
         try:
@@ -986,6 +985,7 @@ class Honeypot(Cog):
         await self._message_registry.initialize()
         self._detection_case_files_path.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(self._case_store.initialize)
+        await joinwatch_state.cutover_live_state(self)
         await self._run_detection_reconciliation()
         await captcha_commands.restore_panels(self)
         self._joinwatch_restore_task = asyncio.create_task(self._restore_joinwatch())
@@ -1727,6 +1727,21 @@ class Honeypot(Cog):
     async def debug(self, ctx: commands.Context) -> None:
         """Maintenance, debug, and export tools"""
         return await self._send_group_overview(ctx)
+
+    @debug.command(name="exportjoinwatch")
+    async def debug_export_joinwatch(self, ctx: commands.Context) -> None:
+        """Copy JoinWatch live rows back into Config. See Honeypot stored data."""
+        # TODO(cleanup PR #148): remove with Config rollback and the matching
+        # export/restore helpers, command documentation, and rollback tests.
+        is_owner = getattr(self.bot, "is_owner", None)
+        if is_owner is None or not await is_owner(ctx.author):
+            await ctx.send("Only a bot owner can export JoinWatch live state")
+            return
+        copied = await joinwatch_state.export_live_state(self, ctx.guild)
+        if not copied:
+            await ctx.send("JoinWatch live state is already in Config")
+            return
+        await ctx.send("JoinWatch live state is in Config again")
 
     @debug.group(name="imagescan", invoke_without_command=True)
     async def debug_imagescan(self, ctx: commands.Context) -> None:
