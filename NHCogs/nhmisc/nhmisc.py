@@ -1393,6 +1393,10 @@ class NHMisc(commands.Cog):
             )
 
     async def red_delete_data_for_user(self, *, requester, user_id: int) -> None:
+        if self._bot_proxy is None:
+            await self._bot_proxy_store.delete_user_data(user_id)
+        else:
+            await self._bot_proxy.delete_user_data(user_id)
         await self._activity_store.delete_user_everywhere(user_id)
         await self._sticky_roles.delete_user_everywhere(user_id)
         await self._role_analytics_store.delete_user_everywhere(user_id)

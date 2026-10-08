@@ -328,6 +328,28 @@ cog, migration_controller = load_cog_module()
 AccessRules = sys.modules[f"{cog.__package__}.catalog"].AccessRules
 
 
+class CustomCommandsPrivacyRequesterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_and_migration_redact_all_requesters_with_access_scope(self):
+        for module, component in (
+            (cog, cog.CustomCommands),
+            (migration_controller, migration_controller.CustomCommandsMigration),
+        ):
+            for requester in ("owner", "user", "user_strict", "discord_deleted_user"):
+                with self.subTest(component=component.__name__, requester=requester):
+                    subject = object.__new__(component)
+                    subject.catalog = object()
+                    subject._legacy_config = object()
+                    subject._data_root = Path("privacy-test-data")
+                    with mock.patch.object(
+                        module, "redact_custom_command_user_data", new=mock.AsyncMock(),
+                    ) as redact:
+                        await subject.red_delete_data_for_user(requester=requester, user_id=42)
+                    redact.assert_awaited_once_with(
+                        subject.catalog, subject._legacy_config, mock.ANY, 42,
+                        redact_access=requester == "discord_deleted_user",
+                    )
+
+
 class CommandUsageChartTests(unittest.IsolatedAsyncioTestCase):
     async def test_private_thread_access_and_output_privacy(self):
         for public_output, manager, member, allowed in (
@@ -1549,6 +1571,7 @@ class CustomCommandsMigrationFlowTests(unittest.IsolatedAsyncioTestCase):
             migration_cog._legacy_config,
             mock.ANY,
             42,
+            redact_access=True,
         )
 
     async def test_verified_plan_imports_once_before_entering_cutover_state(self):

@@ -1644,6 +1644,8 @@ class GateIncrementPrivacyTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             cog = object.__new__(nhmisc.NHMisc)
+            cog._bot_proxy = None
+            cog._bot_proxy_store = nhmisc.BotProxyStore(root / "bot_proxy.sqlite")
             cog._activity_store = nhmisc.ActivityStore(root / "activity.sqlite")
             cog._sticky_roles = nhmisc.StickyRoleStore(root / "sticky.sqlite")
             cog._role_analytics_store = nhmisc.RoleAnalyticsStore(root / "roles.sqlite")
@@ -1657,6 +1659,7 @@ class GateIncrementPrivacyTests(unittest.IsolatedAsyncioTestCase):
                 cog._role_analytics_store,
                 cog._achievement_store,
                 cog._gate_increment_store,
+                cog._bot_proxy_store,
             ):
                 await store.initialize()
             kept = nhmisc.SourceMessageKey(10, 20, 99)

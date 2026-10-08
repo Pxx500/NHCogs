@@ -999,6 +999,8 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             cog = object.__new__(nhmisc.NHMisc)
+            cog._bot_proxy = None
+            cog._bot_proxy_store = nhmisc.BotProxyStore(root / "bot_proxy.sqlite")
             cog._activity_store = nhmisc.ActivityStore(root / "activity.sqlite")
             cog._sticky_roles = nhmisc.StickyRoleStore(root / "sticky.sqlite")
             cog._role_analytics_store = nhmisc.RoleAnalyticsStore(root / "roles.sqlite")
@@ -1010,10 +1012,16 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
                 cog._role_analytics_store,
                 cog._achievement_store,
                 cog._gate_increment_store,
+                cog._bot_proxy_store,
             ):
                 await store.initialize()
             await _seed_nhmisc_user(cog, 42)
             await _seed_nhmisc_user(cog, 99)
+            for user_id in (42, 99):
+                await cog._bot_proxy_store.create_character(
+                    guild_id=123, preset_name=f"Persona-{user_id}", display_name="Persona",
+                    avatar_bytes=b"avatar", avatar_media_type="image/png", moderator_id=user_id,
+                )
 
             await cog.red_delete_data_for_user(
                 requester="discord_deleted_user",
@@ -1022,6 +1030,23 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
 
             await _assert_nhmisc_user_absent(self, cog, 42)
             await _assert_nhmisc_user_present(self, cog, 99)
+            self.assertIsNone(await cog._bot_proxy_store.get_character(123, "Persona-42"))
+            self.assertIsNotNone(await cog._bot_proxy_store.get_character(123, "Persona-99"))
+
+    async def test_user_deletion_uses_active_proxy_manager_for_every_requester(self):
+        for requester in ("user", "user_strict", "owner", "discord_deleted_user"):
+            with self.subTest(requester=requester):
+                cog = object.__new__(nhmisc.NHMisc)
+                cog._bot_proxy = mock.Mock(delete_user_data=mock.AsyncMock())
+                cog._bot_proxy_store = mock.Mock(delete_user_data=mock.AsyncMock())
+                cog._activity_store = mock.Mock(delete_user_everywhere=mock.AsyncMock())
+                cog._sticky_roles = mock.Mock(delete_user_everywhere=mock.AsyncMock())
+                cog._role_analytics_store = mock.Mock(delete_user_everywhere=mock.AsyncMock())
+                cog._achievement_store = mock.Mock(delete_user_everywhere=mock.AsyncMock())
+                cog._gate_increment_store = mock.Mock(redact_user_data=mock.AsyncMock())
+                await cog.red_delete_data_for_user(requester=requester, user_id=42)
+                cog._bot_proxy.delete_user_data.assert_awaited_once_with(42)
+                cog._bot_proxy_store.delete_user_data.assert_not_awaited()
 
 
 def _achievement_kind():

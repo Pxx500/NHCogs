@@ -288,7 +288,11 @@ ZIPs contain one `channel-<id>.jsonl` per source and `metadata.json` with channe
 
 Settings and counters are per server. Cases, operations, first-observed senders, and the message registry use local SQLite storage. The registry retains observed message IDs, dates, author IDs, pin state, and optional spam fingerprints for 14 days, without content or attachments. Purge uses observed IDs, not history scans. Separate `[p]cleanup` commands are documented in their [own README](../cleanup/README.md).
 
-Captured case files are temporary. Selected TP and FP samples remain in the image dataset under its retention settings. Red user-data deletion and guild removal remove matching records and evidence, with unavailable Discord deletions queued for retry. Developers declare channel routing in [channel_routing.py](channel_routing.py).
+Captured case files are temporary. Selected TP and FP reference samples are retained separately until explicitly removed. The reference dataset has no automatic expiry and is not included in case or user-data deletion. Red user-data deletion and guild removal remove matching registry and case records, case evidence, and JoinWatch data, with unavailable Discord deletions queued for retry. Developers declare channel routing in [channel_routing.py](channel_routing.py).
+
+Image-review exports contain SQLite, JSONL, and files scoped to the requested server.
+They include a consistent database snapshot, including committed WAL data, without
+records or files from other servers. Creating an export does not remove reference samples.
 
 JoinWatch keeps active incident and attempt metadata and verification outcomes in guild Config. Auxiliary first-observed joins and frozen wave execution state use the existing case SQLite store, outside the configuration read by message detectors. Current challenge images and answers are retained only with their active check, not in audit logs or evidence archives. Live first-join observations and settled waves are retained for 90 days. Imported history remains explicitly retained for historical analysis. User-data deletion removes the corresponding observations, results, and wave references. Leaving a guild clears pending JoinWatch work and verification history so rejoining doesn't revive stale enforcement.
 

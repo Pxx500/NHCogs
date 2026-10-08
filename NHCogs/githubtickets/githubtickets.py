@@ -566,22 +566,22 @@ class GitHubTickets(commands.Cog):
         )
         histories = await self.store.candidate_history(
             ticket.ticket_id,
-            (
-                int(member.id)
-                for member in members
-                if int(member.id) != ticket.author_id
-            ),
+            matching_profile_ids,
         )
         history_by_id = {history.user_id: history for history in histories}
         candidates: list[CandidateFacts] = []
         for member in members:
             user_id = int(member.id)
-            if user_id == ticket.author_id:
+            if user_id not in matching_profile_ids:
                 continue
             history = history_by_id.get(user_id)
             if history is None:
                 continue
+            if history.was_pinged or history.timed_out or history.declined or history.unassigned:
+                continue
             actor = self._actor_for_member(ticket.guild_id, member)
+            if not actor.can_participate:
+                continue
             candidates.append(
                 CandidateFacts(
                     user_id=user_id,

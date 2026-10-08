@@ -23,6 +23,84 @@ from tests.test_chatchart import load_nhmisc_module
 
 
 class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _seed_imagescan_export_guild(cog, connection, guild_id, marker):
+        sample_file = cog._imagescan_files_path / str(guild_id) / "sample.png"
+        sample_file.parent.mkdir(parents=True)
+        sample_file.write_bytes(marker.encode())
+        connection.execute(
+            """INSERT INTO imagescan_samples (
+                sample_id, guild_id, decision, sha256, phash, dhash, ahash,
+                file_path, created_at, moderator_id
+            ) VALUES (?, ?, 'true_positive', ?, '1', '2', '3', ?, 100, ?)""",
+            (marker, str(guild_id), marker, str(sample_file), f"moderator-{marker}"),
+        )
+        connection.execute(
+            """INSERT INTO imagescan_events (
+                event_id, guild_id, user_id, channel_id, message_id, message_jump_url,
+                created_at, image_count, content, moderator_id
+            ) VALUES (?, ?, ?, '30', ?, 'url', 100, 1, ?, ?)""",
+            (marker, str(guild_id), f"user-{marker}", marker, marker, f"moderator-{marker}"),
+        )
+        connection.execute(
+            """INSERT INTO imagescan_files (
+                event_id, file_index, filename, path, size, sha256
+            ) VALUES (?, 0, 'sample.png', ?, 10, ?)""",
+            (marker, str(sample_file), marker),
+        )
+        connection.execute(
+            "INSERT INTO imagescan_model_state (guild_id) VALUES (?)", (str(guild_id),)
+        )
+        connection.execute(
+            "INSERT INTO imagescan_profile (guild_id) VALUES (?)", (str(guild_id),)
+        )
+
+    async def test_imagescan_dump_isolates_guild_and_includes_uncheckpointed_wal_rows(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
+                cog._imagescan_store.initialize()
+                foreign_marker = "FOREIGN_GUILD_PRIVATE_SECRET"
+                with closing(sqlite3.connect(cog._imagescan_db_path)) as live:
+                    live.execute("PRAGMA journal_mode = WAL")
+                    live.execute("PRAGMA wal_autocheckpoint = 0")
+                    self._seed_imagescan_export_guild(cog, live, 10, "requested-guild")
+                    self._seed_imagescan_export_guild(cog, live, 11, foreign_marker)
+                    live.commit()
+                    temp_root, archives = await honeypot.imagescan._imagescan_create_dump_archives(
+                        cog, 10
+                    )
+                    try:
+                        with zipfile.ZipFile(archives[0]) as archive:
+                            names = archive.namelist()
+                            self.assertIn("imagescan.sqlite", names)
+                            self.assertIn("files/10/sample.png", names)
+                            self.assertFalse(any(name.startswith("files/11/") for name in names))
+                            for name in names:
+                                self.assertNotIn(foreign_marker.encode(), archive.read(name))
+                            archive.extract("imagescan.sqlite", temp_root / "isolated")
+                        with closing(sqlite3.connect(temp_root / "isolated/imagescan.sqlite")) as db:
+                            self.assertEqual(db.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+                            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+                            for table in (
+                                "imagescan_events", "imagescan_samples",
+                                "imagescan_model_state", "imagescan_profile",
+                            ):
+                                self.assertEqual(
+                                    db.execute(f"SELECT guild_id FROM {table}").fetchall(), [("10",)]
+                                )
+                            self.assertEqual(
+                                db.execute("SELECT event_id FROM imagescan_files").fetchall(),
+                                [("requested-guild",)],
+                            )
+                            self.assertEqual(
+                                db.execute("SELECT moderator_id FROM imagescan_events").fetchone()[0],
+                                "moderator-requested-guild",
+                            )
+                        self.assertEqual(live.execute("SELECT COUNT(*) FROM imagescan_samples").fetchone()[0], 2)
+                    finally:
+                        shutil.rmtree(temp_root, ignore_errors=True)
+
     async def test_doctor_reports_every_missing_gif_detector_decoder(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):

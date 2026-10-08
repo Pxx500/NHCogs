@@ -43,6 +43,22 @@ class FakeInteractionResponse:
         self.modals.append(modal)
 
 
+class PresenceMember:
+    def __init__(self, user_id, *, eligible=True, status=None, manager=False):
+        self.id = user_id
+        self.roles = [SimpleNamespace(id=99)] if eligible else []
+        self.guild_permissions = SimpleNamespace(manage_messages=manager)
+        self._status = status
+        self.status_reads = 0
+
+    @property
+    def status(self):
+        if self._status is None:
+            raise AssertionError("presence must only be read for eligible volunteers")
+        self.status_reads += 1
+        return SimpleNamespace(value=self._status)
+
+
 class FakeInteraction:
     def __init__(self, *, user_id=100, role_ids=(), manage_messages=False):
         self.guild_id = 10
@@ -583,6 +599,77 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(bot.fetch_calls, 0)
             finally:
                 await cog.cog_unload()
+
+    async def test_routing_reads_presence_only_for_eligible_opted_in_reviewers(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            bot = FakeBot(ready=False)
+            support = mock.Mock(
+                report_operational_error=mock.AsyncMock(),
+                report_global_error=mock.AsyncMock(),
+                handle_command_error=mock.AsyncMock(),
+            )
+            cog = modules.githubtickets.GitHubTickets(bot, support)
+            await cog.store.initialize()
+            await cog.config.guild_from_id(10).set_raw("participant_role_ids", value=[99])
+            cog._participant_roles[10] = frozenset({99})
+            now = datetime.now(timezone.utc)
+            category = await cog.store.add_category(10, "rendering", now)
+            unrelated = await cog.store.add_category(10, "mixins", now)
+            members = [
+                PresenceMember(30),
+                PresenceMember(200, status="online"),
+                PresenceMember(201),
+                PresenceMember(202),
+                PresenceMember(203),
+                PresenceMember(204, eligible=False),
+                PresenceMember(205),
+                PresenceMember(206),
+                PresenceMember(207),
+                PresenceMember(208),
+                PresenceMember(209, eligible=False, manager=True, status="idle"),
+                PresenceMember(210),
+            ]
+            bot.guild_map[10] = SimpleNamespace(id=10, members=members)
+            for member in members:
+                if member.id == 202:
+                    continue
+                await cog.store.save_profile(
+                    guild_id=10,
+                    user_id=member.id,
+                    github_username=None,
+                    category_ids=(
+                        unrelated.category_id if member.id == 203 else category.category_id,
+                    ),
+                    automatic_pings=member.id != 201,
+                    updated_at=now,
+                )
+            histories = [
+                SimpleNamespace(
+                    user_id=user_id,
+                    was_pinged=user_id == 205,
+                    timed_out=user_id == 206,
+                    declined=user_id == 207,
+                    unassigned=user_id == 208,
+                    active_assignment_count=0,
+                    last_ping_at=None,
+                )
+                for user_id in (200, 205, 206, 207, 208, 209)
+            ]
+            cog.store.candidate_history = mock.AsyncMock(return_value=histories)
+            ticket = SimpleNamespace(
+                guild_id=10, ticket_id=1, author_id=30, category_ids=(category.category_id,),
+            )
+
+            candidates = await cog._get_candidates(ticket)
+
+            self.assertEqual({candidate.user_id for candidate in candidates}, {200, 209})
+            self.assertEqual(modules.routing.select_reviewer(candidates).user_id, 200)
+            cog.store.candidate_history.assert_awaited_once_with(
+                1, frozenset({200, 205, 206, 207, 208, 209, 210}),
+            )
+            for member in members:
+                self.assertEqual(member.status_reads, int(member.id in (200, 209)))
+            self.assertEqual(bot.fetch_calls, 0)
 
     async def test_member_remove_deletes_only_the_departed_guild_profile(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
