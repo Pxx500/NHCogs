@@ -96,7 +96,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
                 )
             }
 
-        self.assertEqual(version, 7)
+        self.assertEqual(version, 8)
         self.assertIn("detection_cases", tables)
         self.assertIn("detection_attachments", tables)
         self.assertIn("public_daily_stats", tables)
@@ -122,7 +122,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertEqual(snapshot.messages[0].message_id, 40)
         self.assertEqual(snapshot.signals[0].signal.detector, "firstpost")
         self.assertEqual(snapshot.operations[0].status, OperationStatus.PENDING)
-        self.assertEqual(version, 7)
+        self.assertEqual(version, 8)
 
     def test_initialize_preserves_timeline_publications_from_previous_schema(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
@@ -286,23 +286,29 @@ class DetectionCaseStoreTests(unittest.TestCase):
             "version": 1, "revision": 0, "import_revision": 0,
             "sources": [], "observations": {},
         }
-        self.assertEqual(self.store.get_joinwatch_history(100), empty)
-        history = {
-            **empty,
-            "revision": 3,
-            "import_revision": 1,
-            "sources": [{"name": "history.json", "count": 1}],
-            "observations": {"20": {"user_id": 20, "joined_at": 1791057600}},
-        }
-        self.store.save_joinwatch_history(100, history)
+        joined = datetime(2026, 10, 1, 12, tzinfo=timezone.utc)
+        self.assertEqual(self.store.all_observations(100), empty)
+        self.assertTrue(self.store.record_first_join(100, 20, joined))
+        self.assertFalse(self.store.record_first_join(100, 20, joined + timedelta(hours=4)))
         reopened = DetectionCaseStore(self.database_path)
         reopened.initialize()
 
-        self.assertEqual(reopened.get_joinwatch_history(100), history)
-        self.assertEqual(reopened.get_joinwatch_history(200), empty)
-        detached = reopened.get_joinwatch_history(100)
+        observation = {"first_joined_at": joined.isoformat(), "imported": False}
+        self.assertEqual(reopened.get_joinwatch_observation(100, 20), observation)
+        self.assertEqual(reopened.all_observations(100)["observations"], {"20": observation})
+        self.assertEqual(reopened.all_observations(100)["revision"], 1)
+        self.assertEqual(reopened.all_observations(200), empty)
+        detached = reopened.all_observations(100)
         detached["observations"].clear()
-        self.assertEqual(reopened.get_joinwatch_history(100), history)
+        self.assertEqual(reopened.all_observations(100)["observations"], {"20": observation})
+        self.assertEqual(
+            reopened.observations_since(100, joined + timedelta(hours=1)),
+            (),
+        )
+        self.assertEqual(
+            reopened.observations_since(100, joined),
+            ((20, joined.isoformat()),),
+        )
 
     def test_daily_stats_store_successful_publication_metadata(self):
         report_date = date(2026, 8, 19)
@@ -342,20 +348,20 @@ class DetectionCaseStoreTests(unittest.TestCase):
     def test_joinwatch_auxiliary_clear_is_guild_scoped_and_preserves_cases_and_stats(self):
         now = datetime(2026, 10, 3, 12, tzinfo=timezone.utc)
         case = self.store.append_message(self.message(40, now), ()).case
-        history = {"version": 1, "revision": 1, "import_revision": 0,
-                   "sources": [], "observations": {"20": {"user_id": 20}}}
+        joined = datetime(2026, 10, 1, 12, tzinfo=timezone.utc)
         wave = {"id": "wave", "targets": ["20"], "entries": {}}
         for guild_id in (100, 200):
-            self.store.save_joinwatch_history(guild_id, history)
+            self.store.record_first_join(guild_id, 20, joined)
             self.store.save_joinwatch_wave(guild_id, wave)
         self.store.record_wave_enrollment(100, now, "enrollment")
+        kept = self.store.all_observations(200)
 
         self.store.clear_joinwatch_auxiliary(100)
         self.store.clear_joinwatch_auxiliary(100)
 
-        self.assertEqual(self.store.get_joinwatch_history(100)["observations"], {})
+        self.assertEqual(self.store.all_observations(100)["observations"], {})
         self.assertEqual(self.store.get_joinwatch_waves(100), {})
-        self.assertEqual(self.store.get_joinwatch_history(200), history)
+        self.assertEqual(self.store.all_observations(200), kept)
         self.assertEqual(self.store.get_joinwatch_waves(200), {"wave": wave})
         self.assertEqual(self.store.get_daily_stats(100, now.date()).wave_guests, 1)
         self.assertEqual(self.store.get_case(case.case_id).case.case_id, case.case_id)
@@ -372,10 +378,114 @@ class DetectionCaseStoreTests(unittest.TestCase):
         reopened.initialize()
 
         self.assertEqual(reopened.get_joinwatch_waves(100), {})
-        self.assertEqual(reopened.get_joinwatch_history(100)["observations"], {})
+        self.assertEqual(reopened.all_observations(100)["observations"], {})
         self.assertEqual(reopened.get_daily_stats(100, now.date()).wave_guests, 1)
         self.assertFalse(reopened.record_wave_enrollment(100, now, "enrollment"))
         self.assertEqual(reopened.get_case(case.case_id).case.case_id, case.case_id)
+
+    def _rewind_joinwatch_history(self, documents: dict[int, str]) -> None:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
+            connection.execute("DROP TABLE IF EXISTS joinwatch_observations")
+            connection.execute("DROP TABLE IF EXISTS joinwatch_history_sources")
+            connection.execute("DROP TABLE IF EXISTS joinwatch_history_meta")
+            connection.execute("DELETE FROM joinwatch_history")
+            connection.executemany(
+                "INSERT INTO joinwatch_history (guild_id, history) VALUES (?, ?)",
+                tuple(documents.items()),
+            )
+            connection.execute("PRAGMA user_version = 7")
+
+    def test_joinwatch_history_copy_is_idempotent_and_keeps_the_json_document(self):
+        joined = "2026-10-01T12:00:00+00:00"
+        document = {
+            "version": 1,
+            "revision": 4,
+            "import_revision": 2,
+            "sources": [{
+                "source": "moderator export",
+                "generated_at": "2026-10-03T00:00:00+00:00",
+                "range_start": "2026-10-01T00:00:00+00:00",
+                "range_end": "2026-10-02T00:00:00+00:00",
+                "complete": True,
+            }],
+            "observations": {
+                "20": {"first_joined_at": joined, "imported": True},
+                "21": {"first_joined_at": "2026-10-01T12:05:00+00:00", "imported": False},
+            },
+        }
+        payload = json.dumps(document)
+        self._rewind_joinwatch_history({100: payload})
+        copied = DetectionCaseStore(self.database_path)
+        copied.initialize()
+        later = datetime(2026, 10, 4, tzinfo=timezone.utc)
+        self.assertTrue(copied.record_first_join(100, 22, later))
+        copied.initialize()
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.execute("PRAGMA user_version = 7")
+        DetectionCaseStore(self.database_path).initialize()
+
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            retained = connection.execute(
+                "SELECT history FROM joinwatch_history WHERE guild_id = ?",
+                (100,),
+            ).fetchone()[0]
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+        history = copied.all_observations(100)
+        self.assertEqual(retained, payload)
+        self.assertEqual(version, 8)
+        self.assertEqual(history["revision"], 5)
+        self.assertEqual(history["import_revision"], 2)
+        self.assertEqual(history["sources"], document["sources"])
+        self.assertEqual(set(history["observations"]), {"20", "21", "22"})
+        self.assertEqual(history["observations"]["20"]["first_joined_at"], joined)
+        self.assertTrue(history["observations"]["20"]["imported"])
+        self.assertFalse(history["observations"]["22"]["imported"])
+
+    def test_joinwatch_history_copy_failure_keeps_the_json_document_in_service(self):
+        payload = "{not json"
+        self._rewind_joinwatch_history({100: payload})
+        with self.assertRaisesRegex(RuntimeError, "detection case storage migration 7 failed"):
+            DetectionCaseStore(self.database_path).initialize()
+
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            retained = connection.execute(
+                "SELECT history FROM joinwatch_history WHERE guild_id = ?",
+                (100,),
+            ).fetchone()[0]
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            observations = connection.execute(
+                "SELECT name FROM sqlite_master WHERE name = 'joinwatch_observations'"
+            ).fetchone()
+        self.assertEqual(retained, payload)
+        self.assertEqual(version, 7)
+        self.assertIsNone(observations)
+
+    def test_joinwatch_import_keeps_the_earliest_join_and_is_idempotent(self):
+        source = {
+            "source": "moderator export",
+            "generated_at": "2026-10-03T00:00:00+00:00",
+            "range_start": "2026-10-01T00:00:00+00:00",
+            "range_end": "2026-10-02T00:00:00+00:00",
+            "complete": False,
+        }
+        later = {"sources": [source], "observations": {
+            "20": {"first_joined_at": "2026-10-01T00:03:00+00:00", "imported": True},
+        }}
+        earlier = {"sources": [source], "observations": {
+            "20": {"first_joined_at": "2026-10-01T00:01:00+00:00", "imported": True},
+        }}
+        first = self.store.import_observations(100, later)
+        second = self.store.import_observations(100, earlier)
+        third = self.store.import_observations(100, earlier)
+        self.assertEqual(first["total"], 1)
+        self.assertEqual(second["revision"], first["revision"] + 1)
+        self.assertEqual(third["revision"], second["revision"])
+        self.assertEqual(third["total"], 1)
+        self.assertEqual(
+            self.store.get_joinwatch_observation(100, 20)["first_joined_at"],
+            "2026-10-01T00:01:00+00:00",
+        )
+        self.assertEqual(len(self.store.all_observations(100)["sources"]), 1)
 
     def test_case_subject_identity_survives_store_restart(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
@@ -566,7 +676,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertIn("description", columns)
         self.assertIn("spoiler", columns)
         self.assertEqual(row, ("legacy.png", None, 0))
-        self.assertEqual(version, 7)
+        self.assertEqual(version, 8)
 
     def test_projection_endpoint_survives_store_restart(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)

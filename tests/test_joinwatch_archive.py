@@ -12,7 +12,16 @@ class VerificationArchiveTests(unittest.TestCase):
             store = DetectionCaseStore(Path(directory) / "cases.sqlite")
             store.initialize()
             record = {"first_joined_at": "2026-10-01T12:00:00+00:00", "imported": True}
-            store.save_joinwatch_history(10, {"observations": {"20": record}})
+            store.import_observations(10, {
+                "sources": [{
+                    "source": "archive",
+                    "generated_at": "2026-10-03T00:00:00+00:00",
+                    "range_start": "2026-10-01T00:00:00+00:00",
+                    "range_end": "2026-10-02T00:00:00+00:00",
+                    "complete": True,
+                }],
+                "observations": {"20": record},
+            })
             self.assertEqual(store.get_joinwatch_observation(10, 20), record)
             self.assertIsNone(store.get_joinwatch_observation(10, 21))
             self.assertIsNone(store.get_joinwatch_observation(11, 20))

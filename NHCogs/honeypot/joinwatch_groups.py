@@ -280,10 +280,7 @@ class JoinwatchGroups:
         return self._locks.setdefault(guild.id, asyncio.Lock())
 
     async def read_history(self, guild):
-        return await asyncio.to_thread(self.cog._case_store.get_joinwatch_history, guild.id)
-
-    async def _save_history(self, guild, history):
-        await asyncio.to_thread(self.cog._case_store.save_joinwatch_history, guild.id, history)
+        return await asyncio.to_thread(self.cog._case_store.all_observations, guild.id)
 
     async def _read_criteria(self, guild) -> GroupCriteria:
         cfg = self.cog.config.guild(guild)
@@ -300,32 +297,29 @@ class JoinwatchGroups:
         if utc_timestamp(normalized["sources"][0]["generated_at"]) > (now or datetime.now(timezone.utc)):
             raise ValueError("History generation date is in the future")
         async with self._lock(guild):
-            existing = await self.read_history(guild)
-            merged = merge_history(existing, normalized)
-            if merged != existing:
-                merged["import_revision"] = existing.get("import_revision", 0) + 1
-            await self._save_history(guild, merged)
-        return {"imported": len(normalized["observations"]), "total": len(merged["observations"]),
-                "revision": merged["revision"], **normalized["sources"][0]}
+            return await asyncio.to_thread(
+                self.cog._case_store.import_observations, guild.id, normalized
+            )
 
     async def observe(self, member, *, now=None) -> tuple[int, ...]:
         observed = now or datetime.now(timezone.utc)
         # Use the event time. Current joined_at cannot prove a first historical join.
         guild = member.guild
         async with self._lock(guild):
-            history = await self.read_history(guild)
-            key = str(member.id)
-            if key in history["observations"]:
+            inserted = await asyncio.to_thread(
+                self.cog._case_store.record_first_join, guild.id, member.id, observed
+            )
+            if not inserted or not await self.cog.config.guild(guild).joinwatch_groups_enabled():
                 return ()
-            incoming = empty_history()
-            incoming["observations"][key] = {"first_joined_at": observed.isoformat(), "imported": False}
-            history = merge_history(history, incoming)
-            await self._save_history(guild, history)
-        if not await self.cog.config.guild(guild).joinwatch_groups_enabled():
-            return ()
-        criteria = await self.criteria(guild)
-        earliest = observed - timedelta(minutes=criteria.join_window_minutes)
-        rows = tuple(row for row in history_observations(history) if row.first_joined_at >= earliest)
+            criteria = await self._read_criteria(guild)
+            earliest = observed - timedelta(minutes=criteria.join_window_minutes)
+            window = await asyncio.to_thread(
+                self.cog._case_store.observations_since, guild.id, earliest
+            )
+        rows = tuple(
+            JoinObservation(user_id, utc_timestamp(stamp), created_at(user_id))
+            for user_id, stamp in window
+        )
         trigger = JoinObservation(member.id, observed, created_at(member.id))
         return match_cohort(rows, trigger, criteria)
 
@@ -350,23 +344,13 @@ class JoinwatchGroups:
     async def prune(self, guild, *, now=None) -> int:
         cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=LIVE_HISTORY_RETENTION_DAYS)
         async with self._lock(guild):
-            history = await self.read_history(guild)
-            keys = [uid for uid, row in history["observations"].items()
-                    if not row.get("imported") and utc_timestamp(row["first_joined_at"]) < cutoff]
-            for uid in keys:
-                del history["observations"][uid]
-            if keys:
-                history["revision"] += 1
-                await self._save_history(guild, history)
-            return len(keys)
+            return await asyncio.to_thread(
+                self.cog._case_store.prune_live_observations, guild.id, cutoff
+            )
 
     async def delete_user(self, guild, user_id) -> None:
         async with self._lock(guild):
-            history = await self.read_history(guild)
-            if history["observations"].pop(str(user_id), None) is not None:
-                history["revision"] += 1
-                history["import_revision"] = history.get("import_revision", 0) + 1
-                await self._save_history(guild, history)
+            await asyncio.to_thread(self.cog._case_store.delete_observation, guild.id, user_id)
 
     async def delete_guild(self, guild) -> None:
         async with self._lock(guild):

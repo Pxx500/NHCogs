@@ -52,7 +52,7 @@ class JoinwatchWaves:
         return await asyncio.to_thread(self.cog._case_store.get_joinwatch_waves, guild.id)
 
     async def _history(self, guild):
-        return await asyncio.to_thread(self.cog._case_store.get_joinwatch_history, guild.id)
+        return await asyncio.to_thread(self.cog._case_store.all_observations, guild.id)
 
     async def _save(self, guild, record):
         await asyncio.to_thread(self.cog._case_store.save_joinwatch_wave, guild.id, record)

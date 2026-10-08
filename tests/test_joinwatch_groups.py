@@ -23,12 +23,11 @@ class _Value:
         self.value = copy.deepcopy(value)
 
 
-def _history_cog(cfg, store):
-    database = SimpleNamespace(
-        get_joinwatch_history=lambda _: copy.deepcopy(store.value),
-        save_joinwatch_history=lambda _, history: setattr(store, "value", copy.deepcopy(history)),
-    )
-    return SimpleNamespace(config=SimpleNamespace(guild=lambda _: cfg), _case_store=database)
+def _history_store(directory):
+    cases = importlib.import_module("NHCogs.honeypot.detection_cases")
+    store = cases.DetectionCaseStore(Path(directory) / "history.sqlite")
+    store.initialize()
+    return store
 
 
 class JoinwatchGroupTests(unittest.TestCase):
@@ -115,21 +114,31 @@ class JoinwatchHistoryTests(unittest.IsolatedAsyncioTestCase):
             with _isolated_honeypot_modules(Path(directory)):
                 groups = importlib.import_module("NHCogs.honeypot.joinwatch_groups")
                 now = datetime(2026, 10, 3, tzinfo=timezone.utc)
-                history = groups.empty_history()
-                history["observations"] = {
-                    "1": {"first_joined_at": (now - timedelta(days=91)).isoformat(), "imported": True},
-                    "2": {"first_joined_at": (now - timedelta(days=91)).isoformat(), "imported": False},
-                    "3": {"first_joined_at": (now - timedelta(hours=23)).isoformat(), "imported": False},
-                }
-                store = _Value(history)
+                store = _history_store(directory)
+                store.import_observations(123, {
+                    "sources": [{
+                        "source": "kept",
+                        "generated_at": now.isoformat(),
+                        "range_start": (now - timedelta(days=120)).isoformat(),
+                        "range_end": now.isoformat(),
+                        "complete": True,
+                    }],
+                    "observations": {
+                        "1": {"first_joined_at": (now - timedelta(days=91)).isoformat(), "imported": True},
+                    },
+                })
+                store.record_first_join(123, 2, now - timedelta(days=91))
+                store.record_first_join(123, 3, now - timedelta(hours=23))
                 guild = SimpleNamespace(id=123)
-                cog = _history_cog(SimpleNamespace(), store)
+                cog = SimpleNamespace(config=SimpleNamespace(guild=lambda _: SimpleNamespace()), _case_store=store)
                 owner = groups.JoinwatchGroups(cog)
+                before = store.all_observations(123)["import_revision"]
                 self.assertEqual(await owner.prune(guild, now=now), 1)
-                self.assertEqual(set((await store())["observations"]), {"1", "3"})
+                self.assertEqual(set(store.all_observations(123)["observations"]), {"1", "3"})
                 await owner.delete_user(guild, 1)
-                self.assertEqual(set((await store())["observations"]), {"3"})
-                self.assertEqual((await store())["import_revision"], 1)
+                document = store.all_observations(123)
+                self.assertEqual(set(document["observations"]), {"3"})
+                self.assertEqual(document["import_revision"], before + 1)
 
     async def test_observed_joins_survive_owner_restart_and_rejoin_never_inflates_cohort(self):
         with TemporaryDirectory() as directory:
@@ -143,7 +152,9 @@ class JoinwatchHistoryTests(unittest.IsolatedAsyncioTestCase):
                                       joinwatch_groups_join_window_minutes=_Value(15),
                                       joinwatch_groups_creation_distance_hours=_Value(6))
                 guild = SimpleNamespace(id=123)
-                cog = _history_cog(cfg, _Value(groups.empty_history()))
+                store = _history_store(directory)
+                store.record_first_join(guild.id, base + 9, now - timedelta(days=2))
+                cog = SimpleNamespace(config=SimpleNamespace(guild=lambda _: cfg), _case_store=store)
                 owner = groups.JoinwatchGroups(cog)
                 first = SimpleNamespace(id=base, guild=guild)
                 second = SimpleNamespace(id=base + 1, guild=guild)
@@ -152,5 +163,16 @@ class JoinwatchHistoryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await owner.observe(second, now=now + timedelta(minutes=3)), ())
                 restarted = groups.JoinwatchGroups(cog)
                 self.assertEqual(await restarted.observe(first, now=now + timedelta(minutes=4)), ())
-                self.assertEqual(await restarted.observe(third, now=now + timedelta(minutes=5)), (base, base + 1, base + 2))
+                matched = await restarted.observe(third, now=now + timedelta(minutes=5))
+                self.assertEqual(matched, (base, base + 1, base + 2))
+                self.assertNotIn(base + 9, matched)
+                self.assertEqual(
+                    store.observations_since(guild.id, now - timedelta(minutes=15)),
+                    (
+                        (base, now.isoformat()),
+                        (base + 1, (now + timedelta(minutes=3)).isoformat()),
+                        (base + 2, (now + timedelta(minutes=5)).isoformat()),
+                    ),
+                )
+                self.assertEqual(store.get_joinwatch_observation(guild.id, base)["first_joined_at"], now.isoformat())
                 self.assertEqual((await restarted.read_history(guild))["import_revision"], 0)
