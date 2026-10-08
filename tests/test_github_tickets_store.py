@@ -236,6 +236,44 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(activated)
         return await self.store.get_ticket(ticket.ticket_id)
 
+    async def test_cancel_pending_automatic_ping_preserves_schedule_and_guards_target(self):
+        await self.store.initialize()
+        for automatic in (False, True):
+            with self.subTest(automatic=automatic):
+                ticket = await self._create_open_ticket(next_action_at=self.now)
+                await self.store.reserve_ping(
+                    ticket.ticket_id, target_user_id=500,
+                    presence_tier=models.PresenceTier.IDLE if automatic else None,
+                    automatic=automatic, reserved_at=self.now,
+                    response_deadline=self.now + timedelta(minutes=5), maximum_pings=3,
+                )
+                before = await self.store.get_ticket(ticket.ticket_id)
+                self.assertFalse(await self.store.cancel_pending_automatic_ping(
+                    ticket.ticket_id, 600, self.now,
+                ))
+                self.assertEqual(await self.store.get_ticket(ticket.ticket_id), before)
+                self.assertEqual(await self.store.cancel_pending_automatic_ping(
+                    ticket.ticket_id, 500, self.now,
+                ), automatic)
+                restarted = store_module.GitHubTicketsStore(self.path)
+                await restarted.initialize()
+                current = await restarted.get_ticket(ticket.ticket_id)
+                if automatic:
+                    for field in (
+                        "pending_target_id", "pending_presence_tier", "pending_ping_automatic",
+                        "pending_ping_reserved_at", "pending_response_deadline",
+                    ):
+                        self.assertIsNone(getattr(current, field))
+                    self.assertEqual(current.next_action, before.next_action)
+                    self.assertEqual(current.next_action_at, before.next_action_at)
+                    self.assertEqual(current.ping_count, 0)
+                    self.assertEqual(await restarted.list_pings(ticket.ticket_id), ())
+                    self.assertFalse(await restarted.cancel_pending_automatic_ping(
+                        ticket.ticket_id, 500, self.now,
+                    ))
+                else:
+                    self.assertEqual(current, before)
+
     async def test_candidate_history_batches_all_persisted_facts_in_candidate_order(self):
         await self.store.initialize()
         rendering = await self.store.add_category(10, "rendering", self.now)

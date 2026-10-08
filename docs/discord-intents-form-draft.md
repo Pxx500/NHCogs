@@ -1,6 +1,25 @@
 # Discord intent form draft
 
-Updated 8 October 2026. This is a draft for human review. Do not submit it unchanged. Confirm the running application, all loaded cogs, the privacy policy, retention, and demonstration links. The repository fixes have not yet been deployed.
+Updated 8 October 2026 after creation of PR #149. This is a draft for human review. Do not submit it unchanged. Confirm the running application, all loaded cogs, the privacy policy, retention, and demonstration links. The PR is open and its fixes have not been confirmed on production.
+
+## Choices for the original screenshots
+
+These choices describe the patched NHCogs features. Verify deployment and all other loaded cogs before using them for the whole running application.
+
+| Screenshot | Field | Choice |
+|---|---|---|
+| 1 | Public Privacy Policy | Yes only with a complete public policy URL. Currently unconfirmed |
+| 1 | Server Members Intent | Select if the described verification, sticky-role, or member-role features are enabled |
+| 1 | Presence Intent | Select if availability-based automatic reviewer routing is enabled |
+| 1 | Message Content Intent | Select if passive message and attachment moderation is enabled |
+| 2 | API Data off-platform | Yes |
+| 3 | Presence opt-out | Yes for the patched automatic-routing feature. Confirm the rest of the application |
+| 3 | User activity off-platform | Yes |
+| 4 | Message Content opt-out | No for a general moderation opt-out |
+| 4 | Message Content off-platform | Yes |
+| 4 | ML or AI training | No for the reviewed implementation and declared operator use. Confirm other cogs and processes |
+
+Every screenshot's explanation and demonstration field is covered below. All demonstration URLs and the public policy URL remain to be supplied. A No opt-out answer or Yes storage answer is not itself a compliance violation.
 
 ## Application Details
 
@@ -19,7 +38,9 @@ Before use, remove disabled features and add relevant functionality from any oth
 
 No existing public policy URL was found in the original repository. Check for an externally published policy. Select Yes only when an accurate policy is publicly accessible, linked in Developer Portal, and accessible from the bot.
 
-The [policy draft](privacy-policy-draft.md) still needs operator and contact information, confirmed production configuration, and approved retention details.
+The existing end_user_data_statement in NHCogs/info.json is part of the data disclosure. Red also provides [p]mydata 3rdparty to display loaded extensions' statements and [p]mydata forgetme for user requests, subject to the running bot's settings. Confirm that these commands work for ordinary users.
+
+The [policy draft](privacy-policy-draft.md) still needs the final operator and manual-contact details, confirmed production configuration, and approved retention descriptions. The requirement is a complete and accessible policy, not a particular file format. Confirm the public URL and its Portal configuration before selecting Yes.
 
 ## Server Members Intent
 
@@ -53,7 +74,7 @@ Our pull-request review workflow uses current availability to choose an authoriz
 
 The NHCogs routing feature reads status only after profile opt-in, category, permissions, and ticket-exclusion checks. It does not read game or activity names or build a continuous online-time history. The selected reviewer's status at notification time is stored locally with the ticket ping and deadline.
 
-Disabling automatic notifications or clearing the profile stops future presence reads for this routing feature. Existing notification history is handled separately through the data-request process.
+Users can disable automatic notifications or clear their developer profile to stop new automatic selections using their presence. Before sending an automatic notification, the bot checks current eligibility again and cancels an unsent queued notification if the reviewer opted out or no longer qualifies. A notification whose sending is already underway may still complete. Existing notification history is handled separately through the data-request process.
 
 ### Demonstration
 
@@ -87,13 +108,15 @@ The 14-day message registry retains identifiers, timestamps, pin state, author m
 
 ### Machine learning or AI training
 
+Recommended dropdown selection for the reviewed NHCogs implementation and the operator's stated use: No. Confirm that other loaded cogs and operator processes also do not train models on API message data.
+
 The operator states that message data is not used for AI training. The reviewed detector hashes images and compares them with moderator-labelled references. It derives a similarity threshold from distances among those examples. No LLM or neural-network training pipeline was found.
 
 Do not label hashing alone as AI training. Describe the implemented heuristic directly, and confirm that no other cog or operator process trains models on API message data before answering for the entire application.
 
 Technical description for the text field or a clarification request:
 
-Our local image-moderation feature computes SHA-256 and perceptual hashes and compares incoming images with moderator-labelled known-scam and false-positive references. It uses hash distances and a heuristic threshold, including calibration from those references. It does not contain an LLM or neural-network training pipeline. We retain the reference set to recognize recurring scam images and avoid false positives.
+We do not use Discord message data to train machine-learning or AI models. Our local image-moderation feature computes SHA-256 and perceptual hashes and compares incoming images with moderator-labelled known-scam and false-positive references. It uses hash distances and a heuristic threshold, including calibration from those reference distances. We retain the reference set to recognize recurring scam images and avoid false positives.
 
 This description does not establish how Discord classifies every form of adaptive calibration. Obtain a specific determination if that distinction affects the application. Merely selecting Yes does not grant permission.
 

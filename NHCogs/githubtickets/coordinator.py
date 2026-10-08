@@ -732,6 +732,31 @@ class TicketCoordinator:
             self._wake_deadlines()
         return result
 
+    async def _automatic_target_is_eligible(self, ticket: Ticket, target_user_id: int) -> bool:
+        return any(
+            candidate.user_id == target_user_id
+            and select_reviewer((candidate,)) is not None
+            for candidate in await self._get_candidates(ticket)
+        )
+
+    async def _reroute_unavailable_ping(
+        self,
+        ticket: Ticket,
+        reservation: PingReservation,
+        settings: GuildSettings,
+        now: datetime,
+    ) -> TicketResult:
+        cancelled = await self._store.cancel_pending_automatic_ping(
+            ticket.ticket_id, reservation.target_user_id, now,
+        )
+        if not cancelled:
+            return TicketResult(False, INACTIVE_TICKET)
+        self._locally_reserved_pings.discard(ticket.ticket_id)
+        current = await self._store.get_ticket(ticket.ticket_id)
+        if current is None:
+            return TicketResult(False, INACTIVE_TICKET)
+        return await self._process_due_ping(current, settings, now)
+
     async def _send_ping_effect(
         self,
         ticket: Ticket,
@@ -742,6 +767,10 @@ class TicketCoordinator:
         if ticket.thread_id is None:
             await self._delete_remaining_projection(ticket, thread_absent=True)
             return TicketResult(True)
+        if reservation.automatic and not await self._automatic_target_is_eligible(
+            ticket, reservation.target_user_id,
+        ):
+            return await self._reroute_unavailable_ping(ticket, reservation, settings, now)
         try:
             await self._projection.ping_reviewer(
                 ticket.thread_id,

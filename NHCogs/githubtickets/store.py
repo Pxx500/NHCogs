@@ -717,6 +717,21 @@ class GitHubTicketsStore:
                 updated_at,
             )
 
+    async def cancel_pending_automatic_ping(
+        self,
+        ticket_id: int,
+        expected_target_id: int,
+        updated_at: datetime,
+    ) -> bool:
+        """Clear an unsent automatic target while retaining the routing schedule."""
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._cancel_pending_automatic_ping_sync,
+                ticket_id,
+                expected_target_id,
+                updated_at,
+            )
+
     async def exhaust_due_routing(
         self,
         ticket_id: int,
@@ -1906,6 +1921,26 @@ class GitHubTicketsStore:
                 _serialize_datetime(updated_at),
                 ticket_id,
             ),
+        )
+        return changed > 0
+
+    def _cancel_pending_automatic_ping_sync(
+        self,
+        ticket_id: int,
+        expected_target_id: int,
+        updated_at: datetime,
+    ) -> bool:
+        changed = self._update_ticket_state(
+            """
+            UPDATE tickets
+            SET pending_target_id = NULL, pending_presence_tier = NULL,
+                pending_ping_automatic = NULL, pending_ping_reserved_at = NULL,
+                pending_response_deadline = NULL,
+                updated_at = ?, transition_version = transition_version + 1
+            WHERE ticket_id = ? AND state = 'open'
+                AND pending_target_id = ? AND pending_ping_automatic = 1
+            """,
+            (_serialize_datetime(updated_at), ticket_id, expected_target_id),
         )
         return changed > 0
 

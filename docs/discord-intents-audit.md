@@ -32,6 +32,8 @@ Automatic GitHubTickets routing reads status only for reviewers who have opted i
 
 Disabling automatic pings or clearing the profile prevents future status reads for this routing feature. Existing ticket history is handled separately. The selected reviewer's status at notification time remains in local SQLite with the notification and deadline.
 
+The post-PR review reproduced a queued automatic notification being sent after profile opt-out or clearing. The correction rechecks eligibility immediately before a new send, cancels only the unsent automatic reservation, and keeps the schedule and budget so another eligible reviewer can be selected. Previously sent notifications are reconciled before this check to avoid duplicate sends. A send already underway may complete.
+
 ## What the changes establish
 
 The patches address concrete gaps in attribution deletion, persona deletion, cross-guild export isolation, and unnecessary presence processing. They do not establish that the entire production application is compliant.
@@ -40,7 +42,7 @@ The regression tests cover requester types, access preservation, persona ownersh
 
 Final validation:
 
-- python -m pytest tests -q -n 4 --dist loadscope: 1697 passed, 1 skipped, 435 subtests passed
+- python -m pytest tests -q -n 4 --dist loadscope after the post-PR correction: 1701 passed, 1 skipped, 442 subtests passed
 - ruff check .: passed
 - git diff --check: passed
 - mypy: 147 errors in 31 files, advisory under the repository's CI configuration. None were reported in the new CustomCommands, Bot Proxy, Presence, or scoped-export methods. Existing imagescan errors occur outside the changed export method
@@ -48,6 +50,8 @@ Final validation:
 The first full run found an incomplete Gate privacy test fixture, which now initializes the new Bot Proxy store as a real cog does. An existing capture-start test with a 50 ms timeout also failed under load. It passed in isolation and in the second full parallel run. Its assertions and timing were not weakened.
 
 An independent review found no blocker in the Bot Proxy deletion lock order, session-creation gate, stale callback checks, or attribution sweep.
+
+PR #149 was created with the approved title and body. The initial GitHub quality check passed. The post-PR review also reproduced and corrected unsent automatic notifications bypassing profile opt-out. Its regression coverage includes profile clearing, category or permission changes, replacement reviewers, and reconciliation of already sent notifications without duplicates.
 
 ## Corrections to the initial audit
 
@@ -69,9 +73,15 @@ The operator needs a specific answer from Discord about retaining ban reasons, s
 
 No new broad deletion or removal of sanctions is implemented.
 
+The framework's ordinary-request contract explicitly allows essential operational data to remain. Its stricter request mode still permits minimal anti-abuse IDs and timestamps, and owner requests may avoid operational hazards while offering another way to handle the request. This supports reviewing retention by purpose instead of interpreting every request as a blanket purge. It is a Red framework contract, not proof of an exception to Discord's own Terms.
+
+The existing Honeypot hook selects all of a user's detection cases for deletion regardless of requester type. NHModeration likewise invokes history anonymization without distinguishing request types and can remove reasons when the person is a target, executor, or credited moderator. These behaviors predate PR #149. They are a concrete follow-up against the requirement to preserve necessary moderation reasons and evidence, rather than a new instruction to erase more data.
+
 ### Public privacy policy and contact
 
 The repository already has an end_user_data_statement in NHCogs/info.json and cog metadata. Those existing disclosures were updated with the implemented controls. They are the basis for the application's policy, rather than evidence that no data disclosure exists.
+
+Red provides a request route already: [p]mydata forgetme. It can also display loaded extensions' declarations through [p]mydata 3rdparty. Their production availability and bot settings remain unconfirmed. A new email address is not the only possible way to provide an accessible request route. A private manual contact is still useful for corrections, disputes, and requests that the automatic hook does not resolve.
 
 No public policy URL or private data-request contact was found in the original repository. A policy may exist elsewhere and needs administrator confirmation.
 
@@ -105,7 +115,7 @@ Reference retention must remain transparent. It should not be described as an au
 | Message Content justification | Passive moderation of ordinary messages and attachments, beyond what interactions or AutoMod can supply |
 | Message Content opt-out | No confirmed general per-user exemption from moderation |
 | Message Content off-platform | Yes, selected evidence, reference images, fingerprints, custom responses, and Proxy content are stored locally |
-| ML or AI training | No LLM or neural training pipeline was found. Describe deterministic hashes, reference matching, and heuristic calibration instead of inferring AI training from variable names |
+| ML or AI training | No for the reviewed implementation and declared operator use, subject to checking other cogs and processes. Describe deterministic hashes, reference matching, and heuristic calibration accurately |
 | Public policy | Pending administrator confirmation, contact, publication, and Portal configuration |
 | Demo links | Still required. No demonstration URLs were supplied |
 
@@ -126,3 +136,5 @@ The [English form draft](discord-intents-form-draft.md) must be checked against 
 [Developer Terms, section 5](https://support-dev.discord.com/hc/en-us/articles/8562894815383-Discord-Developer-Terms-of-Service) covers privacy policies, deletion requests, and data security. [Developer Policy](https://support-dev.discord.com/hc/en-us/articles/8563934450327-Discord-Developer-Policy) covers necessary uses, mining and scraping, and ML training restrictions.
 
 Official sources were fetched from docs.discord.com and the Discord Help Center article API on 8 October 2026.
+
+[Red's end-user data documentation](https://docs.discord.red/en/stable/red_core_data_statement.html) and the [Cog request contract](https://github.com/Cog-Creators/Red-DiscordBot/blob/V3/develop/redbot/core/commands/commands.py) were also checked during the post-PR review.

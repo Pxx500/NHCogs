@@ -192,7 +192,9 @@ ticket. When the ping limit is exhausted, the ticket remains open for a manual c
 
 Automatic routing reads a member's presence only after checking their profile opt-in,
 category match, permissions, and ticket exclusions. Disabling automatic pings or clearing
-the profile prevents future presence reads and notifications for that routing feature.
+the profile prevents new automatic selections using presence. Unsent queued automatic
+notifications are checked again before sending and cancelled or routed to another eligible
+reviewer. A notification whose sending is already underway may still complete.
 The chosen reviewer's presence tier at notification time is stored with the ticket ping
 and response deadline in local SQLite. Changing the profile does not erase past ticket
 history. Red user-data deletion handles retained user records separately.

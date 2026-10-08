@@ -618,6 +618,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(RuntimeError, "controlled settlement failure"):
             await self.coordinator.process_due(ticket.ticket_id)
+        self.candidates = ()
         recovered = await self.coordinator.process_due(ticket.ticket_id)
 
         self.assertTrue(recovered.success)
@@ -626,6 +627,109 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             [call for call in self.projection.calls if call[0] == "ping_reviewer"],
             [("ping_reviewer", ticket.thread_id, 500, True)],
         )
+
+    async def current_profile_candidates(self, ticket):
+        profiles = await self.store.list_matching_profiles(ticket.guild_id, ticket.category_ids)
+        opted_in = {profile.user_id for profile in profiles}
+        return tuple(c for c in self.candidates if c.user_id in opted_in)
+
+    async def queued_automatic_retry(self):
+        ticket = await self.create_active()
+        await self.store.save_profile(
+            guild_id=10, user_id=500, github_username="reviewer",
+            category_ids=(self.category.category_id,), automatic_pings=True,
+            updated_at=self.now,
+        )
+        self.candidates = (self.candidate(500),)
+        self.coordinator._get_candidates = self.current_profile_candidates
+        self.now = ticket.next_action_at
+        self.projection.ping_error = RuntimeError("controlled send failure")
+        self.assertFalse((await self.coordinator.process_due(ticket.ticket_id)).success)
+        reserved = await self.store.get_ticket(ticket.ticket_id)
+        self.assertEqual(reserved.pending_target_id, 500)
+        self.projection.ping_error = None
+        self.projection.calls.clear()
+        self.now = reserved.next_action_at
+        return ticket
+
+    async def test_failed_automatic_ping_is_cancelled_if_profile_opts_out_or_is_cleared(self):
+        for clear_profile in (False, True):
+            with self.subTest(clear_profile=clear_profile):
+                ticket = await self.queued_automatic_retry()
+                if clear_profile:
+                    await self.store.delete_profile(10, 500)
+                else:
+                    await self.store.save_profile(
+                        guild_id=10, user_id=500, github_username="reviewer",
+                        category_ids=(self.category.category_id,), automatic_pings=False,
+                        updated_at=self.now,
+                    )
+                self.assertTrue((await self.coordinator.process_due(ticket.ticket_id)).success)
+
+                self.assertEqual(
+                    [call for call in self.projection.calls if call[0] == "ping_reviewer"], [],
+                )
+                current = await self.store.get_ticket(ticket.ticket_id)
+                self.assertEqual(current.state, models.TicketState.OPEN)
+                self.assertEqual(current.ping_count, 0)
+                self.assertIsNone(current.pending_target_id)
+                self.assertIsNone(current.pending_presence_tier)
+                self.assertEqual(await self.store.list_pings(ticket.ticket_id), ())
+
+    async def test_invalid_automatic_reservation_reroutes_to_another_eligible_reviewer(self):
+        ticket = await self.queued_automatic_retry()
+        await self.store.delete_profile(10, 500)
+        await self.store.save_profile(
+            guild_id=10, user_id=600, github_username="replacement",
+            category_ids=(self.category.category_id,), automatic_pings=True,
+            updated_at=self.now,
+        )
+        self.candidates = (
+            self.candidate(500), self.candidate(600, presence=models.PresenceTier.IDLE),
+        )
+
+        self.assertTrue((await self.coordinator.process_due(ticket.ticket_id)).success)
+
+        self.assertEqual(
+            [call for call in self.projection.calls if call[0] == "ping_reviewer"],
+            [("ping_reviewer", ticket.thread_id, 600, True)],
+        )
+        current = await self.store.get_ticket(ticket.ticket_id)
+        self.assertEqual(current.ping_count, 1)
+        self.assertEqual(current.current_target_id, 600)
+        pings = await self.store.list_pings(ticket.ticket_id)
+        self.assertEqual([ping.target_user_id for ping in pings], [600])
+        self.assertEqual(pings[0].presence_tier, models.PresenceTier.IDLE)
+        self.assertEqual(
+            pings[0].response_deadline,
+            self.now + timedelta(seconds=self.settings.idle_response_seconds),
+        )
+
+    async def test_automatic_retry_checks_categories_membership_and_permissions(self):
+        for change in ("categories", "membership", "permissions"):
+            with self.subTest(change=change):
+                ticket = await self.queued_automatic_retry()
+                if change == "categories":
+                    other = await self.store.add_category(10, "different", self.now)
+                    await self.store.save_profile(
+                        guild_id=10, user_id=500, github_username="reviewer",
+                        category_ids=(other.category_id,), automatic_pings=True,
+                        updated_at=self.now,
+                    )
+                elif change == "membership":
+                    self.candidates = ()
+                else:
+                    self.candidates = (replace(self.candidate(500), has_participant_role=False),)
+
+                self.assertTrue((await self.coordinator.process_due(ticket.ticket_id)).success)
+
+                self.assertEqual(
+                    [call for call in self.projection.calls if call[0] == "ping_reviewer"], [],
+                )
+                current = await self.store.get_ticket(ticket.ticket_id)
+                self.assertEqual(current.ping_count, 0)
+                self.assertIsNone(current.pending_target_id)
+                self.assertEqual(await self.store.list_pings(ticket.ticket_id), ())
 
     async def test_restart_reconciles_existing_ping_before_sending_again(self):
         ticket = await self.create_active()

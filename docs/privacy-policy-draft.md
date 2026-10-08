@@ -51,7 +51,7 @@ The operator must finalize retention and request handling before publication. Do
 
 ## Data requests and implemented controls
 
-Requests go to [PRIVATE_CONTACT]. Confirm the account and specify the data or feature concerned.
+Red provides [p]mydata 3rdparty to display loaded extensions' data statements and [p]mydata forgetme to request deletion. Confirm their availability and the bot's request settings before publication. Users can also contact [PRIVATE_CONTACT] for corrections, disputes, and requests requiring manual review. Confirm the account and specify the data or feature concerned.
 
 CustomCommands requests anonymize author and editor attribution in the current catalog, legacy configuration, and local migration artifacts. Shared command content, cooldowns, and current access configuration remain for ordinary requests.
 
@@ -63,6 +63,8 @@ Other NHCogs stores have existing deletion or anonymization hooks with feature-s
 
 A deletion request does not itself remove a Discord ban or replace the server's appeal process. Published messages and shared content may require separate review when they contain personal information.
 
+Red distinguishes ordinary user requests from stricter, owner, and deleted-account requests. Its documented ordinary-user behavior allows data essential to operation to remain. NHCogs moderation hooks must be reviewed against this distinction and the intended evidence-retention policy. This framework behavior does not establish a general exception to Discord's own Terms.
+
 New activity, command edits, or a newly opened workflow can create new records after a request. Data deletion is not a general opt-out from every future moderation action.
 
 ## Publication requirements
@@ -70,3 +72,5 @@ New activity, command edits, or a newly opened workflow can create new records a
 Replace every placeholder. Verify the description against production and establish the actual private request route. Publish the final document at a stable public URL, configure it in Developer Portal, and make it accessible from the bot.
 
 [Discord Developer Terms, section 5](https://support-dev.discord.com/hc/en-us/articles/8562894815383-Discord-Developer-Terms-of-Service) defines the application's policy, request-handling, and security obligations.
+
+[Red's end-user data documentation](https://docs.discord.red/en/stable/red_core_data_statement.html) describes the built-in data statements and user-request commands.
