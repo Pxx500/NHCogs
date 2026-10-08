@@ -801,3 +801,82 @@ class JoinWatchMigrationRaceTests(unittest.IsolatedAsyncioTestCase):
             saved = await state.read_row(cog, guild, 20, "pending_role")
             self.assertIsNotNone(saved)
             self.assertEqual(saved["incident_id"], "incident")
+    async def test_second_export_does_not_restore_a_deleted_member(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            state = honeypot.joinwatch_state
+            cog = _cog(honeypot, directory, _maps(pending={"20": _entry()}))
+            self.assertTrue(await state.cutover_guild(cog, 100))
+            guild = SimpleNamespace(id=100)
+            await state.export_live_state(cog, guild)
+            self.assertIsNone(cog._case_store.cutover_source(100))
+            deleted = asyncio.Event()
+
+            async def remove():
+                await state.delete_row(cog, guild, 20, "pending_role")
+                deleted.set()
+
+            async def export_again():
+                await deleted.wait()
+                return await state.export_live_state(cog, guild)
+
+            _removed, copied = await asyncio.gather(remove(), export_again())
+            self.assertFalse(copied)
+            self.assertIsNone(await state.read_row(cog, guild, 20, "pending_role"))
+    async def test_export_after_restore_leaves_config_unchanged(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            state = honeypot.joinwatch_state
+            entry = _entry()
+            cog = _cog(honeypot, directory, _maps(pending={"20": entry}))
+            self.assertTrue(await state.cutover_guild(cog, 100))
+            advanced = copy.deepcopy(entry)
+            advanced["stage"] = 2
+            cog._case_store.upsert(100, 20, "pending_role", advanced)
+            guild = SimpleNamespace(id=100)
+            restored = asyncio.Event()
+
+            async def restore():
+                copied = await state.restore_live_backup(cog, guild)
+                restored.set()
+                return copied
+
+            async def export_after():
+                await restored.wait()
+                return await state.export_live_state(cog, guild)
+
+            restored_ok, exported = await asyncio.gather(restore(), export_after())
+            self.assertTrue(restored_ok)
+            self.assertFalse(exported)
+            pending = cog.config.guilds[100]["joinwatch_pending_roles"]["20"]
+            self.assertEqual(pending["stage"], 1)
+            pending["stage"] = 3
+            self.assertFalse(await state.restore_live_backup(cog, guild))
+            self.assertEqual(cog.config.guilds[100]["joinwatch_pending_roles"]["20"]["stage"], 3)
+    async def test_export_command_says_when_config_is_already_live(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            state = honeypot.joinwatch_state
+            cog = _cog(honeypot, directory, _maps(pending={"20": _entry()}))
+            self.assertTrue(await state.cutover_guild(cog, 100))
+            guild = SimpleNamespace(id=100)
+            sent = []
+
+            async def send(message):
+                sent.append(message)
+
+            async def is_owner(_author):
+                return True
+
+            cog.bot.is_owner = is_owner
+            ctx = SimpleNamespace(author=SimpleNamespace(), guild=guild, send=send)
+            command = honeypot.Honeypot.debug_export_joinwatch
+            callback = getattr(command, "callback", command)
+            await callback(cog, ctx)
+            await state.delete_row(cog, guild, 20, "pending_role")
+            await callback(cog, ctx)
+            self.assertEqual(
+                sent,
+                [
+                    "JoinWatch live state is in Config again",
+                    "JoinWatch live state is already in Config",
+                ],
+            )
+            self.assertIsNone(await state.read_row(cog, guild, 20, "pending_role"))

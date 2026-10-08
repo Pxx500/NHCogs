@@ -1735,7 +1735,10 @@ class Honeypot(Cog):
         if is_owner is None or not await is_owner(ctx.author):
             await ctx.send("Only a bot owner can export JoinWatch live state")
             return
-        await joinwatch_state.export_live_state(self, ctx.guild)
+        copied = await joinwatch_state.export_live_state(self, ctx.guild)
+        if not copied:
+            await ctx.send("JoinWatch live state is already in Config")
+            return
         await ctx.send("JoinWatch live state is in Config again")
 
     @debug.group(name="imagescan", invoke_without_command=True)

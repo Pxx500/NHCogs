@@ -327,16 +327,26 @@ async def _release_to_config(cog, guild, maps) -> None:
 
 
 async def export_live_state(cog, guild) -> bool:
-    """Copy SQLite live rows back into Config, then clear the marker. See Honeypot stored data."""
+    """Copy SQLite live rows back into Config when SQLite is the source.
+
+    See Honeypot stored data. Returns false when Config is already live.
+    """
     async with _source_lock(cog):
+        if not await _sqlite_source(cog, guild.id):
+            return False
         maps = await asyncio.to_thread(cog._case_store.config_maps, int(guild.id))
         await _release_to_config(cog, guild, maps)
         return True
 
 
 async def restore_live_backup(cog, guild) -> bool:
-    """Write the one-time backup into Config and clear the marker. See Honeypot stored data."""
+    """Write the one-time backup into Config when SQLite is the source.
+
+    See Honeypot stored data.
+    """
     async with _source_lock(cog):
+        if not await _sqlite_source(cog, guild.id):
+            return False
         backup = await asyncio.to_thread(cog._case_store.live_backup, int(guild.id))
         if backup is None:
             return False
