@@ -605,7 +605,9 @@ class CaseRoleTests(CaseExpiryTestCase):
                 cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = self._config({"mute_role": 55})
                 cog._is_joinwatch_active_role = mock.AsyncMock(return_value=False)
-                appended = self._append_case(honeypot, cog, datetime.now(timezone.utc))
+                appended = self._append_case(
+                    honeypot, cog, datetime.now(timezone.utc) - timedelta(days=2)
+                )
                 ownership = cog._case_store.ensure_operation(
                     appended.case.case_id,
                     "role_apply",
@@ -652,7 +654,9 @@ class CaseRoleTests(CaseExpiryTestCase):
                 bot.get_guild = lambda guild_id: guild
                 cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = self._config({"mute_role": 55})
-                appended = self._append_case(honeypot, cog, datetime.now(timezone.utc))
+                appended = self._append_case(
+                    honeypot, cog, datetime.now(timezone.utc) - timedelta(days=2)
+                )
                 operation = cog._case_store.ensure_operation(
                     appended.case.case_id,
                     "role_apply",
@@ -664,7 +668,9 @@ class CaseRoleTests(CaseExpiryTestCase):
                 await cog._execute_detection_case_operation(
                     claimed, datetime.now(timezone.utc)
                 )
-                await cog.resolve_detection_case(appended.case.case_id, "expired")
+                self.assertTrue(
+                    await cog.resolve_detection_case(appended.case.case_id, "expired")
+                )
                 snapshot = cog._case_store.get_case(appended.case.case_id)
 
                 member.remove_roles.assert_not_awaited()
@@ -698,7 +704,9 @@ class CaseRoleTests(CaseExpiryTestCase):
                 cog = honeypot.Honeypot(bot, _operational_support())
                 cog.config = self._config({"mute_role": 55})
                 cog._is_joinwatch_active_role = mock.AsyncMock(return_value=False)
-                appended = self._append_case(honeypot, cog, datetime.now(timezone.utc))
+                appended = self._append_case(
+                    honeypot, cog, datetime.now(timezone.utc) - timedelta(days=2)
+                )
                 operation = cog._case_store.ensure_operation(
                     appended.case.case_id,
                     "role_apply",
@@ -788,7 +796,7 @@ class CaseRoleTests(CaseExpiryTestCase):
                 cog.config = self._config({"mute_role": 55})
                 cog._is_joinwatch_active_role = mock.AsyncMock(return_value=False)
                 now = datetime.now(timezone.utc)
-                appended = self._append_case(honeypot, cog, now)
+                appended = self._append_case(honeypot, cog, now - timedelta(days=2))
                 operation = cog._case_store.ensure_operation(
                     appended.case.case_id,
                     "role_apply",
@@ -817,7 +825,9 @@ class CaseRoleTests(CaseExpiryTestCase):
                 await cog._execute_detection_case_operation(
                     second, now + timedelta(seconds=1)
                 )
-                await cog.resolve_detection_case(appended.case.case_id, "expired")
+                self.assertTrue(
+                    await cog.resolve_detection_case(appended.case.case_id, "expired")
+                )
 
                 member.add_roles.assert_not_awaited()
                 member.remove_roles.assert_not_awaited()

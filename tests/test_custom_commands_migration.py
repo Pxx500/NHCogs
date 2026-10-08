@@ -303,13 +303,15 @@ class MigrationImportIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LegacyPrivacyTests(unittest.IsolatedAsyncioTestCase):
-    async def test_privacy_deletion_redacts_legacy_config_and_artifacts(self):
+    async def test_metadata_deletion_redacts_catalog_legacy_config_and_artifacts(self):
         legacy = {
             100: {
                 "commands": {
                     "hello": {
                         "author": {"id": 42, "name": "User"},
                         "editors": [7, 42],
+                        "response": "working response",
+                        "cooldowns": {"member": 60},
                     }
                 }
             }
@@ -362,8 +364,17 @@ class LegacyPrivacyTests(unittest.IsolatedAsyncioTestCase):
                 encoding="utf-8",
             )
 
-            await migration.redact_legacy_config(Config(), 42)
-            migration.redact_migration_artifacts(migration_root, 42)
+            store = catalog.CustomCommandCatalog(migration_root / "commands.sqlite")
+            await store.initialize()
+            created = await store.create(
+                guild_id=100, name="hello", author_id=42, author_name="User",
+                responses=(catalog.ResponseDraft("working response"),),
+                cooldowns={"member": 60}, access=catalog.AccessRules(user_ids=(42,)),
+            )
+            await migration.redact_custom_command_user_data(
+                store, Config(), migration_root, 42, redact_access=False,
+            )
+            stored = await store.get(100, "hello")
 
             backup = json.loads(
                 (artifact / "legacy-backup.json").read_text(encoding="utf-8")
@@ -379,6 +390,14 @@ class LegacyPrivacyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(record["author"]["id"], migration.DELETED_USER_ID)
             self.assertEqual(record["author"]["name"], migration.DELETED_USER_NAME)
             self.assertNotIn(42, record["editors"])
+            self.assertIn(7, record["editors"])
+            self.assertEqual(record["response"], "working response")
+            self.assertEqual(record["cooldowns"], {"member": 60})
+        self.assertEqual(stored.author_id, catalog.DELETED_USER_ID)
+        self.assertEqual(stored.author_name, catalog.DELETED_USER_NAME)
+        self.assertEqual(stored.access, created.access)
+        self.assertEqual(stored.responses, created.responses)
+        self.assertEqual(stored.cooldowns, created.cooldowns)
         self.assertEqual(
             report_record["author"]["id"],
             migration.DELETED_USER_ID,

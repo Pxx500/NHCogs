@@ -296,6 +296,121 @@ class BotProxyWorkflowManagerTests(unittest.IsolatedAsyncioTestCase):
 
         manager.workspace_channel.assert_not_awaited()
 
+    async def test_user_deletion_drains_admitted_write_and_closes_only_owned_sessions(self):
+        events = []
+        store = SimpleNamespace(
+            delete_user_data=mock.AsyncMock(side_effect=lambda _user: events.append("erase")),
+            remove_active_session=mock.AsyncMock(),
+        )
+        session = self._session(store=store)
+        session.thread.edit = mock.AsyncMock()
+        manager = session.manager
+        manager.sessions[session.active.session_id] = session
+        manager.registry.add(session.active)
+        other = SimpleNamespace(opener_id=21, finish=mock.AsyncMock())
+        manager.sessions["other"] = other
+        manager._session_sequences[(10, 20)] = 1
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def admitted_save():
+            async with manager.enabled_operation(session.guild):
+                entered.set()
+                await release.wait()
+                events.append("save")
+
+        save = asyncio.create_task(admitted_save())
+        await entered.wait()
+        deletion = asyncio.create_task(manager.delete_user_data(20))
+        await asyncio.sleep(0)
+        self.assertTrue(session._data_deleted)
+        store.delete_user_data.assert_not_awaited()
+        with self.assertRaisesRegex(workflow.WorkflowInputError, "being deleted"):
+            await manager.create_session(session.guild, session.moderator)
+        release.set()
+        await asyncio.gather(save, deletion)
+        self.assertEqual(events, ["save", "erase"])
+        self.assertEqual(session._terminal.status, workflow.SessionStatus.CANCELLED)
+        self.assertNotIn(session.active.session_id, manager.sessions)
+        self.assertNotIn((10, 20), manager._session_sequences)
+        self.assertIs(manager.sessions["other"], other)
+        other.finish.assert_not_awaited()
+        with self.assertRaisesRegex(workflow.WorkflowInputError, "user-data deletion"):
+            session.set_identity(workflow.ProxyIdentity(manager_module.IdentityType.BOT))
+
+    async def test_modal_loading_avatar_cannot_restore_persona_after_user_deletion(self):
+        store = SimpleNamespace(
+            create_character=mock.AsyncMock(), update_character=mock.AsyncMock(),
+            delete_user_data=mock.AsyncMock(), remove_active_session=mock.AsyncMock(),
+        )
+        session = self._session(store=store)
+        session.thread.edit = mock.AsyncMock()
+        session.manager.sessions[session.active.session_id] = session
+        session.manager.registry.add(session.active)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def load_avatar(_url):
+            entered.set()
+            await release.wait()
+
+        session.manager.load_avatar_url = load_avatar
+        modal = workflow.CharacterModal(session, save_preset=True)
+        modal.preset_name.value = "Guide"
+        modal.display_name.value = "Guide"
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=20), permissions=SimpleNamespace(manage_messages=True),
+            response=SimpleNamespace(defer=mock.AsyncMock(), is_done=lambda: True),
+            edit_original_response=mock.AsyncMock(),
+        )
+        submission = asyncio.create_task(modal.on_submit(interaction))
+        await entered.wait()
+        await session.manager.delete_user_data(20)
+        release.set()
+        await submission
+        store.create_character.assert_not_awaited()
+        store.update_character.assert_not_awaited()
+        self.assertIn("user-data deletion", interaction.edit_original_response.await_args.kwargs["content"])
+
+    async def test_user_deletion_rolls_back_session_creation_waiting_for_store(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def record_session(_record):
+            entered.set()
+            await release.wait()
+
+        store = SimpleNamespace(
+            record_active_session=mock.AsyncMock(side_effect=record_session),
+            remove_active_session=mock.AsyncMock(), delete_user_data=mock.AsyncMock(),
+        )
+        dashboard = SimpleNamespace(id=60, edit=mock.AsyncMock())
+        thread = SimpleNamespace(
+            id=50, send=mock.AsyncMock(return_value=dashboard), edit=mock.AsyncMock(),
+        )
+        launcher = SimpleNamespace(id=40, create_thread=mock.AsyncMock(return_value=thread))
+        workspace = _Workspace(launcher)
+        manager = manager_module.BotProxyWorkflowManager(
+            config=SimpleNamespace(guild=lambda _guild: SimpleNamespace(
+                bot_proxy_enabled=mock.AsyncMock(return_value=True),
+            )),
+            store=store, moderation_log=mock.AsyncMock(), error_reporter=mock.AsyncMock(),
+        )
+        manager.workspace_channel = mock.AsyncMock(return_value=workspace)
+        creation = asyncio.create_task(manager.create_session(
+            SimpleNamespace(id=10),
+            SimpleNamespace(id=20, mention="<@20>", display_name="Mod"),
+        ))
+        await entered.wait()
+        deletion = asyncio.create_task(manager.delete_user_data(20))
+        await asyncio.sleep(0)
+        release.set()
+        with self.assertRaisesRegex(workflow.WorkflowInputError, "being deleted"):
+            await creation
+        await deletion
+        self.assertEqual(manager.sessions, {})
+        self.assertEqual(manager.registry.sessions_for(10, 20), ())
+        store.remove_active_session.assert_awaited_once()
+        thread.edit.assert_awaited_once_with(archived=True, locked=True)
+        store.delete_user_data.assert_awaited_once_with(20)
+
     async def test_disabling_persists_before_closing_guild_sessions(self) -> None:
         events: list[str] = []
         setting = mock.AsyncMock(return_value=True)

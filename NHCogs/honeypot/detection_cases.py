@@ -25,6 +25,26 @@ JOINWATCH_LIVE_BACKUP_RETENTION_DAYS = 7
 _LIVE_KINDS = ("verified", "pending_role", "pending_assignment")
 _OPEN_KINDS = ("pending_role", "pending_assignment")
 _HISTORY_SOURCE_FIELDS = ("source", "generated_at", "range_start", "range_end", "complete")
+_CAPABILITY_WAIT_ERRORS = (
+    "Waiting for Gateway message_content data",
+    "Waiting for Gateway members data",
+    "Waiting for Gateway presences data",
+)
+_NO_CAPABILITY_WAIT = """NOT EXISTS (
+    SELECT 1 FROM detection_operations deferred_operation
+    WHERE deferred_operation.case_id = detection_cases.case_id
+      AND deferred_operation.status IN ('pending', 'running', 'failed')
+      AND deferred_operation.last_error IN (
+        'Waiting for Gateway message_content data',
+        'Waiting for Gateway members data',
+        'Waiting for Gateway presences data'
+      )
+)"""
+_NO_PENDING_CAPTURE = """NOT EXISTS (
+    SELECT 1 FROM detection_attachments pending_attachment
+    WHERE pending_attachment.case_id = detection_cases.case_id
+      AND pending_attachment.capture_status = 'pending'
+)"""
 
 
 def _execute_script(connection: sqlite3.Connection, script: str) -> None:
@@ -1082,6 +1102,16 @@ class DetectionCaseStore:
             "read_at": datetime.now(timezone.utc).isoformat(),
         }}
 
+    def redact_verification_user_context(self, user_id: int) -> None:
+        """Remove optional profile/activity snapshots, retaining verification facts."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                """UPDATE verification_incidents
+                   SET record = json_set(record, '$.profile', NULL, '$.activity', NULL)
+                   WHERE user_id = ?""",
+                (user_id,),
+            )
+
     def delete_verification_history(self, *, user_id: int | None = None, guild_id: int | None = None) -> None:
         if (user_id is None) == (guild_id is None):
             raise ValueError("specify exactly one privacy scope")
@@ -1820,6 +1850,25 @@ class DetectionCaseStore:
             )
             return result.rowcount
 
+    def redact_joinwatch_live_user_context(self, user_id: int) -> None:
+        """Clear optional live and rollback snapshots without changing backup age."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                """UPDATE joinwatch_live_state
+                   SET payload = json_set(payload, '$.history.profile', NULL,
+                                          '$.history.activity', NULL)
+                   WHERE user_id = ? AND json_type(payload, '$.history') = 'object'""",
+                (int(user_id),),
+            )
+            for kind in ("verified", "pending_role", "pending_assignment"):
+                path = f'$.{kind}."{int(user_id)}".history'
+                connection.execute(
+                    """UPDATE joinwatch_live_backup
+                       SET payload = json_set(payload, ?, NULL, ?, NULL)
+                       WHERE json_type(payload, ?) = 'object'""",
+                    (f"{path}.profile", f"{path}.activity", path),
+                )
+
     def record_daily_stat(
         self,
         guild_id: int,
@@ -2233,6 +2282,8 @@ class DetectionCaseStore:
         new_message: NewMessage,
         signals: tuple[DetectionSignal, ...],
         initial_operations: tuple[tuple[OperationType | str, str], ...] = (),
+        *,
+        admitted_at: datetime | None = None,
     ) -> AppendResult | None:
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -2309,7 +2360,9 @@ class DetectionCaseStore:
             case_created = case_row is None
             if case_created:
                 case_id = str(uuid4())
-                created_at = new_message.created_at.astimezone(timezone.utc)
+                created_at = (
+                    new_message.created_at if admitted_at is None else admitted_at
+                ).astimezone(timezone.utc)
                 connection.execute(
                     """INSERT INTO detection_cases
                        (case_id, guild_id, user_id, status, created_at, expires_at, needs_attention)
@@ -3165,6 +3218,19 @@ class DetectionCaseStore:
                 }
             )
 
+    def redact_user_case_context(self, user_id: int) -> None:
+        """Preserve case evidence and operations while erasing optional user context."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                """UPDATE detection_case_subjects
+                   SET display_name = NULL, avatar_url = NULL,
+                       account_created_at = NULL, guild_joined_at = NULL,
+                       account_snapshot = NULL, activity_summary = NULL,
+                       context_captured_at = NULL
+                   WHERE case_id IN (SELECT case_id FROM detection_cases WHERE user_id = ?)""",
+                (user_id,),
+            )
+
     def plan_user_case_deletion(self, user_id: int) -> tuple[tuple[int, str], ...]:
         """Durably tombstone every case owned by a user."""
         return self._plan_case_deletion("user", "user_id", user_id)
@@ -3511,13 +3577,80 @@ class DetectionCaseStore:
             )
             return cursor.rowcount == 1
 
+    def pause_case_for_unavailable_capture(self, case_id: str, now: datetime) -> bool:
+        """Persist a wait before automatic expiry can race the first worker."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            pending = connection.execute(
+                """SELECT 1 FROM detection_cases
+                   WHERE case_id = ? AND status IN ('pending', 'resolving')
+                     AND NOT EXISTS (
+                       SELECT 1 FROM detection_case_deletions deletion
+                       WHERE deletion.case_id = detection_cases.case_id
+                     )
+                     AND EXISTS (
+                       SELECT 1 FROM detection_attachments attachment
+                       WHERE attachment.case_id = detection_cases.case_id
+                         AND attachment.capture_status = 'pending'
+                     )""",
+                (case_id,),
+            ).fetchone()
+            if pending is None:
+                return False
+            connection.execute(
+                """UPDATE detection_operations
+                   SET last_error = 'Waiting for Gateway message_content data', updated_at = ?
+                   WHERE case_id = ? AND operation_type = 'message_process'
+                     AND status IN ('pending', 'running', 'failed')
+                     AND EXISTS (
+                       SELECT 1 FROM detection_attachments attachment
+                       WHERE attachment.case_id = detection_operations.case_id
+                         AND attachment.message_sequence = detection_operations.message_sequence
+                         AND attachment.capture_status = 'pending'
+                     )""",
+                (_to_timestamp(now), case_id),
+            )
+            return True
+
+    def resume_capability_deferred_case(
+        self, operation_id: str, token: str, now: datetime,
+    ) -> bool:
+        """Give recovered evidence a fresh review window once per durable wait."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            operation = connection.execute(
+                """SELECT operation.case_id FROM detection_operations operation
+                   JOIN detection_cases detection_case USING (case_id)
+                   WHERE operation.operation_id = ? AND operation.claim_token = ?
+                     AND operation.status = 'running'
+                     AND detection_case.status IN ('pending', 'resolving')
+                     AND operation.last_error IN (?, ?, ?)
+                     AND NOT EXISTS (
+                       SELECT 1 FROM detection_case_deletions deletion
+                       WHERE deletion.case_id = operation.case_id
+                     )""",
+                (operation_id, token, *_CAPABILITY_WAIT_ERRORS),
+            ).fetchone()
+            if operation is None:
+                return False
+            connection.execute(
+                "UPDATE detection_cases SET expires_at = MAX(expires_at, ?) WHERE case_id = ?",
+                (_to_timestamp(new_case_expiry(now)), operation["case_id"]),
+            )
+            connection.execute(
+                "UPDATE detection_operations SET last_error = NULL WHERE operation_id = ? AND claim_token = ?",
+                (operation_id, token),
+            )
+            return True
+
     def list_due_cases(self, now: datetime) -> tuple[CaseRecord, ...]:
         with closing(self._connect()) as connection:
             return tuple(
                 self._case_from_row(row)
                 for row in connection.execute(
-                    """SELECT * FROM detection_cases
+                    f"""SELECT * FROM detection_cases
                        WHERE status = 'pending' AND expires_at <= ?
+                         AND {_NO_CAPABILITY_WAIT}
                          AND NOT EXISTS (
                            SELECT 1 FROM detection_case_deletions deletion
                            WHERE deletion.case_id = detection_cases.case_id
@@ -3534,13 +3667,14 @@ class DetectionCaseStore:
             return tuple(
                 self._case_from_row(row)
                 for row in connection.execute(
-                    """SELECT * FROM detection_cases
+                    f"""SELECT * FROM detection_cases
                        WHERE ((status = 'pending' AND expires_at <= ?)
                           OR (
                             status = 'resolving'
                             AND expires_at <= ?
                             AND resolving_since <= ?
                           ))
+                         AND {_NO_CAPABILITY_WAIT}
                          AND NOT EXISTS (
                            SELECT 1 FROM detection_case_deletions deletion
                            WHERE deletion.case_id = detection_cases.case_id
@@ -3561,6 +3695,7 @@ class DetectionCaseStore:
         stale_before: datetime | None = None,
         *,
         require_terminal_captures: bool = False,
+        automatic_expiry: bool = False,
     ) -> ResolutionLease | None:
         now_value = _to_timestamp(now)
         token = str(uuid4())
@@ -3568,9 +3703,11 @@ class DetectionCaseStore:
             connection.execute("BEGIN IMMEDIATE")
             if stale_before is None:
                 result = connection.execute(
-                    """UPDATE detection_cases
+                    f"""UPDATE detection_cases
                        SET status = 'resolving', resolving_since = ?, resolving_token = ?
                         WHERE case_id = ? AND status = 'pending'
+                          AND (? = 0 OR (expires_at <= ? AND {_NO_CAPABILITY_WAIT}
+                                         AND {_NO_PENDING_CAPTURE}))
                           AND NOT EXISTS (
                             SELECT 1 FROM detection_case_deletions deletion
                             WHERE deletion.case_id = detection_cases.case_id
@@ -3580,13 +3717,16 @@ class DetectionCaseStore:
                             WHERE attachment.case_id = detection_cases.case_id
                               AND attachment.capture_status = 'pending'
                           ))""",
-                    (now_value, token, case_id, int(require_terminal_captures)),
+                    (now_value, token, case_id, int(automatic_expiry), now_value,
+                     int(require_terminal_captures)),
                 )
             else:
                 result = connection.execute(
-                    """UPDATE detection_cases
+                    f"""UPDATE detection_cases
                        SET status = 'resolving', resolving_since = ?, resolving_token = ?
                        WHERE case_id = ?
+                          AND (? = 0 OR (expires_at <= ? AND {_NO_CAPABILITY_WAIT}
+                                         AND {_NO_PENDING_CAPTURE}))
                           AND NOT EXISTS (
                             SELECT 1 FROM detection_case_deletions deletion
                             WHERE deletion.case_id = detection_cases.case_id
@@ -3608,6 +3748,8 @@ class DetectionCaseStore:
                         now_value,
                         token,
                         case_id,
+                        int(automatic_expiry),
+                        now_value,
                         int(require_terminal_captures),
                         _to_timestamp(stale_before),
                     ),
@@ -3634,17 +3776,31 @@ class DetectionCaseStore:
         *,
         decisions: Mapping[AttachmentKey, str] | None = None,
         final_operations: tuple[tuple[str, str], ...] = (),
+        automatic_expiry: bool = False,
     ) -> bool:
         if status not in (CaseStatus.RESOLVED, CaseStatus.EXPIRED):
             raise ValueError("status must be resolved or expired")
         with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             owned = connection.execute(
-                """SELECT 1 FROM detection_cases
-                   WHERE case_id = ? AND status = 'resolving' AND resolving_token = ?""",
-                (lease.case_id, lease.token),
+                f"""SELECT 1 FROM detection_cases
+                   WHERE case_id = ? AND status = 'resolving' AND resolving_token = ?
+                     AND (? = 0 OR (expires_at <= ? AND {_NO_CAPABILITY_WAIT}
+                                    AND {_NO_PENDING_CAPTURE}))
+                     AND NOT EXISTS (
+                       SELECT 1 FROM detection_case_deletions deletion
+                       WHERE deletion.case_id = detection_cases.case_id
+                     )""",
+                (lease.case_id, lease.token, int(automatic_expiry), _to_timestamp(now)),
             ).fetchone()
             if owned is None:
+                if automatic_expiry:
+                    connection.execute(
+                        """UPDATE detection_cases SET status = 'pending',
+                           resolving_since = NULL, resolving_token = NULL
+                           WHERE case_id = ? AND status = 'resolving' AND resolving_token = ?""",
+                        (lease.case_id, lease.token),
+                    )
                 return False
             metadata = json.dumps(
                 {
@@ -4465,6 +4621,27 @@ class DetectionCaseStore:
                 (operation_id,),
             ).fetchone()
             return row is not None and row[0] is not None
+
+    def defer_operation_for_capability(
+        self, operation_id: str, now: datetime, token: str, capability: str,
+    ) -> bool:
+        """Keep unavailable-data work pending without spending a retry attempt."""
+        with closing(self._connect()) as connection, connection:
+            result = connection.execute(
+                """UPDATE detection_operations
+                   SET status = 'pending', updated_at = ?, retry_at = ?,
+                       last_error = ?, attempts = MAX(attempts - 1, 0),
+                       claim_token = NULL, claimed_at = NULL
+                   WHERE operation_id = ? AND status = 'running' AND claim_token = ?""",
+                (
+                    _to_timestamp(now),
+                    _to_timestamp(now + timedelta(seconds=30)),
+                    f"Waiting for Gateway {capability} data",
+                    operation_id,
+                    token,
+                ),
+            )
+            return result.rowcount == 1
 
     def fail_operation(
         self, operation_id: str, token: str, error: str, now: datetime,

@@ -138,10 +138,14 @@ must use the same argument signature.
 
 The cog stores guild IDs, lowercase command names, response content, weights, response
 order and IDs, cooldown settings, revisions, author and editor IDs and names, and create
-or edit timestamps. Discord user-data deletion replaces matching author and editor
-identity with `Deleted User` while preserving the command content.
+or edit timestamps. User-data requests replace matching author and editor identity
+with `Deleted User` in the catalog, legacy configuration, and local migration artifacts.
+Command content, cooldowns, and configured access rules remain. Discord account deletion
+also redacts matching individual access IDs without opening a restricted command to others.
 
 Cooldown deadlines are kept only in memory and reset when the cog or bot restarts.
+These requests do not erase copies of migration files already downloaded or prevent
+new author or editor records when the user creates or edits another command.
 
 ## Permanent replacement and legacy cleanup
 

@@ -81,6 +81,36 @@ class BotProxyCharacterStoreTests(unittest.IsolatedAsyncioTestCase):
                 moderator_id=20,
             )
 
+    async def test_user_deletion_erases_owned_avatars_and_redacts_shared_updater(self):
+        for guild_id in (10, 11):
+            await self.store.create_character(
+                guild_id=guild_id, preset_name="Owned", display_name="Owned",
+                avatar_bytes=b"private avatar", avatar_media_type="image/png",
+                moderator_id=20,
+            )
+        shared = await self.store.create_character(
+            guild_id=10, preset_name="Shared", display_name="Shared",
+            avatar_bytes=b"shared avatar", avatar_media_type="image/png",
+            moderator_id=21,
+        )
+        await self.store.update_character(
+            guild_id=10, preset_name="Shared", expected_revision=shared.revision,
+            new_preset_name="Shared", display_name="Shared",
+            avatar_bytes=shared.avatar_bytes, avatar_media_type=shared.avatar_media_type,
+            moderator_id=20,
+        )
+        await self.store.delete_user_data(20)
+        await self.store.delete_user_data(20)
+        restarted = BotProxyStore(self.store._path)
+        await restarted.initialize()
+        for guild_id in (10, 11):
+            self.assertIsNone(await restarted.get_character(guild_id, "Owned"))
+        retained = await restarted.get_character(10, "Shared")
+        self.assertEqual(retained.created_by, 21)
+        self.assertEqual(retained.updated_by, bot_proxy_store.DELETED_USER_ID)
+        self.assertEqual(retained.avatar_bytes, b"shared avatar")
+        self.assertNotIn(b"private avatar", self.store._path.read_bytes())
+
     async def test_update_requires_current_revision(self) -> None:
         created = await self.store.create_character(
             guild_id=10,
@@ -192,6 +222,49 @@ class BotProxyLifecycleStoreTests(unittest.IsolatedAsyncioTestCase):
             [(event.action, event.revision, event.content) for event in events],
             [("sent", 1, "Original content")],
         )
+
+    async def test_user_deletion_preserves_message_linkage_and_redacts_all_attribution(self):
+        for moderator_id in (20, 21):
+            await self.store.record_active_session(ActiveSessionRecord(
+                session_id=f"session-{moderator_id}", guild_id=10,
+                moderator_id=moderator_id, launcher_channel_id=30,
+                launcher_message_id=moderator_id + 100, thread_id=moderator_id + 200,
+                dashboard_message_id=moderator_id + 300,
+            ))
+            await self.store.record_message(
+                guild_id=10, channel_id=30, message_id=moderator_id + 400,
+                moderator_id=moderator_id, sender=ProxySender.CHARACTER,
+                webhook_id=50, content="Server-owned message", reply_message_id=90,
+                character_preset_name="Guide", character_display_name="Guide",
+                avatar_sha256="digest",
+            )
+        await self.store.remember_webhook(10, 30, 50)
+        with self.store._connection() as connection, connection:
+            connection.execute(
+                "UPDATE bot_proxy_messages SET edited_by = ?, deleted_by = ?",
+                (20, 20),
+            )
+        await self.store.delete_user_data(20)
+        sessions = await self.store.list_active_sessions()
+        self.assertEqual([session.moderator_id for session in sessions], [21])
+        self.assertEqual(await self.store.get_webhook_id(10, 30), 50)
+        with self.store._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM bot_proxy_messages ORDER BY message_id"
+            ).fetchall()
+        self.assertEqual([row["moderator_id"] for row in rows], [0, 21])
+        for row in rows:
+            self.assertEqual(row["edited_by"], 0)
+            self.assertEqual(row["deleted_by"], 0)
+            self.assertEqual(row["content"], "Server-owned message")
+            self.assertEqual(row["original_content"], "Server-owned message")
+            self.assertEqual(row["reply_message_id"], 90)
+            self.assertEqual(row["webhook_id"], 50)
+        events = await self.store.list_message_events(10, 30, 420)
+        self.assertEqual(events[0].moderator_id, 0)
+        self.assertEqual(events[0].content, "Server-owned message")
+        other_events = await self.store.list_message_events(10, 30, 421)
+        self.assertEqual(other_events[0].moderator_id, 21)
 
 if __name__ == "__main__":
     unittest.main()

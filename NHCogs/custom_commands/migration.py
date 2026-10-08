@@ -270,8 +270,10 @@ async def redact_custom_command_user_data(
     legacy_config: Any,
     migration_root: Path,
     user_id: int,
+    *,
+    redact_access: bool = True,
 ) -> None:
-    await catalog.redact_user(user_id)
+    await catalog.redact_user(user_id, redact_access=redact_access)
     await redact_legacy_config(legacy_config, user_id)
     await asyncio.to_thread(redact_migration_artifacts, migration_root, user_id)
 

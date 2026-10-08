@@ -471,3 +471,41 @@ class ImageScanStore:
 
     def export_samples(self, guild_id: int) -> list[dict[str, Any]]:
         return self.rows(guild_id, include_inactive=True)
+
+    def export_guild_snapshot(
+        self, guild_id: int, destination: Path
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Create a fresh, standalone database containing only one guild's data."""
+        if destination.exists():
+            raise ValueError("Image scan snapshot destination already exists")
+        with closing(self._connect()) as source, closing(sqlite3.connect(destination)) as target:
+            apply_migrations(target, MIGRATIONS, label="imagescan export")
+            source.execute("BEGIN")
+            with target:
+                for table in (
+                    "imagescan_events",
+                    "imagescan_files",
+                    "imagescan_samples",
+                    "imagescan_model_state",
+                    "imagescan_profile",
+                ):
+                    predicate = (
+                        "event_id IN (SELECT event_id FROM imagescan_events WHERE guild_id = ?)"
+                        if table == "imagescan_files"
+                        else "guild_id = ?"
+                    )
+                    cursor = source.execute(
+                        f"SELECT * FROM {table} WHERE {predicate}", (str(guild_id),)
+                    )
+                    columns = ", ".join(f'"{column[0]}"' for column in cursor.description)
+                    placeholders = ", ".join("?" for _ in cursor.description)
+                    target.executemany(
+                        f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", cursor
+                    )
+        snapshot = ImageScanStore(destination, self.files_path)
+        rows = snapshot.export_rows(guild_id)
+        samples = snapshot.export_samples(guild_id)
+        # Keep the exported database readable without a separate WAL file.
+        with closing(sqlite3.connect(destination)) as connection:
+            connection.execute("PRAGMA journal_mode = DELETE")
+        return rows, samples

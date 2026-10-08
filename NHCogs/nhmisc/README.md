@@ -749,6 +749,13 @@ saved character avatars in `bot_proxy.sqlite`. Active workflow
 records contain only the IDs needed to disable and archive an interrupted session.
 Unpublished draft content remains in memory and is not restored after a restart.
 
+User-data requests remove character presets created by that user, including their
+saved avatars, and close their active Bot Proxy sessions. Matching updater, publisher,
+editor, and deleter identifiers in retained records are anonymized. Presets created by
+other users and server-owned published messages, content, and operational location IDs
+remain. Existing exports and backups are separate copies. The user can open a new
+session after the request has completed.
+
 Sticky roles are stored in a local SQLite database as guild IDs, user IDs, and role IDs.
 
 Role analytics stores guild IDs, current member user IDs, bot flags, and current role

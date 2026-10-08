@@ -56,6 +56,78 @@ def observation(
 
 
 class ModerationHistoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_requester_modes_keep_essential_history_and_other_targets_evidence(self):
+        for requester in ("user", "user_strict", "owner", "discord_deleted_user"):
+            with self.subTest(requester=requester), TemporaryDirectory() as directory:
+                path = Path(directory) / "moderation.sqlite"
+                history = NHModerationHistory(path)
+                await history.initialize()
+                await history.observe(replace(
+                    observation(
+                        source_kind="red_modlog", source_key="target-case",
+                        target_user_id=100, executor_user_id=55,
+                        credited_moderator_hint=55, attribution_hint="human_direct",
+                        reason="Evidence-backed restriction for Nickname",
+                    ),
+                    account_snapshot={"nickname": "Nickname"},
+                    activity_summary={"availability": "observed", "messages": 5},
+                ))
+                await history.observe(replace(
+                    observation(
+                        source_kind="red_modlog", source_key="moderator-case",
+                        target_user_id=200, executor_user_id=100,
+                        credited_moderator_hint=100, attribution_hint="human_direct",
+                        reason="Another member's essential ban evidence",
+                    ),
+                    account_snapshot={"nickname": "Other member"},
+                    activity_summary={"availability": "observed", "messages": 8},
+                ))
+                await history.delete_user_data(100, requester=requester)
+                reopened = NHModerationHistory(path)
+                await reopened.initialize()
+                exported = await reopened.export_history(1)
+                rows = {row["source_key"]: row for row in exported["observations"]}
+                own = rows["target-case"]
+                other = rows["moderator-case"]
+                self.assertIsNone(own["account_snapshot"])
+                self.assertIsNone(own["activity_summary"])
+                self.assertEqual(other["account_snapshot"], {"nickname": "Other member"})
+                self.assertEqual(other["activity_summary"]["messages"], 8)
+                self.assertEqual(own["occurred_at"], NOW.isoformat())
+                self.assertEqual(other["target_user_id"], "200")
+                if requester in {"user", "user_strict"}:
+                    self.assertEqual(own["target_user_id"], "100")
+                    self.assertEqual(other["executor_user_id"], "100")
+                    self.assertEqual(other["credited_moderator_hint"], "100")
+                    self.assertEqual(other["reason"], "Another member's essential ban evidence")
+                    self.assertEqual(own["reason"], "Evidence-backed restriction for Nickname")
+                else:
+                    self.assertIsNone(own["target_user_id"])
+                    self.assertIsNone(other["executor_user_id"])
+                    self.assertIsNone(other["credited_moderator_hint"])
+                    self.assertIsNone(own["reason"])
+                    self.assertIsNone(other["reason"])
+                actions = {
+                    action["observation_ids"][0]: action for action in exported["actions"]
+                }
+                self.assertEqual(actions[own["observation_id"]]["reason"], own["reason"])
+                self.assertEqual(actions[other["observation_id"]]["reason"], other["reason"])
+
+    async def test_unknown_requester_fails_before_mutating_moderation_history(self):
+        with TemporaryDirectory() as directory:
+            history = NHModerationHistory(Path(directory) / "moderation.sqlite")
+            await history.initialize()
+            await history.observe(observation(
+                source_kind="red_modlog", source_key="retained-case",
+                executor_user_id=55, reason="Essential ban evidence",
+            ))
+            before = await history.export_history(1)
+            with self.assertRaisesRegex(ValueError, "Unsupported NHModeration"):
+                await history.delete_user_data(100, requester="future_requester")
+            after = await history.export_history(1)
+            self.assertEqual(after["observations"], before["observations"])
+            self.assertEqual(after["actions"], before["actions"])
+
     async def test_existing_database_upgrade_preserves_history_with_unknown_snapshots(self):
         with TemporaryDirectory() as directory:
             path = Path(directory) / "moderation.sqlite"

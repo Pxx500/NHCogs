@@ -11,6 +11,51 @@ from tests.test_joinwatch_live_state import _cog, _entry, _maps
 
 
 class JoinWatchUserDeletionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_context_redaction_preserves_sqlite_restrictions_and_residual_config(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as hp:
+            entry = _entry(history={
+                "profile": {"username": "private"}, "activity": {"messages": 5},
+            })
+            cog = _cog(hp, directory, _maps(pending={"30": entry}))
+            guild = SimpleNamespace(id=100)
+            cog.bot.guilds = []
+            cog.config.fail_clear = True
+            await hp.joinwatch_state.cutover_live_state(cog)
+            backup = cog._case_store.live_backup(guild.id)
+            advanced = {**entry, "stage": 2}
+            cog._case_store.upsert(guild.id, 30, "pending_role", advanced)
+            cog._case_store.upsert(200, 30, "pending_role", advanced)
+            verification = importlib.import_module(f"{hp.__package__}.joinwatch_verification")
+            owner = verification.JoinwatchVerification(cog)
+            try:
+                await owner.redact_user_context(30)
+                await owner.redact_user_context(30)
+            finally:
+                await owner.close()
+            live = cog._case_store.get(guild.id, 30, "pending_role")
+            residual = cog.config.guilds[guild.id]["joinwatch_pending_roles"]["30"]
+            for row in (live, residual):
+                self.assertIsNone(row["history"]["profile"])
+                self.assertIsNone(row["history"]["activity"])
+                for field in ("incident_id", "role_id", "challenge", "verification_state"):
+                    self.assertEqual(row[field], entry[field])
+            self.assertEqual(live["stage"], 2)
+            self.assertEqual(residual["stage"], 1)
+            scrubbed_backup = cog._case_store.live_backup(guild.id)
+            backed_entry = scrubbed_backup["pending_role"]["30"]
+            self.assertIsNone(backed_entry["history"]["profile"])
+            self.assertIsNone(backed_entry["history"]["activity"])
+            for field in ("incident_id", "role_id", "challenge", "verification_state"):
+                self.assertEqual(backed_entry[field], backup["pending_role"]["30"][field])
+            orphaned = cog._case_store.get(200, 30, "pending_role")
+            self.assertIsNone(orphaned["history"]["profile"])
+            self.assertIsNone(orphaned["history"]["activity"])
+            cog.config.fail_clear = False
+            self.assertTrue(await hp.joinwatch_state.restore_live_backup(cog, guild))
+            restored = await hp.joinwatch_state.read_row(cog, guild, 30, "pending_role")
+            self.assertIsNone(restored["history"]["profile"])
+            self.assertIsNone(restored["history"]["activity"])
+
     async def test_deletion_after_export_erases_config_and_inactive_sqlite_rows(self):
         await self._assert_deletion_after_rollback("export_live_state")
 

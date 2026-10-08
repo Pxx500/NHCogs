@@ -104,8 +104,8 @@ class JoinwatchVerification:
         for key in ("role_id", "enrollment_moderator", "completion_moderator"):
             record[key] = str(entry[key]) if entry.get(key) is not None else None
         try:
-            await asyncio.to_thread(self.cog._case_store.save_verification_history,
-                                    record, entry.get("history_events", []))
+            await joinwatch_state.finish_thread(self.cog._case_store.save_verification_history,
+                                               record, entry.get("history_events", []))
         except Exception as error:
             log.exception("Could not settle JoinWatch history for guild %s", guild.id)
             try:
@@ -966,6 +966,23 @@ class JoinwatchVerification:
                 await self.preparation.wait()
                 if key in self._deleted_challenges:
                     break
+
+    async def redact_user_context(self, user_id):
+        """Erase optional snapshots without changing restriction or challenge state."""
+        guilds = {guild.id: guild for guild in self.cog.bot.guilds}
+        all_guilds = getattr(self.cog.config, "all_guilds", None)
+        if callable(all_guilds):
+            for guild_id in await all_guilds():
+                guilds.setdefault(int(guild_id), SimpleNamespace(id=int(guild_id)))
+        for guild in guilds.values():
+            async with joinwatch_state.member_lock(self.cog, guild.id, user_id):
+                await joinwatch_state.redact_member_context(self.cog, guild, user_id)
+                planned = self._planned.get((guild.id, user_id))
+                if isinstance(planned, dict) and isinstance(planned.get("history"), dict):
+                    planned["history"]["profile"] = None
+                    planned["history"]["activity"] = None
+        await joinwatch_state.redact_sqlite_user_context(self.cog, user_id)
+        await asyncio.to_thread(self.cog._case_store.redact_verification_user_context, user_id)
 
     async def delete_user_data(self, user_id):
         guilds = {guild.id: guild for guild in self.cog.bot.guilds}

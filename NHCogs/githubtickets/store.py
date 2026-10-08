@@ -673,6 +673,15 @@ class GitHubTicketsStore:
                 maximum_pings,
             )
 
+    async def rebase_pending_ping(
+        self, ticket_id: int, expected_target_id: int, response_deadline: datetime,
+    ) -> bool:
+        """Refresh an unsent ping's response window without changing its recovery marker."""
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._rebase_pending_ping_sync, ticket_id, expected_target_id, response_deadline,
+            )
+
     async def acknowledge_ping(
         self,
         ticket_id: int,
@@ -714,6 +723,21 @@ class GitHubTicketsStore:
                 self._defer_due_ping_sync,
                 ticket_id,
                 next_action_at,
+                updated_at,
+            )
+
+    async def cancel_pending_automatic_ping(
+        self,
+        ticket_id: int,
+        expected_target_id: int,
+        updated_at: datetime,
+    ) -> bool:
+        """Clear an unsent automatic target while retaining the routing schedule."""
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._cancel_pending_automatic_ping_sync,
+                ticket_id,
+                expected_target_id,
                 updated_at,
             )
 
@@ -1748,6 +1772,20 @@ class GitHubTicketsStore:
             response_deadline=response_deadline.astimezone(timezone.utc),
         )
 
+    def _rebase_pending_ping_sync(
+        self, ticket_id: int, expected_target_id: int, response_deadline: datetime,
+    ) -> bool:
+        changed = self._update_ticket_state(
+            """
+            UPDATE tickets
+            SET pending_response_deadline = ?, transition_version = transition_version + 1
+            WHERE ticket_id = ? AND state = 'open' AND pending_target_id = ?
+                AND next_action IN ('direct_ping', 'automatic_ping')
+            """,
+            (_serialize_datetime(response_deadline), ticket_id, expected_target_id),
+        )
+        return changed > 0
+
     def _acknowledge_ping_sync(
         self,
         ticket_id: int,
@@ -1906,6 +1944,26 @@ class GitHubTicketsStore:
                 _serialize_datetime(updated_at),
                 ticket_id,
             ),
+        )
+        return changed > 0
+
+    def _cancel_pending_automatic_ping_sync(
+        self,
+        ticket_id: int,
+        expected_target_id: int,
+        updated_at: datetime,
+    ) -> bool:
+        changed = self._update_ticket_state(
+            """
+            UPDATE tickets
+            SET pending_target_id = NULL, pending_presence_tier = NULL,
+                pending_ping_automatic = NULL, pending_ping_reserved_at = NULL,
+                pending_response_deadline = NULL,
+                updated_at = ?, transition_version = transition_version + 1
+            WHERE ticket_id = ? AND state = 'open'
+                AND pending_target_id = ? AND pending_ping_automatic = 1
+            """,
+            (_serialize_datetime(updated_at), ticket_id, expected_target_id),
         )
         return changed > 0
 

@@ -258,6 +258,42 @@ async def _question(runtime, *, now=None):
 
 
 class VerificationLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_context_redaction_preserves_active_restriction_and_challenge(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            runtime = _runtime(honeypot)
+            entry = runtime.raw["joinwatch_pending_roles"]["20"]
+            entry["history"] = {
+                "captured_at": runtime.now.isoformat(), "history_origin": "enrollment",
+                "profile": {"username": "private"}, "activity": {"messages": 5},
+                "first_join": {"first_joined_at": runtime.now.isoformat()},
+            }
+            runtime.owner._planned[(10, 20)] = copy.deepcopy(entry)
+            runtime.owner.event(entry, "enrolled", now=runtime.now)
+            before = copy.deepcopy(entry)
+            try:
+                await runtime.owner.persist_history(runtime.member.guild, 20, entry)
+                await runtime.owner.redact_user_context(20)
+                await runtime.owner.redact_user_context(20)
+                current = runtime.raw["joinwatch_pending_roles"]["20"]
+                for field in ("incident_id", "role_id", "expires_at", "failures", "stage",
+                              "challenge", "verification_state"):
+                    self.assertEqual(current[field], before[field])
+                self.assertIsNone(current["history"]["profile"])
+                self.assertIsNone(current["history"]["activity"])
+                self.assertIsNone(runtime.owner._planned[(10, 20)]["history"]["profile"])
+                self.assertIn(runtime.role, runtime.member.roles)
+                history = await runtime.owner.export_history(10)
+                self.assertEqual(len(history["events"]), 1)
+                self.assertIsNone(history["incidents"][0]["profile"])
+                self.assertIsNone(history["incidents"][0]["activity"])
+                await runtime.owner.restore()
+                restored = await runtime.owner.export_history(10)
+                self.assertIsNone(restored["incidents"][0]["profile"])
+                self.assertEqual((await _question(runtime)).status, "question")
+                self.assertIn(runtime.role, runtime.member.roles)
+            finally:
+                await runtime.owner.close()
+
     async def test_cancelled_assignments_do_not_remain_pending_in_history(self):
         for wave in (False, True):
             with self.subTest(wave=wave), TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:

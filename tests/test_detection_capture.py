@@ -627,10 +627,11 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                     "NHCogs.honeypot.operations.message_process"
                 )
 
+                # The successful retry performs real SQLite work before signalling its start.
                 with mock.patch.object(
                     message_process,
                     "DETECTION_CAPTURE_START_TIMEOUT_SECONDS",
-                    0.05,
+                    1.0,
                 ):
                     await cog.on_message(message)
 

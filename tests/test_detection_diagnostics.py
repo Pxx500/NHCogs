@@ -23,6 +23,84 @@ from tests.test_chatchart import load_nhmisc_module
 
 
 class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _seed_imagescan_export_guild(cog, connection, guild_id, marker):
+        sample_file = cog._imagescan_files_path / str(guild_id) / "sample.png"
+        sample_file.parent.mkdir(parents=True)
+        sample_file.write_bytes(marker.encode())
+        connection.execute(
+            """INSERT INTO imagescan_samples (
+                sample_id, guild_id, decision, sha256, phash, dhash, ahash,
+                file_path, created_at, moderator_id
+            ) VALUES (?, ?, 'true_positive', ?, '1', '2', '3', ?, 100, ?)""",
+            (marker, str(guild_id), marker, str(sample_file), f"moderator-{marker}"),
+        )
+        connection.execute(
+            """INSERT INTO imagescan_events (
+                event_id, guild_id, user_id, channel_id, message_id, message_jump_url,
+                created_at, image_count, content, moderator_id
+            ) VALUES (?, ?, ?, '30', ?, 'url', 100, 1, ?, ?)""",
+            (marker, str(guild_id), f"user-{marker}", marker, marker, f"moderator-{marker}"),
+        )
+        connection.execute(
+            """INSERT INTO imagescan_files (
+                event_id, file_index, filename, path, size, sha256
+            ) VALUES (?, 0, 'sample.png', ?, 10, ?)""",
+            (marker, str(sample_file), marker),
+        )
+        connection.execute(
+            "INSERT INTO imagescan_model_state (guild_id) VALUES (?)", (str(guild_id),)
+        )
+        connection.execute(
+            "INSERT INTO imagescan_profile (guild_id) VALUES (?)", (str(guild_id),)
+        )
+
+    async def test_imagescan_dump_isolates_guild_and_includes_uncheckpointed_wal_rows(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                cog = honeypot.Honeypot(_Bot(), _operational_support())
+                cog._imagescan_store.initialize()
+                foreign_marker = "FOREIGN_GUILD_PRIVATE_SECRET"
+                with closing(sqlite3.connect(cog._imagescan_db_path)) as live:
+                    live.execute("PRAGMA journal_mode = WAL")
+                    live.execute("PRAGMA wal_autocheckpoint = 0")
+                    self._seed_imagescan_export_guild(cog, live, 10, "requested-guild")
+                    self._seed_imagescan_export_guild(cog, live, 11, foreign_marker)
+                    live.commit()
+                    temp_root, archives = await honeypot.imagescan._imagescan_create_dump_archives(
+                        cog, 10
+                    )
+                    try:
+                        with zipfile.ZipFile(archives[0]) as archive:
+                            names = archive.namelist()
+                            self.assertIn("imagescan.sqlite", names)
+                            self.assertIn("files/10/sample.png", names)
+                            self.assertFalse(any(name.startswith("files/11/") for name in names))
+                            for name in names:
+                                self.assertNotIn(foreign_marker.encode(), archive.read(name))
+                            archive.extract("imagescan.sqlite", temp_root / "isolated")
+                        with closing(sqlite3.connect(temp_root / "isolated/imagescan.sqlite")) as db:
+                            self.assertEqual(db.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+                            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 1)
+                            for table in (
+                                "imagescan_events", "imagescan_samples",
+                                "imagescan_model_state", "imagescan_profile",
+                            ):
+                                self.assertEqual(
+                                    db.execute(f"SELECT guild_id FROM {table}").fetchall(), [("10",)]
+                                )
+                            self.assertEqual(
+                                db.execute("SELECT event_id FROM imagescan_files").fetchall(),
+                                [("requested-guild",)],
+                            )
+                            self.assertEqual(
+                                db.execute("SELECT moderator_id FROM imagescan_events").fetchone()[0],
+                                "moderator-requested-guild",
+                            )
+                        self.assertEqual(live.execute("SELECT COUNT(*) FROM imagescan_samples").fetchone()[0], 2)
+                    finally:
+                        shutil.rmtree(temp_root, ignore_errors=True)
+
     async def test_doctor_reports_every_missing_gif_detector_decoder(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)):
@@ -915,7 +993,9 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = honeypot.Honeypot(_Bot(), _operational_support())
-                appended = self._append_case(honeypot, cog)
+                appended = self._append_case(
+                    honeypot, cog, created_at=datetime.now(timezone.utc) - timedelta(days=2)
+                )
                 cog._case_store.update_message_delete(
                     appended.case.case_id,
                     appended.message.sequence,
@@ -1014,6 +1094,51 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(compacted.messages, ())
                 self.assertEqual(compacted.attachments, ())
                 self.assertEqual(compacted.operations, ())
+
+    async def test_red_requester_scope_preserves_ordinary_user_case_and_evidence(self):
+        for requester in ("user", "user_strict", "owner", "discord_deleted_user"):
+            with self.subTest(requester=requester), TemporaryDirectory() as directory:
+                with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                    cog = honeypot.Honeypot(_Bot(), _operational_support())
+                    await cog._message_registry.initialize()
+                    target = self._append_case(honeypot, cog, user_id=20, message_id=40)
+                    evidence_root = (cog._detection_case_files_path
+                                     / str(target.case.guild_id) / target.case.case_id)
+                    evidence_root.mkdir(parents=True)
+                    evidence = evidence_root / "retained.png"
+                    evidence.write_bytes(b"operational evidence")
+                    before = cog._case_store.get_case(target.case.case_id)
+                    cog._joinwatch_verification.redact_user_context = mock.AsyncMock()
+                    cog._joinwatch_verification.delete_user_data = mock.AsyncMock()
+                    forget = mock.patch.object(cog._message_registry, "forget_user",
+                                               wraps=cog._message_registry.forget_user)
+                    with forget as forget_user:
+                        await cog.red_delete_data_for_user(requester=requester, user_id=20)
+                    if requester in {"user", "user_strict"}:
+                        current = cog._case_store.get_case(target.case.case_id)
+                        self.assertEqual(current.case, before.case)
+                        self.assertEqual(current.messages, before.messages)
+                        self.assertEqual(current.operations, before.operations)
+                        self.assertEqual(evidence.read_bytes(), b"operational evidence")
+                        forget_user.assert_not_awaited()
+                        cog._joinwatch_verification.redact_user_context.assert_awaited_once_with(20)
+                        cog._joinwatch_verification.delete_user_data.assert_not_awaited()
+                        self.assertIsNone(cog._case_store.get_case_deletion_job(target.case.case_id))
+                    else:
+                        self.assertIsNone(cog._case_store.get_case(target.case.case_id))
+                        self.assertFalse(evidence_root.exists())
+                        forget_user.assert_awaited_once_with(20)
+                        cog._joinwatch_verification.delete_user_data.assert_awaited_once_with(20)
+                        cog._joinwatch_verification.redact_user_context.assert_not_awaited()
+
+    async def test_unknown_data_requester_does_not_erase_operational_case(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            cog = honeypot.Honeypot(_Bot(), _operational_support())
+            target = self._append_case(honeypot, cog, user_id=20, message_id=40)
+            before = cog._case_store.get_case(target.case.case_id)
+            with self.assertRaisesRegex(ValueError, "Unsupported"):
+                await cog.red_delete_data_for_user(requester="unexpected", user_id=20)
+            self.assertEqual(cog._case_store.get_case(target.case.case_id), before)
 
     async def test_user_data_deletion_removes_cases_and_case_files(self):
         with TemporaryDirectory() as directory:
