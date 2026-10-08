@@ -326,6 +326,16 @@ async def restore_live_backup(cog, guild) -> bool:
         return True
 
 
+async def delete_sqlite_member(cog, guild_id: int, user_id: int) -> None:
+    """Delete one member's SQLite live rows. Caller holds member_lock."""
+    store = getattr(cog, "_case_store", None)
+    if store is None or not hasattr(store, "delete"):
+        return
+    async with _source_lock(cog):
+        for kind in _LIVE_KINDS:
+            await asyncio.to_thread(store.delete, int(guild_id), int(user_id), kind)
+
+
 @dataclass(frozen=True, slots=True)
 class JoinwatchSelectedAction:
     action: typing.Literal["discard_assignment", "apply_role", "discard_role", "expire_role"]

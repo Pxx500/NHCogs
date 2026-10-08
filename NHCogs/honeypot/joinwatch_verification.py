@@ -21,6 +21,16 @@ PREPARED_ENROLLMENT_CAPACITY = 32
 log = logging.getLogger("red.Honeypot")
 
 
+def _clear_moderator_fields(payload: dict, user_id: int) -> bool:
+    changed = False
+    for key in ("enrollment_moderator", "completion_moderator"):
+        if payload.get(key) in (user_id, str(user_id)):
+            payload[key] = None
+            payload["completion_reason"] = None
+            changed = True
+    return changed
+
+
 @dataclass(frozen=True, slots=True)
 class VerificationResult:
     status: str
@@ -975,42 +985,85 @@ class JoinwatchVerification:
                     break
 
     async def delete_user_data(self, user_id):
+        seen = set()
         for guild in self.cog.bot.guilds:
+            seen.add(guild.id)
             async with joinwatch_state.member_lock(self.cog, guild.id, user_id):
-                rows = await joinwatch_state.rows_for_member(self.cog, guild, user_id)
-                for entry in rows.values():
-                    self._forget_challenge(guild.id, user_id, entry)
-                if not await joinwatch_state._uses_sqlite(self.cog, guild.id):
-                    for name in (
-                        "joinwatch_pending_roles",
-                        "joinwatch_pending_role_assignments",
-                        "joinwatch_verified_members",
-                    ):
-                        async with getattr(self.cog.config.guild(guild), name)() as entries:
-                            entry = entries.pop(str(user_id), None)
-                            self._forget_challenge(guild.id, user_id, entry)
+                await self._drop_member_rows(guild, user_id)
                 self._planned.pop((guild.id, user_id), None)
             # Remove actor references from active state as well as the archive.
             # Otherwise the next outcome update would restore the erased identity.
             # The one-time Config backup is not rewritten; it expires on its own.
-            if not await joinwatch_state._uses_sqlite(self.cog, guild.id):
-                for name in ("joinwatch_pending_roles", "joinwatch_pending_role_assignments"):
-                    config_store = getattr(self.cog.config.guild(guild), name)
-                    saved = await self.cog.config.guild(guild).get_raw(name, default={})
-                    for member_id in tuple(saved):
-                        async with (
-                            joinwatch_state.member_lock(self.cog, guild.id, int(member_id)),
-                            config_store() as entries,
-                        ):
-                            current = entries.get(member_id, {})
-                            for key in ("enrollment_moderator", "completion_moderator"):
-                                if current.get(key) == user_id:
-                                    current[key] = None
-                                    current["completion_reason"] = None
-        store = getattr(self.cog, "_case_store", None)
-        if store is not None and hasattr(store, "delete_user"):
-            await asyncio.to_thread(store.delete_user, int(user_id))
+            await self._scrub_moderator_references(guild, user_id)
+        await self._delete_unloaded_live_rows(user_id, seen)
         await asyncio.to_thread(self.cog._case_store.delete_verification_history, user_id=user_id)
+
+    async def _drop_member_rows(self, guild, user_id) -> None:
+        rows = await joinwatch_state.rows_for_member(self.cog, guild, user_id)
+        for entry in rows.values():
+            self._forget_challenge(guild.id, user_id, entry)
+        if await joinwatch_state._uses_sqlite(self.cog, guild.id):
+            for kind in ("verified", "pending_role", "pending_assignment"):
+                await joinwatch_state.delete_row(self.cog, guild, int(user_id), kind)
+            return
+        for name in (
+            "joinwatch_pending_roles",
+            "joinwatch_pending_role_assignments",
+            "joinwatch_verified_members",
+        ):
+            async with getattr(self.cog.config.guild(guild), name)() as entries:
+                entry = entries.pop(str(user_id), None)
+                self._forget_challenge(guild.id, user_id, entry)
+
+    async def _scrub_moderator_references(self, guild, user_id) -> None:
+        if await joinwatch_state._uses_sqlite(self.cog, guild.id):
+            await self._scrub_sqlite_moderators(guild, int(user_id))
+            return
+        for name in ("joinwatch_pending_roles", "joinwatch_pending_role_assignments"):
+            config_store = getattr(self.cog.config.guild(guild), name)
+            saved = await self.cog.config.guild(guild).get_raw(name, default={})
+            for member_id in tuple(saved):
+                async with (
+                    joinwatch_state.member_lock(self.cog, guild.id, int(member_id)),
+                    config_store() as entries,
+                ):
+                    current = entries.get(member_id, {})
+                    for key in ("enrollment_moderator", "completion_moderator"):
+                        if current.get(key) == user_id:
+                            current[key] = None
+                            current["completion_reason"] = None
+
+    async def _scrub_sqlite_moderators(self, guild, user_id: int) -> None:
+        pending = await joinwatch_state.open_maps(self.cog, guild)
+        member_ids = []
+        seen = set()
+        for entries in pending.values():
+            for member_id in entries:
+                try:
+                    parsed = int(member_id)
+                except (TypeError, ValueError):
+                    continue
+                if parsed == user_id or parsed in seen:
+                    continue
+                seen.add(parsed)
+                member_ids.append(parsed)
+        for member_id in member_ids:
+            async with joinwatch_state.member_lock(self.cog, guild.id, member_id):
+                for kind in ("pending_role", "pending_assignment"):
+                    current = await joinwatch_state.read_row(self.cog, guild, member_id, kind)
+                    if not isinstance(current, dict) or not _clear_moderator_fields(current, user_id):
+                        continue
+                    await joinwatch_state.write_row(self.cog, guild, member_id, kind, current)
+
+    async def _delete_unloaded_live_rows(self, user_id, seen) -> None:
+        store = getattr(self.cog, "_case_store", None)
+        if store is None or not hasattr(store, "live_guild_ids"):
+            return
+        for guild_id in await asyncio.to_thread(store.live_guild_ids, int(user_id)):
+            if guild_id in seen:
+                continue
+            async with joinwatch_state.member_lock(self.cog, guild_id, int(user_id)):
+                await joinwatch_state.delete_sqlite_member(self.cog, guild_id, int(user_id))
 
     def _forget_challenge(self, guild_id, user_id, entry) -> None:
         if not isinstance(entry, dict) or not entry.get("incident_id"):

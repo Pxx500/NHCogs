@@ -1736,6 +1736,16 @@ class DetectionCaseStore:
             maps[row["kind"]][str(row["user_id"])] = json.loads(row["payload"])
         return maps
 
+    def live_guild_ids(self, user_id: int) -> list[int]:
+        """List guilds that still have live rows for one member. See Honeypot stored data."""
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """SELECT DISTINCT guild_id FROM joinwatch_live_state
+                   WHERE user_id = ? ORDER BY guild_id""",
+                (int(user_id),),
+            ).fetchall()
+        return [int(row["guild_id"]) for row in rows]
+
     def delete_user(self, user_id: int) -> None:
         """Delete one member's live rows and scrub moderator ids. See Honeypot stored data."""
         with closing(self._connect()) as connection:
