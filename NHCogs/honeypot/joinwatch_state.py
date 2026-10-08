@@ -298,6 +298,7 @@ async def _cutover_guild(cog, guild_id: int) -> tuple[bool, tuple[int, str, str]
             )
         maps[kind] = raw_map
     if all(not item for item in maps.values()):
+        await finish_thread(store.clear_cutover, int(guild_id))
         return True, None
     copied = await finish_thread(store.replace_from_config, int(guild_id), maps)
     if not copied:
@@ -347,6 +348,53 @@ async def _write_config_map(config, config_key: str, entries: dict) -> None:
     async with group() as current:
         current.clear()
         current.update(entries)
+
+
+async def delete_config_member(cog, guild, user_id: int) -> tuple[dict, ...]:
+    """Erase a Config copy even when SQLite is live. Caller holds member_lock."""
+    removed = []
+    async with _source_lock(cog):
+        config = cog.config.guild(guild)
+        for kind, config_key in _KIND_CONFIG.items():
+            entries = await _read_config_map(cog, guild, kind)
+            if str(user_id) not in entries:
+                continue
+            entry = entries.pop(str(user_id))
+            await _write_config_map(config, config_key, entries)
+            if isinstance(entry, dict):
+                removed.append(entry)
+    return tuple(removed)
+
+
+async def scrub_config_moderators(cog, guild, user_id: int) -> None:
+    """Clear moderator references in active and inactive Config copies."""
+    async with _source_lock(cog):
+        pending = {
+            kind: await _read_config_map(cog, guild, kind)
+            for kind in ("pending_role", "pending_assignment")
+        }
+    member_ids = set()
+    for entries in pending.values():
+        for member_id, entry in entries.items():
+            if not isinstance(entry, dict) or not any(
+                entry.get(key) in (user_id, str(user_id))
+                for key in ("enrollment_moderator", "completion_moderator")
+            ):
+                continue
+            try:
+                parsed = int(member_id)
+            except (TypeError, ValueError):
+                continue
+            if parsed != int(user_id):
+                member_ids.add(parsed)
+    for member_id in member_ids:
+        async with member_lock(cog, guild.id, member_id), _source_lock(cog):
+            for kind in ("pending_role", "pending_assignment"):
+                entries = await _read_config_map(cog, guild, kind)
+                current = entries.get(str(member_id))
+                if not isinstance(current, dict) or not _clear_moderator_fields(current, user_id):
+                    continue
+                await _write_config_map(cog.config.guild(guild), _KIND_CONFIG[kind], entries)
 
 
 async def _release_to_config(cog, guild, maps) -> None:

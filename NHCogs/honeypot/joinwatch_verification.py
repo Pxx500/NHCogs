@@ -8,6 +8,7 @@ import random
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import discord
 
@@ -967,7 +968,12 @@ class JoinwatchVerification:
                     break
 
     async def delete_user_data(self, user_id):
-        for guild in self.cog.bot.guilds:
+        guilds = {guild.id: guild for guild in self.cog.bot.guilds}
+        all_guilds = getattr(self.cog.config, "all_guilds", None)
+        if callable(all_guilds):
+            for guild_id in await all_guilds():
+                guilds.setdefault(int(guild_id), SimpleNamespace(id=int(guild_id)))
+        for guild in guilds.values():
             async with joinwatch_state.member_lock(self.cog, guild.id, user_id):
                 await self._drop_member_rows(guild, user_id)
                 self._planned.pop((guild.id, user_id), None)
@@ -975,6 +981,7 @@ class JoinwatchVerification:
             # Otherwise the next outcome update would restore the erased identity.
             # The one-time Config backup is not rewritten; it expires on its own.
             await self._scrub_moderator_references(guild, user_id)
+            await joinwatch_state.scrub_config_moderators(self.cog, guild, int(user_id))
         await self._delete_sqlite_live_rows(user_id)
         await asyncio.to_thread(self.cog._case_store.delete_verification_history, user_id=user_id)
 
@@ -984,6 +991,8 @@ class JoinwatchVerification:
             self._forget_challenge(guild.id, user_id, entry)
         for kind in ("verified", "pending_role", "pending_assignment"):
             await joinwatch_state.delete_row(self.cog, guild, int(user_id), kind)
+        for entry in await joinwatch_state.delete_config_member(self.cog, guild, int(user_id)):
+            self._forget_challenge(guild.id, user_id, entry)
 
     async def _scrub_moderator_references(self, guild, user_id) -> None:
         deleted = int(user_id)

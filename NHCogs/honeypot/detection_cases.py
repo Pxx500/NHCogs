@@ -1555,6 +1555,7 @@ class DetectionCaseStore:
     def clear_cutover(self, guild_id: int) -> None:
         """Return one guild to Config as the live-state source. See Honeypot stored data."""
         with closing(self._connect()) as connection, connection:
+            connection.execute("DELETE FROM joinwatch_live_state WHERE guild_id = ?", (guild_id,))
             connection.execute("DELETE FROM joinwatch_cutover WHERE guild_id = ?", (guild_id,))
 
     def get(self, guild_id: int, user_id: int, kind: str) -> dict | None:

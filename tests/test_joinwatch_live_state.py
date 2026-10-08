@@ -225,7 +225,7 @@ class JoinWatchLiveStateTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(restored["joinwatch_pending_roles"]["20"], entry)
             self.assertEqual(restored["joinwatch_verified_members"]["20"], verified)
             self.assertEqual(restored["joinwatch_pending_role_assignments"]["20"], assignment)
-            self.assertEqual(cog._case_store.get(100, 20, "pending_role")["stage"], 2)
+            self.assertEqual(cog._case_store.rows_for_member(100, 20), {})
             self.assertTrue(await honeypot.joinwatch_state.cutover_guild(cog, 100))
             self.assertEqual(cog._case_store.get(100, 20, "pending_role"), entry)
             cog._case_store.upsert(100, 20, "pending_role", advanced)

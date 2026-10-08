@@ -508,6 +508,26 @@ class DetectionCaseStoreTests(unittest.TestCase):
         )
         self.assertEqual(len(self.store.all_observations(100)["sources"]), 1)
 
+    def test_source_release_rolls_back_live_rows_when_marker_removal_fails(self):
+        payload = {"incident_id": "incident", "role_id": 51, "session_id": "session"}
+        self.assertTrue(self.store.replace_from_config(100, {
+            "verified": {}, "pending_role": {"20": payload}, "pending_assignment": {},
+        }))
+
+        class FailingConnection(sqlite3.Connection):
+            def execute(self, sql, *args, **kwargs):
+                if "DELETE FROM joinwatch_cutover" in sql:
+                    raise sqlite3.OperationalError("marker failure")
+                return super().execute(sql, *args, **kwargs)
+
+        connection = sqlite3.connect(self.database_path, factory=FailingConnection)
+        with mock.patch.object(self.store, "_connect", return_value=connection):
+            with self.assertRaisesRegex(sqlite3.OperationalError, "marker failure"):
+                self.store.clear_cutover(100)
+        self.assertEqual(self.store.cutover_source(100), "sqlite")
+        self.assertEqual(self.store.get(100, 20, "pending_role"), payload)
+        self.assertEqual(self.store.live_backup(100)["pending_role"]["20"], payload)
+
     def test_history_import_counts_existing_and_new_accounts_without_repeated_scans(self):
         self.store.record_first_join(100, 20, datetime(2026, 10, 2, tzinfo=timezone.utc))
         source = {
