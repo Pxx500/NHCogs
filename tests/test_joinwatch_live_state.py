@@ -670,3 +670,134 @@ class JoinWatchLiveRaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("7 days", statement)
         self.assertIn("not rewritten on user deletion", statement)
         self.assertIn("leaves the guild", statement)
+
+
+def _source_held(cog) -> bool:
+    lock = getattr(cog, "_joinwatch_live_source_lock", None)
+    return lock is not None and lock.locked()
+
+
+def _arm_config_clear(cog, opened, release, *, pause_at, before):
+    original = cog.config.guild_from_id
+    state = {"count": 0}
+
+    def guild_from_id(guild_id):
+        guild_config = original(guild_id)
+        real_clear = guild_config.clear_raw
+
+        async def clear_raw(key):
+            state["count"] += 1
+            hit = state["count"] == pause_at
+            if hit and before:
+                opened.set()
+                if not _source_held(cog):
+                    await release.wait()
+            await real_clear(key)
+            if hit and not before:
+                opened.set()
+                if not _source_held(cog):
+                    await release.wait()
+
+        guild_config.clear_raw = clear_raw
+        return guild_config
+
+    cog.config.guild_from_id = guild_from_id
+
+
+def _arm_guild_list(config, opened, release):
+    original = config.all_guilds
+    armed = {"done": False}
+
+    async def all_guilds():
+        snapshot = await original()
+        if not armed["done"]:
+            armed["done"] = True
+            opened.set()
+            await release.wait()
+        return snapshot
+
+    config.all_guilds = all_guilds
+
+
+def _arm_unloaded_listing(store, loop, started, advanced):
+    real_list = store.list_open
+    real_history = store.delete_verification_history
+    listed = {"done": False}
+
+    def list_open(guild_id):
+        rows = real_list(guild_id)
+        if int(guild_id) == 200 and not listed["done"]:
+            listed["done"] = True
+            loop.call_soon_threadsafe(started.set)
+            advanced.wait()
+        return rows
+
+    def delete_verification_history(*args, **kwargs):
+        result = real_history(*args, **kwargs)
+        loop.call_soon_threadsafe(started.set)
+        return result
+
+    store.list_open = list_open
+    store.delete_verification_history = delete_verification_history
+
+
+async def _write_joined_member(state, cog, guild, opened, release):
+    await opened.wait()
+    await state.write_row(cog, guild, 21, "pending_role", _entry(incident_id="joined"))
+    release.set()
+
+
+async def _export_when_open(state, cog, guild, opened, release):
+    await opened.wait()
+    copied = await state.export_live_state(cog, guild)
+    release.set()
+    return copied
+
+
+async def _advance_unloaded_stage(state, cog, started, advanced):
+    await started.wait()
+    guild = SimpleNamespace(id=200)
+    async with state.member_lock(cog, 200, 20):
+        row = await state.read_row(cog, guild, 20, "pending_role")
+        row["stage"] = 2
+        await state.write_row(cog, guild, 20, "pending_role", row)
+    advanced.set()
+
+
+class JoinWatchMigrationRaceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cutover_keeps_a_join_written_after_the_guild_list(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            state = honeypot.joinwatch_state
+            entry = _entry()
+            cog = _cog(honeypot, directory, _maps(pending={"20": entry}))
+            guild = SimpleNamespace(id=100)
+            opened = asyncio.Event()
+            release = asyncio.Event()
+            _arm_guild_list(cog.config, opened, release)
+            await asyncio.gather(
+                state.cutover_live_state(cog),
+                _write_joined_member(state, cog, guild, opened, release),
+            )
+            store = cog._case_store
+            self.assertEqual(store.get(100, 20, "pending_role")["incident_id"], "incident")
+            joined = store.get(100, 21, "pending_role")
+            self.assertIsNotNone(joined)
+            self.assertEqual(joined["incident_id"], "joined")
+            self.assertEqual(cog.config.guilds[100]["joinwatch_pending_roles"], {})
+    async def test_sqlite_cutover_clear_keeps_an_in_flight_export(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            state = honeypot.joinwatch_state
+            entry = _entry()
+            cog = _cog(honeypot, directory, _maps(pending={"20": entry}))
+            self.assertTrue(await state.cutover_guild(cog, 100))
+            guild = SimpleNamespace(id=100)
+            opened = asyncio.Event()
+            release = asyncio.Event()
+            _arm_config_clear(cog, opened, release, pause_at=1, before=True)
+            await asyncio.gather(
+                state.cutover_guild(cog, 100),
+                _export_when_open(state, cog, guild, opened, release),
+            )
+            saved = await state.read_row(cog, guild, 20, "pending_role")
+            self.assertIsNotNone(saved)
+            self.assertEqual(saved["incident_id"], "incident")

@@ -49,9 +49,10 @@ async def member_lock(cog, guild_id: int, member_id: int):
 
 
 def _source_lock(cog) -> asyncio.Lock:
-    """Serialize a live-source check with export and restore.
+    """Serialize the choice between Config and SQLite.
 
-    Callers that also need member_lock take that lock first.
+    Callers that also need member_lock take that lock first. Cutover, export,
+    restore, and guild removal take only this lock.
     """
     lock = getattr(cog, "_joinwatch_live_source_lock", None)
     if lock is None:
@@ -64,7 +65,8 @@ def kind_for_store(store_name: str) -> str:
     return _STORE_KIND[store_name]
 
 
-async def _uses_sqlite(cog, guild_id: int | None) -> bool:
+async def _sqlite_source(cog, guild_id: int | None) -> bool:
+    """Report the marker. Caller holds the source lock when the result is used."""
     store = getattr(cog, "_case_store", None)
     if store is None or guild_id is None or not hasattr(store, "cutover_source"):
         return False
@@ -72,9 +74,8 @@ async def _uses_sqlite(cog, guild_id: int | None) -> bool:
     return source == "sqlite"
 
 
-async def read_row(cog, guild, user_id: int, kind: str) -> dict | None:
-    """Read one live row from SQLite or Config. See Honeypot stored data."""
-    if await _uses_sqlite(cog, guild.id):
+async def _read_locked(cog, guild, user_id: int, kind: str) -> dict | None:
+    if await _sqlite_source(cog, guild.id):
         return await asyncio.to_thread(cog._case_store.get, int(guild.id), int(user_id), kind)
     config = cog.config.guild(guild)
     accessor = getattr(config, _KIND_CONFIG[kind], None)
@@ -93,25 +94,35 @@ async def read_row(cog, guild, user_id: int, kind: str) -> dict | None:
     return dict(current) if isinstance(current, dict) else None
 
 
+async def read_row(cog, guild, user_id: int, kind: str) -> dict | None:
+    """Read one live row from SQLite or Config. See Honeypot stored data."""
+    async with _source_lock(cog):
+        return await _read_locked(cog, guild, user_id, kind)
+
+
 async def rows_for_member(cog, guild, user_id: int) -> dict[str, dict]:
     """Read one member's live rows. See Honeypot stored data."""
-    if await _uses_sqlite(cog, guild.id):
-        return await asyncio.to_thread(
-            cog._case_store.rows_for_member, int(guild.id), int(user_id)
-        )
-    rows = {}
-    for kind in _LIVE_KINDS:
-        row = await read_row(cog, guild, user_id, kind)
-        if row is not None:
-            rows[kind] = row
-    return rows
+    async with _source_lock(cog):
+        if await _sqlite_source(cog, guild.id):
+            return await asyncio.to_thread(
+                cog._case_store.rows_for_member, int(guild.id), int(user_id)
+            )
+        rows = {}
+        for kind in _LIVE_KINDS:
+            row = await _read_locked(cog, guild, user_id, kind)
+            if row is not None:
+                rows[kind] = row
+        return rows
 
 
 async def is_verified(cog, guild, user_id: int) -> bool:
     """Report a verified member without loading other accounts. See Honeypot stored data."""
-    if await _uses_sqlite(cog, guild.id):
-        return await asyncio.to_thread(cog._case_store.is_verified, int(guild.id), int(user_id))
-    return await read_row(cog, guild, user_id, "verified") is not None
+    async with _source_lock(cog):
+        if await _sqlite_source(cog, guild.id):
+            return await asyncio.to_thread(
+                cog._case_store.is_verified, int(guild.id), int(user_id)
+            )
+        return await _read_locked(cog, guild, user_id, "verified") is not None
 
 
 async def write_row(
@@ -127,7 +138,7 @@ async def write_row(
     """Write one live row. A compare refuses a different incident. See Honeypot stored data."""
     stored = dict(payload)
     async with _source_lock(cog):
-        if await _uses_sqlite(cog, guild.id):
+        if await _sqlite_source(cog, guild.id):
             return await asyncio.to_thread(
                 partial(
                     cog._case_store.upsert,
@@ -160,7 +171,7 @@ async def delete_row(
 ) -> bool:
     """Delete one live row. A compare refuses a different incident. See Honeypot stored data."""
     async with _source_lock(cog):
-        if await _uses_sqlite(cog, guild.id):
+        if await _sqlite_source(cog, guild.id):
             return await asyncio.to_thread(
                 cog._case_store.delete,
                 int(guild.id),
@@ -205,23 +216,25 @@ async def _read_config_map(cog, guild, kind: str) -> dict:
 
 async def open_maps(cog, guild) -> dict[str, dict]:
     """Read open rows for the timer and restore, never the verified map. See Honeypot stored data."""
-    if await _uses_sqlite(cog, getattr(guild, "id", None)):
-        return await asyncio.to_thread(cog._case_store.list_open, int(guild.id))
-    return {
-        "pending_role": await _read_config_map(cog, guild, "pending_role"),
-        "pending_assignment": await _read_config_map(cog, guild, "pending_assignment"),
-    }
+    async with _source_lock(cog):
+        if await _sqlite_source(cog, getattr(guild, "id", None)):
+            return await asyncio.to_thread(cog._case_store.list_open, int(guild.id))
+        return {
+            "pending_role": await _read_config_map(cog, guild, "pending_role"),
+            "pending_assignment": await _read_config_map(cog, guild, "pending_assignment"),
+        }
 
 
 async def live_counts(cog, guild) -> dict[str, int]:
     """Count live rows for status commands. See Honeypot stored data."""
-    if await _uses_sqlite(cog, getattr(guild, "id", None)):
-        return await asyncio.to_thread(cog._case_store.counts, int(guild.id))
-    totals = {}
-    for kind in _KIND_CONFIG:
-        entries = await _read_config_map(cog, guild, kind)
-        totals[kind] = len(entries) if isinstance(entries, dict) else 0
-    return totals
+    async with _source_lock(cog):
+        if await _sqlite_source(cog, getattr(guild, "id", None)):
+            return await asyncio.to_thread(cog._case_store.counts, int(guild.id))
+        totals = {}
+        for kind in _KIND_CONFIG:
+            entries = await _read_config_map(cog, guild, kind)
+            totals[kind] = len(entries) if isinstance(entries, dict) else 0
+        return totals
 
 
 async def _clear_config_maps(cog, guild_id: int) -> None:
@@ -230,16 +243,19 @@ async def _clear_config_maps(cog, guild_id: int) -> None:
         await config.clear_raw(config_key)
 
 
-async def cutover_guild(cog, guild_id: int, values: dict | None = None) -> bool:
+async def cutover_guild(cog, guild_id: int) -> bool:
     """Copy one guild into SQLite when the rows match. See Honeypot stored data."""
+    async with _source_lock(cog):
+        return await _cutover_guild(cog, guild_id)
+
+
+async def _cutover_guild(cog, guild_id: int) -> bool:
     store = cog._case_store
-    source = await asyncio.to_thread(store.cutover_source, int(guild_id))
-    if source == "sqlite":
+    if await _sqlite_source(cog, guild_id):
         await _clear_config_maps(cog, guild_id)
         return True
     config = cog.config.guild_from_id(guild_id)
-    if values is None:
-        values = await config.all()
+    values = await config.all()
     maps = {}
     for kind, config_key in _KIND_CONFIG.items():
         raw_map = values.get(config_key, {})
@@ -281,9 +297,9 @@ async def cutover_live_state(cog) -> None:
     if store is None or not hasattr(store, "replace_from_config"):
         return
     await asyncio.to_thread(store.expire_live_backups, datetime.now(timezone.utc))
-    for guild_id, values in (await cog.config.all_guilds()).items():
+    for guild_id in await cog.config.all_guilds():
         try:
-            await cutover_guild(cog, int(guild_id), values)
+            await cutover_guild(cog, int(guild_id))
         except Exception as error:
             log.exception("JoinWatch live cutover failed for guild %s", guild_id)
             await cog._record_operational_failure(
@@ -303,14 +319,19 @@ async def _write_config_map(config, config_key: str, entries: dict) -> None:
         current.update(entries)
 
 
-async def export_live_state(cog, guild) -> None:
+async def _release_to_config(cog, guild, maps) -> None:
+    config = cog.config.guild(guild)
+    for kind, config_key in _KIND_CONFIG.items():
+        await _write_config_map(config, config_key, maps.get(kind, {}))
+    await asyncio.to_thread(cog._case_store.clear_cutover, int(guild.id))
+
+
+async def export_live_state(cog, guild) -> bool:
     """Copy SQLite live rows back into Config, then clear the marker. See Honeypot stored data."""
     async with _source_lock(cog):
         maps = await asyncio.to_thread(cog._case_store.config_maps, int(guild.id))
-        config = cog.config.guild(guild)
-        for kind, config_key in _KIND_CONFIG.items():
-            await _write_config_map(config, config_key, maps[kind])
-        await asyncio.to_thread(cog._case_store.clear_cutover, int(guild.id))
+        await _release_to_config(cog, guild, maps)
+        return True
 
 
 async def restore_live_backup(cog, guild) -> bool:
@@ -319,10 +340,7 @@ async def restore_live_backup(cog, guild) -> bool:
         backup = await asyncio.to_thread(cog._case_store.live_backup, int(guild.id))
         if backup is None:
             return False
-        config = cog.config.guild(guild)
-        for kind, config_key in _KIND_CONFIG.items():
-            await _write_config_map(config, config_key, backup.get(kind, {}))
-        await asyncio.to_thread(cog._case_store.clear_cutover, int(guild.id))
+        await _release_to_config(cog, guild, backup)
         return True
 
 

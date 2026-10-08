@@ -20,7 +20,6 @@ MAX_ATTEMPTS = 2
 PREPARED_ENROLLMENT_CAPACITY = 32
 log = logging.getLogger("red.Honeypot")
 
-
 def _clear_moderator_fields(payload: dict, user_id: int) -> bool:
     changed = False
     for key in ("enrollment_moderator", "completion_moderator"):
@@ -800,29 +799,21 @@ class JoinwatchVerification:
         updates = {
             key: entry[key] for key in ("member_id", "account_age_hours", "captcha_status")
         }
-        if await joinwatch_state._uses_sqlite(self.cog, member.guild.id):
-            for kind in ("pending_role", "pending_assignment"):
-                current = await joinwatch_state.read_row(
-                    self.cog, member.guild, member.id, kind
+        for kind in ("pending_role", "pending_assignment"):
+            current = await joinwatch_state.read_row(
+                self.cog, member.guild, member.id, kind
+            )
+            if current is not None and current.get("incident_id") == entry.get("incident_id"):
+                current.update(updates)
+                await joinwatch_state.write_row(
+                    self.cog,
+                    member.guild,
+                    member.id,
+                    kind,
+                    current,
+                    expected_incident_id=entry.get("incident_id"),
+                    compare=True,
                 )
-                if current is not None and current.get("incident_id") == entry.get("incident_id"):
-                    current.update(updates)
-                    await joinwatch_state.write_row(
-                        self.cog,
-                        member.guild,
-                        member.id,
-                        kind,
-                        current,
-                        expected_incident_id=entry.get("incident_id"),
-                        compare=True,
-                    )
-        else:
-            config = self.cog.config.guild(member.guild)
-            for name in ("joinwatch_pending_roles", "joinwatch_pending_role_assignments"):
-                async with getattr(config, name)() as entries:
-                    current = entries.get(str(member.id))
-                    if current is not None and current.get("incident_id") == entry.get("incident_id"):
-                        current.update(updates)
         role = member.guild.get_role(entry["role_id"])
         if role_status is None:
             role_status = "Not confirmed"
@@ -1002,38 +993,11 @@ class JoinwatchVerification:
         rows = await joinwatch_state.rows_for_member(self.cog, guild, user_id)
         for entry in rows.values():
             self._forget_challenge(guild.id, user_id, entry)
-        if await joinwatch_state._uses_sqlite(self.cog, guild.id):
-            for kind in ("verified", "pending_role", "pending_assignment"):
-                await joinwatch_state.delete_row(self.cog, guild, int(user_id), kind)
-            return
-        for name in (
-            "joinwatch_pending_roles",
-            "joinwatch_pending_role_assignments",
-            "joinwatch_verified_members",
-        ):
-            async with getattr(self.cog.config.guild(guild), name)() as entries:
-                entry = entries.pop(str(user_id), None)
-                self._forget_challenge(guild.id, user_id, entry)
+        for kind in ("verified", "pending_role", "pending_assignment"):
+            await joinwatch_state.delete_row(self.cog, guild, int(user_id), kind)
 
     async def _scrub_moderator_references(self, guild, user_id) -> None:
-        if await joinwatch_state._uses_sqlite(self.cog, guild.id):
-            await self._scrub_sqlite_moderators(guild, int(user_id))
-            return
-        for name in ("joinwatch_pending_roles", "joinwatch_pending_role_assignments"):
-            config_store = getattr(self.cog.config.guild(guild), name)
-            saved = await self.cog.config.guild(guild).get_raw(name, default={})
-            for member_id in tuple(saved):
-                async with (
-                    joinwatch_state.member_lock(self.cog, guild.id, int(member_id)),
-                    config_store() as entries,
-                ):
-                    current = entries.get(member_id, {})
-                    for key in ("enrollment_moderator", "completion_moderator"):
-                        if current.get(key) == user_id:
-                            current[key] = None
-                            current["completion_reason"] = None
-
-    async def _scrub_sqlite_moderators(self, guild, user_id: int) -> None:
+        deleted = int(user_id)
         pending = await joinwatch_state.open_maps(self.cog, guild)
         member_ids = []
         seen = set()
@@ -1043,7 +1007,7 @@ class JoinwatchVerification:
                     parsed = int(member_id)
                 except (TypeError, ValueError):
                     continue
-                if parsed == user_id or parsed in seen:
+                if parsed == deleted or parsed in seen:
                     continue
                 seen.add(parsed)
                 member_ids.append(parsed)
@@ -1051,7 +1015,7 @@ class JoinwatchVerification:
             async with joinwatch_state.member_lock(self.cog, guild.id, member_id):
                 for kind in ("pending_role", "pending_assignment"):
                     current = await joinwatch_state.read_row(self.cog, guild, member_id, kind)
-                    if not isinstance(current, dict) or not _clear_moderator_fields(current, user_id):
+                    if not isinstance(current, dict) or not _clear_moderator_fields(current, deleted):
                         continue
                     await joinwatch_state.write_row(self.cog, guild, member_id, kind, current)
 
@@ -1083,7 +1047,7 @@ class JoinwatchVerification:
         if (
             store is not None
             and hasattr(store, "config_maps")
-            and await joinwatch_state._uses_sqlite(self.cog, guild.id)
+            and await joinwatch_state._sqlite_source(self.cog, guild.id)
         ):
             for entries in (await asyncio.to_thread(store.config_maps, guild.id)).values():
                 for user_id, entry in entries.items():
