@@ -288,7 +288,13 @@ ZIPs contain one `channel-<id>.jsonl` per source and `metadata.json` with channe
 
 Settings and counters are per server. Cases, operations, first-observed senders, and the message registry use local SQLite storage. The registry retains observed message IDs, dates, author IDs, pin state, and optional spam fingerprints for 14 days, without content or attachments. Purge uses observed IDs, not history scans. Separate `[p]cleanup` commands are documented in their [own README](../cleanup/README.md).
 
-Captured case files are temporary. Selected TP and FP reference samples are retained separately until explicitly removed. The reference dataset has no automatic expiry and is not included in case or user-data deletion. Red user-data deletion and guild removal remove matching registry and case records, case evidence, and JoinWatch data, with unavailable Discord deletions queued for retry. Developers declare channel routing in [channel_routing.py](channel_routing.py).
+Captured case files are temporary. Selected TP and FP reference samples are retained separately until explicitly removed. The reference dataset has no automatic expiry and is not included in case or user-data deletion. Ordinary Red user requests, including strict-user mode, remove optional account and activity snapshots while retaining necessary moderation cases, evidence, restrictions, IDs, and pending actions. Explicit owner or deleted-account requests retain the stronger deletion path. Guild removal follows the existing registry, case, evidence, and JoinWatch cleanup. Unavailable Discord deletions remain queued for retry. Developers declare channel routing in [channel_routing.py](channel_routing.py).
+
+When Message Content is unavailable, enabled detection queues only the IDs and retry state
+of received guild messages in SQLite for up to 14 days. The worker fetches those known IDs
+after access returns. It does not scan channel history. Incomplete attachment processing
+remains pending before source deletion, without spending a failure retry. Missing events
+or messages deleted before recovery cannot be reconstructed.
 
 Image-review exports contain SQLite, JSONL, and files scoped to the requested server.
 They include a consistent database snapshot, including committed WAL data, without

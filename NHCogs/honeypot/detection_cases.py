@@ -892,6 +892,16 @@ class DetectionCaseStore:
             "read_at": datetime.now(timezone.utc).isoformat(),
         }}
 
+    def redact_verification_user_context(self, user_id: int) -> None:
+        """Remove optional profile/activity snapshots, retaining verification facts."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                """UPDATE verification_incidents
+                   SET record = json_set(record, '$.profile', NULL, '$.activity', NULL)
+                   WHERE user_id = ?""",
+                (user_id,),
+            )
+
     def delete_verification_history(self, *, user_id: int | None = None, guild_id: int | None = None) -> None:
         if (user_id is None) == (guild_id is None):
             raise ValueError("specify exactly one privacy scope")
@@ -2379,6 +2389,19 @@ class DetectionCaseStore:
                 }
             )
 
+    def redact_user_case_context(self, user_id: int) -> None:
+        """Preserve case evidence and operations while erasing optional user context."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                """UPDATE detection_case_subjects
+                   SET display_name = NULL, avatar_url = NULL,
+                       account_created_at = NULL, guild_joined_at = NULL,
+                       account_snapshot = NULL, activity_summary = NULL,
+                       context_captured_at = NULL
+                   WHERE case_id IN (SELECT case_id FROM detection_cases WHERE user_id = ?)""",
+                (user_id,),
+            )
+
     def plan_user_case_deletion(self, user_id: int) -> tuple[tuple[int, str], ...]:
         """Durably tombstone every case owned by a user."""
         return self._plan_case_deletion("user", "user_id", user_id)
@@ -3679,6 +3702,27 @@ class DetectionCaseStore:
                 (operation_id,),
             ).fetchone()
             return row is not None and row[0] is not None
+
+    def defer_operation_for_capability(
+        self, operation_id: str, now: datetime, token: str, capability: str,
+    ) -> bool:
+        """Keep unavailable-data work pending without spending a retry attempt."""
+        with closing(self._connect()) as connection, connection:
+            result = connection.execute(
+                """UPDATE detection_operations
+                   SET status = 'pending', updated_at = ?, retry_at = ?,
+                       last_error = ?, attempts = MAX(attempts - 1, 0),
+                       claim_token = NULL, claimed_at = NULL
+                   WHERE operation_id = ? AND status = 'running' AND claim_token = ?""",
+                (
+                    _to_timestamp(now),
+                    _to_timestamp(now + timedelta(seconds=30)),
+                    f"Waiting for Gateway {capability} data",
+                    operation_id,
+                    token,
+                ),
+            )
+            return result.rowcount == 1
 
     def fail_operation(
         self, operation_id: str, token: str, error: str, now: datetime,

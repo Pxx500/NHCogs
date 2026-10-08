@@ -950,6 +950,26 @@ class JoinwatchVerification:
                 if key in self._deleted_challenges:
                     break
 
+    async def redact_user_context(self, user_id):
+        """Erase optional snapshots without changing restriction or challenge state."""
+        for guild in self.cog.bot.guilds:
+            async with joinwatch_state.member_lock(self.cog, guild.id, user_id):
+                for name in (
+                    "joinwatch_pending_roles",
+                    "joinwatch_pending_role_assignments",
+                    "joinwatch_verified_members",
+                ):
+                    async with getattr(self.cog.config.guild(guild), name)() as entries:
+                        entry = entries.get(str(user_id))
+                        if isinstance(entry, dict) and isinstance(entry.get("history"), dict):
+                            entry["history"]["profile"] = None
+                            entry["history"]["activity"] = None
+                planned = self._planned.get((guild.id, user_id))
+                if isinstance(planned, dict) and isinstance(planned.get("history"), dict):
+                    planned["history"]["profile"] = None
+                    planned["history"]["activity"] = None
+        await asyncio.to_thread(self.cog._case_store.redact_verification_user_context, user_id)
+
     async def delete_user_data(self, user_id):
         for guild in self.cog.bot.guilds:
             async with joinwatch_state.member_lock(self.cog, guild.id, user_id):

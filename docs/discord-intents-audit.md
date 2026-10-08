@@ -61,7 +61,7 @@ Deterministic image hashes and similarity comparisons are not evidence of AI tra
 
 The reference dataset is a required moderation feature. No automatic dataset purge or heuristic change is part of this patch.
 
-Moderation evidence, reasons, active sanctions, and references necessary to enforce restrictions require their own retention rules. They should not be removed through an indiscriminate user-ID purge. The existing Honeypot and NHModeration deletion hooks were not changed here. Those hooks already delete or anonymize some case and history data, so their behavior must be reviewed separately against the intended moderation policy.
+Moderation evidence, reasons, active sanctions, and references necessary to enforce restrictions require their own retention rules. They should not be removed through an indiscriminate user-ID purge. Honeypot and NHModeration now distinguish ordinary user and strict-user requests from explicit owner and deleted-account requests. Normal user requests remove optional profiles and activity snapshots while retaining essential moderation data and pending actions. A moderator's request does not erase another target's reasons. Stronger owner or deleted-account paths remain explicit, and unknown requester types fail before mutation.
 
 ## Questions that remain open
 
@@ -75,7 +75,7 @@ No new broad deletion or removal of sanctions is implemented.
 
 The framework's ordinary-request contract explicitly allows essential operational data to remain. Its stricter request mode still permits minimal anti-abuse IDs and timestamps, and owner requests may avoid operational hazards while offering another way to handle the request. This supports reviewing retention by purpose instead of interpreting every request as a blanket purge. It is a Red framework contract, not proof of an exception to Discord's own Terms.
 
-The existing Honeypot hook selects all of a user's detection cases for deletion regardless of requester type. NHModeration likewise invokes history anonymization without distinguishing request types and can remove reasons when the person is a target, executor, or credited moderator. These behaviors predate PR #149. They are a concrete follow-up against the requirement to preserve necessary moderation reasons and evidence, rather than a new instruction to erase more data.
+The post-review correction preserves cases, evidence, verification restrictions, deadlines, and action retries for both user and user_strict. This matters because strict-user mode is Red's default. Owner or deleted-account requests retain the stronger path. Necessary operational retention follows the framework contract and does not establish a universal exemption from Discord's own Terms.
 
 ### Public privacy policy and contact
 
@@ -122,6 +122,28 @@ Reference retention must remain transparent. It should not be described as an au
 The [English form draft](discord-intents-form-draft.md) must be checked against the running application before submission.
 
 ## Code and tests
+
+## Intent-loss protection added before the deadline
+
+The shared capability guard blocks dependent work when the requested mask is disabled,
+approval is denied, or the required state is unknown. OperationalSupport refreshes
+application flags every 30 seconds. The external launcher handles a rejected Gateway
+connection by restarting the same instance with privileged intents disabled. It returns
+to the original mask after full approval, stopping the old process first.
+
+Received messages requiring unavailable content are retained as a metadata-only queue
+for up to 14 days. The worker fetches only observed message IDs after restoration.
+Pending attachment capture waits before source deletion without spending its retry
+budget. Automatic reviewer work and role synchronization remain pending, and an
+incomplete member cache cannot replace a valid generation. A newly sent notification
+gets a fresh response window after a long pause without duplicating a known sent ping.
+
+Known actions that can use REST without privileged intents remain usable. Events never
+delivered by Discord and content deleted before capture cannot be reconstructed.
+
+Final local validation for the combined safety and privacy correction: 1741 tests passed,
+1 skipped, and 459 subtests passed. Ruff and diff checks passed. Deployment is still an
+administrator action, described in [the runbook](intent-loss-runbook.md).
 
 - CustomCommands: catalog.py, cog.py, migration.py, migration_controller.py, and the catalog, cog, and migration tests
 - Bot Proxy: bot_proxy_store.py, bot_proxy_manager.py, bot_proxy_workflow.py, nhmisc.py, and store, workflow, and deletion-hook tests

@@ -1093,6 +1093,51 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(compacted.attachments, ())
                 self.assertEqual(compacted.operations, ())
 
+    async def test_red_requester_scope_preserves_ordinary_user_case_and_evidence(self):
+        for requester in ("user", "user_strict", "owner", "discord_deleted_user"):
+            with self.subTest(requester=requester), TemporaryDirectory() as directory:
+                with _isolated_honeypot_modules(Path(directory)) as honeypot:
+                    cog = honeypot.Honeypot(_Bot(), _operational_support())
+                    await cog._message_registry.initialize()
+                    target = self._append_case(honeypot, cog, user_id=20, message_id=40)
+                    evidence_root = (cog._detection_case_files_path
+                                     / str(target.case.guild_id) / target.case.case_id)
+                    evidence_root.mkdir(parents=True)
+                    evidence = evidence_root / "retained.png"
+                    evidence.write_bytes(b"operational evidence")
+                    before = cog._case_store.get_case(target.case.case_id)
+                    cog._joinwatch_verification.redact_user_context = mock.AsyncMock()
+                    cog._joinwatch_verification.delete_user_data = mock.AsyncMock()
+                    forget = mock.patch.object(cog._message_registry, "forget_user",
+                                               wraps=cog._message_registry.forget_user)
+                    with forget as forget_user:
+                        await cog.red_delete_data_for_user(requester=requester, user_id=20)
+                    if requester in {"user", "user_strict"}:
+                        current = cog._case_store.get_case(target.case.case_id)
+                        self.assertEqual(current.case, before.case)
+                        self.assertEqual(current.messages, before.messages)
+                        self.assertEqual(current.operations, before.operations)
+                        self.assertEqual(evidence.read_bytes(), b"operational evidence")
+                        forget_user.assert_not_awaited()
+                        cog._joinwatch_verification.redact_user_context.assert_awaited_once_with(20)
+                        cog._joinwatch_verification.delete_user_data.assert_not_awaited()
+                        self.assertIsNone(cog._case_store.get_case_deletion_job(target.case.case_id))
+                    else:
+                        self.assertIsNone(cog._case_store.get_case(target.case.case_id))
+                        self.assertFalse(evidence_root.exists())
+                        forget_user.assert_awaited_once_with(20)
+                        cog._joinwatch_verification.delete_user_data.assert_awaited_once_with(20)
+                        cog._joinwatch_verification.redact_user_context.assert_not_awaited()
+
+    async def test_unknown_data_requester_does_not_erase_operational_case(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            cog = honeypot.Honeypot(_Bot(), _operational_support())
+            target = self._append_case(honeypot, cog, user_id=20, message_id=40)
+            before = cog._case_store.get_case(target.case.case_id)
+            with self.assertRaisesRegex(ValueError, "Unsupported"):
+                await cog.red_delete_data_for_user(requester="unexpected", user_id=20)
+            self.assertEqual(cog._case_store.get_case(target.case.case_id), before)
+
     async def test_user_data_deletion_removes_cases_and_case_files(self):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:

@@ -568,6 +568,26 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reloaded.state, models.TicketState.CLAIMED)
         self.assertIn(reloaded.assignee_id, (101, 102))
 
+    async def test_pending_deadline_rebase_preserves_recovery_marker_and_checks_target(self):
+        await self.store.initialize()
+        ticket = await self._create_open_ticket(next_action_at=self.now)
+        await self.store.reserve_ping(
+            ticket.ticket_id, target_user_id=400,
+            presence_tier=models.PresenceTier.ONLINE, automatic=True,
+            reserved_at=self.now, response_deadline=self.now + timedelta(minutes=5),
+            maximum_pings=3,
+        )
+        deadline = self.now + timedelta(hours=2)
+        self.assertFalse(await self.store.rebase_pending_ping(ticket.ticket_id, 401, deadline))
+        pending = await self.store.get_ticket(ticket.ticket_id)
+        self.assertEqual(pending.pending_response_deadline, self.now + timedelta(minutes=5))
+        self.assertTrue(await self.store.rebase_pending_ping(ticket.ticket_id, 400, deadline))
+        updated = await self.store.get_ticket(ticket.ticket_id)
+        self.assertEqual(updated.pending_response_deadline, deadline)
+        self.assertEqual(updated.pending_ping_reserved_at, self.now)
+        self.assertEqual(updated.pending_target_id, 400)
+        self.assertEqual(updated.ping_count, 0)
+
     async def test_decline_unassign_and_ping_history_are_ticket_scoped(self):
         await self.store.initialize()
         first = await self._create_open_ticket(author_id=100)

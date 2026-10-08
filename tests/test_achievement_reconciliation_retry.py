@@ -58,7 +58,12 @@ class AchievementReconciliationRetryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.channel.guild = self.guild
         self.cog = object.__new__(nhmisc.NHMisc)
-        self.cog.bot = SimpleNamespace(guilds=[self.guild])
+        self.cog.bot = SimpleNamespace(
+            guilds=[self.guild], intents=SimpleNamespace(members=True),
+            application_flags=SimpleNamespace(
+                gateway_guild_members=True, gateway_guild_members_limited=False,
+            ),
+        )
         self.cog._achievement_reconciliations = {}
         self.cog._achievement_reconciliation_runs = set()
         self.cog._achievement_reconciliation_closing = False
@@ -113,6 +118,27 @@ class AchievementReconciliationRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.channel.pings, [False])
         self.assertIn("Members corrected: 1", self.channel.messages[0].content)
         self.assertTrue(self.channel.messages[0].content.endswith("Retry completed"))
+        self.member.edit.assert_awaited_once()
+
+    async def test_member_capability_loss_preserves_retry_until_restored(self):
+        self.cog.bot.intents = SimpleNamespace(members=False)
+        await self.cog._reconcile_achievement_roles_for_guild(self.guild)
+        await asyncio.wait_for(self.sleeping.wait(), 1)
+        state = self.cog._achievement_reconciliations[self.guild.id]
+        pending = state.task
+        self.assertIsNotNone(pending)
+        self.guild.fetch_member.assert_not_awaited()
+        await self.cog._reconcile_achievement_roles_for_guild(self.guild, retry=True)
+        self.assertIs(state.task, pending)
+        self.assertFalse(pending.done())
+        self.assertIn("paused", self.channel.messages[0].content)
+        self.assertEqual(self.delays, [30])
+        self.cog.bot.intents.members = True
+        self.guild.fetch_member.side_effect = None
+        self.guild.fetch_member.return_value = self.member
+        self.release.set()
+        await asyncio.wait_for(pending, 1)
+        self.assertIsNone(state.task)
         self.member.edit.assert_awaited_once()
 
     async def test_failed_retry_pings_a_new_message_without_scheduling_another(self):

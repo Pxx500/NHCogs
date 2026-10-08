@@ -160,8 +160,14 @@ class NHModerationHistory:
         total = sum(row.count for row in output) + other_count
         return BanChartData(tuple(output), other_count, total)
 
-    async def delete_user_data(self, user_id: int) -> None:
-        for guild_id in await self._store.delete_user(user_id):
+    async def delete_user_data(self, user_id: int, *, requester: str = "owner") -> None:
+        if requester in {"user", "user_strict"}:
+            guild_ids = await self._store.minimize_user(user_id)
+        elif requester in {"owner", "discord_deleted_user"}:
+            guild_ids = await self._store.delete_user(user_id)
+        else:
+            raise ValueError(f"Unsupported NHModeration data-deletion requester: {requester}")
+        for guild_id in guild_ids:
             await self.rebuild(guild_id)
 
     async def delete_guild_data(self, guild_id: int) -> None:

@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.storage_loader import load_shared_storage
+
 ROOT_PACKAGE_NAME = "nhmisc_forum_autopin_test_root"
 PACKAGE_NAME = f"{ROOT_PACKAGE_NAME}.nhmisc"
 ROOT_PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs"
@@ -138,6 +140,7 @@ ALLOWED_MENTIONS_NONE = object()
 
 
 def load_nhmisc_modules():
+    load_shared_storage()
     discord = types.ModuleType("discord")
     discord.HTTPException = type("HTTPException", (Exception,), {})
     # Mirror the real discord.py hierarchy so except ordering is exercised.

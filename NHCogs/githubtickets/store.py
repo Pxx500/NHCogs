@@ -673,6 +673,15 @@ class GitHubTicketsStore:
                 maximum_pings,
             )
 
+    async def rebase_pending_ping(
+        self, ticket_id: int, expected_target_id: int, response_deadline: datetime,
+    ) -> bool:
+        """Refresh an unsent ping's response window without changing its recovery marker."""
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._rebase_pending_ping_sync, ticket_id, expected_target_id, response_deadline,
+            )
+
     async def acknowledge_ping(
         self,
         ticket_id: int,
@@ -1762,6 +1771,20 @@ class GitHubTicketsStore:
             reserved_at=reserved_at.astimezone(timezone.utc),
             response_deadline=response_deadline.astimezone(timezone.utc),
         )
+
+    def _rebase_pending_ping_sync(
+        self, ticket_id: int, expected_target_id: int, response_deadline: datetime,
+    ) -> bool:
+        changed = self._update_ticket_state(
+            """
+            UPDATE tickets
+            SET pending_response_deadline = ?, transition_version = transition_version + 1
+            WHERE ticket_id = ? AND state = 'open' AND pending_target_id = ?
+                AND next_action IN ('direct_ping', 'automatic_ping')
+            """,
+            (_serialize_datetime(response_deadline), ticket_id, expected_target_id),
+        )
+        return changed > 0
 
     def _acknowledge_ping_sync(
         self,

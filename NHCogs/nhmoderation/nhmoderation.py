@@ -123,8 +123,7 @@ class NHModeration(commands.Cog):
         self._sync_tasks.clear()
 
     async def red_delete_data_for_user(self, *, requester: str, user_id: int) -> None:
-        del requester
-        await self.history.delete_user_data(user_id)
+        await self.history.delete_user_data(user_id, requester=requester)
 
     @commands.Cog.listener()
     async def on_guild_remove(self, guild: discord.Guild) -> None:

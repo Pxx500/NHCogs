@@ -671,6 +671,28 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(member.status_reads, int(member.id in (200, 209)))
             self.assertEqual(bot.fetch_calls, 0)
 
+    async def test_missing_presence_grant_or_partial_cache_is_not_an_empty_candidate_pool(self):
+        with isolated_githubtickets_modules(self.data_path) as modules:
+            bot = FakeBot(ready=False)
+            bot.intents = SimpleNamespace(members=True, presences=True)
+            member = PresenceMember(200, status="online")
+            guild = SimpleNamespace(id=10, members=[member], chunked=True, member_count=1)
+            bot.guild_map[10] = guild
+            cog = modules.githubtickets.GitHubTickets(bot, mock.Mock())
+            await cog.store.initialize()
+            ticket = SimpleNamespace(guild_id=10, ticket_id=1, author_id=30, category_ids=())
+            bot._nhcogs_gateway_grants = {"presences": False}
+            with self.assertRaises(modules.githubtickets.GatewayCapabilityUnavailable):
+                await cog._get_candidates(ticket)
+            bot._nhcogs_gateway_grants = {"presences": True}
+            guild.member_count = 2
+            with self.assertRaises(modules.githubtickets.GatewayCapabilityUnavailable):
+                await cog._get_candidates(ticket)
+            guild.member_count = 1
+            self.assertEqual(await cog._get_candidates(ticket), ())
+            self.assertEqual(member.status_reads, 0)
+            self.assertEqual(bot.fetch_calls, 0)
+
     async def test_member_remove_deletes_only_the_departed_guild_profile(self):
         with isolated_githubtickets_modules(self.data_path) as modules:
             support = mock.Mock(

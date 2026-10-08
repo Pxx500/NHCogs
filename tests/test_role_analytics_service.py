@@ -6,6 +6,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
+from tests.storage_loader import load_shared_storage
+
+load_shared_storage()
+
 PACKAGE_NAME = "nhmisc_role_analytics_service_test_package"
 PACKAGE_PATH = Path(__file__).parents[1] / "NHCogs" / "nhmisc"
 package = types.ModuleType(PACKAGE_NAME)
@@ -57,6 +61,9 @@ class FakeGuild:
 class FakeBot:
     def __init__(self, *, members_intent=True):
         self.intents = types.SimpleNamespace(members=members_intent)
+        self.application_flags = types.SimpleNamespace(
+            gateway_guild_members=True, gateway_guild_members_limited=False,
+        )
 
 
 class GatedStore:
@@ -146,6 +153,56 @@ class RoleAnalyticsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(guild.chunk_calls, 1)
         self.assertEqual(result.source, "gateway-chunk")
         self.assertEqual(result.member_count, 2)
+
+    async def test_partial_cache_preserves_last_complete_generation(self):
+        guild = FakeGuild([FakeMember(1, (123, 10)), FakeMember(2, (123, 20))])
+        service = role_analytics_service.RoleAnalyticsService(FakeBot(), self.store)
+        initial = await service.sync_guild(guild, manual=True)
+        guild.member_count = 2
+        guild.members = guild.members[:1]
+        with self.assertRaises(role_analytics_service.MemberCacheUnavailableError):
+            await service.sync_guild(guild, manual=True)
+        state = await self.store.get_state(guild.id)
+        self.assertEqual(state.active_generation, initial.generation)
+        self.assertEqual(state.status, role_analytics_store.SyncStatus.RETRYING)
+        self.assertEqual(await self.store.count_matching(guild.id, "1 = 1", ()), 2)
+
+    async def test_intent_loss_during_sync_preserves_old_generation_and_recovers(self):
+        guild = FakeGuild([FakeMember(1, (123, 10))])
+        bot = FakeBot()
+        initial_service = role_analytics_service.RoleAnalyticsService(bot, self.store)
+        initial = await initial_service.sync_guild(guild, manual=True)
+        gated = GatedStore(self.store)
+        service = role_analytics_service.RoleAnalyticsService(bot, gated)
+        task = __import__("asyncio").create_task(service.sync_guild(guild, manual=True))
+        await gated.write_started.wait()
+        bot.intents.members = False
+        gated.allow_write.set()
+        with self.assertRaises(role_analytics_service.MemberIntentRequiredError):
+            await task
+        self.assertEqual((await self.store.get_state(guild.id)).active_generation, initial.generation)
+        bot.intents.members = True
+        restored = await service.sync_guild(guild, manual=True)
+        self.assertGreater(restored.generation, initial.generation)
+
+    async def test_missing_intent_retry_remains_scheduled_until_restored(self):
+        guild = FakeGuild([FakeMember(1, (123, 10))])
+        bot = FakeBot()
+        service = role_analytics_service.RoleAnalyticsService(bot, self.store)
+        await service.sync_guild(guild, manual=True)
+        bot.intents.members = False
+        delays = []
+
+        async def sleep(delay):
+            delays.append(delay)
+            if len(delays) == 2:
+                bot.intents.members = True
+
+        with mock.patch.object(role_analytics_service.asyncio, "sleep", new=sleep):
+            await service.reconcile_enabled_guilds([guild])
+            await __import__("asyncio").gather(*tuple(service._tasks))
+        self.assertEqual(delays, [30.0, 30.0])
+        self.assertEqual((await self.store.get_state(guild.id)).status, role_analytics_store.SyncStatus.READY)
 
     async def test_member_event_during_snapshot_is_replayed_before_activation(self):
         guild = FakeGuild([FakeMember(1, (123, 10))], chunked=True)

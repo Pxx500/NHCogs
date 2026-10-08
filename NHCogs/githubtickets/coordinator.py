@@ -4,8 +4,10 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+
+from NHCogs.gateway_capabilities import GatewayCapabilityUnavailable
 
 from . import presentation
 from .models import (
@@ -644,7 +646,19 @@ class TicketCoordinator:
             )
             self._wake_deadlines()
             return TicketResult(True)
-        return await self._process_due_ping(ticket, settings, now)
+        return await self._process_due_ping_or_defer(ticket, settings, now)
+
+    async def _process_due_ping_or_defer(
+        self, ticket: Ticket, settings: GuildSettings, now: datetime,
+    ) -> TicketResult:
+        try:
+            return await self._process_due_ping(ticket, settings, now)
+        except GatewayCapabilityUnavailable:
+            await self._store.defer_due_ping(
+                ticket.ticket_id, now + timedelta(seconds=30), now,
+            )
+            self._wake_deadlines()
+            return TicketResult(False, "Automatic routing is waiting for Gateway data")
 
     async def _process_due_ping(
         self,
@@ -704,7 +718,10 @@ class TicketCoordinator:
             if recovered_sent_at is not None:
                 pending_settlement = (reservation, recovered_sent_at)
                 self._sent_ping_settlements[ticket.ticket_id] = pending_settlement
-        if pending_settlement is None or pending_settlement[0] != reservation:
+        # An unsent ping's deadline can be rebased; its recovery marker stays stable.
+        if pending_settlement is None or replace(
+            pending_settlement[0], response_deadline=reservation.response_deadline,
+        ) != reservation:
             effect_result = await self._send_ping_effect(
                 ticket,
                 reservation,
@@ -713,7 +730,7 @@ class TicketCoordinator:
             )
             if effect_result is not None:
                 return effect_result
-            pending_settlement = (reservation, now)
+            pending_settlement = (reservation, self._clock())
             self._sent_ping_settlements[ticket.ticket_id] = pending_settlement
 
         acknowledged = await self._store.acknowledge_ping(
@@ -771,6 +788,18 @@ class TicketCoordinator:
             ticket, reservation.target_user_id,
         ):
             return await self._reroute_unavailable_ping(ticket, reservation, settings, now)
+        response_seconds = (
+            self._automatic_response_seconds(
+                settings, reservation.presence_tier or PresenceTier.OFFLINE,
+            )
+            if reservation.automatic
+            else settings.direct_response_seconds
+        )
+        if not await self._store.rebase_pending_ping(
+            ticket.ticket_id, reservation.target_user_id,
+            self._clock() + timedelta(seconds=response_seconds),
+        ):
+            return TicketResult(False, INACTIVE_TICKET)
         try:
             await self._projection.ping_reviewer(
                 ticket.thread_id,

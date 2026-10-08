@@ -925,6 +925,12 @@ class _AppCommandTree:
 
 class _Bot:
     def __init__(self, ready=True):
+        self.intents = SimpleNamespace(members=True, presences=True, message_content=True)
+        self.application_flags = SimpleNamespace(
+            gateway_guild_members=True, gateway_guild_members_limited=False,
+            gateway_presence=True, gateway_presence_limited=False,
+            gateway_message_content=True, gateway_message_content_limited=False,
+        )
         self.ready = asyncio.Event()
         self.tree = _AppCommandTree()
         self.guilds = []

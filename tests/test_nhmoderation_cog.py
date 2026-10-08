@@ -48,6 +48,14 @@ def loaded_nhmoderation():
 
 
 class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
+    async def test_data_deletion_forwards_red_requester_without_erasing_semantics(self):
+        with loaded_nhmoderation() as module:
+            subject = object.__new__(module.NHModeration)
+            subject.history = SimpleNamespace(delete_user_data=mock.AsyncMock())
+            for requester in ("user", "user_strict", "owner", "discord_deleted_user"):
+                await subject.red_delete_data_for_user(requester=requester, user_id=100)
+                subject.history.delete_user_data.assert_awaited_with(100, requester=requester)
+
     async def test_gateway_ban_retains_profile_and_available_activity(self):
         with loaded_nhmoderation() as module:
             with TemporaryDirectory() as directory:

@@ -10,6 +10,8 @@ from redbot.core import Config, commands
 from redbot.core.bot import Red
 from redbot.core.data_manager import cog_data_path
 
+from NHCogs.gateway_capabilities import GatewayCapabilityUnavailable, require
+
 from .. import command_overview
 from . import presentation, settings
 from .coordinator import TicketActor, TicketCoordinator, TicketResult
@@ -555,10 +557,17 @@ class GitHubTickets(commands.Cog):
         )
 
     async def _get_candidates(self, ticket: Ticket) -> tuple[CandidateFacts, ...]:
+        require(self.bot, "members")
+        require(self.bot, "presences")
         guild = self.bot.get_guild(ticket.guild_id)
         if guild is None:
-            return ()
+            raise GatewayCapabilityUnavailable("members")
+        if getattr(guild, "unavailable", False) or not getattr(guild, "chunked", True):
+            raise GatewayCapabilityUnavailable("members")
         members = tuple(getattr(guild, "members", ()))
+        reported_count = getattr(guild, "member_count", len(members))
+        if reported_count is None or reported_count != len(members):
+            raise GatewayCapabilityUnavailable("members")
         matching_profile_ids = await self._automatic_candidate_ids(
             ticket.guild_id,
             ticket.category_ids,

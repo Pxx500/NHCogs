@@ -101,6 +101,45 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertIn("detection_attachments", tables)
         self.assertIn("public_daily_stats", tables)
 
+    def test_user_context_redaction_keeps_active_evidence_and_operations(self):
+        now = datetime(2026, 10, 4, 12, tzinfo=timezone.utc)
+        attachment = NewAttachment(0, "proof.png", 128, "image/png", 32, 16,
+                                   "https://cdn.test/proof.png")
+        message = replace(
+            self.message(40, now, attachments=(attachment,)),
+            display_name="Private name", avatar_url="https://cdn.test/avatar.png",
+            account_created_at=now - timedelta(days=7), guild_joined_at=now,
+            account_snapshot={"username": "private"}, activity_summary={"messages": 5},
+            context_captured_at=now,
+        )
+        first = self.store.append_message(
+            message, (DetectionSignal("firstpost", "Review evidence", ActionIntent.REVIEW,
+                                      True, {}),),
+            ((OperationType.MESSAGE_PROCESS, "message-process:{case_id}:{sequence}"),),
+        )
+        other = self.store.append_message(replace(message, user_id=21, message_id=41), ())
+        before = self.store.get_case(first.case.case_id)
+        other_before = self.store.get_case(other.case.case_id)
+
+        self.store.redact_user_case_context(20)
+        self.store.redact_user_case_context(20)
+
+        current = DetectionCaseStore(self.database_path).get_case(first.case.case_id)
+        self.assertEqual(current.case, before.case)
+        self.assertEqual(current.messages, before.messages)
+        self.assertEqual(current.attachments, before.attachments)
+        self.assertEqual(current.signals, before.signals)
+        self.assertEqual(current.operations, before.operations)
+        self.assertEqual(self.store.get_case(other.case.case_id), other_before)
+        self.assertIsNone(current.subject.display_name)
+        self.assertIsNone(current.subject.avatar_url)
+        history = self.store.export_detection_history(10)
+        target = next(record for record in history if record["user_id"] == "20")
+        for field in ("account_snapshot", "activity_summary", "context_captured_at",
+                      "account_created_at", "guild_joined_at"):
+            self.assertIsNone(target[field])
+        self.assertIsNone(self.store.get_case_deletion_job(first.case.case_id))
+
     def test_initialize_preserves_current_schema_data_when_backfilling_version(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
         stored_case = self.store.append_message(

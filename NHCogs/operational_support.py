@@ -11,12 +11,19 @@ from redbot.core.data_manager import cog_data_path
 
 from .command_feedback import respond_to_command_error
 from .command_overview import channel_is_private, send_group_overview
+from .gateway_capabilities import (
+    GRANT_FLAGS,
+    available,
+    signal_full_intent_recovery,
+    update_grants,
+)
 from .operational_errors import OperationalErrorReporter, OperationalFailure
 
 log = logging.getLogger("red.NHCogs.NHMisc")
 NHMISC_CONFIG_IDENTIFIER = 8597423150612235807
 ERROR_CONFIG_IDENTIFIER = 8597423150612235808
 USER_MENTION_OR_ID = "Provide a user mention or user ID"
+GATEWAY_GRANT_REFRESH_SECONDS = 30
 
 
 def stored_user_id(value: str) -> int:
@@ -56,6 +63,8 @@ class OperationalSupport(commands.Cog):
         )
         self.config.register_guild(error_channel=None, error_maintainer_id=None)
         self._report_tasks: set[asyncio.Task] = set()
+        self._gateway_task: asyncio.Task | None = None
+        self._gateway_states: dict[str, bool] = {}
         self.operational_errors = OperationalErrorReporter(
             bot,
             self.config,
@@ -65,10 +74,47 @@ class OperationalSupport(commands.Cog):
 
     async def cog_load(self) -> None:
         await self.operational_errors.initialize()
+        if callable(getattr(self.bot, "application_info", None)):
+            self._gateway_task = asyncio.create_task(self._watch_gateway_grants())
 
     async def cog_unload(self) -> None:
+        if self._gateway_task is not None:
+            self._gateway_task.cancel()
+            await asyncio.gather(self._gateway_task, return_exceptions=True)
+            self._gateway_task = None
         if self._report_tasks:
             await asyncio.gather(*tuple(self._report_tasks), return_exceptions=True)
+
+    async def _refresh_gateway_grants(self) -> None:
+        application = await self.bot.application_info()
+        flags = getattr(application, "flags", None)
+        if flags is None:
+            return
+        update_grants(self.bot, flags)
+        current = {key: available(self.bot, key) for key in GRANT_FLAGS}
+        for key, enabled in current.items():
+            if self._gateway_states.get(key) == enabled:
+                continue
+            if enabled:
+                log.info("Gateway %s data available. Deferred workers may resume", key)
+            else:
+                log.warning("Gateway %s data unavailable. Dependent work remains pending", key)
+        self._gateway_states = current
+        if signal_full_intent_recovery(self.bot, flags):
+            log.info("Full privileged-intent approval restored. Signalled the fallback launcher")
+
+    async def _watch_gateway_grants(self) -> None:
+        wait_until_ready = getattr(self.bot, "wait_until_ready", None)
+        if callable(wait_until_ready):
+            await wait_until_ready()
+        while True:
+            try:
+                await self._refresh_gateway_grants()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.warning("Could not refresh Gateway approval flags", exc_info=True)
+            await asyncio.sleep(GATEWAY_GRANT_REFRESH_SECONDS)
 
     async def report_global_error(self, *, source: str, action: str, error: BaseException) -> None:
         """Report a suite-wide failure to its configured guild destinations."""

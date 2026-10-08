@@ -17,6 +17,8 @@ import discord
 from redbot.core import commands
 from redbot.core.data_manager import cog_data_path
 
+from NHCogs.gateway_capabilities import GatewayCapabilityUnavailable, require
+
 from ..command_overview import send_group_overview
 from ..operational_errors import OperationalFailure
 from ..operational_support import NHMISC_CONFIG_IDENTIFIER, OperationalSupport
@@ -964,6 +966,7 @@ class NHMisc(commands.Cog):
     async def _achievement_discord_snapshot(
         self, guild: discord.Guild
     ) -> DiscordRoleSnapshot | None:
+        require(self.bot, "members")
         cached_member_count = len(guild.members)
         reported_member_count = guild.member_count
         if (
@@ -1090,8 +1093,14 @@ class NHMisc(commands.Cog):
         state = self._achievement_reconciliations.setdefault(guild.id, _AchievementReconciliation())
         async with state.lock:
             aborted = False
+            capability_wait = False
             try:
                 corrected, skips = await self._reconcile_achievement_roles_once(guild)
+            except (GatewayCapabilityUnavailable, AnalyticsUnavailableError):
+                corrected = None
+                skips = None
+                aborted = True
+                capability_wait = True
             except Exception as error:
                 corrected = None
                 skips = None
@@ -1104,7 +1113,7 @@ class NHMisc(commands.Cog):
             unsuccessful = aborted or bool(skips)
             pending = state.task is not None
             if unsuccessful and not retry and not pending:
-                state.retry_at = int(time.time()) + ACHIEVEMENT_RETRY_SECONDS
+                state.retry_at = int(time.time()) + (30 if capability_wait else ACHIEVEMENT_RETRY_SECONDS)
                 state.task = asyncio.create_task(self._retry_achievement_roles(guild, state))
             if retry or (pending and not unsuccessful):
                 status_line = "Retry failed" if unsuccessful else "Retry completed"
@@ -1118,6 +1127,11 @@ class NHMisc(commands.Cog):
                 skips=skips,
                 status_line=status_line,
             )
+            if capability_wait:
+                content = (
+                    "Achievement role reconciliation paused: member data is unavailable\n\n"
+                    "Pending work is preserved and will be retried"
+                )
             # A crash already pings through the operational error report.
             # Skip-only retries ping with a new message; edits never ping.
             ping = bool(retry and unsuccessful and not aborted)
@@ -1125,7 +1139,9 @@ class NHMisc(commands.Cog):
                 await self._publish_achievement_reconciliation(
                     guild, state, content, ping=ping
                 )
-            if retry or not unsuccessful:
+            if retry and capability_wait:
+                state.retry_at = int(time.time()) + 30
+            elif retry or not unsuccessful:
                 if state.task is not None and state.task is not asyncio.current_task():
                     state.task.cancel()
                 state.task = None
@@ -1133,8 +1149,11 @@ class NHMisc(commands.Cog):
                 state.retry_at = 0
 
     async def _retry_achievement_roles(self, guild, state) -> None:
-        await asyncio.sleep(max(0, state.retry_at - time.time()))
-        await self._reconcile_achievement_roles_for_guild(guild, retry=True)
+        while not self._achievement_reconciliation_closing:
+            await asyncio.sleep(max(0, state.retry_at - time.time()))
+            await self._reconcile_achievement_roles_for_guild(guild, retry=True)
+            if state.task is not asyncio.current_task():
+                return
 
     async def _publish_achievement_reconciliation(
         self, guild, state, content, *, ping: bool = False
@@ -1183,6 +1202,7 @@ class NHMisc(commands.Cog):
     async def _reconcile_achievement_roles_once(  # noqa: PLR0912
         self, guild: discord.Guild
     ) -> tuple[int, tuple[ReconciliationSkip, ...]]:
+        require(self.bot, "members")
         definitions = tuple(
             definition
             for definition in await self._achievement_store.list_definitions(guild.id)

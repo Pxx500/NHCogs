@@ -343,6 +343,7 @@ class GateIncrementExecutionTests(unittest.IsolatedAsyncioTestCase):
         )
         cog = object.__new__(nhmisc.NHMisc)
         cog._gate_increment_store = self.store
+        cog.bot = SimpleNamespace(intents=SimpleNamespace(members=False, presences=False))
         key = cog._gate_increment_key(source)
         await self.store.claim(
             key,

@@ -59,7 +59,11 @@ Bot Proxy requests delete presets created by the user and their saved avatars, c
 
 Automatic reviewer notifications are opt-in. Disabling them or clearing the profile prevents future availability processing by that routing feature. Existing ticket history is separate from this opt-out.
 
-Other NHCogs stores have existing deletion or anonymization hooks with feature-specific behavior. The handling of moderation evidence, sanctions, and reference data must be finalized with the administrator and, where necessary, Discord. The image-reference dataset is not included in the current case-deletion hook.
+Honeypot and NHModeration treat ordinary user and strict-user requests as removal of optional account and activity snapshots while retaining essential moderation reasons, cases, evidence, operational IDs, restrictions, and pending actions. Explicit owner or deleted-account requests retain a stronger cleanup path. A moderator's request does not erase another target's reasons. Unknown request types fail before mutation. The handling of necessary operational retention must still be documented and approved by the operator. The image-reference dataset is not included in case deletion.
+
+During a temporary loss of Message Content, enabled moderation stores received guild,
+channel, and message IDs with retry metadata for up to 14 days. This queue contains no
+message text or attachments. It fetches only those known messages when access returns.
 
 A deletion request does not itself remove a Discord ban or replace the server's appeal process. Published messages and shared content may require separate review when they contain personal information.
 

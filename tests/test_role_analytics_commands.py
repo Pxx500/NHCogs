@@ -320,6 +320,10 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
         cog = object.__new__(nhmisc.NHMisc)
         cog.bot = types.SimpleNamespace(
             guilds=[],
+            intents=types.SimpleNamespace(members=True),
+            application_flags=types.SimpleNamespace(
+                gateway_guild_members=True, gateway_guild_members_limited=False,
+            ),
             wait_for=mock.AsyncMock(),
             get_channel=lambda _channel_id: None,
         )

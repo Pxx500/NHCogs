@@ -13,6 +13,7 @@ import logging
 import re
 import sqlite3
 import typing
+from collections import Counter
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,7 @@ from redbot.core import commands, modlog
 from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import box
 
+from ..gateway_capabilities import GatewayCapabilityUnavailable, available
 from . import detection_runtime, imagescan, review_publication
 from .case_review import case_feedback_items
 from .detection_cases import (
@@ -711,6 +713,29 @@ async def _run_detection_operation_follow_ups(
             await cog._finish_case_review_if_ready(operation.case_id, None)
 
 
+def _capture_needs_unavailable_content(cog, context: OperationContext) -> bool:
+    if context.operation.operation_type != OperationType.MESSAGE_PROCESS:
+        return False
+    if available(cog.bot, "message_content"):
+        return False
+    terminal_statuses = {status.value for status in detection_runtime.CaptureStatus}
+    pending = tuple(
+        attachment for attachment in context.snapshot.attachments
+        if attachment.message_sequence == context.operation.message_sequence
+        and attachment.capture_status not in terminal_statuses
+    )
+    if not pending:
+        return False
+    if context.live_message is None:
+        return True
+    supplied = Counter(
+        (str(attachment.filename), int(attachment.size))
+        for attachment in getattr(context.live_message, "attachments", ())
+    )
+    needed = Counter((attachment.filename, attachment.size) for attachment in pending)
+    return any(supplied[key] < count for key, count in needed.items())
+
+
 async def _execute_detection_case_operation(
     cog,
     operation,
@@ -754,6 +779,8 @@ async def _execute_detection_case_operation(
                 "unsupported detection case operation: "
                 f"{operation_type_value}"
             )
+        if _capture_needs_unavailable_content(cog, context):
+            raise GatewayCapabilityUnavailable("message_content")
         operation_outcome = apply_operation_policy(
             await handler(cog, context), operation_policy
         )
@@ -768,6 +795,15 @@ async def _execute_detection_case_operation(
     if cancellation is not None:
         raise cancellation
     if operation_error is not None:
+        if isinstance(operation_error, GatewayCapabilityUnavailable):
+            await asyncio.to_thread(
+                cog._case_store.defer_operation_for_capability,
+                lease.operation_id,
+                now,
+                lease.claim_token,
+                operation_error.capability,
+            )
+            return
         await _settle_detection_operation_failure(
             cog,
             operation,
