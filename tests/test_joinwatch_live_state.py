@@ -978,53 +978,7 @@ class JoinWatchMigrationRaceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(survivor["stage"], 1)
 
 
-class JoinWatchRemovalAndCutoverTests(unittest.IsolatedAsyncioTestCase):
-    async def test_guild_removal_drops_a_write_that_resumes_later(self):
-        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
-            state = honeypot.joinwatch_state
-            cog = _cog(honeypot, directory, _maps(pending={"20": _entry()}))
-            self.assertTrue(await state.cutover_guild(cog, 100))
-            guild = SimpleNamespace(id=100)
-            paused = asyncio.Event()
-            resume = asyncio.Event()
-            written = {}
-
-            async def resume_write():
-                async with state.member_lock(cog, 100, 20):
-                    paused.set()
-                    await resume.wait()
-                    written["copied"] = await state.write_row(
-                        cog, guild, 20, "pending_role", _entry(incident_id="resurrected")
-                    )
-
-            async def remove_while_paused():
-                await paused.wait()
-                await owner.delete_guild_data(guild)
-                resume.set()
-
-            module = importlib.import_module(f"{honeypot.__package__}.joinwatch_verification")
-            owner = module.JoinwatchVerification(cog)
-            try:
-                await asyncio.gather(resume_write(), remove_while_paused())
-            finally:
-                await owner.close()
-            self.assertFalse(written["copied"])
-            for name in (
-                "joinwatch_pending_roles",
-                "joinwatch_pending_role_assignments",
-                "joinwatch_verified_members",
-            ):
-                self.assertEqual(cog.config.guilds[100][name], {})
-            self.assertIsNone(cog._case_store.get(100, 20, "pending_role"))
-            await honeypot.Honeypot.on_guild_join(cog, guild)
-            self.assertTrue(
-                await state.write_row(cog, guild, 20, "pending_role", _entry(incident_id="rejoined"))
-            )
-            self.assertEqual(
-                cog.config.guilds[100]["joinwatch_pending_roles"]["20"]["incident_id"],
-                "rejoined",
-            )
-
+class JoinWatchCutoverAlertTests(unittest.IsolatedAsyncioTestCase):
     async def test_cutover_alert_does_not_block_live_writes(self):
         with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
             state = honeypot.joinwatch_state

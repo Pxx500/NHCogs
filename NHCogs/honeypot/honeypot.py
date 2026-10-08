@@ -250,11 +250,6 @@ class Honeypot(Cog):
             await self._joinwatch_waves.delete_user(guild, user_id)
 
     @commands.Cog.listener()
-    async def on_guild_join(self, guild: discord.Guild) -> None:
-        """Allow JoinWatch live writes again when the bot joins a guild."""
-        await joinwatch_state.mark_guild_present(self, guild)
-
-    @commands.Cog.listener()
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         """Delete retained message and detection-case data when Red leaves a guild."""
         await self._delete_retained_data_scope(
