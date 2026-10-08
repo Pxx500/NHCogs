@@ -65,6 +65,28 @@ def kind_for_store(store_name: str) -> str:
     return _STORE_KIND[store_name]
 
 
+def _removed_guilds(cog) -> set[int]:
+    removed = getattr(cog, "_joinwatch_removed_guilds", None)
+    if removed is None:
+        removed = cog._joinwatch_removed_guilds = set()
+    return removed
+
+
+def _guild_is_removed(cog, guild_id: int | None) -> bool:
+    return guild_id is not None and int(guild_id) in _removed_guilds(cog)
+
+
+def mark_guild_removed(cog, guild_id: int) -> None:
+    """Remember a guild the bot left. Caller holds the source lock."""
+    _removed_guilds(cog).add(int(guild_id))
+
+
+async def mark_guild_present(cog, guild) -> None:
+    """Allow live writes again when the bot joins that guild."""
+    async with _source_lock(cog):
+        _removed_guilds(cog).discard(int(guild.id))
+
+
 async def _sqlite_source(cog, guild_id: int | None) -> bool:
     """Report the marker. Caller holds the source lock when the result is used."""
     store = getattr(cog, "_case_store", None)
@@ -138,6 +160,8 @@ async def write_row(
     """Write one live row. A compare refuses a different incident. See Honeypot stored data."""
     stored = dict(payload)
     async with _source_lock(cog):
+        if _guild_is_removed(cog, guild.id):
+            return False
         if await _sqlite_source(cog, guild.id):
             return await asyncio.to_thread(
                 partial(
@@ -171,6 +195,8 @@ async def delete_row(
 ) -> bool:
     """Delete one live row. A compare refuses a different incident. See Honeypot stored data."""
     async with _source_lock(cog):
+        if _guild_is_removed(cog, guild.id):
+            return False
         if await _sqlite_source(cog, guild.id):
             return await asyncio.to_thread(
                 cog._case_store.delete,

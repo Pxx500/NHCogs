@@ -1043,6 +1043,7 @@ class JoinwatchVerification:
         )
         store = getattr(self.cog, "_case_store", None)
         async with joinwatch_state._source_lock(self.cog):
+            joinwatch_state.mark_guild_removed(self.cog, guild.id)
             config = self.cog.config.guild(guild)
             if (
                 store is not None
