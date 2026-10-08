@@ -278,6 +278,13 @@ class FakeConfigRoot:
     def register_guild(self, **defaults):
         self.defaults.update(defaults)
 
+    def register_global(self, **defaults):
+        if not hasattr(self, "global_values"):
+            self.global_values = {}
+        for key, value in defaults.items():
+            self.global_values.setdefault(key, value)
+            setattr(self, key, FakeConfigValue(self.global_values, key))
+
     def store_for(self, guild):
         return self.stores.setdefault(
             guild.id, self.defaults.copy()

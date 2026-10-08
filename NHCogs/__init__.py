@@ -5,6 +5,8 @@ from importlib import import_module
 from redbot.core.bot import Red
 from redbot.core.utils import get_end_user_data_statement
 
+from . import loop_lag
+
 __red_end_user_data_statement__ = get_end_user_data_statement(file=__file__)
 log = logging.getLogger("red.NHCogs")
 
@@ -159,6 +161,7 @@ async def setup(bot: Red) -> None:
             loaded.append(nhmoderation)
         if custom_commands := await _load_custom_commands(bot, support):
             loaded.append(custom_commands)
+        await loop_lag.note_suite_loaded(bot)
     except asyncio.CancelledError:
         await _cleanup_cancelled_setup(bot, loaded)
         raise

@@ -9,6 +9,7 @@ import discord
 from redbot.core import Config, commands
 from redbot.core.data_manager import cog_data_path
 
+from . import loop_lag
 from .command_feedback import respond_to_command_error
 from .command_overview import channel_is_private, send_group_overview
 from .operational_errors import OperationalErrorReporter, OperationalFailure
@@ -55,6 +56,7 @@ class OperationalSupport(commands.Cog):
             force_registration=True,
         )
         self.config.register_guild(error_channel=None, error_maintainer_id=None)
+        self.config.register_global(loop_lag_until=None)
         self._report_tasks: set[asyncio.Task] = set()
         self.operational_errors = OperationalErrorReporter(
             bot,
@@ -65,8 +67,10 @@ class OperationalSupport(commands.Cog):
 
     async def cog_load(self) -> None:
         await self.operational_errors.initialize()
+        await loop_lag.resume(self.bot, self.config)
 
     async def cog_unload(self) -> None:
+        loop_lag.pause()
         if self._report_tasks:
             await asyncio.gather(*tuple(self._report_tasks), return_exceptions=True)
 
@@ -168,6 +172,26 @@ class OperationalSupport(commands.Cog):
     async def nhcogs(self, ctx: commands.Context) -> None:
         """Configure shared NHCogs settings"""
         await send_group_overview(ctx, title="NHCogs", include_descendants=False)
+
+    @nhcogs.command(name="lag", usage="[on|off]")
+    async def lag(self, ctx: commands.Context, state: str | None = None) -> None:
+        """Measure event-loop lag. See NHCogs/README.md."""
+        self._require_private_configuration(ctx)
+        if state is None:
+            await ctx.send(loop_lag.summary_text())
+            return
+        word = state.strip().lower()
+        if word == "on":
+            deadline = await loop_lag.enable(self.bot, self.config)
+            await ctx.send(
+                f"Loop lag measurement is on until {loop_lag.format_deadline(deadline)}"
+            )
+            return
+        if word == "off":
+            await loop_lag.disable(self.config)
+            await ctx.send("Loop lag measurement is off")
+            return
+        raise commands.UserFeedbackCheckFailure("Use on or off")
 
     @nhcogs.group(name="errors", invoke_without_command=True)
     async def errors(self, ctx: commands.Context) -> None:
