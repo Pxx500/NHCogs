@@ -1442,6 +1442,12 @@ class DetectionCaseStore:
                 (guild_id,),
             )
 
+    # TODO(cleanup PR #148): after validating the normalized history rollout,
+    # drop legacy joinwatch_history JSON in a NEW schema migration. Remove this
+    # helper, its delete_observation call, and legacy-table deletion from
+    # clear_joinwatch_auxiliary. Keep historical schema migrations and the
+    # copy helpers they need so older databases can still upgrade.
+    # Update runtime snapshot tests and stored-data docs/info.json.
     def _remove_history_snapshot_account(
         self, connection: sqlite3.Connection, guild_id: int, member_id: str
     ) -> None:
@@ -1790,6 +1796,11 @@ class DetectionCaseStore:
                 raise
         return True
 
+    # TODO(cleanup PR #148): once Config rollback is retired and backups expire,
+    # drop joinwatch_live_backup in a NEW schema migration. Remove live_backup,
+    # expire_live_backups, their callers, and backup writes in replace_from_config.
+    # Keep historical schema migrations and adapt the one-way upgrade importer.
+    # Update backup-only tests and stored-data docs/info.json.
     def live_backup(self, guild_id: int) -> dict | None:
         """Read the one-time Config backup for one guild. See Honeypot stored data."""
         with closing(self._connect()) as connection:

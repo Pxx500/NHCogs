@@ -15,6 +15,11 @@ import discord
 log = logging.getLogger("red.Honeypot")
 
 _LIVE_KINDS = ("verified", "pending_role", "pending_assignment")
+# TODO(cleanup PR #148): after verified rollout and Config rollback retirement,
+# make live reads/writes SQLite-only, including new and empty guilds. Remove
+# Config fallback branches and rollback writers. Convert store_name callers
+# to SQLite kinds before removing these key mappings. Keep one-way upgrade
+# import and cleanup of residual Config copies from failed imports.
 _KIND_CONFIG = {
     "verified": "joinwatch_verified_members",
     "pending_role": "joinwatch_pending_roles",
@@ -280,6 +285,9 @@ async def cutover_guild(cog, guild_id: int) -> bool:
     return copied
 
 
+# TODO(cleanup PR #148): reduce this to one-way upgrade import after retiring
+# the Config backend. Keep pre-148 data import and failed-clear retries.
+# Successful migration on one bot does not make this upgrade path obsolete.
 async def _cutover_guild(cog, guild_id: int) -> tuple[bool, tuple[int, str, str] | None]:
     store = cog._case_store
     if await _sqlite_source(cog, guild_id):
@@ -397,6 +405,9 @@ async def scrub_config_moderators(cog, guild, user_id: int) -> None:
                 await _write_config_map(cog.config.guild(guild), _KIND_CONFIG[kind], entries)
 
 
+# TODO(cleanup PR #148): when Config rollback is retired, remove this helper,
+# export_live_state, restore_live_backup, the debug export command, and their
+# rollback-only tests/docs. Seven-day backup expiry alone does not retire them.
 async def _release_to_config(cog, guild, maps) -> None:
     config = cog.config.guild(guild)
     for kind, config_key in _KIND_CONFIG.items():

@@ -1731,6 +1731,8 @@ class Honeypot(Cog):
     @debug.command(name="exportjoinwatch")
     async def debug_export_joinwatch(self, ctx: commands.Context) -> None:
         """Copy JoinWatch live rows back into Config. See Honeypot stored data."""
+        # TODO(cleanup PR #148): remove with Config rollback and the matching
+        # export/restore helpers, command documentation, and rollback tests.
         is_owner = getattr(self.bot, "is_owner", None)
         if is_owner is None or not await is_owner(ctx.author):
             await ctx.send("Only a bot owner can export JoinWatch live state")

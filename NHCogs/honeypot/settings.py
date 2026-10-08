@@ -188,6 +188,10 @@ DEFAULTS: Mapping[str, object] = MappingProxyType(
         "joinwatch_auto_role_random_delay_enabled": False,
         "joinwatch_auto_role_random_delay_min_minutes": 1,
         "joinwatch_auto_role_random_delay_max_minutes": 10,
+        # TODO(cleanup PR #148): retire the two joinwatch_pending_* maps and
+        # joinwatch_verified_members when Config rollback is removed. Preserve
+        # the one-way upgrade import and run it before unknown-key pruning.
+        # Remove _JOINWATCH_MEMBER_MAPS and its read filter with these defaults.
         "joinwatch_pending_role_assignments": {},
         "joinwatch_pending_roles": {},
         "joinwatch_captcha_enabled": False,
