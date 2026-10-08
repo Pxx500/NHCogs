@@ -993,7 +993,9 @@ class DetectionDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         with TemporaryDirectory() as directory:
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = honeypot.Honeypot(_Bot(), _operational_support())
-                appended = self._append_case(honeypot, cog)
+                appended = self._append_case(
+                    honeypot, cog, created_at=datetime.now(timezone.utc) - timedelta(days=2)
+                )
                 cog._case_store.update_message_delete(
                     appended.case.case_id,
                     appended.message.sequence,
