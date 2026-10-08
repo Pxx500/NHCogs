@@ -14,6 +14,7 @@ from tests.harness import (
     DetectionPipelineTestCase,
     _Bot,
     _isolated_honeypot_modules,
+    _mapping_get_raw,
     _operational_support,
     active_case,
     drain_background_work,
@@ -1372,8 +1373,10 @@ class DetectionCaptureTests(DetectionPipelineTestCase):
                 cog._is_protected_member = mock.AsyncMock(return_value=False)
                 cog._observe_message = mock.AsyncMock()
                 cog.bot.cog_disabled_in_guild = mock.AsyncMock(return_value=False)
+                config = {"enabled": True}
                 cog.config.guild = lambda guild: SimpleNamespace(
-                    all=mock.AsyncMock(return_value={"enabled": True})
+                    all=mock.AsyncMock(return_value=config),
+                    get_raw=_mapping_get_raw(config),
                 )
                 batch_key = (message.guild.id, message.id)
                 completed = asyncio.create_task(asyncio.sleep(0, result={"data": b"image"}))

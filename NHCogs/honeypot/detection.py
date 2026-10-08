@@ -26,7 +26,7 @@ from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import box
 
 from ..gateway_capabilities import GatewayCapabilityUnavailable, available
-from . import detection_runtime, imagescan, review_publication
+from . import detection_runtime, imagescan, joinwatch_state, review_publication
 from .case_review import case_feedback_items
 from .detection_cases import (
     OPERATION_RESULT_CHANNEL_UNAVAILABLE,
@@ -72,6 +72,7 @@ from .settings import (
     WHITELIST_MODE_OPTIONS,
     GuildSettings,
     WhitelistModeOption,
+    read_guild_settings,
 )
 
 _ = Translator("Honeypot", __file__)
@@ -1748,8 +1749,10 @@ async def on_message(
             return
         batch_key = (message.guild.id, message.id)
         try:
-            raw_config = await cog.config.guild(message.guild).all()
-            guild_settings = GuildSettings.from_mapping(raw_config)
+            group = cog.config.guild(message.guild)
+            if await group.get_raw("enabled", default=False) is False:
+                return
+            guild_settings = await read_guild_settings(group)
             if not guild_settings.enabled:
                 return
             if await cog._is_protected_member(message.author, message.guild):
@@ -2403,6 +2406,7 @@ async def config_stats(cog, ctx: commands.Context) -> None:
         now,
         now - timedelta(minutes=5),
     )
+    live_counts = await joinwatch_state.live_counts(cog, ctx.guild)
     await cog._send_config_dump(
         ctx,
         _("Stats config"),
@@ -2410,11 +2414,11 @@ async def config_stats(cog, ctx: commands.Context) -> None:
             (_("Stored stats"), len(stats)),
             (
                 _("Pending joinwatch role applications"),
-                len(guild_settings.joinwatch_pending_role_assignments),
+                live_counts["pending_assignment"],
             ),
             (
                 _("Active joinwatch auto-role timers"),
-                len(guild_settings.joinwatch_pending_roles),
+                live_counts["pending_role"],
             ),
             (_("Active detection cases"), case_counts["active_cases"]),
             (_("Due detection cases"), case_counts["due_cases"]),
@@ -2430,6 +2434,7 @@ async def config_stats(cog, ctx: commands.Context) -> None:
 async def config_all(cog, ctx: commands.Context) -> None:
     raw_config = await cog.config.guild(ctx.guild).all()
     guild_settings = GuildSettings.from_mapping(raw_config)
+    live_counts = await joinwatch_state.live_counts(cog, ctx.guild)
     await cog._send_config_dump(
         ctx,
         _("Honeypot config summary"),
@@ -2471,11 +2476,11 @@ async def config_all(cog, ctx: commands.Context) -> None:
             ),
             (
                 _("Pending joinwatch role applications"),
-                len(guild_settings.joinwatch_pending_role_assignments),
+                live_counts["pending_assignment"],
             ),
             (
                 _("Active joinwatch auto-role timers"),
-                len(guild_settings.joinwatch_pending_roles),
+                live_counts["pending_role"],
             ),
         ],
     )

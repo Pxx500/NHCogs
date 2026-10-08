@@ -188,6 +188,10 @@ DEFAULTS: Mapping[str, object] = MappingProxyType(
         "joinwatch_auto_role_random_delay_enabled": False,
         "joinwatch_auto_role_random_delay_min_minutes": 1,
         "joinwatch_auto_role_random_delay_max_minutes": 10,
+        # TODO(cleanup PR #148): retire the two joinwatch_pending_* maps and
+        # joinwatch_verified_members when Config rollback is removed. Preserve
+        # the one-way upgrade import and run it before unknown-key pruning.
+        # Remove _JOINWATCH_MEMBER_MAPS and its read filter with these defaults.
         "joinwatch_pending_role_assignments": {},
         "joinwatch_pending_roles": {},
         "joinwatch_captcha_enabled": False,
@@ -282,17 +286,6 @@ def _int_dict(raw: Mapping[str, object], key: str) -> dict[str, int]:
         return dict(value)
     log.warning("Invalid guild setting %s=%r; using default %r", key, value, default)
     return dict(default)
-
-
-def _nested_dict(raw: Mapping[str, object], key: str) -> dict[str, dict[str, object]]:
-    value = raw.get(key, DEFAULTS[key])
-    if isinstance(value, Mapping) and all(
-        isinstance(item_key, str) and isinstance(item_value, Mapping)
-        for item_key, item_value in value.items()
-    ):
-        return {item_key: dict(item_value) for item_key, item_value in value.items()}
-    log.warning("Invalid guild setting %s mapping, using default", key)
-    return {}
 
 
 @dataclass(frozen=True)
@@ -433,10 +426,7 @@ class GuildSettings:
     joinwatch_auto_role_random_delay_enabled: bool
     joinwatch_auto_role_random_delay_min_minutes: int
     joinwatch_auto_role_random_delay_max_minutes: int
-    joinwatch_pending_role_assignments: dict[str, dict[str, object]]
-    joinwatch_pending_roles: dict[str, dict[str, object]]
     joinwatch_captcha_enabled: bool
-    joinwatch_verified_members: dict[str, dict[str, object]]
     captcha_channel: int | None
     captcha_log_channel: int | None
     captcha_panel_channel_id: int | None
@@ -542,12 +532,7 @@ class GuildSettings:
             joinwatch_auto_role_random_delay_max_minutes=_int(
                 raw, "joinwatch_auto_role_random_delay_max_minutes"
             ),
-            joinwatch_pending_role_assignments=_nested_dict(
-                raw, "joinwatch_pending_role_assignments"
-            ),
-            joinwatch_pending_roles=_nested_dict(raw, "joinwatch_pending_roles"),
             joinwatch_captcha_enabled=_bool(raw, "joinwatch_captcha_enabled"),
-            joinwatch_verified_members=_nested_dict(raw, "joinwatch_verified_members"),
             captcha_channel=_optional_int(raw, "captcha_channel"),
             captcha_log_channel=_optional_int(raw, "captcha_log_channel"),
             captcha_panel_channel_id=_optional_int(raw, "captcha_panel_channel_id"),
@@ -566,3 +551,26 @@ class GuildSettings:
                 raw, "baitrole_action", BaitActionOption, BaitActionOption.BAN
             ),
         )
+
+
+# Member maps grow with the guild. Hot paths must not ask the config driver for them.
+_JOINWATCH_MEMBER_MAPS = frozenset(
+    {
+        "joinwatch_pending_role_assignments",
+        "joinwatch_pending_roles",
+        "joinwatch_verified_members",
+    }
+)
+# Red merges a dict default in place. A private sentinel keeps DEFAULTS untouched.
+_UNSET = object()
+
+
+async def read_guild_settings(group) -> GuildSettings:
+    """Settings for a hot path, without the JoinWatch member maps."""
+    raw = {}
+    for key, default in DEFAULTS.items():
+        if key in _JOINWATCH_MEMBER_MAPS:
+            continue
+        value = await group.get_raw(key, default=_UNSET)
+        raw[key] = default if value is _UNSET else value
+    return GuildSettings.from_mapping(raw)

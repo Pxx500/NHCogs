@@ -3,12 +3,29 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import typing
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import partial
 
 import discord
+
+log = logging.getLogger("red.Honeypot")
+
+_LIVE_KINDS = ("verified", "pending_role", "pending_assignment")
+# TODO(cleanup PR #148): after verified rollout and Config rollback retirement,
+# make live reads/writes SQLite-only, including new and empty guilds. Remove
+# Config fallback branches and rollback writers. Convert store_name callers
+# to SQLite kinds before removing these key mappings. Keep one-way upgrade
+# import and cleanup of residual Config copies from failed imports.
+_KIND_CONFIG = {
+    "verified": "joinwatch_verified_members",
+    "pending_role": "joinwatch_pending_roles",
+    "pending_assignment": "joinwatch_pending_role_assignments",
+}
+_STORE_KIND = {config_key: kind for kind, config_key in _KIND_CONFIG.items()}
 
 JOINWATCH_RETRY_DELAY_MINUTES = 1
 JOINWATCH_MAX_RETRIES = 5
@@ -34,6 +51,474 @@ async def member_lock(cog, guild_id: int, member_id: int):
             yield
         finally:
             owners.pop(key, None)
+
+
+def _source_lock(cog) -> asyncio.Lock:
+    """Serialize the choice between Config and SQLite.
+
+    Callers that also need member_lock take that lock first. Cutover, export,
+    restore, and guild removal take only this lock. The bot owns the lock so
+    existing workers stay serialized with a reloaded cog.
+    """
+    owner = getattr(cog, "bot", cog)
+    lock = getattr(owner, "_joinwatch_live_source_lock", None)
+    if lock is None:
+        lock = owner._joinwatch_live_source_lock = asyncio.Lock()
+    cog._joinwatch_live_source_lock = lock
+    return lock
+
+
+async def finish_thread(callback, *args):
+    """Keep the caller's locks until a worker finishes, even after cancellation."""
+    worker = asyncio.create_task(asyncio.to_thread(callback, *args))
+    cancellation = None
+    while True:
+        try:
+            result = await asyncio.shield(worker)
+            break
+        except asyncio.CancelledError as error:
+            if worker.cancelled():
+                raise
+            cancellation = error
+        except Exception:
+            if cancellation is not None:
+                raise cancellation from None
+            raise
+    if cancellation is not None:
+        raise cancellation
+    return result
+
+
+def kind_for_store(store_name: str) -> str:
+    """Map a Config key to a live-state kind. See Honeypot stored data."""
+    return _STORE_KIND[store_name]
+
+
+async def _sqlite_source(cog, guild_id: int | None) -> bool:
+    """Report the marker. Caller holds the source lock when the result is used."""
+    store = getattr(cog, "_case_store", None)
+    if store is None or guild_id is None or not hasattr(store, "cutover_source"):
+        return False
+    source = await asyncio.to_thread(store.cutover_source, int(guild_id))
+    return source == "sqlite"
+
+
+async def _read_locked(cog, guild, user_id: int, kind: str) -> dict | None:
+    if await _sqlite_source(cog, guild.id):
+        return await asyncio.to_thread(cog._case_store.get, int(guild.id), int(user_id), kind)
+    config = cog.config.guild(guild)
+    accessor = getattr(config, _KIND_CONFIG[kind], None)
+    member_key = str(user_id)
+    if accessor is None:
+        raw = await config.all()
+        current = (raw.get(_KIND_CONFIG[kind]) or {}).get(member_key)
+        return dict(current) if isinstance(current, dict) else None
+    opened = accessor()
+    if hasattr(opened, "__aenter__"):
+        async with opened as entries:
+            current = entries.get(member_key)
+            return dict(current) if isinstance(current, dict) else None
+    entries = await opened
+    current = entries.get(member_key) if isinstance(entries, dict) else None
+    return dict(current) if isinstance(current, dict) else None
+
+
+async def read_row(cog, guild, user_id: int, kind: str) -> dict | None:
+    """Read one live row from SQLite or Config. See Honeypot stored data."""
+    async with _source_lock(cog):
+        return await _read_locked(cog, guild, user_id, kind)
+
+
+async def rows_for_member(cog, guild, user_id: int) -> dict[str, dict]:
+    """Read one member's live rows. See Honeypot stored data."""
+    async with _source_lock(cog):
+        if await _sqlite_source(cog, guild.id):
+            return await asyncio.to_thread(
+                cog._case_store.rows_for_member, int(guild.id), int(user_id)
+            )
+        rows = {}
+        for kind in _LIVE_KINDS:
+            row = await _read_locked(cog, guild, user_id, kind)
+            if row is not None:
+                rows[kind] = row
+        return rows
+
+
+async def is_verified(cog, guild, user_id: int) -> bool:
+    """Report a verified member without loading other accounts. See Honeypot stored data."""
+    async with _source_lock(cog):
+        if await _sqlite_source(cog, guild.id):
+            return await asyncio.to_thread(
+                cog._case_store.is_verified, int(guild.id), int(user_id)
+            )
+        return await _read_locked(cog, guild, user_id, "verified") is not None
+
+
+async def redact_member_context(cog, guild, user_id: int) -> None:
+    """Remove optional snapshots from live and residual state without releasing roles."""
+    async with _source_lock(cog):
+        store = getattr(cog, "_case_store", None)
+        if store is not None and hasattr(store, "rows_for_member"):
+            rows = await asyncio.to_thread(store.rows_for_member, int(guild.id), int(user_id))
+            for kind, entry in rows.items():
+                if isinstance(entry.get("history"), dict):
+                    entry["history"]["profile"] = None
+                    entry["history"]["activity"] = None
+                    await finish_thread(store.upsert, int(guild.id), int(user_id), kind, entry)
+        for name in _KIND_CONFIG.values():
+            accessor = getattr(cog.config.guild(guild), name, None)
+            if accessor is None:
+                continue
+            async with accessor() as entries:
+                entry = entries.get(str(user_id))
+                if isinstance(entry, dict) and isinstance(entry.get("history"), dict):
+                    entry["history"]["profile"] = None
+                    entry["history"]["activity"] = None
+
+
+async def redact_sqlite_user_context(cog, user_id: int) -> None:
+    """Scrub all live and backup copies while excluding concurrent rollback."""
+    async with _source_lock(cog):
+        await finish_thread(cog._case_store.redact_joinwatch_live_user_context, int(user_id))
+
+
+async def write_row(
+    cog,
+    guild,
+    user_id: int,
+    kind: str,
+    payload: dict,
+    *,
+    expected_incident_id: str | None = None,
+    compare: bool = False,
+) -> bool:
+    """Write one live row. A compare refuses a different incident. See Honeypot stored data."""
+    stored = dict(payload)
+    async with _source_lock(cog):
+        if await _sqlite_source(cog, guild.id):
+            return await finish_thread(
+                partial(
+                    cog._case_store.upsert,
+                    int(guild.id),
+                    int(user_id),
+                    kind,
+                    stored,
+                    expected_incident_id=expected_incident_id,
+                    compare=compare,
+                )
+            )
+        async with getattr(cog.config.guild(guild), _KIND_CONFIG[kind])() as entries:
+            current = entries.get(str(user_id))
+            if compare and (
+                not isinstance(current, dict) or current.get("incident_id") != expected_incident_id
+            ):
+                return False
+            entries[str(user_id)] = stored
+        return True
+
+
+async def delete_row(
+    cog,
+    guild,
+    user_id: int,
+    kind: str,
+    *,
+    expected_incident_id: str | None = None,
+    compare: bool = False,
+) -> bool:
+    """Delete one live row. A compare refuses a different incident. See Honeypot stored data."""
+    async with _source_lock(cog):
+        if await _sqlite_source(cog, guild.id):
+            return await finish_thread(
+                cog._case_store.delete,
+                int(guild.id),
+                int(user_id),
+                kind,
+                expected_incident_id,
+                compare,
+            )
+        async with getattr(cog.config.guild(guild), _KIND_CONFIG[kind])() as entries:
+            current = entries.get(str(user_id))
+            if compare and (
+                not isinstance(current, dict) or current.get("incident_id") != expected_incident_id
+            ):
+                return False
+            entries.pop(str(user_id), None)
+        return True
+
+
+async def _read_config_map(cog, guild, kind: str) -> dict:
+    config = cog.config.guild(guild)
+    accessor = getattr(config, _KIND_CONFIG[kind], None)
+    if accessor is None:
+        all_config = getattr(config, "all", None)
+        if all_config is None:
+            return {}
+        raw = await all_config()
+        entries = raw.get(_KIND_CONFIG[kind], {})
+    else:
+        opened = accessor()
+        if hasattr(opened, "__aenter__"):
+            async with opened as current:
+                entries = dict(current)
+        else:
+            entries = await opened
+    if not isinstance(entries, dict):
+        return {}
+    return {
+        str(user_id): dict(entry) if isinstance(entry, dict) else entry
+        for user_id, entry in entries.items()
+    }
+
+
+async def open_maps(cog, guild) -> dict[str, dict]:
+    """Read open rows for the timer and restore, never the verified map. See Honeypot stored data."""
+    async with _source_lock(cog):
+        if await _sqlite_source(cog, getattr(guild, "id", None)):
+            return await asyncio.to_thread(cog._case_store.list_open, int(guild.id))
+        return {
+            "pending_role": await _read_config_map(cog, guild, "pending_role"),
+            "pending_assignment": await _read_config_map(cog, guild, "pending_assignment"),
+        }
+
+
+async def live_counts(cog, guild) -> dict[str, int]:
+    """Count live rows for status commands. See Honeypot stored data."""
+    async with _source_lock(cog):
+        if await _sqlite_source(cog, getattr(guild, "id", None)):
+            return await asyncio.to_thread(cog._case_store.counts, int(guild.id))
+        totals = {}
+        for kind in _KIND_CONFIG:
+            entries = await _read_config_map(cog, guild, kind)
+            totals[kind] = len(entries) if isinstance(entries, dict) else 0
+        return totals
+
+
+async def _clear_config_maps(cog, guild_id: int) -> None:
+    config = cog.config.guild_from_id(guild_id)
+    for config_key in _KIND_CONFIG.values():
+        await config.clear_raw(config_key)
+
+
+async def _cutover_under_lock(
+    cog, guild_id: int
+) -> tuple[bool, tuple[int, str, str] | None]:
+    async with _source_lock(cog):
+        return await _cutover_guild(cog, guild_id)
+
+
+async def cutover_guild(cog, guild_id: int) -> bool:
+    """Copy one guild into SQLite when the rows match. See Honeypot stored data."""
+    copied, _failure = await _cutover_under_lock(cog, guild_id)
+    return copied
+
+
+# TODO(cleanup PR #148): reduce this to one-way upgrade import after retiring
+# the Config backend. Keep pre-148 data import and failed-clear retries.
+# Successful migration on one bot does not make this upgrade path obsolete.
+async def _cutover_guild(cog, guild_id: int) -> tuple[bool, tuple[int, str, str] | None]:
+    store = cog._case_store
+    if await _sqlite_source(cog, guild_id):
+        await _clear_config_maps(cog, guild_id)
+        return True, None
+    config = cog.config.guild_from_id(guild_id)
+    values = await config.all()
+    maps = {}
+    for kind, config_key in _KIND_CONFIG.items():
+        raw_map = values.get(config_key, {})
+        if not isinstance(raw_map, dict):
+            return False, (
+                guild_id,
+                "joinwatch_live_cutover",
+                "JoinWatch live state stayed in Config because a map was unreadable",
+            )
+        maps[kind] = raw_map
+    if all(not item for item in maps.values()):
+        await finish_thread(store.clear_cutover, int(guild_id))
+        return True, None
+    copied = await finish_thread(store.replace_from_config, int(guild_id), maps)
+    if not copied:
+        return False, (
+            guild_id,
+            "joinwatch_live_cutover",
+            "JoinWatch live state stayed in Config because the SQLite copy did not match",
+        )
+    try:
+        await _clear_config_maps(cog, guild_id)
+    except Exception as error:
+        log.exception("JoinWatch Config clear failed for guild %s", guild_id)
+        return False, (
+            guild_id,
+            "joinwatch_live_cutover",
+            "JoinWatch live state is in SQLite but Config was not cleared: "
+            f"{type(error).__name__}",
+        )
+    return True, None
+
+
+async def cutover_live_state(cog) -> None:
+    """Copy JoinWatch Config maps on cog load, including a reload. See Honeypot stored data."""
+    store = getattr(cog, "_case_store", None)
+    if store is None or not hasattr(store, "replace_from_config"):
+        return
+    await finish_thread(store.expire_live_backups, datetime.now(timezone.utc))
+    for guild_id in await cog.config.all_guilds():
+        try:
+            _copied, failure = await _cutover_under_lock(cog, int(guild_id))
+        except Exception as error:
+            log.exception("JoinWatch live cutover failed for guild %s", guild_id)
+            failure = (
+                int(guild_id),
+                "joinwatch_live_cutover",
+                f"JoinWatch live state stayed in Config: {type(error).__name__}",
+            )
+        if failure is not None:
+            await cog._record_operational_failure(*failure)
+
+
+async def _write_config_map(config, config_key: str, entries: dict) -> None:
+    group = getattr(config, config_key)
+    if hasattr(group, "set"):
+        await group.set(entries)
+        return
+    async with group() as current:
+        current.clear()
+        current.update(entries)
+
+
+async def delete_config_member(cog, guild, user_id: int) -> tuple[dict, ...]:
+    """Erase a Config copy even when SQLite is live. Caller holds member_lock."""
+    removed = []
+    async with _source_lock(cog):
+        config = cog.config.guild(guild)
+        for kind, config_key in _KIND_CONFIG.items():
+            entries = await _read_config_map(cog, guild, kind)
+            if str(user_id) not in entries:
+                continue
+            entry = entries.pop(str(user_id))
+            await _write_config_map(config, config_key, entries)
+            if isinstance(entry, dict):
+                removed.append(entry)
+    return tuple(removed)
+
+
+async def scrub_config_moderators(cog, guild, user_id: int) -> None:
+    """Clear moderator references in active and inactive Config copies."""
+    async with _source_lock(cog):
+        pending = {
+            kind: await _read_config_map(cog, guild, kind)
+            for kind in ("pending_role", "pending_assignment")
+        }
+    member_ids = set()
+    for entries in pending.values():
+        for member_id, entry in entries.items():
+            if not isinstance(entry, dict) or not any(
+                entry.get(key) in (user_id, str(user_id))
+                for key in ("enrollment_moderator", "completion_moderator")
+            ):
+                continue
+            try:
+                parsed = int(member_id)
+            except (TypeError, ValueError):
+                continue
+            if parsed != int(user_id):
+                member_ids.add(parsed)
+    for member_id in member_ids:
+        async with member_lock(cog, guild.id, member_id), _source_lock(cog):
+            for kind in ("pending_role", "pending_assignment"):
+                entries = await _read_config_map(cog, guild, kind)
+                current = entries.get(str(member_id))
+                if not isinstance(current, dict) or not _clear_moderator_fields(current, user_id):
+                    continue
+                await _write_config_map(cog.config.guild(guild), _KIND_CONFIG[kind], entries)
+
+
+# TODO(cleanup PR #148): when Config rollback is retired, remove this helper,
+# export_live_state, restore_live_backup, the debug export command, and their
+# rollback-only tests/docs. Seven-day backup expiry alone does not retire them.
+async def _release_to_config(cog, guild, maps) -> None:
+    config = cog.config.guild(guild)
+    for kind, config_key in _KIND_CONFIG.items():
+        await _write_config_map(config, config_key, maps.get(kind, {}))
+    await finish_thread(cog._case_store.clear_cutover, int(guild.id))
+
+
+async def export_live_state(cog, guild) -> bool:
+    """Copy SQLite live rows back into Config when SQLite is the source.
+
+    See Honeypot stored data. Returns false when Config is already live.
+    """
+    async with _source_lock(cog):
+        if not await _sqlite_source(cog, guild.id):
+            return False
+        maps = await asyncio.to_thread(cog._case_store.config_maps, int(guild.id))
+        await _release_to_config(cog, guild, maps)
+        return True
+
+
+async def restore_live_backup(cog, guild) -> bool:
+    """Write the one-time backup into Config when SQLite is the source.
+
+    See Honeypot stored data.
+    """
+    async with _source_lock(cog):
+        if not await _sqlite_source(cog, guild.id):
+            return False
+        backup = await asyncio.to_thread(cog._case_store.live_backup, int(guild.id))
+        if backup is None:
+            return False
+        await _release_to_config(cog, guild, backup)
+        return True
+
+
+async def delete_sqlite_member(cog, guild_id: int, user_id: int) -> None:
+    """Delete one member's SQLite live rows. Caller holds member_lock."""
+    store = getattr(cog, "_case_store", None)
+    if store is None or not hasattr(store, "delete"):
+        return
+    async with _source_lock(cog):
+        for kind in _LIVE_KINDS:
+            await finish_thread(store.delete, int(guild_id), int(user_id), kind)
+
+
+def _clear_moderator_fields(payload: dict, user_id: int) -> bool:
+    changed = False
+    for key in ("enrollment_moderator", "completion_moderator"):
+        if payload.get(key) in (user_id, str(user_id)):
+            payload[key] = None
+            payload["completion_reason"] = None
+            changed = True
+    return changed
+
+
+async def scrub_sqlite_moderators(cog, guild_id: int, user_id: int) -> None:
+    """Clear moderator ids on pending rows from a fresh read. See Honeypot stored data."""
+    store = getattr(cog, "_case_store", None)
+    if store is None or not hasattr(store, "list_open"):
+        return
+    pending = await asyncio.to_thread(store.list_open, int(guild_id))
+    deleted = int(user_id)
+    member_ids = []
+    seen = set()
+    for entries in pending.values():
+        for member_id in entries:
+            try:
+                parsed = int(member_id)
+            except (TypeError, ValueError):
+                continue
+            if parsed == deleted or parsed in seen:
+                continue
+            seen.add(parsed)
+            member_ids.append(parsed)
+    for member_id in member_ids:
+        async with member_lock(cog, int(guild_id), member_id), _source_lock(cog):
+            for kind in ("pending_role", "pending_assignment"):
+                current = await asyncio.to_thread(store.get, int(guild_id), member_id, kind)
+                if not isinstance(current, dict) or not _clear_moderator_fields(current, deleted):
+                    continue
+                await finish_thread(
+                    partial(store.upsert, int(guild_id), member_id, kind, current)
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,8 +725,7 @@ async def store_pending_role(
     if alert_channel_id is not None and alert_message_id is not None:
         pending_role["alert_channel_id"] = alert_channel_id
         pending_role["alert_message_id"] = alert_message_id
-    async with cog.config.guild(member.guild).joinwatch_pending_roles() as pending_roles:
-        pending_roles[str(member.id)] = pending_role
+    await write_row(cog, member.guild, member.id, "pending_role", pending_role)
     if owner is not None:
         await owner.persist_history(member.guild, member.id, pending_role)
 
@@ -249,31 +733,26 @@ async def store_pending_role(
 async def delete_pending_role(cog, guild: discord.Guild, member_id: int | str, *, outcome="cancelled") -> None:
     owner = getattr(cog, "_joinwatch_verification", None)
     if owner is not None:
-        entry = await cog.config.guild(guild).get_raw("joinwatch_pending_roles", str(member_id), default=None)
+        entry = await read_row(cog, guild, int(member_id), "pending_role")
         if entry is not None:
-            await owner.finish(guild, int(member_id), dict(entry), outcome)
+            await owner.finish(guild, int(member_id), entry, outcome)
         return
-    async with cog.config.guild(guild).joinwatch_pending_roles() as pending_roles:
-        pending_roles.pop(str(member_id), None)
+    await delete_row(cog, guild, int(member_id), "pending_role")
 
 
 async def mark_manual_role_reason(cog, member, role_ids, *, remove=False) -> None:
-    settings = await cog.config.guild(member.guild).all()
-    entry = settings.get("joinwatch_pending_roles", {}).get(str(member.id))
-    if entry is None or entry.get("role_id") not in role_ids:
+    current = await read_row(cog, member.guild, member.id, "pending_role")
+    if current is None or current.get("role_id") not in role_ids:
         return set()
-    async with cog.config.guild(member.guild).joinwatch_pending_roles() as entries:
-        current = entries.get(str(member.id))
-        if current is None or current.get("role_id") not in role_ids:
-            return set()
-        reasons = set(current.get("manual_role_reasons", []))
-        added = {current["role_id"]} - reasons
-        if remove:
-            reasons.difference_update(role_ids)
-        else:
-            reasons.add(current["role_id"])
-        current["manual_role_reasons"] = sorted(reasons)
-        return added
+    reasons = set(current.get("manual_role_reasons", []))
+    added = {current["role_id"]} - reasons
+    if remove:
+        reasons.difference_update(role_ids)
+    else:
+        reasons.add(current["role_id"])
+    current["manual_role_reasons"] = sorted(reasons)
+    await write_row(cog, member.guild, member.id, "pending_role", current)
+    return added
 
 
 async def store_pending_assignment(
@@ -285,19 +764,16 @@ async def store_pending_assignment(
     expires_at: datetime | None = None,
     incident: typing.Mapping[str, typing.Any] | None = None,
 ) -> None:
-    async with cog.config.guild(
-        member.guild
-    ).joinwatch_pending_role_assignments() as pending_assignments:
-        pending_assignment = dict(incident or {})
-        pending_assignment.update(
-            {
-                "role_id": role_id,
-                "apply_at": apply_at.isoformat(),
-            }
-        )
-        if expires_at is not None:
-            pending_assignment["expires_at"] = expires_at.isoformat()
-        pending_assignments[str(member.id)] = pending_assignment
+    pending_assignment = dict(incident or {})
+    pending_assignment.update(
+        {
+            "role_id": role_id,
+            "apply_at": apply_at.isoformat(),
+        }
+    )
+    if expires_at is not None:
+        pending_assignment["expires_at"] = expires_at.isoformat()
+    await write_row(cog, member.guild, member.id, "pending_assignment", pending_assignment)
     owner = getattr(cog, "_joinwatch_verification", None)
     if owner is not None:
         await owner.capture_enrollment(member, pending_assignment)
@@ -308,19 +784,17 @@ async def store_pending_assignment(
 async def delete_pending_assignment(cog, guild: discord.Guild, member_id: int | str, *, outcome="cancelled") -> None:
     owner = getattr(cog, "_joinwatch_verification", None)
     if owner is not None:
-        config = cog.config.guild(guild)
-        entry = await config.get_raw("joinwatch_pending_role_assignments", str(member_id), default=None)
-        active = await config.get_raw("joinwatch_pending_roles", str(member_id), default=None)
+        entry = await read_row(cog, guild, int(member_id), "pending_assignment")
+        active = await read_row(cog, guild, int(member_id), "pending_role")
         if entry is not None and not (active and active.get("incident_id") == entry.get("incident_id")):
-            await owner.finish(guild, int(member_id), dict(entry), outcome,
+            await owner.finish(guild, int(member_id), entry, outcome,
                                store_name="joinwatch_pending_role_assignments")
             return
-    async with cog.config.guild(guild).joinwatch_pending_role_assignments() as pending_assignments:
-        pending_assignments.pop(str(member_id), None)
+    await delete_row(cog, guild, int(member_id), "pending_assignment")
 
 
 async def clear_pending_assignments(cog, guild: discord.Guild) -> None:
-    pending = await cog.config.guild(guild).get_raw("joinwatch_pending_role_assignments", default={})
+    pending = (await open_maps(cog, guild))["pending_assignment"]
     for member_id in tuple(pending):
         async with member_lock(cog, guild.id, int(member_id)):
             await delete_pending_assignment(cog, guild, member_id)
@@ -333,20 +807,15 @@ async def store_alert_reference(
     channel_id: int,
     message_id: int,
 ) -> bool:
-    member_key = str(member_id)
     stored = False
-    guild_config = cog.config.guild(guild)
-    for store_name in (
-        "joinwatch_pending_role_assignments",
-        "joinwatch_pending_roles",
-    ):
-        store = getattr(guild_config, store_name)
-        async with store() as entries:
-            incident = entries.get(member_key)
+    async with member_lock(cog, guild.id, member_id):
+        for kind in ("pending_assignment", "pending_role"):
+            incident = await read_row(cog, guild, member_id, kind)
             if incident is None:
                 continue
             incident["alert_channel_id"] = channel_id
             incident["alert_message_id"] = message_id
+            await write_row(cog, guild, member_id, kind, incident)
             stored = True
     return stored
 
@@ -358,19 +827,15 @@ async def disable_alert_updates(
     *,
     incident: dict[str, typing.Any] | None = None,
 ) -> None:
-    member_key = str(member_id)
-    guild_config = cog.config.guild(guild)
-    for store_name in (
-        "joinwatch_pending_role_assignments",
-        "joinwatch_pending_roles",
-    ):
-        store = getattr(guild_config, store_name)
-        async with store() as entries:
-            stored_incident = entries.get(member_key)
-            if stored_incident is not None:
-                stored_incident["alert_updates_disabled"] = True
-    if incident is not None:
-        incident["alert_updates_disabled"] = True
+    async with member_lock(cog, guild.id, member_id):
+        for kind in ("pending_assignment", "pending_role"):
+            stored_incident = await read_row(cog, guild, member_id, kind)
+            if stored_incident is None:
+                continue
+            stored_incident["alert_updates_disabled"] = True
+            await write_row(cog, guild, member_id, kind, stored_incident)
+        if incident is not None:
+            incident["alert_updates_disabled"] = True
 
 
 def next_retry_count(data: typing.Mapping[str, typing.Any]) -> int | None:
@@ -392,24 +857,24 @@ async def _reschedule_retry(
     deadline_key: str,
 ) -> JoinwatchRetryTransition:
     retry_count = next_retry_count(data)
-    store = getattr(cog.config.guild(guild), store_name)
+    kind = kind_for_store(store_name)
     if retry_count is None:
         owner = getattr(cog, "_joinwatch_verification", None)
         if owner is not None:
             await owner.finish(guild, int(member_key), data, "action_failed", store_name=store_name)
         else:
-            async with store() as entries:
-                entries.pop(member_key, None)
+            await delete_row(cog, guild, int(member_key), kind)
         return JoinwatchRetryTransition(
             attempts=JOINWATCH_MAX_RETRIES + 1,
             retry_at=None,
         )
 
     retry_at = now + timedelta(minutes=JOINWATCH_RETRY_DELAY_MINUTES)
-    async with store() as entries:
-        if member_key in entries:
-            entries[member_key][deadline_key] = retry_at.isoformat()
-            entries[member_key]["retry_count"] = retry_count
+    current = await read_row(cog, guild, int(member_key), kind)
+    if current is not None:
+        current[deadline_key] = retry_at.isoformat()
+        current["retry_count"] = retry_count
+        await write_row(cog, guild, int(member_key), kind, current)
     data[deadline_key] = retry_at.isoformat()
     data["retry_count"] = retry_count
     return JoinwatchRetryTransition(
@@ -461,8 +926,16 @@ async def reschedule_pending_roles(
     new_timer_minutes: int,
 ) -> tuple[tuple[dict[str, typing.Any], int, datetime], ...]:
     updates: list[tuple[dict[str, typing.Any], int, datetime]] = []
-    async with cog.config.guild(guild).joinwatch_pending_roles() as pending_roles:
-        for data in pending_roles.values():
+    pending_roles = (await open_maps(cog, guild))["pending_role"]
+    for member_key in tuple(pending_roles):
+        try:
+            member_id = int(member_key)
+        except (TypeError, ValueError):
+            continue
+        async with member_lock(cog, guild.id, member_id):
+            data = await read_row(cog, guild, member_id, "pending_role")
+            if data is None:
+                continue
             try:
                 role_id = int(data["role_id"])
                 if data.get("applied_at") is not None:
@@ -475,5 +948,7 @@ async def reschedule_pending_roles(
             expires_at = applied_at + timedelta(minutes=new_timer_minutes)
             data["applied_at"] = applied_at.isoformat()
             data["expires_at"] = expires_at.isoformat()
-            updates.append((dict(data), role_id, expires_at))
+            await write_row(cog, guild, member_id, "pending_role", data)
+            published = (dict(data), role_id, expires_at)
+        updates.append(published)
     return tuple(updates)

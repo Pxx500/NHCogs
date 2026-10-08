@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 import discord
 
+from . import joinwatch_state
 from .captcha_views import VerifyPanelView
 from .joinwatch_groups import (
     PREVIEW_LIFETIME_MINUTES,
@@ -18,6 +19,7 @@ from .joinwatch_groups import (
     historical_matches,
     utc_timestamp,
 )
+from .settings import DEFAULTS
 
 WAVE_BATCH_SIZE = 5
 WAVE_INTERVAL_SECONDS = 10
@@ -45,14 +47,17 @@ class JoinwatchWaves:
         return self._locks.setdefault(guild.id, asyncio.Lock())
 
     async def _configuration(self, guild):
-        settings = await self.cog.config.guild(guild).all()
-        return {name: settings.get(name) for name in CRITICAL_CONFIGURATION}
+        group = self.cog.config.guild(guild)
+        return {
+            name: await group.get_raw(name, default=DEFAULTS[name])
+            for name in CRITICAL_CONFIGURATION
+        }
 
     async def _records(self, guild):
         return await asyncio.to_thread(self.cog._case_store.get_joinwatch_waves, guild.id)
 
     async def _history(self, guild):
-        return await asyncio.to_thread(self.cog._case_store.get_joinwatch_history, guild.id)
+        return await asyncio.to_thread(self.cog._case_store.all_observations, guild.id)
 
     async def _save(self, guild, record):
         await asyncio.to_thread(self.cog._case_store.save_joinwatch_wave, guild.id, record)
@@ -456,7 +461,7 @@ class JoinwatchWaves:
         cutoff = observed - timedelta(days=WAVE_RETENTION_DAYS)
         async with self._lock(guild):
             records = await self._records(guild)
-            active_roles = await self.cog.config.guild(guild).joinwatch_pending_roles()
+            active_roles = (await joinwatch_state.open_maps(self.cog, guild))["pending_role"]
             owned_waves = {entry.get("wave_id") for entry in active_roles.values()}
             stale = [key for key, record in records.items()
                      if key not in owned_waves and ((record["status"] in {"preview", "cancelled"} and utc_timestamp(record["expires_at"]) < observed)
