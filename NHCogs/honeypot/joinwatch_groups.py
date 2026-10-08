@@ -302,8 +302,12 @@ class JoinwatchGroups:
             )
 
     async def observe(self, member, *, now=None) -> tuple[int, ...]:
-        observed = now or datetime.now(timezone.utc)
         # Use the event time. Current joined_at cannot prove a first historical join.
+        # The stored row, window, and cohort trigger share one second-precision UTC time.
+        observed = now or datetime.now(timezone.utc)
+        if observed.tzinfo is None or observed.utcoffset() is None:
+            raise ValueError("Join time needs an explicit timezone")
+        observed = observed.astimezone(timezone.utc).replace(microsecond=0)
         guild = member.guild
         async with self._lock(guild):
             inserted = await asyncio.to_thread(

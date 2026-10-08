@@ -176,3 +176,31 @@ class JoinwatchHistoryTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(store.get_joinwatch_observation(guild.id, base)["first_joined_at"], now.isoformat())
                 self.assertEqual((await restarted.read_history(guild))["import_revision"], 0)
+
+    async def test_observed_join_matches_when_the_clock_has_microseconds(self):
+        with TemporaryDirectory() as directory:
+            with _isolated_honeypot_modules(Path(directory)):
+                groups = importlib.import_module("NHCogs.honeypot.joinwatch_groups")
+                now = datetime(2026, 10, 3, 12, 0, 7, 654321, tzinfo=timezone.utc)
+                stored = now.replace(microsecond=0)
+                created = stored - timedelta(days=60)
+                base = (int(created.timestamp() * 1000) - 1420070400000) << 22
+                cfg = SimpleNamespace(joinwatch_groups_enabled=_Value(True),
+                                      joinwatch_groups_minimum_accounts=_Value(3),
+                                      joinwatch_groups_join_window_minutes=_Value(15),
+                                      joinwatch_groups_creation_distance_hours=_Value(6))
+                guild = SimpleNamespace(id=123)
+                store = _history_store(directory)
+                store.record_first_join(guild.id, base, stored)
+                store.record_first_join(guild.id, base + 1, stored + timedelta(minutes=3))
+                cog = SimpleNamespace(config=SimpleNamespace(guild=lambda _: cfg), _case_store=store)
+                owner = groups.JoinwatchGroups(cog)
+                trigger = SimpleNamespace(id=base + 2, guild=guild)
+                matched = await owner.observe(
+                    trigger, now=stored + timedelta(minutes=5, microseconds=80)
+                )
+                self.assertEqual(matched, (base, base + 1, base + 2))
+                self.assertEqual(
+                    store.get_joinwatch_observation(guild.id, base + 2)["first_joined_at"],
+                    (stored + timedelta(minutes=5)).isoformat(),
+                )
