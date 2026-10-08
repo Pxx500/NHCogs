@@ -658,8 +658,11 @@ class JoinWatchLiveRaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("one-time copy of the three JoinWatch maps", statement)
         self.assertIn("active challenge", statement)
         self.assertIn("7 days", statement)
-        self.assertIn("not rewritten on user deletion", statement)
-        self.assertIn("leaves the guild", statement)
+        self.assertIn("next cog load after 7 days", statement)
+        self.assertIn("Ordinary user requests also redact", statement)
+        self.assertIn("optional account and activity snapshots in that backup", statement)
+        self.assertIn("Stronger deletion requests preserve the backup until expiry", statement)
+        self.assertIn("Leaving a guild removes its backup", statement)
 
 
 def _source_held(cog) -> bool:
