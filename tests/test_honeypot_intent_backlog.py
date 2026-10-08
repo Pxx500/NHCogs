@@ -83,6 +83,24 @@ class IntentBacklogTests(DetectionPipelineTestCase):
             await module.intent_backlog.queue_if_unavailable(cog, message)
             self.assertEqual(await cog._intent_backlog.due(), ())
 
+    async def test_failed_batch_does_not_starve_later_messages_after_restart(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as module:
+            path = Path(directory) / "queue.sqlite"
+            store = module.intent_backlog.IntentBacklog(path)
+            await store.initialize()
+            for message_id in range(11):
+                await store.enqueue(1, 2, message_id, now=1000)
+            first_batch = await store.due(now=1000)
+            self.assertEqual([row.message_id for row in first_batch], list(range(10)))
+            for pending in first_batch:
+                await store.retry(pending, now=1000)
+            reopened = module.intent_backlog.IntentBacklog(path)
+            await reopened.initialize()
+            second_batch = await reopened.due(now=1030)
+            self.assertEqual(second_batch[0].message_id, 10)
+            self.assertEqual(len(second_batch), 10)
+            self.assertEqual(len(await reopened.due(now=1030, limit=20)), 11)
+
     async def test_restored_content_fetches_known_id_and_acks_only_after_processing(self):
         with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as module:
             bot = _Bot()

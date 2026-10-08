@@ -7,7 +7,9 @@ import logging
 import sqlite3
 import time
 from contextlib import closing
+from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import discord
@@ -17,6 +19,7 @@ from ..gateway_capabilities import available
 RETENTION_SECONDS = 14 * 24 * 60 * 60
 RETRY_SECONDS = 30
 DRAIN_BATCH_SIZE = 10
+REPLAY_ADMITTED_AT: ContextVar[datetime | None] = ContextVar("nhcogs_replay_admitted_at", default=None)
 log = logging.getLogger("red.Honeypot")
 
 
@@ -83,7 +86,7 @@ class IntentBacklog:
             )
             rows = connection.execute(
                 "SELECT * FROM pending_content_messages WHERE retry_at <= ? "
-                "ORDER BY enqueued_at, message_id LIMIT ?", (now, limit),
+                "ORDER BY retry_at, enqueued_at, message_id LIMIT ?", (now, limit),
             ).fetchall()
         return tuple(PendingMessage(**dict(row)) for row in rows)
 
@@ -151,7 +154,11 @@ async def drain_once(cog) -> int:
             if not available(cog.bot, "message_content"):
                 await cog._intent_backlog.retry(pending)
                 break
-            await cog.on_message(message)
+            token = REPLAY_ADMITTED_AT.set(datetime.now(timezone.utc))
+            try:
+                await cog.on_message(message)
+            finally:
+                REPLAY_ADMITTED_AT.reset(token)
             if not available(cog.bot, "message_content"):
                 await cog._intent_backlog.retry(pending)
                 break

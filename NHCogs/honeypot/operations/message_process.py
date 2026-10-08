@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from time import perf_counter
 from typing import TYPE_CHECKING
 
 import discord
 
+from ...gateway_capabilities import GatewayCapabilityUnavailable
 from .. import detection_runtime
+from ..capture_capability import capture_needs_unavailable_content
 from ..detection_cases import (
     OPERATION_RESULT_CASE_TERMINAL,
     ActionIntent,
@@ -584,6 +586,10 @@ async def _process_active_message(
                     live_message = await fetch_message(source.message_id)
                 except discord.NotFound:
                     live_message = None
+    if live_message is not None and capture_needs_unavailable_content(
+        cog.bot, replace(context, live_message=live_message),
+    ):
+        raise GatewayCapabilityUnavailable("message_content")
     state = _MessageProcessState(
         source=source,
         guild_settings=guild_settings,

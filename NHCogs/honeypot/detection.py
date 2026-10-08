@@ -13,7 +13,6 @@ import logging
 import re
 import sqlite3
 import typing
-from collections import Counter
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -27,6 +26,7 @@ from redbot.core.utils.chat_formatting import box
 
 from ..gateway_capabilities import GatewayCapabilityUnavailable, available
 from . import detection_runtime, imagescan, joinwatch_state, review_publication
+from .capture_capability import capture_needs_unavailable_content
 from .case_review import case_feedback_items
 from .detection_cases import (
     OPERATION_RESULT_CHANNEL_UNAVAILABLE,
@@ -46,6 +46,7 @@ from .effects import (
     ModerationEffectResult,
     ModerationOrigin,
 )
+from .intent_backlog import REPLAY_ADMITTED_AT
 from .message_registry import MESSAGE_REGISTRY_RETENTION_DAYS, MessageRecord
 from .operations import executor_operation_policy
 from .operations.context import (
@@ -367,12 +368,19 @@ async def resolve_detection_case(
     defer_final_operations: bool = False,
 ) -> bool:
     resolved_at = now or datetime.now(timezone.utc)
+    automatic_expiry = resolution == "expired" and moderator_id is None
+    content_unavailable = automatic_expiry and not available(cog.bot, "message_content")
+    if content_unavailable and await asyncio.to_thread(
+        cog._case_store.pause_case_for_unavailable_capture, case_id, resolved_at,
+    ):
+        return False
     lease = await asyncio.to_thread(
         cog._case_store.claim_resolution,
         case_id,
         resolved_at,
         resolved_at - timedelta(minutes=5),
-        require_terminal_captures=resolution == "ignore",
+        require_terminal_captures=resolution == "ignore" or automatic_expiry,
+        automatic_expiry=automatic_expiry,
     )
     if lease is None:
         return False
@@ -403,6 +411,13 @@ async def resolve_detection_case(
                     f"role-release:{case_id}:{int(role_id)}",
                 )
             )
+        if automatic_expiry and not available(cog.bot, "message_content"):
+            paused = await asyncio.to_thread(
+                cog._case_store.pause_case_for_unavailable_capture, case_id, resolved_at,
+            )
+            if paused:
+                await asyncio.to_thread(cog._case_store.release_resolution, lease)
+                return False
         finished = await asyncio.to_thread(
             cog._case_store.finish_resolution,
             lease,
@@ -412,6 +427,7 @@ async def resolve_detection_case(
             resolved_at,
             decisions=decisions,
             final_operations=tuple(final_operations),
+            automatic_expiry=automatic_expiry,
         )
     except BaseException:
         await asyncio.to_thread(cog._case_store.release_resolution, lease)
@@ -715,26 +731,7 @@ async def _run_detection_operation_follow_ups(
 
 
 def _capture_needs_unavailable_content(cog, context: OperationContext) -> bool:
-    if context.operation.operation_type != OperationType.MESSAGE_PROCESS:
-        return False
-    if available(cog.bot, "message_content"):
-        return False
-    terminal_statuses = {status.value for status in detection_runtime.CaptureStatus}
-    pending = tuple(
-        attachment for attachment in context.snapshot.attachments
-        if attachment.message_sequence == context.operation.message_sequence
-        and attachment.capture_status not in terminal_statuses
-    )
-    if not pending:
-        return False
-    if context.live_message is None:
-        return True
-    supplied = Counter(
-        (str(attachment.filename), int(attachment.size))
-        for attachment in getattr(context.live_message, "attachments", ())
-    )
-    needed = Counter((attachment.filename, attachment.size) for attachment in pending)
-    return any(supplied[key] < count for key, count in needed.items())
+    return capture_needs_unavailable_content(cog.bot, context)
 
 
 async def _execute_detection_case_operation(
@@ -782,6 +779,10 @@ async def _execute_detection_case_operation(
             )
         if _capture_needs_unavailable_content(cog, context):
             raise GatewayCapabilityUnavailable("message_content")
+        await asyncio.to_thread(
+            cog._case_store.resume_capability_deferred_case,
+            lease.operation_id, lease.claim_token, now,
+        )
         operation_outcome = apply_operation_policy(
             await handler(cog, context), operation_policy
         )
@@ -1128,11 +1129,14 @@ async def _process_detected_message(
                 )
             except Exception:
                 log.exception("Could not capture detection activity context")
+        admitted_at = REPLAY_ADMITTED_AT.get()
+        admission_kwargs = {} if admitted_at is None else {"admitted_at": admitted_at}
         append = await asyncio.to_thread(
             cog._case_store.append_message,
             review_publication._new_case_message(message, activity_summary=activity_summary),
             signals,
             initial_operations(signals),
+            **admission_kwargs,
         )
     finally:
         if admission_lock is not None:
@@ -1561,6 +1565,7 @@ async def _spam_suspicion_reasons(
             message.author.id,
             current_fingerprint,
             since_utc=cutoff,
+            through_utc=message.created_at,
         )
     except Exception as error:
         log.exception("Message registry spam lookup failed")

@@ -634,7 +634,9 @@ class CaseLifecycleTests(CaseExpiryTestCase):
                 cog._case_review_rerender = mock.AsyncMock(
                     side_effect=honeypot.discord.HTTPException()
                 )
-                appended = self._append_case(honeypot, cog, datetime.now(timezone.utc))
+                appended = self._append_case(
+                    honeypot, cog, datetime.now(timezone.utc) - timedelta(days=2)
+                )
                 publish_primary(cog._case_store, appended.case.case_id, 30, 77)
 
                 resolved = await cog.resolve_detection_case(
@@ -676,7 +678,9 @@ class CaseLifecycleTests(CaseExpiryTestCase):
             with _isolated_honeypot_modules(Path(directory)) as honeypot:
                 cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = self._config({"mute_role": 55})
-                appended = self._append_case(honeypot, cog, datetime.now(timezone.utc))
+                appended = self._append_case(
+                    honeypot, cog, datetime.now(timezone.utc) - timedelta(days=2)
+                )
                 ownership = cog._case_store.ensure_operation(
                     appended.case.case_id,
                     "role_apply",
@@ -710,7 +714,9 @@ class CaseLifecycleTests(CaseExpiryTestCase):
                 cog = honeypot.Honeypot(_Bot(), _operational_support())
                 cog.config = self._config({"mute_role": None})
                 cog._case_review_rerender = mock.AsyncMock()
-                appended = self._append_case(honeypot, cog, datetime.now(timezone.utc))
+                appended = self._append_case(
+                    honeypot, cog, datetime.now(timezone.utc) - timedelta(days=2)
+                )
                 case_directory = (
                     cog._detection_case_files_path
                     / str(appended.case.guild_id)
@@ -826,7 +832,7 @@ class CaseLifecycleTests(CaseExpiryTestCase):
                         channel_id=30,
                         message_id=44,
                         content="evidence",
-                        created_at=datetime.now(timezone.utc),
+                        created_at=datetime.now(timezone.utc) - timedelta(days=2),
                         jump_url="https://discord.test/messages/44",
                         attachments=(attachment,),
                     ),

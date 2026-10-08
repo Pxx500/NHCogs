@@ -1,6 +1,6 @@
 # Discord intents and data controls
 
-Updated 8 October 2026. This document distinguishes repository changes from production configuration and unresolved retention questions. The changes have not been deployed or submitted to Discord.
+Updated 9 October 2026. This document distinguishes repository changes from production configuration and unresolved retention questions. Deployment and submission to Discord have not been confirmed.
 
 ## Implemented changes
 
@@ -40,14 +40,14 @@ The patches address concrete gaps in attribution deletion, persona deletion, cro
 
 The regression tests cover requester types, access preservation, persona ownership, in-flight and delayed workflow writes, two-guild exports with WAL, and reviewer opt-in boundaries.
 
-Final validation:
+Validation before the intent-loss protections and integration with PR #148:
 
 - python -m pytest tests -q -n 4 --dist loadscope after the post-PR correction: 1701 passed, 1 skipped, 442 subtests passed
 - ruff check .: passed
 - git diff --check: passed
 - mypy: 147 errors in 31 files, advisory under the repository's CI configuration. None were reported in the new CustomCommands, Bot Proxy, Presence, or scoped-export methods. Existing imagescan errors occur outside the changed export method
 
-The first full run found an incomplete Gate privacy test fixture, which now initializes the new Bot Proxy store as a real cog does. An existing capture-start test with a 50 ms timeout also failed under load. It passed in isolation and in the second full parallel run. Its assertions and timing were not weakened.
+The first full run found an incomplete Gate privacy test fixture, which now initializes the new Bot Proxy store as a real cog does. An existing capture-start test with a 50 ms timeout also failed under load. Its timeout was later aligned with the production value of one second so real SQLite work can finish. Its assertions and the production timeout remain unchanged.
 
 An independent review found no blocker in the Bot Proxy deletion lock order, session-creation gate, stale callback checks, or attribution sweep.
 
@@ -93,6 +93,8 @@ Confirm Application ID, actual installs, enabled intents, loaded Red cogs, produ
 
 The user reports one NewHorizons server with more than 90,000 members. Since 10 June 2026 the review threshold is based on more than 10,000 unique users who can see the application, rather than a count of guilds. The guide describes a standard 90-day notification window and annual review, but the application's actual deadline must be read from its notice.
 
+The supplied Developer Portal notice shows `Request due: 09/10/2026` and `0 days`. It does not specify an hour or time zone. Neither local midnight nor midnight UTC is confirmed by that notice or the reviewed public documentation.
+
 ### Research export
 
 The existing research dump can export full channel histories. Its purpose, use, and retention need review against Discord's mining and scraping restrictions. It was not changed or represented as a justified intent use case in this patch.
@@ -123,7 +125,7 @@ The [English form draft](discord-intents-form-draft.md) must be checked against 
 
 ## Code and tests
 
-## Intent-loss protection added before the deadline
+## Protection when intents are unavailable
 
 The shared capability guard blocks dependent work when the requested mask is disabled,
 approval is denied, or the required state is unknown. OperationalSupport refreshes
@@ -133,6 +135,16 @@ connection. They protect NHCogs work in the connected application.
 
 Received messages requiring unavailable content are retained as a metadata-only queue
 for up to 14 days. The worker fetches only observed message IDs after restoration.
+Retries are ordered by their due time so inaccessible messages do not block later work.
+Historical spam checks exclude messages newer than the evaluated message. A new case
+created from replay receives a fresh 24-hour review window while preserving the original
+message timestamp as evidence.
+
+Pending capture is checked again after fetching a message. Automatic expiry checks the
+current deadline, unresolved attachments, and durable capability waits in both its initial
+claim and final database transaction. Rejected automatic closure releases only its own
+claim. Resumed deferred work receives at least a full 24-hour review window. Manual
+moderation and explicit data deletion retain their separate behavior.
 Pending attachment capture waits before source deletion without spending its retry
 budget. Automatic reviewer work and role synchronization remain pending, and an
 incomplete member cache cannot replace a valid generation. A newly sent notification

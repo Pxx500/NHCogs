@@ -16,7 +16,11 @@ Jeśli bot otrzyma wiadomość, ale Message Content jest niedostępny, Honeypot 
 
 Po odzyskaniu dostępu worker pobiera konkretne, wcześniej zaobserwowane wiadomości. Przetwarza maksymalnie 10 wpisów na przebieg. Wpisy wygasają po 14 dniach. Nie pobiera historii całych kanałów i nie odtwarza dawnych komend użytkowników.
 
+Nieudane próby nie blokują późniejszych wiadomości w kolejce. Sprawdzanie spamu używa czasu oryginalnej wiadomości i nie wlicza do jej okna wiadomości wysłanych później. Nowa sprawa utworzona z opóźnionej wiadomości dostaje 24 godziny na review od chwili przyjęcia jej do sprawy. Oryginalny czas wiadomości pozostaje zapisany jako dowód.
+
 Jeśli istniejąca sprawa oczekuje na załączniki niedostępne przez brak Message Content, operacja zostaje odłożona. Ta ścieżka nie usuwa źródła i nie oznacza oczekujących załączników jako nieudanych tylko przez utratę dostępu. Oczekiwanie nie zużywa budżetu prób. Kolejne sprawdzenie jest zaplanowane po 30 sekundach.
+
+Bot sprawdza dostęp także po pobraniu wiadomości, przed przechwyceniem załączników i usunięciem źródła. Automatyczne wygaszenie nie zamyka sprawy z niedokończonym pobieraniem ani trwałym wpisem oczekiwania na dane. Po wznowieniu odłożonej pracy sprawa dostaje co najmniej pełne 24 godziny na review. Świadome zamknięcie przez moderatora i jawne usunięcie danych zachowują swoje osobne zasady.
 
 Znane działania z wystarczającymi zapisanymi danymi mogą nadal działać przez REST, czyli bezpośrednie żądania do API Discorda. Dotyczy to na przykład znanego bana i operacji na roli, gdy potrzebne dane członka można pobrać. Sam brak członka w cache nie oznacza jego odejścia. Stan nieobecności wymaga potwierdzenia przez API.
 
