@@ -598,14 +598,15 @@ async def store_alert_reference(
     message_id: int,
 ) -> bool:
     stored = False
-    for kind in ("pending_assignment", "pending_role"):
-        incident = await read_row(cog, guild, member_id, kind)
-        if incident is None:
-            continue
-        incident["alert_channel_id"] = channel_id
-        incident["alert_message_id"] = message_id
-        await write_row(cog, guild, member_id, kind, incident)
-        stored = True
+    async with member_lock(cog, guild.id, member_id):
+        for kind in ("pending_assignment", "pending_role"):
+            incident = await read_row(cog, guild, member_id, kind)
+            if incident is None:
+                continue
+            incident["alert_channel_id"] = channel_id
+            incident["alert_message_id"] = message_id
+            await write_row(cog, guild, member_id, kind, incident)
+            stored = True
     return stored
 
 
@@ -616,14 +617,15 @@ async def disable_alert_updates(
     *,
     incident: dict[str, typing.Any] | None = None,
 ) -> None:
-    for kind in ("pending_assignment", "pending_role"):
-        stored_incident = await read_row(cog, guild, member_id, kind)
-        if stored_incident is None:
-            continue
-        stored_incident["alert_updates_disabled"] = True
-        await write_row(cog, guild, member_id, kind, stored_incident)
-    if incident is not None:
-        incident["alert_updates_disabled"] = True
+    async with member_lock(cog, guild.id, member_id):
+        for kind in ("pending_assignment", "pending_role"):
+            stored_incident = await read_row(cog, guild, member_id, kind)
+            if stored_incident is None:
+                continue
+            stored_incident["alert_updates_disabled"] = True
+            await write_row(cog, guild, member_id, kind, stored_incident)
+        if incident is not None:
+            incident["alert_updates_disabled"] = True
 
 
 def next_retry_count(data: typing.Mapping[str, typing.Any]) -> int | None:
