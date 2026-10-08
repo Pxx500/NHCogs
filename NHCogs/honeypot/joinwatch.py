@@ -247,10 +247,8 @@ async def _apply_joinwatch_assignment_actions(
             )
             continue
         async with joinwatch_state.member_lock(cog, guild.id, member_id):
-            current = (
-                (await cog.config.guild(guild).all())
-                .get("joinwatch_pending_role_assignments", {})
-                .get(str(member_id))
+            current = await joinwatch_state.read_row(
+                cog, guild, member_id, "pending_assignment"
             )
             if current != selected_action.data:
                 continue
@@ -354,7 +352,7 @@ async def _apply_joinwatch_assignment_actions_locked(
             await joinwatch_state.delete_pending_assignment(cog, guild, member_id)
             continue
         if role in member.roles:
-            active = (await cog.config.guild(guild).all()).get("joinwatch_pending_roles", {}).get(member_id_str)
+            active = await joinwatch_state.read_row(cog, guild, member_id, "pending_role")
             await joinwatch_state.delete_pending_assignment(cog, guild, member_id)
             if not (active is not None and active.get("role_id") == role_id
                     and active.get("incident_id") == data.get("incident_id")):
@@ -450,11 +448,7 @@ async def _apply_joinwatch_role_actions(
             )
             continue
         async with joinwatch_state.member_lock(cog, guild.id, member_id):
-            current = (
-                (await cog.config.guild(guild).all())
-                .get("joinwatch_pending_roles", {})
-                .get(str(member_id))
-            )
+            current = await joinwatch_state.read_row(cog, guild, member_id, "pending_role")
             if current is None or current != selected_action.data or current.get("test"):
                 continue
             if current.get("verification_state") == "release_pending":
@@ -667,11 +661,12 @@ async def joinwatch_auto_role_loop(cog) -> None:
                 await owner.settle_history(guild)
             raw_config = await cog.config.guild(guild).all()
             guild_settings = GuildSettings.from_mapping(raw_config)
+            open_cases = await joinwatch_state.open_maps(cog, guild)
             selected = joinwatch_state.select_due_joinwatch_assignments(
                 now=now,
                 assignments_enabled=guild_settings.joinwatch_auto_role_enabled,
-                pending_assignments=guild_settings.joinwatch_pending_role_assignments,
-                pending_roles=guild_settings.joinwatch_pending_roles,
+                pending_assignments=open_cases["pending_assignment"],
+                pending_roles=open_cases["pending_role"],
             )
         except Exception as exc:
             log.exception(
@@ -728,8 +723,9 @@ async def _on_member_join_locked(cog, member: discord.Member) -> None:
     guild_settings = GuildSettings.from_mapping(raw_config)
     owner = getattr(cog, "_joinwatch_verification", None)
     member_key = str(member.id)
-    active_incident = guild_settings.joinwatch_pending_roles.get(member_key)
-    pending_incident = guild_settings.joinwatch_pending_role_assignments.get(member_key)
+    member_rows = await joinwatch_state.rows_for_member(cog, member.guild, member.id)
+    active_incident = member_rows.get("pending_role")
+    pending_incident = member_rows.get("pending_assignment")
     existing_incident = active_incident or pending_incident
     if active_incident is not None and pending_incident is not None and active_incident.get("incident_id") == pending_incident.get("incident_id"):
         existing_incident = dict(active_incident)
@@ -740,7 +736,7 @@ async def _on_member_join_locked(cog, member: discord.Member) -> None:
             "Interrupted CAPTCHA role work needs moderator reconciliation before another enrollment",
         )
         return
-    if existing_incident is None and member_key in raw_config.get("joinwatch_verified_members", {}):
+    if existing_incident is None and await joinwatch_state.is_verified(cog, member.guild, member.id):
         return
     if not guild_settings.joinwatch_enabled and existing_incident is None:
         return
@@ -799,9 +795,7 @@ async def _on_member_join_locked(cog, member: discord.Member) -> None:
                     )
                     status = role_permission_error
                 elif guild_settings.joinwatch_auto_role_random_delay_enabled:
-                    existing_assignment = guild_settings.joinwatch_pending_role_assignments.get(
-                        member_key
-                    )
+                    existing_assignment = pending_incident
                     try:
                         apply_at = datetime.fromisoformat(
                             typing.cast(str, existing_assignment["apply_at"])
@@ -921,8 +915,7 @@ async def _on_member_update_locked(cog, before: discord.Member, after: discord.M
         return
     raw_config = await cog.config.guild(after.guild).all()
     guild_settings = GuildSettings.from_mapping(raw_config)
-    pending_roles = guild_settings.joinwatch_pending_roles
-    pending_role = pending_roles.get(str(after.id))
+    pending_role = await joinwatch_state.read_row(cog, after.guild, after.id, "pending_role")
     if pending_role is not None:
         try:
             pending_role_id = int(typing.cast(typing.Any, pending_role["role_id"]))

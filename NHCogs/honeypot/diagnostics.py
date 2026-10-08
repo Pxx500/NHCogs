@@ -15,7 +15,7 @@ from redbot.core import commands
 from redbot.core.i18n import Translator
 from redbot.core.utils.chat_formatting import box, pagify
 
-from . import channel_routing
+from . import channel_routing, joinwatch_state
 from .remote_media import media_decoder_support
 from .settings import (
     CORE_ACTION_OPTIONS,
@@ -50,10 +50,7 @@ async def honeypot_mod_stats(cog, ctx: commands.Context) -> None:
     """Show detailed moderation statistics."""
     stats = DEFAULT_STATS.copy()
     stats.update(await cog.config.guild(ctx.guild).stats())
-    pending_joinwatch_assignments = await cog.config.guild(
-        ctx.guild
-    ).joinwatch_pending_role_assignments()
-    pending_joinwatch_roles = await cog.config.guild(ctx.guild).joinwatch_pending_roles()
+    live_counts = await joinwatch_state.live_counts(cog, ctx.guild)
     now = datetime.now(timezone.utc)
     case_counts = await asyncio.to_thread(
         cog._case_store.operational_counts,
@@ -115,11 +112,11 @@ async def honeypot_mod_stats(cog, ctx: commands.Context) -> None:
             "Young joins": young_joins,
             "Young join rate": f"{young_join_rate:.1f}%",
             "Auto-role applications scheduled": stats["joinwatch_auto_roles_scheduled"],
-            "Pending role applications": len(pending_joinwatch_assignments),
+            "Pending role applications": live_counts["pending_assignment"],
             "Auto-roles applied": stats["joinwatch_auto_roles"],
             "Auto-role failures": stats["joinwatch_auto_role_failures"],
             "Auto-roles cleared": stats["joinwatch_auto_roles_cleared"],
-            "Active auto-role timers": len(pending_joinwatch_roles),
+            "Active auto-role timers": live_counts["pending_role"],
             "Auto-role punishments": stats["joinwatch_auto_role_punishments"],
         },
         "Actions": {

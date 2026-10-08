@@ -96,10 +96,13 @@ class DetectionCaseStoreTests(unittest.TestCase):
                 )
             }
 
-        self.assertEqual(version, 8)
+        self.assertEqual(version, 9)
         self.assertIn("detection_cases", tables)
         self.assertIn("detection_attachments", tables)
         self.assertIn("public_daily_stats", tables)
+        self.assertIn("joinwatch_live_state", tables)
+        self.assertIn("joinwatch_cutover", tables)
+        self.assertIn("joinwatch_live_backup", tables)
 
     def test_initialize_preserves_current_schema_data_when_backfilling_version(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
@@ -122,7 +125,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertEqual(snapshot.messages[0].message_id, 40)
         self.assertEqual(snapshot.signals[0].signal.detector, "firstpost")
         self.assertEqual(snapshot.operations[0].status, OperationStatus.PENDING)
-        self.assertEqual(version, 8)
+        self.assertEqual(version, 9)
 
     def test_initialize_preserves_timeline_publications_from_previous_schema(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
@@ -450,7 +453,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
             version = connection.execute("PRAGMA user_version").fetchone()[0]
         history = copied.all_observations(100)
         self.assertEqual(retained, payload)
-        self.assertEqual(version, 8)
+        self.assertEqual(version, 9)
         self.assertEqual(history["revision"], 5)
         self.assertEqual(history["import_revision"], 2)
         self.assertEqual(history["sources"], document["sources"])
@@ -740,7 +743,7 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertIn("description", columns)
         self.assertIn("spoiler", columns)
         self.assertEqual(row, ("legacy.png", None, 0))
-        self.assertEqual(version, 8)
+        self.assertEqual(version, 9)
 
     def test_projection_endpoint_survives_store_restart(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)

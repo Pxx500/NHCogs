@@ -21,6 +21,9 @@ DAILY_STATS_METRICS = frozenset(
 )
 JOINWATCH_HISTORY_ACCOUNT_LIMIT = 200_000
 JOINWATCH_HISTORY_SOURCE_LIMIT = 100
+JOINWATCH_LIVE_BACKUP_RETENTION_DAYS = 7
+_LIVE_KINDS = ("verified", "pending_role", "pending_assignment")
+_OPEN_KINDS = ("pending_role", "pending_assignment")
 _HISTORY_SOURCE_FIELDS = ("source", "generated_at", "range_start", "range_end", "complete")
 
 
@@ -482,6 +485,96 @@ def _history_source_fields(source: object, guild_id: int) -> tuple[str, str, str
     return (label, generated_at, range_start, range_end, int(complete))
 
 
+def _require_live_kind(kind: str) -> None:
+    if kind not in _LIVE_KINDS:
+        raise ValueError(f"unknown joinwatch live kind: {kind}")
+
+
+def _live_user_id(key: object) -> int | None:
+    if isinstance(key, bool) or not isinstance(key, (int, str)):
+        return None
+    try:
+        user_id = int(key)
+    except ValueError:
+        return None
+    if str(user_id) != (key if isinstance(key, str) else str(key)):
+        return None
+    return user_id
+
+
+def _live_columns(kind: str, payload: Mapping) -> tuple[str | None, int | None, str | None, str]:
+    incident = payload.get("incident_id")
+    incident_id = incident if isinstance(incident, str) else None
+    role = payload.get("role_id")
+    role_id = role if isinstance(role, int) and not isinstance(role, bool) else None
+    if kind == "pending_role":
+        due = payload.get("expires_at")
+    elif kind == "pending_assignment":
+        due = payload.get("apply_at")
+    else:
+        due = None
+    due_at = due if isinstance(due, str) else None
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    return incident_id, role_id, due_at, encoded
+
+
+def _prepare_live_maps(maps: Mapping) -> dict[str, list[tuple[int, dict]]] | None:
+    """Return rows to copy, or None when Config cannot be stored unchanged."""
+    prepared: dict[str, list[tuple[int, dict]]] = {}
+    for kind in _LIVE_KINDS:
+        raw = maps.get(kind, {})
+        if not isinstance(raw, Mapping):
+            return None
+        rows: list[tuple[int, dict]] = []
+        seen: set[int] = set()
+        for key, payload in raw.items():
+            user_id = _live_user_id(key)
+            if user_id is None or user_id in seen or not isinstance(payload, dict):
+                return None
+            seen.add(user_id)
+            rows.append((user_id, payload))
+        prepared[kind] = rows
+    return prepared
+
+
+def _live_state_matches(
+    connection: sqlite3.Connection,
+    guild_id: int,
+    prepared: Mapping[str, list[tuple[int, dict]]],
+) -> bool:
+    stored: dict[str, dict[int, sqlite3.Row]] = {kind: {} for kind in _LIVE_KINDS}
+    for row in connection.execute(
+        """SELECT user_id, kind, incident_id, payload FROM joinwatch_live_state
+           WHERE guild_id = ?""",
+        (guild_id,),
+    ):
+        stored[row["kind"]][int(row["user_id"])] = row
+    for kind, rows in prepared.items():
+        actual = stored[kind]
+        if len(actual) != len(rows):
+            return False
+        for user_id, payload in rows:
+            row = actual.get(user_id)
+            if row is None or json.loads(row["payload"]) != payload:
+                return False
+            expected_incident = payload.get("incident_id")
+            if not isinstance(expected_incident, str):
+                expected_incident = None
+            if row["incident_id"] != expected_incident:
+                return False
+    return True
+
+
+def _scrub_live_moderators(payload: dict, user_id: int) -> bool:
+    changed = False
+    for key in ("enrollment_moderator", "completion_moderator"):
+        if payload.get(key) in (user_id, str(user_id)):
+            payload[key] = None
+            payload["completion_reason"] = None
+            changed = True
+    return changed
+
+
 def _json_value(value: object) -> object:
     if isinstance(value, Mapping):
         return {key: _json_value(item) for key, item in value.items()}
@@ -921,12 +1014,43 @@ class DetectionCaseStore:
             for row in connection.execute("SELECT guild_id, history FROM joinwatch_history"):
                 self._copy_joinwatch_history(connection, int(row["guild_id"]), row["history"])
 
+        def migrate_schema_8(connection: sqlite3.Connection) -> None:
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS joinwatch_live_state (
+                       guild_id INTEGER NOT NULL,
+                       user_id INTEGER NOT NULL,
+                       kind TEXT NOT NULL,
+                       incident_id TEXT,
+                       role_id INTEGER,
+                       due_at TEXT,
+                       payload TEXT NOT NULL,
+                       PRIMARY KEY (guild_id, user_id, kind)
+                   )"""
+            )
+            connection.execute(
+                """CREATE INDEX IF NOT EXISTS joinwatch_live_state_due
+                   ON joinwatch_live_state (guild_id, kind, due_at)"""
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS joinwatch_cutover (
+                       guild_id INTEGER PRIMARY KEY,
+                       source TEXT NOT NULL
+                   )"""
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS joinwatch_live_backup (
+                       guild_id INTEGER PRIMARY KEY,
+                       written_at INTEGER NOT NULL,
+                       payload TEXT NOT NULL
+                   )"""
+            )
+
         with closing(self._connect()) as connection:
             apply_migrations(
                 connection,
                 (migrate_schema_0, migrate_schema_1, migrate_schema_2,
                  migrate_schema_3, migrate_schema_4, migrate_schema_5, migrate_schema_6,
-                 migrate_schema_7),
+                 migrate_schema_7, migrate_schema_8),
                 label="detection case storage",
             )
 
@@ -1427,6 +1551,306 @@ class DetectionCaseStore:
             connection.execute("DELETE FROM joinwatch_history_meta WHERE guild_id = ?", (guild_id,))
             connection.execute("DELETE FROM joinwatch_history WHERE guild_id = ?", (guild_id,))
             connection.execute("DELETE FROM joinwatch_waves WHERE guild_id = ?", (guild_id,))
+
+    def cutover_source(self, guild_id: int) -> str | None:
+        """Read the per-guild live-state marker. See Honeypot stored data."""
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT source FROM joinwatch_cutover WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()
+        return None if row is None else row["source"]
+
+    def clear_cutover(self, guild_id: int) -> None:
+        """Return one guild to Config as the live-state source. See Honeypot stored data."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute("DELETE FROM joinwatch_cutover WHERE guild_id = ?", (guild_id,))
+
+    def get(self, guild_id: int, user_id: int, kind: str) -> dict | None:
+        """Read one JoinWatch live row. See Honeypot stored data."""
+        _require_live_kind(kind)
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """SELECT payload FROM joinwatch_live_state
+                   WHERE guild_id = ? AND user_id = ? AND kind = ?""",
+                (guild_id, int(user_id), kind),
+            ).fetchone()
+        return None if row is None else json.loads(row["payload"])
+
+    def rows_for_member(self, guild_id: int, user_id: int) -> dict[str, dict]:
+        """Read every live row for one member. See Honeypot stored data."""
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """SELECT kind, payload FROM joinwatch_live_state
+                   WHERE guild_id = ? AND user_id = ?""",
+                (guild_id, int(user_id)),
+            ).fetchall()
+        return {row["kind"]: json.loads(row["payload"]) for row in rows}
+
+    def is_verified(self, guild_id: int, user_id: int) -> bool:
+        """Report whether this member has a verified row. See Honeypot stored data."""
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """SELECT 1 FROM joinwatch_live_state
+                   WHERE guild_id = ? AND user_id = ? AND kind = 'verified'""",
+                (guild_id, int(user_id)),
+            ).fetchone()
+        return row is not None
+
+    def upsert(
+        self,
+        guild_id: int,
+        user_id: int,
+        kind: str,
+        payload: Mapping,
+        *,
+        expected_incident_id: str | None = None,
+        compare: bool = False,
+    ) -> bool:
+        """Write one live row. A compare refuses a different incident. See Honeypot stored data."""
+        _require_live_kind(kind)
+        incident_id, role_id, due_at, encoded = _live_columns(kind, payload)
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                if compare:
+                    current = connection.execute(
+                        """SELECT incident_id FROM joinwatch_live_state
+                           WHERE guild_id = ? AND user_id = ? AND kind = ?""",
+                        (guild_id, int(user_id), kind),
+                    ).fetchone()
+                    if current is None or current["incident_id"] != expected_incident_id:
+                        connection.rollback()
+                        return False
+                connection.execute(
+                    """INSERT INTO joinwatch_live_state (
+                           guild_id, user_id, kind, incident_id, role_id, due_at, payload
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(guild_id, user_id, kind) DO UPDATE SET
+                           incident_id = excluded.incident_id,
+                           role_id = excluded.role_id,
+                           due_at = excluded.due_at,
+                           payload = excluded.payload""",
+                    (guild_id, int(user_id), kind, incident_id, role_id, due_at, encoded),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return True
+
+    def delete(
+        self,
+        guild_id: int,
+        user_id: int,
+        kind: str,
+        expected_incident_id: str | None = None,
+        compare: bool = False,
+    ) -> bool:
+        """Delete one live row. A compare refuses a different incident. See Honeypot stored data."""
+        _require_live_kind(kind)
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                if compare:
+                    current = connection.execute(
+                        """SELECT incident_id FROM joinwatch_live_state
+                           WHERE guild_id = ? AND user_id = ? AND kind = ?""",
+                        (guild_id, int(user_id), kind),
+                    ).fetchone()
+                    if current is None or current["incident_id"] != expected_incident_id:
+                        connection.rollback()
+                        return False
+                connection.execute(
+                    """DELETE FROM joinwatch_live_state
+                       WHERE guild_id = ? AND user_id = ? AND kind = ?""",
+                    (guild_id, int(user_id), kind),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return True
+
+    def list_open(self, guild_id: int) -> dict[str, dict[str, dict]]:
+        """List pending rows for the timer and restore. See Honeypot stored data."""
+        maps = {kind: {} for kind in _OPEN_KINDS}
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """SELECT user_id, kind, payload FROM joinwatch_live_state
+                   WHERE guild_id = ? AND kind IN ('pending_role', 'pending_assignment')
+                   ORDER BY user_id""",
+                (guild_id,),
+            ).fetchall()
+        for row in rows:
+            maps[row["kind"]][str(row["user_id"])] = json.loads(row["payload"])
+        return maps
+
+    def list_due(self, guild_id: int, kind: str, now: datetime) -> list[dict]:
+        """List one kind of row whose deadline is due. See Honeypot stored data."""
+        _require_live_kind(kind)
+        moment = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+        due: list[dict] = []
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """SELECT due_at, payload FROM joinwatch_live_state
+                   WHERE guild_id = ? AND kind = ? AND due_at IS NOT NULL
+                   ORDER BY due_at, user_id""",
+                (guild_id, kind),
+            ).fetchall()
+        for row in rows:
+            try:
+                deadline = datetime.fromisoformat(row["due_at"])
+            except ValueError:
+                continue
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            if deadline <= moment:
+                due.append(json.loads(row["payload"]))
+        return due
+
+    def counts(self, guild_id: int) -> dict[str, int]:
+        """Count live rows by kind. See Honeypot stored data."""
+        totals = dict.fromkeys(_LIVE_KINDS, 0)
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """SELECT kind, COUNT(*) AS total FROM joinwatch_live_state
+                   WHERE guild_id = ? GROUP BY kind""",
+                (guild_id,),
+            ).fetchall()
+        for row in rows:
+            if row["kind"] in totals:
+                totals[row["kind"]] = int(row["total"])
+        return totals
+
+    def config_maps(self, guild_id: int) -> dict[str, dict[str, dict]]:
+        """Return the three Config-shaped live maps. See Honeypot stored data."""
+        maps = {kind: {} for kind in _LIVE_KINDS}
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """SELECT user_id, kind, payload FROM joinwatch_live_state
+                   WHERE guild_id = ? ORDER BY kind, user_id""",
+                (guild_id,),
+            ).fetchall()
+        for row in rows:
+            maps[row["kind"]][str(row["user_id"])] = json.loads(row["payload"])
+        return maps
+
+    def delete_user(self, user_id: int) -> None:
+        """Delete one member's live rows and scrub moderator ids. See Honeypot stored data."""
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    "DELETE FROM joinwatch_live_state WHERE user_id = ?",
+                    (int(user_id),),
+                )
+                rows = connection.execute(
+                    """SELECT guild_id, user_id, kind, payload FROM joinwatch_live_state
+                       WHERE kind IN ('pending_role', 'pending_assignment')"""
+                ).fetchall()
+                for row in rows:
+                    payload = json.loads(row["payload"])
+                    if not _scrub_live_moderators(payload, int(user_id)):
+                        continue
+                    incident_id, role_id, due_at, encoded = _live_columns(row["kind"], payload)
+                    connection.execute(
+                        """UPDATE joinwatch_live_state
+                           SET incident_id = ?, role_id = ?, due_at = ?, payload = ?
+                           WHERE guild_id = ? AND user_id = ? AND kind = ?""",
+                        (
+                            incident_id, role_id, due_at, encoded,
+                            row["guild_id"], row["user_id"], row["kind"],
+                        ),
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def delete_guild(self, guild_id: int) -> None:
+        """Delete one guild's live rows, marker, and backup. See Honeypot stored data."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute(
+                "DELETE FROM joinwatch_live_state WHERE guild_id = ?",
+                (guild_id,),
+            )
+            connection.execute("DELETE FROM joinwatch_cutover WHERE guild_id = ?", (guild_id,))
+            connection.execute(
+                "DELETE FROM joinwatch_live_backup WHERE guild_id = ?",
+                (guild_id,),
+            )
+
+    def replace_from_config(self, guild_id: int, maps: Mapping, *, now: datetime | None = None) -> bool:
+        """Replace live rows from Config when the copy matches, and keep a one-time backup.
+
+        See Honeypot stored data. An empty Config is refused so it cannot replace SQLite.
+        """
+        if all(not maps.get(kind) for kind in _LIVE_KINDS):
+            return False
+        prepared = _prepare_live_maps(maps)
+        if prepared is None:
+            return False
+        moment = now or datetime.now(timezone.utc)
+        backup = json.dumps(
+            {kind: maps.get(kind, {}) for kind in _LIVE_KINDS},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    "DELETE FROM joinwatch_live_state WHERE guild_id = ?",
+                    (guild_id,),
+                )
+                for kind, rows in prepared.items():
+                    for user_id, payload in rows:
+                        incident_id, role_id, due_at, encoded = _live_columns(kind, payload)
+                        connection.execute(
+                            """INSERT INTO joinwatch_live_state (
+                                   guild_id, user_id, kind, incident_id, role_id, due_at, payload
+                               ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                            (guild_id, user_id, kind, incident_id, role_id, due_at, encoded),
+                        )
+                if not _live_state_matches(connection, guild_id, prepared):
+                    connection.rollback()
+                    return False
+                connection.execute(
+                    """INSERT INTO joinwatch_live_backup (guild_id, written_at, payload)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(guild_id) DO NOTHING""",
+                    (guild_id, _to_timestamp(moment), backup),
+                )
+                connection.execute(
+                    """INSERT INTO joinwatch_cutover (guild_id, source) VALUES (?, 'sqlite')
+                       ON CONFLICT(guild_id) DO UPDATE SET source = excluded.source""",
+                    (guild_id,),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return True
+
+    def live_backup(self, guild_id: int) -> dict | None:
+        """Read the one-time Config backup for one guild. See Honeypot stored data."""
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT payload FROM joinwatch_live_backup WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()
+        return None if row is None else json.loads(row["payload"])
+
+    def expire_live_backups(self, now: datetime) -> int:
+        """Delete Config backups older than the retention window. See Honeypot stored data."""
+        cutoff = _to_timestamp(now - timedelta(days=JOINWATCH_LIVE_BACKUP_RETENTION_DAYS))
+        with closing(self._connect()) as connection, connection:
+            result = connection.execute(
+                "DELETE FROM joinwatch_live_backup WHERE written_at < ?",
+                (cutoff,),
+            )
+            return result.rowcount
 
     def record_daily_stat(
         self,

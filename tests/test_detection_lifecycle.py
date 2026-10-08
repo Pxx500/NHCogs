@@ -255,14 +255,9 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     "account-one": {"challenge": "private-question-answer", "session_nonce": "private-session-nonce"},
                     "account-two": "malformed entry",
                 }}
-                with self.assertLogs("red.Honeypot", level=logging.WARNING) as captured:
+                with self.assertNoLogs("red.Honeypot", level=logging.WARNING):
                     settings = honeypot.GuildSettings.from_mapping(raw)
-                self.assertEqual(settings.joinwatch_pending_roles, {})
-                logged = "\n".join(captured.output)
-                self.assertIn("joinwatch_pending_roles", logged)
-                self.assertNotIn("private-question-answer", logged)
-                self.assertNotIn("private-session-nonce", logged)
-                self.assertNotIn("account-one", logged)
+                self.assertFalse(hasattr(settings, "joinwatch_pending_roles"))
 
 
     async def test_guild_settings_defaults_exactly_match_registered_config(self):
@@ -286,7 +281,16 @@ class DetectionPipelineLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     field.name: getattr(guild_settings, field.name)
                     for field in fields(guild_settings)
                 }
-                self.assertEqual(observed, EXPECTED_GUILD_DEFAULTS)
+                expected = {
+                    key: value
+                    for key, value in EXPECTED_GUILD_DEFAULTS.items()
+                    if key not in {
+                        "joinwatch_pending_roles",
+                        "joinwatch_pending_role_assignments",
+                        "joinwatch_verified_members",
+                    }
+                }
+                self.assertEqual(observed, expected)
 
 
     async def test_load_ignores_stale_pending_reviews_when_there_are_no_open_cases(self):

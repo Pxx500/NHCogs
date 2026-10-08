@@ -243,9 +243,9 @@ async def publish_joinwatch_incident(
 
     embed = _incident_embed(member, incident, status)
     if incident.get("captcha_enabled") and not incident.get("captcha_status"):
-        settings = await cog.config.guild(guild).all()
-        for key in ("joinwatch_pending_roles", "joinwatch_pending_role_assignments"):
-            enrolled = settings.get(key, {}).get(str(incident["member_id"]))
+        rows = await joinwatch_state.rows_for_member(cog, guild, int(incident["member_id"]))
+        for kind in ("pending_role", "pending_assignment"):
+            enrolled = rows.get(kind)
             if (enrolled is not None and enrolled.get("captcha_enabled")
                     and enrolled.get("incident_id") == incident.get("incident_id")):
                 embed.add_field(name=_("CAPTCHA:"), value=_("Awaiting verification"), inline=False)

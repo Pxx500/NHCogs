@@ -284,17 +284,6 @@ def _int_dict(raw: Mapping[str, object], key: str) -> dict[str, int]:
     return dict(default)
 
 
-def _nested_dict(raw: Mapping[str, object], key: str) -> dict[str, dict[str, object]]:
-    value = raw.get(key, DEFAULTS[key])
-    if isinstance(value, Mapping) and all(
-        isinstance(item_key, str) and isinstance(item_value, Mapping)
-        for item_key, item_value in value.items()
-    ):
-        return {item_key: dict(item_value) for item_key, item_value in value.items()}
-    log.warning("Invalid guild setting %s mapping, using default", key)
-    return {}
-
-
 @dataclass(frozen=True)
 class ManualPunishmentRoleSettings:
     role_id: int
@@ -433,10 +422,7 @@ class GuildSettings:
     joinwatch_auto_role_random_delay_enabled: bool
     joinwatch_auto_role_random_delay_min_minutes: int
     joinwatch_auto_role_random_delay_max_minutes: int
-    joinwatch_pending_role_assignments: dict[str, dict[str, object]]
-    joinwatch_pending_roles: dict[str, dict[str, object]]
     joinwatch_captcha_enabled: bool
-    joinwatch_verified_members: dict[str, dict[str, object]]
     captcha_channel: int | None
     captcha_log_channel: int | None
     captcha_panel_channel_id: int | None
@@ -542,12 +528,7 @@ class GuildSettings:
             joinwatch_auto_role_random_delay_max_minutes=_int(
                 raw, "joinwatch_auto_role_random_delay_max_minutes"
             ),
-            joinwatch_pending_role_assignments=_nested_dict(
-                raw, "joinwatch_pending_role_assignments"
-            ),
-            joinwatch_pending_roles=_nested_dict(raw, "joinwatch_pending_roles"),
             joinwatch_captcha_enabled=_bool(raw, "joinwatch_captcha_enabled"),
-            joinwatch_verified_members=_nested_dict(raw, "joinwatch_verified_members"),
             captcha_channel=_optional_int(raw, "captcha_channel"),
             captcha_log_channel=_optional_int(raw, "captcha_log_channel"),
             captcha_panel_channel_id=_optional_int(raw, "captcha_panel_channel_id"),

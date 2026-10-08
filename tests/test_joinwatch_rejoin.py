@@ -193,6 +193,41 @@ class JoinwatchRejoinTests(unittest.IsolatedAsyncioTestCase):
                 finally:
                     await runtime.cog._joinwatch_verification.close()
 
+    async def test_verified_member_is_not_restricted_again(self):
+        for source in ("config", "sqlite"):
+            with self.subTest(source=source), TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+                runtime = _make_runtime(honeypot, random_delay=False)
+                verified = {"incident_id": "done", "completed_at": "2026-10-01T00:00:00+00:00"}
+                if source == "config":
+                    config = await runtime.cog.config.guild(runtime.guild).all()
+                    config["joinwatch_verified_members"] = {"200": verified}
+                else:
+                    stored = runtime.cog._case_store.replace_from_config(100, {
+                        "verified": {"200": verified},
+                        "pending_role": {},
+                        "pending_assignment": {},
+                    })
+                    self.assertTrue(stored)
+                runtime.cog._increment_stat = mock.AsyncMock()
+                runtime.guild.ban = mock.AsyncMock()
+                owner = runtime.cog._joinwatch_verification
+                try:
+                    await runtime.cog.on_member_join(runtime.member)
+                    self.assertEqual(runtime.pending_roles, {})
+                    self.assertEqual(runtime.pending_assignments, {})
+                    runtime.member.add_roles.assert_not_awaited()
+                    runtime.cog._increment_stat.assert_not_awaited()
+                    runtime.guild.ban.assert_not_awaited()
+                    self.assertEqual((await owner.eligibility(runtime.member)).status, "verified")
+                    wave = await owner.prepare_enrollment(
+                        runtime.member, source="wave", wave_id="wave"
+                    )
+                    self.assertEqual(wave.status, "verified")
+                    self.assertEqual(runtime.pending_roles, {})
+                    self.assertEqual(runtime.pending_assignments, {})
+                finally:
+                    await owner.close()
+
     async def test_join_alert_does_not_offer_captcha_without_enrollment(self):
         for reason in ("autorole_disabled", "protected", "missing_permission"):
             with self.subTest(reason=reason), TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:

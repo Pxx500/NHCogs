@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 import discord
 
+from . import joinwatch_state
 from .captcha_views import VerifyPanelView
 from .joinwatch_groups import (
     PREVIEW_LIFETIME_MINUTES,
@@ -456,7 +457,7 @@ class JoinwatchWaves:
         cutoff = observed - timedelta(days=WAVE_RETENTION_DAYS)
         async with self._lock(guild):
             records = await self._records(guild)
-            active_roles = await self.cog.config.guild(guild).joinwatch_pending_roles()
+            active_roles = (await joinwatch_state.open_maps(self.cog, guild))["pending_role"]
             owned_waves = {entry.get("wave_id") for entry in active_roles.values()}
             stale = [key for key, record in records.items()
                      if key not in owned_waves and ((record["status"] in {"preview", "cancelled"} and utc_timestamp(record["expires_at"]) < observed)
