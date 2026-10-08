@@ -1024,3 +1024,38 @@ class JoinWatchRemovalAndCutoverTests(unittest.IsolatedAsyncioTestCase):
                 cog.config.guilds[100]["joinwatch_pending_roles"]["20"]["incident_id"],
                 "rejoined",
             )
+
+    async def test_cutover_alert_does_not_block_live_writes(self):
+        with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
+            state = honeypot.joinwatch_state
+            values = _maps()
+            values["joinwatch_pending_roles"] = ["broken"]
+            cog = _cog(honeypot, directory, values)
+            guild = SimpleNamespace(id=100)
+            started = asyncio.Event()
+            release = asyncio.Event()
+
+            async def record(guild_id, source, summary, **_kwargs):
+                cog.failures.append((guild_id, source, summary))
+                started.set()
+                await release.wait()
+
+            async def write_during_alert():
+                await started.wait()
+                lock = getattr(cog, "_joinwatch_live_source_lock", None)
+                if lock is not None and lock.locked():
+                    release.set()
+                    return
+                await state.write_row(
+                    cog, guild, 21, "verified", {"incident_id": "during-alert"}
+                )
+                release.set()
+
+            cog._record_operational_failure = record
+            await asyncio.gather(state.cutover_live_state(cog), write_during_alert())
+            self.assertEqual(cog.failures[0][1], "joinwatch_live_cutover")
+            self.assertEqual(
+                cog.config.guilds[100]["joinwatch_verified_members"]["21"]["incident_id"],
+                "during-alert",
+            )
+            self.assertIsNone(cog._case_store.cutover_source(100))

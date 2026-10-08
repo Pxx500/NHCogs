@@ -269,52 +269,56 @@ async def _clear_config_maps(cog, guild_id: int) -> None:
         await config.clear_raw(config_key)
 
 
-async def cutover_guild(cog, guild_id: int) -> bool:
-    """Copy one guild into SQLite when the rows match. See Honeypot stored data."""
+async def _cutover_under_lock(
+    cog, guild_id: int
+) -> tuple[bool, tuple[int, str, str] | None]:
     async with _source_lock(cog):
         return await _cutover_guild(cog, guild_id)
 
 
-async def _cutover_guild(cog, guild_id: int) -> bool:
+async def cutover_guild(cog, guild_id: int) -> bool:
+    """Copy one guild into SQLite when the rows match. See Honeypot stored data."""
+    copied, _failure = await _cutover_under_lock(cog, guild_id)
+    return copied
+
+
+async def _cutover_guild(cog, guild_id: int) -> tuple[bool, tuple[int, str, str] | None]:
     store = cog._case_store
     if await _sqlite_source(cog, guild_id):
         await _clear_config_maps(cog, guild_id)
-        return True
+        return True, None
     config = cog.config.guild_from_id(guild_id)
     values = await config.all()
     maps = {}
     for kind, config_key in _KIND_CONFIG.items():
         raw_map = values.get(config_key, {})
         if not isinstance(raw_map, dict):
-            await cog._record_operational_failure(
+            return False, (
                 guild_id,
                 "joinwatch_live_cutover",
                 "JoinWatch live state stayed in Config because a map was unreadable",
             )
-            return False
         maps[kind] = raw_map
     if all(not item for item in maps.values()):
-        return True
+        return True, None
     copied = await asyncio.to_thread(store.replace_from_config, int(guild_id), maps)
     if not copied:
-        await cog._record_operational_failure(
+        return False, (
             guild_id,
             "joinwatch_live_cutover",
             "JoinWatch live state stayed in Config because the SQLite copy did not match",
         )
-        return False
     try:
         await _clear_config_maps(cog, guild_id)
     except Exception as error:
         log.exception("JoinWatch Config clear failed for guild %s", guild_id)
-        await cog._record_operational_failure(
+        return False, (
             guild_id,
             "joinwatch_live_cutover",
             "JoinWatch live state is in SQLite but Config was not cleared: "
             f"{type(error).__name__}",
         )
-        return False
-    return True
+    return True, None
 
 
 async def cutover_live_state(cog) -> None:
@@ -325,14 +329,16 @@ async def cutover_live_state(cog) -> None:
     await asyncio.to_thread(store.expire_live_backups, datetime.now(timezone.utc))
     for guild_id in await cog.config.all_guilds():
         try:
-            await cutover_guild(cog, int(guild_id))
+            _copied, failure = await _cutover_under_lock(cog, int(guild_id))
         except Exception as error:
             log.exception("JoinWatch live cutover failed for guild %s", guild_id)
-            await cog._record_operational_failure(
+            failure = (
                 int(guild_id),
                 "joinwatch_live_cutover",
                 f"JoinWatch live state stayed in Config: {type(error).__name__}",
             )
+        if failure is not None:
+            await cog._record_operational_failure(*failure)
 
 
 async def _write_config_map(config, config_key: str, entries: dict) -> None:
