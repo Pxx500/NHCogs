@@ -1310,11 +1310,13 @@ class DetectionCaseStore:
 
     def delete_observation(self, guild_id: int, user_id: int) -> None:
         """Delete one account's first join. See Honeypot stored data."""
+        member_id = int(user_id)
         with closing(self._connect()) as connection, connection:
             deleted = connection.execute(
                 "DELETE FROM joinwatch_observations WHERE guild_id = ? AND user_id = ?",
-                (guild_id, int(user_id)),
+                (guild_id, member_id),
             )
+            self._remove_history_snapshot_account(connection, guild_id, str(member_id))
             if deleted.rowcount == 0:
                 return
             self._ensure_history_meta(connection, guild_id)
@@ -1324,6 +1326,32 @@ class DetectionCaseStore:
                    WHERE guild_id = ?""",
                 (guild_id,),
             )
+
+    def _remove_history_snapshot_account(
+        self, connection: sqlite3.Connection, guild_id: int, member_id: str
+    ) -> None:
+        row = connection.execute(
+            "SELECT history FROM joinwatch_history WHERE guild_id = ?",
+            (guild_id,),
+        ).fetchone()
+        if row is None:
+            return
+        try:
+            document = json.loads(row["history"])
+        except json.JSONDecodeError as error:
+            raise ValueError(f"joinwatch history for guild {guild_id} is not valid JSON") from error
+        if not isinstance(document, dict):
+            raise TypeError(f"joinwatch history for guild {guild_id} is not a document")
+        observations = document.get("observations", {})
+        if not isinstance(observations, dict):
+            raise TypeError(f"joinwatch history for guild {guild_id} is not a document")
+        if member_id not in observations:
+            return
+        del observations[member_id]
+        connection.execute(
+            "UPDATE joinwatch_history SET history = ? WHERE guild_id = ?",
+            (json.dumps(_json_value(document), separators=(",", ":")), guild_id),
+        )
 
     def get_joinwatch_observation(self, guild_id: int, user_id: int) -> dict | None:
         """Read one retained join. See Honeypot stored data."""

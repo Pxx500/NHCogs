@@ -355,6 +355,15 @@ class DetectionCaseStoreTests(unittest.TestCase):
             self.store.save_joinwatch_wave(guild_id, wave)
         self.store.record_wave_enrollment(100, now, "enrollment")
         kept = self.store.all_observations(200)
+        snapshot = json.dumps({
+            "version": 1, "revision": 1, "import_revision": 0, "sources": [],
+            "observations": {"20": {"first_joined_at": joined.isoformat(), "imported": False}},
+        })
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
+            connection.executemany(
+                "INSERT INTO joinwatch_history (guild_id, history) VALUES (?, ?)",
+                ((100, snapshot), (200, snapshot)),
+            )
 
         self.store.clear_joinwatch_auxiliary(100)
         self.store.clear_joinwatch_auxiliary(100)
@@ -362,6 +371,15 @@ class DetectionCaseStoreTests(unittest.TestCase):
         self.assertEqual(self.store.all_observations(100)["observations"], {})
         self.assertEqual(self.store.get_joinwatch_waves(100), {})
         self.assertEqual(self.store.all_observations(200), kept)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            cleared = connection.execute(
+                "SELECT history FROM joinwatch_history WHERE guild_id = ?", (100,)
+            ).fetchone()
+            retained_snapshot = connection.execute(
+                "SELECT history FROM joinwatch_history WHERE guild_id = ?", (200,)
+            ).fetchone()
+        self.assertIsNone(cleared)
+        self.assertEqual(retained_snapshot[0], snapshot)
         self.assertEqual(self.store.get_joinwatch_waves(200), {"wave": wave})
         self.assertEqual(self.store.get_daily_stats(100, now.date()).wave_guests, 1)
         self.assertEqual(self.store.get_case(case.case_id).case.case_id, case.case_id)
@@ -486,6 +504,52 @@ class DetectionCaseStoreTests(unittest.TestCase):
             "2026-10-01T00:01:00+00:00",
         )
         self.assertEqual(len(self.store.all_observations(100)["sources"]), 1)
+
+    def test_delete_observation_removes_the_account_from_the_frozen_document(self):
+        joined = datetime(2026, 10, 1, 12, tzinfo=timezone.utc)
+        document = {
+            "version": 1,
+            "revision": 4,
+            "import_revision": 2,
+            "sources": [],
+            "observations": {
+                "20": {"first_joined_at": joined.isoformat(), "imported": True},
+                "21": {"first_joined_at": joined.isoformat(), "imported": False},
+                "22": {"first_joined_at": joined.isoformat(), "imported": True},
+            },
+        }
+        other = {
+            "version": 1,
+            "revision": 1,
+            "import_revision": 0,
+            "sources": [],
+            "observations": {"20": {"first_joined_at": joined.isoformat(), "imported": True}},
+        }
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
+            connection.executemany(
+                "INSERT INTO joinwatch_history (guild_id, history) VALUES (?, ?)",
+                ((100, json.dumps(document)), (200, json.dumps(other))),
+            )
+        self.assertTrue(self.store.record_first_join(100, 20, joined))
+        before = self.store.all_observations(100)
+
+        self.store.delete_observation(100, 20)
+        self.store.delete_observation(100, 21)
+        self.store.delete_observation(100, 21)
+
+        history = self.store.all_observations(100)
+        self.assertNotIn("20", history["observations"])
+        self.assertEqual(history["revision"], before["revision"] + 1)
+        self.assertEqual(history["import_revision"], before["import_revision"] + 1)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            retained = json.loads(connection.execute(
+                "SELECT history FROM joinwatch_history WHERE guild_id = ?", (100,)
+            ).fetchone()[0])
+            untouched = json.loads(connection.execute(
+                "SELECT history FROM joinwatch_history WHERE guild_id = ?", (200,)
+            ).fetchone()[0])
+        self.assertEqual(set(retained["observations"]), {"22"})
+        self.assertEqual(untouched, other)
 
     def test_case_subject_identity_survives_store_restart(self):
         now = datetime(2026, 7, 14, 12, tzinfo=timezone.utc)
