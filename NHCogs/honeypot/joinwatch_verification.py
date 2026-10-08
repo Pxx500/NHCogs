@@ -967,9 +967,7 @@ class JoinwatchVerification:
                     break
 
     async def delete_user_data(self, user_id):
-        seen = set()
         for guild in self.cog.bot.guilds:
-            seen.add(guild.id)
             async with joinwatch_state.member_lock(self.cog, guild.id, user_id):
                 await self._drop_member_rows(guild, user_id)
                 self._planned.pop((guild.id, user_id), None)
@@ -977,7 +975,7 @@ class JoinwatchVerification:
             # Otherwise the next outcome update would restore the erased identity.
             # The one-time Config backup is not rewritten; it expires on its own.
             await self._scrub_moderator_references(guild, user_id)
-        await self._delete_unloaded_live_rows(user_id, seen)
+        await self._delete_sqlite_live_rows(user_id)
         await asyncio.to_thread(self.cog._case_store.delete_verification_history, user_id=user_id)
 
     async def _drop_member_rows(self, guild, user_id) -> None:
@@ -1012,7 +1010,8 @@ class JoinwatchVerification:
                         continue
                     await joinwatch_state.write_row(self.cog, guild, member_id, kind, current)
 
-    async def _delete_unloaded_live_rows(self, user_id, seen) -> None:
+    async def _delete_sqlite_live_rows(self, user_id) -> None:
+        """Erase active and inactive SQLite copies, including guilds using Config."""
         store = getattr(self.cog, "_case_store", None)
         if store is None:
             return
@@ -1022,8 +1021,6 @@ class JoinwatchVerification:
         if hasattr(store, "pending_guild_ids"):
             guild_ids.update(await asyncio.to_thread(store.pending_guild_ids))
         for guild_id in guild_ids:
-            if guild_id in seen:
-                continue
             async with joinwatch_state.member_lock(self.cog, guild_id, int(user_id)):
                 await joinwatch_state.delete_sqlite_member(self.cog, guild_id, int(user_id))
             await joinwatch_state.scrub_sqlite_moderators(self.cog, guild_id, int(user_id))

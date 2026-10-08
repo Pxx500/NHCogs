@@ -1281,6 +1281,14 @@ class DetectionCaseStore:
             ).fetchall()
         return tuple((int(row["user_id"]), row["first_joined_at"]) for row in rows)
 
+    def count_observations(self, guild_id: int) -> int:
+        """Count retained joins without loading the history payloads."""
+        with closing(self._connect()) as connection:
+            return connection.execute(
+                "SELECT COUNT(*) FROM joinwatch_observations WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()[0]
+
     def all_observations(self, guild_id: int) -> dict:
         """Assemble the history document from rows. See Honeypot stored data."""
         with closing(self._connect()) as connection:

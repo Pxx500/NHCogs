@@ -4,9 +4,13 @@ import logging
 import subprocess
 import sys
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest import mock
 
+from tests.test_detection_cases import DetectionCaseStore
 from tests.test_shared_error_configuration import context, shared_reporting
 
 
@@ -93,6 +97,28 @@ class Probe:
         await asyncio.sleep(0)
 
 
+class CompletedDetection:
+    qualified_name = "Honeypot"
+
+    async def on_message(self):
+        CLOCK.now += 0.15
+
+
+class CompletedVoice:
+    qualified_name = "NHMisc"
+
+    async def on_message(self):
+        CLOCK.now += 0.15
+
+
+class EventClient:
+    async def _run_event(self, coro, event_name, *args, **kwargs):
+        try:
+            await coro(*args, **kwargs)
+        except asyncio.CancelledError:
+            pass
+
+
 class Deadline:
     def __init__(self, value=None):
         self.value = value
@@ -110,12 +136,12 @@ class DeadlineConfig:
 
 
 class History:
-    def get_joinwatch_history(self, guild_id):
+    def count_observations(self, guild_id):
         if guild_id == 12:
             raise RuntimeError("missing table")
         if guild_id == 10:
-            return {"observations": {"1": {}, "2": {}, "3": {}, "4": {}}}
-        return {"observations": {}}
+            return 4
+        return 0
 
     def cutover_source(self, guild_id):
         return "sqlite"
@@ -251,6 +277,56 @@ class LoopLagTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("sleep", matched[0])
         self.assertIn("took 150 ms", matched[0])
 
+    async def test_completed_listeners_keep_separate_handlers_and_cogs(self):
+        await self._enable()
+        self.messages.clear()
+        client = EventClient()
+        tasks = [
+            asyncio.create_task(
+                client._run_event(cog.on_message, "on_message"), name="discord.py: on_message",
+            )
+            for cog in (CompletedDetection(), CompletedVoice())
+        ]
+        await asyncio.gather(*tasks)
+        self.assertIn(
+            "Loop lag: CompletedDetection.on_message cog=Honeypot "
+            "task=discord.py: on_message took 150 ms",
+            self.messages,
+        )
+        self.assertIn(
+            "Loop lag: CompletedVoice.on_message cog=NHMisc "
+            "task=discord.py: on_message took 150 ms",
+            self.messages,
+        )
+        summary = loop_lag.summary_text()
+        self.assertIn("CompletedDetection.on_message cog=Honeypot", summary)
+        self.assertIn("CompletedVoice.on_message cog=NHMisc", summary)
+        self.assertNotIn("_run_event", summary)
+
+    async def test_unreadable_task_metadata_cannot_prevent_a_callback(self):
+        await self._enable()
+        called = []
+
+        class Callback:
+            @property
+            def __self__(self):
+                raise RuntimeError("metadata unavailable")
+
+            def __call__(self):
+                called.append(True)
+
+        asyncio.get_running_loop().call_soon(Callback())
+        await asyncio.sleep(0)
+        self.assertEqual(called, [True])
+
+    async def test_completed_task_keeps_its_cog_without_an_event_wrapper(self):
+        await self._enable()
+        self.messages.clear()
+        await asyncio.create_task(CompletedDetection().on_message())
+        self.assertEqual(self.messages, [
+            "Loop lag: CompletedDetection.on_message cog=Honeypot took 150 ms",
+        ])
+
     async def test_task_label_keeps_the_method_name_and_skips_the_event_wrapper(self):
         async def _run_event():
             await Probe().on_message()
@@ -341,6 +417,29 @@ class LoopLagTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self._lines_for("Loop lag sizes:"))
         await loop_lag.enable(bot, DeadlineConfig())
         self.assertEqual(len(self._lines_for("Loop lag sizes:")), 2)
+
+    async def test_joinwatch_sizes_use_real_sqlite_counts_including_an_empty_guild(self):
+        with TemporaryDirectory() as directory:
+            store = DetectionCaseStore(Path(directory) / "cases.sqlite")
+            store.initialize()
+            joined = datetime(2026, 10, 8, tzinfo=timezone.utc)
+            store.record_first_join(10, 1, joined)
+            store.record_first_join(10, 2, joined)
+            store.record_first_join(20, 3, joined)
+            honeypot = SimpleNamespace(_case_store=store)
+            bot = SimpleNamespace(
+                get_cog=lambda name: honeypot if name == "Honeypot" else None,
+                guilds=[SimpleNamespace(id=10), SimpleNamespace(id=11)],
+            )
+            with mock.patch.object(store, "all_observations", side_effect=AssertionError):
+                await self._enable(bot)
+            sizes = self._lines_for("Loop lag sizes:")
+            self.assertEqual(sizes, [
+                "Loop lag sizes: guild 10 verified_members=0 pending_roles=0 "
+                "pending_role_assignments=0 join_history_observations=2",
+                "Loop lag sizes: guild 11 verified_members=0 pending_roles=0 "
+                "pending_role_assignments=0 join_history_observations=0",
+            ])
 
     async def test_missing_honeypot_is_reported_once(self):
         await self._enable()

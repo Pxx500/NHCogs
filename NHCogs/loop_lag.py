@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 log = logging.getLogger("red.NHCogs.loop_lag")
 
 # asyncio debug mode also times callbacks, but it captures a stack on every
-# scheduled call. This wrapper only reads the clock unless a callback is slow.
+# scheduled call. This wrapper saves shallow task identity before each step.
+# It inspects the await chain only when a callback is slow.
 THRESHOLD_SECONDS = 0.1
 WINDOW_SECONDS = 48 * 60 * 60
 SUMMARY_LIMIT = 5
@@ -226,18 +227,19 @@ def _timed_run(self):
     )
     if not _measurement.active or original is None:
         return None if original is None else original(self)
+    task_label = _capture_task_label(self)
     started = perf_counter()
     try:
         return original(self)
     finally:
         elapsed = perf_counter() - started
         if elapsed > THRESHOLD_SECONDS:
-            _record(self, elapsed)
+            _record(self, elapsed, task_label=task_label)
 
 
-def _record(handle, elapsed: float) -> None:
+def _record(handle, elapsed: float, *, task_label: str | None = None) -> None:
     try:
-        label = _clip(_label(handle))
+        label = _clip(_label(handle, task_label=task_label))
         elapsed_ms = elapsed * MS_PER_SECOND
         _remember(label, elapsed_ms)
         log.warning("Loop lag: %s took %.0f ms", label, elapsed_ms)
@@ -261,13 +263,44 @@ def _remember(label: str, elapsed_ms: float) -> None:
     row[2] = max(row[2], elapsed_ms)
 
 
-def _label(handle) -> str:
+def _capture_task_label(handle) -> str | None:
+    """Save the outer handler name without walking its await chain."""
+    try:
+        task = getattr(getattr(handle, "_callback", None), "__self__", None)
+        if task is None or not _is_task(task):
+            return None
+        coroutine = task.get_coro()
+        frame = getattr(coroutine, "cr_frame", None)
+        if frame is None:
+            return None
+        code = getattr(coroutine, "cr_code", None)
+        callback = (
+            frame.f_locals.get("coro")
+            if code is not None and code.co_name == "_run_event"
+            else coroutine
+        )
+        if callback is None:
+            return None
+        name = getattr(callback, "__qualname__", None) or type(callback).__name__
+        owner = getattr(callback, "__self__", None) or frame.f_locals.get("self")
+        cog = getattr(owner, "qualified_name", None)
+        parts = [name]
+        if isinstance(cog, str) and cog:
+            parts.append(f"cog={cog}")
+        if task_name := _task_name(task):
+            parts.append(f"task={task_name}")
+        return _clip(" ".join(parts))
+    except Exception:
+        return None
+
+
+def _label(handle, *, task_label: str | None = None) -> str:
     callback = getattr(handle, "_callback", None)
     if callback is None:
         return "unknown callback"
     owner = getattr(callback, "__self__", None)
     if _is_task(owner):
-        return _describe_task(owner)
+        return _describe_task(owner, task_label=task_label)
     return _describe_callback(callback, owner)
 
 
@@ -290,9 +323,13 @@ def _describe_callback(callback, owner) -> str:
     return str(qualname)
 
 
-def _describe_task(task) -> str:
+def _describe_task(task, *, task_label: str | None = None) -> str:
     frames = _chain(task)
     interesting = [entry for entry in frames if not _is_scheduler(entry[0])]
+    if task_label and (
+        not interesting or all(frame is None for _code, frame, _name in interesting)
+    ):
+        return task_label
     chosen = interesting or frames
     if not chosen:
         function = "task"
@@ -469,7 +506,7 @@ def _as_count(value) -> int:
 
 
 async def _history_counts(store, guild_ids: list[int]) -> dict[int, int | None]:
-    if store is None or not callable(getattr(store, "get_joinwatch_history", None)):
+    if store is None or not callable(getattr(store, "count_observations", None)):
         log.info("Loop lag: Honeypot has no join-history store")
         return dict.fromkeys(guild_ids)
 
@@ -477,13 +514,10 @@ async def _history_counts(store, guild_ids: list[int]) -> dict[int, int | None]:
         found: dict[int, int | None] = {}
         for guild_id in guild_ids:
             try:
-                history = store.get_joinwatch_history(guild_id)
+                found[guild_id] = store.count_observations(guild_id)
             except Exception:
                 log.warning("Loop lag: could not count join history for guild %s", guild_id)
                 found[guild_id] = None
-                continue
-            observations = history.get("observations") if isinstance(history, dict) else None
-            found[guild_id] = len(observations) if isinstance(observations, dict) else 0
         return found
 
     return await asyncio.to_thread(read)
