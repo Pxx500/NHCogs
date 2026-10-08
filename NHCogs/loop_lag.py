@@ -198,13 +198,16 @@ async def _clear_deadline(config) -> None:
 
 def _install() -> None:
     events = asyncio.events
-    # TimerHandle replaces Handle._run, so both entry points need the wrapper.
-    if events.Handle._run is not _timed_run:
-        _measurement.handle_run = events.Handle._run
-        events.Handle._run = _timed_run
-    if events.TimerHandle._run is not _timed_run:
-        _measurement.timer_run = events.TimerHandle._run
-        events.TimerHandle._run = _timed_run
+    # TimerHandle inherits Handle._run. Save both before either class changes,
+    # then set the wrapper on TimerHandle itself.
+    handle_run = events.Handle._run
+    timer_run = events.TimerHandle._run
+    if handle_run is not _timed_run:
+        _measurement.handle_run = handle_run
+    if timer_run is not _timed_run:
+        _measurement.timer_run = timer_run
+    events.Handle._run = _timed_run
+    events.TimerHandle._run = _timed_run
 
 
 def _uninstall() -> None:

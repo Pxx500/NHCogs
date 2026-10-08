@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import logging
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -24,6 +25,31 @@ def _load_loop_lag():
 
 
 loop_lag = _load_loop_lag()
+
+_FRESH_TIMER_PROBE = """
+import asyncio
+import importlib.util
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("NHCogs.loop_lag", path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+async def main():
+    module._measurement.active = True
+    module._install()
+    fired = []
+    asyncio.get_running_loop().call_later(0, fired.append, "later")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0.05)
+    if fired != ["later"]:
+        raise SystemExit("call_later did not fire: %r" % (fired,))
+    print("ok")
+
+asyncio.run(main())
+"""
 
 ORIGINAL_HANDLE_RUN = asyncio.events.Handle._run
 ORIGINAL_TIMER_RUN = asyncio.events.TimerHandle._run
@@ -239,6 +265,18 @@ class LoopLagTests(unittest.IsolatedAsyncioTestCase):
             self._lines_for("tests.test_loop_lag.marker"),
             ["Loop lag: tests.test_loop_lag.marker took 150 ms"],
         )
+
+    def test_fresh_interpreter_still_runs_timers_with_the_probe(self):
+        path = Path(__file__).resolve().parents[1] / "NHCogs" / "loop_lag.py"
+        completed = subprocess.run(
+            [sys.executable, "-c", _FRESH_TIMER_PROBE, str(path)],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), "ok")
 
     async def test_raising_callback_is_recorded_without_escaping(self):
         await self._enable()
