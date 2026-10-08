@@ -145,6 +145,11 @@ current deadline, unresolved attachments, and durable capability waits in both i
 claim and final database transaction. Rejected automatic closure releases only its own
 claim. Resumed deferred work receives at least a full 24-hour review window. Manual
 moderation and explicit data deletion retain their separate behavior.
+
+Concurrent summary and timeline publishers retain their existing database ownership
+checks. A follower waits for the owner's result using a five-second elapsed-time budget
+with 50 ms polling. Slow commits can complete without duplicate sends, and a stalled
+owner still produces the existing unavailable error after the bounded wait.
 Pending attachment capture waits before source deletion without spending its retry
 budget. Automatic reviewer work and role synchronization remain pending, and an
 incomplete member cache cannot replace a valid generation. A newly sent notification
