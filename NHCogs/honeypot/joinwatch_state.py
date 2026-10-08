@@ -52,12 +52,36 @@ def _source_lock(cog) -> asyncio.Lock:
     """Serialize the choice between Config and SQLite.
 
     Callers that also need member_lock take that lock first. Cutover, export,
-    restore, and guild removal take only this lock.
+    restore, and guild removal take only this lock. The bot owns the lock so
+    existing workers stay serialized with a reloaded cog.
     """
-    lock = getattr(cog, "_joinwatch_live_source_lock", None)
+    owner = getattr(cog, "bot", cog)
+    lock = getattr(owner, "_joinwatch_live_source_lock", None)
     if lock is None:
-        lock = cog._joinwatch_live_source_lock = asyncio.Lock()
+        lock = owner._joinwatch_live_source_lock = asyncio.Lock()
+    cog._joinwatch_live_source_lock = lock
     return lock
+
+
+async def finish_thread(callback, *args):
+    """Keep the caller's locks until a worker finishes, even after cancellation."""
+    worker = asyncio.create_task(asyncio.to_thread(callback, *args))
+    cancellation = None
+    while True:
+        try:
+            result = await asyncio.shield(worker)
+            break
+        except asyncio.CancelledError as error:
+            if worker.cancelled():
+                raise
+            cancellation = error
+        except Exception:
+            if cancellation is not None:
+                raise cancellation from None
+            raise
+    if cancellation is not None:
+        raise cancellation
+    return result
 
 
 def kind_for_store(store_name: str) -> str:
@@ -139,7 +163,7 @@ async def write_row(
     stored = dict(payload)
     async with _source_lock(cog):
         if await _sqlite_source(cog, guild.id):
-            return await asyncio.to_thread(
+            return await finish_thread(
                 partial(
                     cog._case_store.upsert,
                     int(guild.id),
@@ -172,7 +196,7 @@ async def delete_row(
     """Delete one live row. A compare refuses a different incident. See Honeypot stored data."""
     async with _source_lock(cog):
         if await _sqlite_source(cog, guild.id):
-            return await asyncio.to_thread(
+            return await finish_thread(
                 cog._case_store.delete,
                 int(guild.id),
                 int(user_id),
@@ -275,7 +299,7 @@ async def _cutover_guild(cog, guild_id: int) -> tuple[bool, tuple[int, str, str]
         maps[kind] = raw_map
     if all(not item for item in maps.values()):
         return True, None
-    copied = await asyncio.to_thread(store.replace_from_config, int(guild_id), maps)
+    copied = await finish_thread(store.replace_from_config, int(guild_id), maps)
     if not copied:
         return False, (
             guild_id,
@@ -300,7 +324,7 @@ async def cutover_live_state(cog) -> None:
     store = getattr(cog, "_case_store", None)
     if store is None or not hasattr(store, "replace_from_config"):
         return
-    await asyncio.to_thread(store.expire_live_backups, datetime.now(timezone.utc))
+    await finish_thread(store.expire_live_backups, datetime.now(timezone.utc))
     for guild_id in await cog.config.all_guilds():
         try:
             _copied, failure = await _cutover_under_lock(cog, int(guild_id))
@@ -329,7 +353,7 @@ async def _release_to_config(cog, guild, maps) -> None:
     config = cog.config.guild(guild)
     for kind, config_key in _KIND_CONFIG.items():
         await _write_config_map(config, config_key, maps.get(kind, {}))
-    await asyncio.to_thread(cog._case_store.clear_cutover, int(guild.id))
+    await finish_thread(cog._case_store.clear_cutover, int(guild.id))
 
 
 async def export_live_state(cog, guild) -> bool:
@@ -367,7 +391,7 @@ async def delete_sqlite_member(cog, guild_id: int, user_id: int) -> None:
         return
     async with _source_lock(cog):
         for kind in _LIVE_KINDS:
-            await asyncio.to_thread(store.delete, int(guild_id), int(user_id), kind)
+            await finish_thread(store.delete, int(guild_id), int(user_id), kind)
 
 
 def _clear_moderator_fields(payload: dict, user_id: int) -> bool:
@@ -405,7 +429,7 @@ async def scrub_sqlite_moderators(cog, guild_id: int, user_id: int) -> None:
                 current = await asyncio.to_thread(store.get, int(guild_id), member_id, kind)
                 if not isinstance(current, dict) or not _clear_moderator_fields(current, deleted):
                     continue
-                await asyncio.to_thread(
+                await finish_thread(
                     partial(store.upsert, int(guild_id), member_id, kind, current)
                 )
 

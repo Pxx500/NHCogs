@@ -1339,6 +1339,10 @@ class DetectionCaseStore:
                 )
                 sources.append(comparable)
                 changed = True
+            count = connection.execute(
+                "SELECT COUNT(*) FROM joinwatch_observations WHERE guild_id = ?",
+                (guild_id,),
+            ).fetchone()[0]
             for key, row in incoming_observations.items():
                 user_id = int(key)
                 incoming_at = _parse_join_time(row["first_joined_at"])
@@ -1349,10 +1353,6 @@ class DetectionCaseStore:
                 ).fetchone()
                 imported = int(bool(row.get("imported")))
                 if current is None:
-                    count = connection.execute(
-                        "SELECT COUNT(*) FROM joinwatch_observations WHERE guild_id = ?",
-                        (guild_id,),
-                    ).fetchone()[0]
                     if count >= JOINWATCH_HISTORY_ACCOUNT_LIMIT:
                         raise ValueError(
                             "History account limit reached. No observations were discarded"
@@ -1363,6 +1363,7 @@ class DetectionCaseStore:
                            ) VALUES (?, ?, ?, ?)""",
                         (guild_id, user_id, _canonical_join_time(incoming_at), imported),
                     )
+                    count += 1
                     changed = True
                     continue
                 if incoming_at < _parse_join_time(current["first_joined_at"]):
@@ -1390,13 +1391,9 @@ class DetectionCaseStore:
                        SET revision = ?, import_revision = ? WHERE guild_id = ?""",
                     (revision, import_revision, guild_id),
                 )
-            total = connection.execute(
-                "SELECT COUNT(*) FROM joinwatch_observations WHERE guild_id = ?",
-                (guild_id,),
-            ).fetchone()[0]
         return {
             "imported": len(incoming_observations),
-            "total": total,
+            "total": count,
             "revision": revision,
             **incoming_sources[0],
         }

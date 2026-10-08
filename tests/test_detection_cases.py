@@ -508,6 +508,54 @@ class DetectionCaseStoreTests(unittest.TestCase):
         )
         self.assertEqual(len(self.store.all_observations(100)["sources"]), 1)
 
+    def test_history_import_counts_existing_and_new_accounts_without_repeated_scans(self):
+        self.store.record_first_join(100, 20, datetime(2026, 10, 2, tzinfo=timezone.utc))
+        source = {
+            "source": "export", "complete": False,
+            "generated_at": "2026-10-03T00:00:00+00:00",
+            "range_start": "2026-10-01T00:00:00+00:00",
+            "range_end": "2026-10-02T00:00:00+00:00",
+        }
+        incoming = {"sources": [source], "observations": {
+            str(user_id): {"first_joined_at": "2026-10-01T00:00:00+00:00", "imported": True}
+            for user_id in (20, 21, 22)
+        }}
+        statements = []
+        connect = self.store._connect
+
+        def traced_connection():
+            connection = connect()
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        with mock.patch.object(self.store, "_connect", side_effect=traced_connection):
+            result = self.store.import_observations(100, incoming)
+
+        self.assertEqual(result["total"], 3)
+        counts = [sql for sql in statements if "SELECT COUNT(*) FROM joinwatch_observations" in sql]
+        self.assertEqual(len(counts), 1)
+        retained = self.store.all_observations(100)
+        self.assertEqual(set(retained["observations"]), {"20", "21", "22"})
+        self.assertEqual(retained["observations"], incoming["observations"])
+
+    def test_history_import_rolls_back_new_accounts_and_sources_at_the_limit(self):
+        self.store.record_first_join(100, 20, datetime(2026, 10, 2, tzinfo=timezone.utc))
+        before = self.store.all_observations(100)
+        source = {
+            "source": "export", "complete": False,
+            "generated_at": "2026-10-03T00:00:00+00:00",
+            "range_start": "2026-10-01T00:00:00+00:00",
+            "range_end": "2026-10-02T00:00:00+00:00",
+        }
+        incoming = {"sources": [source], "observations": {
+            str(user_id): {"first_joined_at": "2026-10-01T00:00:00+00:00", "imported": True}
+            for user_id in (20, 21, 22)
+        }}
+        with mock.patch.object(detection_cases_under_test, "JOINWATCH_HISTORY_ACCOUNT_LIMIT", 2):
+            with self.assertRaisesRegex(ValueError, "History account limit reached"):
+                self.store.import_observations(100, incoming)
+        self.assertEqual(self.store.all_observations(100), before)
+
     def test_delete_observation_removes_the_account_from_the_frozen_document(self):
         joined = datetime(2026, 10, 1, 12, tzinfo=timezone.utc)
         document = {

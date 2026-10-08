@@ -371,6 +371,51 @@ async def _two_expired_next_clicks(next_button):
     await second
 
 
+class PagerAcknowledgementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_older_success_cannot_rewind_a_newer_success(self):
+        for view_type in (cog.CommandListView, cog.RawResponseView):
+            with self.subTest(view=view_type.__name__):
+                await self._reversed_acknowledgements(view_type)
+
+    async def _reversed_acknowledgements(self, view_type):
+        pages = tuple(cog.discord.Embed(title=f"page {index}") for index in range(4))
+        view = view_type(types.SimpleNamespace(), requester_id=1, pages=pages)
+        applied = asyncio.Event()
+        release = asyncio.Event()
+        displayed = []
+
+        async def older_edit(*, embed, **_kwargs):
+            displayed.append(embed)
+            applied.set()
+            await release.wait()
+
+        async def newer_edit(*, embed, **_kwargs):
+            displayed.append(embed)
+
+        older = asyncio.create_task(view._next(types.SimpleNamespace(
+            response=types.SimpleNamespace(edit_message=older_edit),
+        )))
+        try:
+            await applied.wait()
+            await view._next(types.SimpleNamespace(
+                response=types.SimpleNamespace(edit_message=newer_edit),
+            ))
+        finally:
+            release.set()
+            await older
+
+        self.assertIs(displayed[-1], pages[2])
+        self.assertEqual(view._page, 2)
+        self.assertEqual(view._accepted_page, 2)
+        self.assertFalse(view._previous_button.disabled)
+        self.assertFalse(view._next_button.disabled)
+        await view._next(types.SimpleNamespace(
+            response=types.SimpleNamespace(edit_message=newer_edit),
+        ))
+        self.assertIs(displayed[-1], pages[3])
+        self.assertTrue(view._next_button.disabled)
+
+
 class CommandUsageChartTests(unittest.IsolatedAsyncioTestCase):
     async def test_private_thread_access_and_output_privacy(self):
         for public_output, manager, member, allowed in (

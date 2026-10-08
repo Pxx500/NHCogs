@@ -251,6 +251,22 @@ class LoopLagTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("sleep", matched[0])
         self.assertIn("took 150 ms", matched[0])
 
+    async def test_task_label_keeps_the_method_name_and_skips_the_event_wrapper(self):
+        async def _run_event():
+            await Probe().on_message()
+
+        task = asyncio.create_task(_run_event(), name="discord.py: on_message")
+        try:
+            await asyncio.sleep(0)
+            label = loop_lag._describe_task(task)
+            self.assertIn("Probe.on_message", label)
+            self.assertIn("cog=Honeypot", label)
+            self.assertNotIn("_run_event", label)
+            self.assertNotIn("sleep", label)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def test_timer_callback_is_timed(self):
         await self._enable()
         self.messages.clear()

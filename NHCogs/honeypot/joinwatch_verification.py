@@ -1062,7 +1062,7 @@ class JoinwatchVerification:
                 if key[0] == guild.id:
                     self._planned.pop(key)
             if store is not None and hasattr(store, "delete_guild"):
-                await asyncio.to_thread(store.delete_guild, guild.id)
+                await joinwatch_state.finish_thread(store.delete_guild, guild.id)
         await asyncio.to_thread(self.cog._case_store.delete_verification_history, guild_id=guild.id)
 
     async def close(self):

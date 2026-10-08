@@ -75,9 +75,11 @@ async def _turn_pager_page(view, interaction: discord.Interaction, *, page: int)
             raise
         return
     view._inflight_turns.discard(turn)
-    view._accepted_page = page
+    if turn > view._accepted_turn:
+        view._accepted_turn = turn
+        view._accepted_page = page
     if not _newer_turn_pending(view, turn):
-        view._page = page
+        view._page = view._accepted_page
         view._update_navigation_buttons()
 
 
@@ -95,6 +97,7 @@ class CommandListView(discord.ui.View):
         self._pages = pages
         self._page = 0
         self._accepted_page = 0
+        self._accepted_turn = 0
         self._inflight_turns: set[int] = set()
         self._next_turn = 0
         self.message: discord.Message | None = None
@@ -205,6 +208,7 @@ class RawResponseView(discord.ui.View):
         self._pages = pages
         self._page = 0
         self._accepted_page = 0
+        self._accepted_turn = 0
         self._inflight_turns: set[int] = set()
         self._next_turn = 0
         self.message: discord.Message | None = None

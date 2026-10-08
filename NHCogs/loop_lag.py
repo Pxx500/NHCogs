@@ -292,14 +292,14 @@ def _describe_callback(callback, owner) -> str:
 
 def _describe_task(task) -> str:
     frames = _chain(task)
-    interesting = [(code, frame) for code, frame in frames if not _is_scheduler(code)]
+    interesting = [entry for entry in frames if not _is_scheduler(entry[0])]
     chosen = interesting or frames
     if not chosen:
         function = "task"
     elif len(chosen) == 1:
-        function = chosen[0][0].co_qualname
+        function = chosen[0][2]
     else:
-        function = f"{chosen[0][0].co_qualname} -> {chosen[-1][0].co_qualname}"
+        function = f"{chosen[0][2]} -> {chosen[-1][2]}"
     parts = [function]
     cog = _cog_name(chosen) or _cog_name(frames)
     if cog:
@@ -315,27 +315,31 @@ def _chain(task) -> list[tuple]:
         current = task.get_coro()
     except Exception:
         return []
-    frames = []
+    frames: list[tuple] = []
     seen: set[int] = set()
     while current is not None and id(current) not in seen and len(frames) < CHAIN_LIMIT:
         seen.add(id(current))
         code = getattr(current, "cr_code", None)
         if code is not None:
-            frames.append((code, getattr(current, "cr_frame", None)))
+            frames.append((
+                code,
+                getattr(current, "cr_frame", None),
+                getattr(current, "__qualname__", code.co_name),
+            ))
         nxt = getattr(current, "cr_await", None)
         current = nxt if getattr(nxt, "cr_code", None) is not None else None
     return frames
 
 
 def _is_scheduler(code) -> bool:
-    if code.co_qualname == "_run_event":
+    if code.co_name == "_run_event":
         return True
     filename = str(getattr(code, "co_filename", "")).replace("\\", "/")
     return "/asyncio/" in filename
 
 
 def _cog_name(frames) -> str | None:
-    for _code, frame in frames:
+    for _code, frame, _qualname in frames:
         if frame is None:
             continue
         self_obj = frame.f_locals.get("self")
