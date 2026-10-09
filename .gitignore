@@ -7,3 +7,6 @@ __pycache__/
 venv/
 /.codebase-memory
 /.worktrees/
+
+# Local documentation and working notes
+/docs/
