@@ -3,6 +3,7 @@
 Red-DiscordBot V3 cogs maintained for the NewHorizons Discord server.
 
 Read the [NHBot privacy policy](PRIVACY.md) for data use, retention, and requests.
+See the [NHBot Terms of Service](TERMS_OF_SERVICE.md) for use of the official bot service.
 
 ## Available cogs
 
