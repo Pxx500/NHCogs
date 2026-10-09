@@ -195,9 +195,15 @@ category match, permissions, and ticket exclusions. Disabling automatic pings or
 the profile prevents new automatic selections using presence. Unsent queued automatic
 notifications are checked again before sending and cancelled or routed to another eligible
 reviewer. A notification whose sending is already underway may still complete.
-The chosen reviewer's presence tier at notification time is stored with the ticket ping
-and response deadline in local SQLite. Changing the profile does not erase past ticket
-history. Red user-data deletion handles retained user records separately.
+Current presence is used briefly to choose a reviewer and calculate the response deadline.
+Raw presence tiers are not saved in pending reservations or ping history. The upgrade
+clears tiers saved by earlier versions. Before a fresh send, the target's eligibility and
+current status are checked again. Previously sent pings are recovered without another
+status read or duplicate send.
+Active tickets retain reviewer IDs, notification times, and deadlines needed for routing.
+These deadlines derive from status, even though the raw status is not retained. The Discord
+client's current Gateway cache remains in memory. Changing the profile stops future routing
+by this feature and does not erase active ticket history.
 
 ## Administrative profile maintenance
 
@@ -243,10 +249,14 @@ that person or another participant successfully claims the ticket.
 - Declining or unassigning excludes that member from future pings for the same ticket
 - Ticket activity postpones only automatic pings by the configured protection period
 
-After successful cleanup, Mark finished deletes the ticket message, its thread, and the
-active database state. Failed Discord cleanup is retried later while the ticket remains in
-its finishing state. When a configured log channel is available, the bot records who
-finished the ticket. Deleting the ticket message or its thread also removes the ticket. The
+Mark finished immediately removes the local PR content, participant attribution, routing,
+ping history, exclusions, and ticket-category links. Developer profiles, GitHub usernames,
+profile categories, and notification preferences remain. Deleting the Discord message and
+thread then removes the remaining technical cleanup record. If Discord cleanup fails,
+only location IDs and retry metadata remain in the finishing record for a later attempt.
+When a configured log channel is available, the existing completion log remains on Discord
+with the PR title and URL and the finisher, author, and reviewer IDs.
+Deleting the ticket message or its thread also removes the ticket. The
 bot uses saved Discord IDs for normal updates and does not fetch messages merely to check
 whether they still exist.
 

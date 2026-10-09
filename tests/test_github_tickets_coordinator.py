@@ -634,6 +634,105 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             [("ping_reviewer", ticket.thread_id, 500, True)],
         )
 
+    async def ping_with_failed_acknowledgement(self):
+        ticket = await self.create_active()
+        self.candidates = (self.candidate(500),)
+        self.now = ticket.next_action_at
+        with mock.patch.object(
+            self.store, "acknowledge_ping",
+            side_effect=RuntimeError("controlled settlement failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "controlled settlement failure"):
+                await self.coordinator.process_due(ticket.ticket_id)
+        self.assertIn(ticket.ticket_id, self.coordinator._sent_ping_settlements)
+        self.assertIn(ticket.ticket_id, self.coordinator._locally_reserved_pings)
+        return await self.store.get_ticket(ticket.ticket_id)
+
+    async def test_closing_ticket_clears_cached_ping_even_if_discord_cleanup_fails(self):
+        for cleanup_fails in (False, True):
+            with self.subTest(cleanup_fails=cleanup_fails):
+                unrelated = await self.ping_with_failed_acknowledgement()
+                unrelated_settlement = self.coordinator._sent_ping_settlements[unrelated.ticket_id]
+                ticket = await self.ping_with_failed_acknowledgement()
+                if cleanup_fails:
+                    self.projection.errors["delete_thread"] = RuntimeError("controlled cleanup")
+                result = await self.coordinator.mark_finished(
+                    ticket.ticket_id, self.actor(ticket.author_id),
+                )
+                self.assertEqual(result.success, not cleanup_fails)
+                self.assertNotIn(ticket.ticket_id, self.coordinator._sent_ping_settlements)
+                self.assertNotIn(ticket.ticket_id, self.coordinator._locally_reserved_pings)
+                self.assertEqual(
+                    self.coordinator._sent_ping_settlements[unrelated.ticket_id],
+                    unrelated_settlement,
+                )
+                self.assertIn(unrelated.ticket_id, self.coordinator._locally_reserved_pings)
+                if cleanup_fails:
+                    remaining = await self.store.get_ticket(ticket.ticket_id)
+                    self.assertEqual(remaining.state, models.TicketState.FINISHING)
+                    self.assertEqual(remaining.author_id, 0)
+                    self.assertIsNone(remaining.pending_target_id)
+                    self.assertEqual(await self.store.list_pings(ticket.ticket_id), ())
+                else:
+                    self.assertIsNone(await self.store.get_ticket(ticket.ticket_id))
+                    self.assertEqual(result.finished_ticket, ticket)
+                self.projection.errors.clear()
+
+    async def test_terminal_deletion_and_authored_cleanup_clear_cached_ping(self):
+        for path in ("message", "thread", "recovery", "authored", "privacy"):
+            with self.subTest(path=path):
+                ticket = await self.ping_with_failed_acknowledgement()
+                self.projection.errors["delete_thread"] = RuntimeError("controlled cleanup")
+                self.projection.errors["delete_message"] = RuntimeError("controlled cleanup")
+                if path == "message":
+                    with self.assertRaisesRegex(RuntimeError, "controlled cleanup"):
+                        await self.coordinator.handle_message_deleted(ticket.message_id)
+                elif path == "thread":
+                    with self.assertRaisesRegex(RuntimeError, "controlled cleanup"):
+                        await self.coordinator.handle_thread_deleted(ticket.thread_id)
+                elif path == "recovery":
+                    await self.store.begin_finishing(ticket.ticket_id, self.now)
+                    self.assertFalse((await self.coordinator.recover_projection_cleanup(
+                        ticket.ticket_id,
+                    )).success)
+                elif path == "authored":
+                    self.assertIsNotNone(await self.coordinator.begin_authored_ticket_cleanup(
+                        ticket.ticket_id, author_id=ticket.author_id, updated_at=self.now,
+                    ))
+                else:
+                    await self.coordinator.redact_user(ticket.author_id, updated_at=self.now)
+                self.assertNotIn(ticket.ticket_id, self.coordinator._sent_ping_settlements)
+                self.assertNotIn(ticket.ticket_id, self.coordinator._locally_reserved_pings)
+                self.projection.errors.clear()
+
+    async def test_cancelled_close_waits_for_database_then_clears_cached_ping(self):
+        ticket = await self.ping_with_failed_acknowledgement()
+        started = asyncio.Event()
+        release = asyncio.Event()
+        begin_finishing = self.store.begin_finishing
+
+        async def delayed_close(*args, **kwargs):
+            started.set()
+            await release.wait()
+            return await begin_finishing(*args, **kwargs)
+
+        with mock.patch.object(self.store, "begin_finishing", side_effect=delayed_close):
+            close = asyncio.create_task(self.coordinator.mark_finished(
+                ticket.ticket_id, self.actor(ticket.author_id),
+            ))
+            await started.wait()
+            close.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(close.done())
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await close
+        self.assertEqual((await self.store.get_ticket(ticket.ticket_id)).state,
+                         models.TicketState.FINISHING)
+        self.assertNotIn(ticket.ticket_id, self.coordinator._sent_ping_settlements)
+        self.assertNotIn(ticket.ticket_id, self.coordinator._locally_reserved_pings)
+        self.assertTrue((await self.coordinator.recover_projection_cleanup(ticket.ticket_id)).success)
+
     async def current_profile_candidates(self, ticket):
         profiles = await self.store.list_matching_profiles(ticket.guild_id, ticket.category_ids)
         opted_in = {profile.user_id for profile in profiles}
@@ -682,6 +781,42 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(current.pending_presence_tier)
                 self.assertEqual(await self.store.list_pings(ticket.ticket_id), ())
 
+    async def test_unsent_ping_after_restart_uses_current_status_without_retaining_it(self):
+        ticket = await self.queued_automatic_retry()
+        pending = await self.store.get_ticket(ticket.ticket_id)
+        self.assertIsNone(pending.pending_presence_tier)
+        original_reserved_at = pending.pending_ping_reserved_at
+        self.now += timedelta(hours=2)
+        self.candidates = (self.candidate(500, presence=models.PresenceTier.OFFLINE),)
+        reopened = store_module.GitHubTicketsStore(self.path)
+        await reopened.initialize()
+        restarted = coordinator_module.TicketCoordinator(
+            reopened, self.projection,
+            support=mock.Mock(report_operational_error=mock.AsyncMock()),
+            get_settings=self.get_settings,
+            get_candidates=self.current_profile_candidates,
+            wake_deadlines=self.wake_deadlines,
+            clock=lambda: self.now,
+        )
+
+        self.assertTrue((await restarted.process_due(ticket.ticket_id)).success)
+
+        pings = await reopened.list_pings(ticket.ticket_id)
+        self.assertEqual(len(pings), 1)
+        self.assertIsNone(pings[0].presence_tier)
+        self.assertEqual(
+            pings[0].response_deadline,
+            self.now + timedelta(seconds=self.settings.offline_response_seconds),
+        )
+        self.assertEqual(
+            [call for call in self.projection.calls if call[0] == "ping_reviewer"],
+            [("ping_reviewer", ticket.thread_id, 500, True)],
+        )
+        self.assertEqual(
+            [call for call in self.projection.calls if call[0] == "find_ping"][0][-1],
+            original_reserved_at,
+        )
+
     async def test_invalid_automatic_reservation_reroutes_to_another_eligible_reviewer(self):
         ticket = await self.queued_automatic_retry()
         await self.store.delete_profile(10, 500)
@@ -705,7 +840,7 @@ class TicketCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(current.current_target_id, 600)
         pings = await self.store.list_pings(ticket.ticket_id)
         self.assertEqual([ping.target_user_id for ping in pings], [600])
-        self.assertEqual(pings[0].presence_tier, models.PresenceTier.IDLE)
+        self.assertIsNone(pings[0].presence_tier)
         self.assertEqual(
             pings[0].response_deadline,
             self.now + timedelta(seconds=self.settings.idle_response_seconds),

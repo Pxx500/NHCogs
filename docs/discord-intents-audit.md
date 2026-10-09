@@ -30,7 +30,7 @@ The archive keeps the SQLite, JSONL, and file format. Files resolving outside th
 
 Automatic GitHubTickets routing reads status only for reviewers who have opted into automatic pings, match every requested category, have the required permissions, and are not excluded by previous ticket outcomes.
 
-Disabling automatic pings or clearing the profile prevents future status reads for this routing feature. Existing ticket history is handled separately. The selected reviewer's status at notification time remains in local SQLite with the notification and deadline.
+Disabling automatic pings or clearing the profile prevents future status reads for this routing feature. The earlier implementation retained raw status with notification records until ticket cleanup. The minimization change stops writing raw status to pending reservations and ping history and clears older values. Active tickets retain reviewer IDs, notification times, and status-derived deadlines. Closing a ticket immediately removes its local content and history. Failed Discord cleanup retains only technical location identifiers and retry metadata, while developer profiles remain. Optional completion logs remain on Discord.
 
 The post-PR review reproduced a queued automatic notification being sent after profile opt-out or clearing. The correction rechecks eligibility immediately before a new send, cancels only the unsent automatic reservation, and keeps the schedule and budget so another eligible reviewer can be selected. Previously sent notifications are reconciled before this check to avoid duplicate sends. A send already underway may complete.
 
@@ -113,7 +113,7 @@ Reference retention must remain transparent. It should not be described as an au
 | Members data off-platform | Yes for the local member and role stores |
 | Presence justification | Availability-based routing for opted-in reviewers, if enabled |
 | Presence opt-out | The routing feature supports opt-out from future availability processing. Verify other loaded cogs before answering for the whole application |
-| Presence off-platform | Yes, selected-reviewer status is retained in ticket notification records |
+| Presence off-platform | Yes, active reviewer IDs, notification times, and status-derived deadlines remain locally. Raw status values are no longer persisted by the minimization change |
 | Message Content justification | Passive moderation of ordinary messages and attachments, beyond what interactions or AutoMod can supply |
 | Message Content opt-out | No confirmed general per-user exemption from moderation |
 | Message Content off-platform | Yes, selected evidence, reference images, fingerprints, custom responses, and Proxy content are stored locally |

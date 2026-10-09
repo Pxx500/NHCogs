@@ -27,7 +27,7 @@ CustomCommands stores responses, weights, cooldowns, access configuration, revis
 
 Bot Proxy stores character presets and avatars, active workflow records, published text and versions, publication metadata, and operational references.
 
-GitHubTickets stores developer profiles, expertise categories, optional GitHub usernames, ticket and notification records, and selected-reviewer presence at notification time.
+GitHubTickets stores developer profiles, expertise categories, optional GitHub usernames, and active ticket and notification records. Reviewer status is used in memory for selection and deadline calculation and is not saved as a raw status value. Reviewer IDs, notification times, and status-derived response deadlines remain while the ticket is active. Older stored raw statuses are cleared by the upgrade.
 
 Technical errors contain operational identifiers and bounded summaries. Tracebacks can be sent to configured private Discord destinations.
 
@@ -43,7 +43,7 @@ Exports and backups are separate copies and need their own access and retention 
 
 The message registry expires after 14 days. Detailed activity retention is configurable. Current-state role analytics is updated as membership and roles change.
 
-Image references have no automatic expiry and remain until explicitly removed. Verification, moderation, imported history, ticket history, custom responses, and Proxy publication records have feature-specific retention rather than one common expiry.
+Image references have no automatic expiry and remain until explicitly removed. Verification, moderation, imported history, custom responses, and Proxy publication records have feature-specific retention rather than one common expiry. Closing a GitHub ticket immediately removes its local content, participant attribution, routing, ping history, exclusions, and ticket-category links. Failed Discord cleanup retains only technical location identifiers and retry metadata until deletion succeeds. Developer profiles and preferences are separate and remain until changed or cleared. Optional completion logs on Discord retain the PR details and participant IDs.
 
 [CONFIRM_APPROVED_RETENTION_FOR_MODERATION_EVIDENCE_REFERENCE_SAMPLES_AND_OTHER_HISTORY]
 
