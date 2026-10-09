@@ -17,7 +17,6 @@ The combined `NHCogs` extension loads the maintained cogs:
 
 The combined extension also provides shared technical error reporting. See the
 [NHCogs command catalog](NHCogs/README.md) for its configuration commands.
-Shared prefix-group rules are in [Command trees](docs/command-trees.md).
 
 ## Installation
 
