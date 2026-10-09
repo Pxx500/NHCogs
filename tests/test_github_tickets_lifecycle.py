@@ -1169,7 +1169,8 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(cleanup.message_id, 40)
             self.assertEqual(cleanup.thread_id, 50)
             self.assertEqual(channel.message.delete_calls, 0)
-            self.assertEqual(bot.fetch_calls, 1)
+            # Finishing already removed the author, so a user request has no ticket data to find.
+            self.assertEqual(bot.fetch_calls, 0)
 
             thread = CachedThread(50)
             bot.channels[50] = thread
@@ -1181,4 +1182,4 @@ class GitHubTicketsLifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await cog.store.get_ticket(created.ticket_id))
             self.assertEqual(thread.delete_calls, 1)
             self.assertEqual(channel.message.delete_calls, 1)
-            self.assertEqual(bot.fetch_calls, 1)
+            self.assertEqual(bot.fetch_calls, 0)

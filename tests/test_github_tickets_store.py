@@ -80,9 +80,9 @@ class GitHubTicketsStoreTests(unittest.IsolatedAsyncioTestCase):
     async def test_initialize_rejects_newer_schema_version(self):
         self.assertIsNotNone(self.store, "the GitHub Tickets store interface is missing")
         with closing(sqlite3.connect(self.path)) as connection:
-            connection.execute("PRAGMA user_version = 2")
+            connection.execute(f"PRAGMA user_version = {store_module.SCHEMA_VERSION + 1}")
 
-        with self.assertRaisesRegex(ValueError, "newer than supported version 1"):
+        with self.assertRaisesRegex(ValueError, f"newer than supported version {store_module.SCHEMA_VERSION}"):
             await self.store.initialize()
 
     async def test_categories_normalize_validate_and_enforce_guild_limit(self):

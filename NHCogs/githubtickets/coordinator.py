@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from typing import TypeVar
 
 from NHCogs.gateway_capabilities import GatewayCapabilityUnavailable
 
@@ -36,6 +37,7 @@ ACTION_FAILED = presentation.COULD_NOT_COMPLETE_ACTION
 PROJECTION_RETRY_SECONDS = 5
 PING_RETRY_FLOOR_SECONDS = 5
 log = logging.getLogger(__name__)
+_CleanupResult = TypeVar("_CleanupResult", bool, Ticket, None)
 
 
 def _utc_now() -> datetime:
@@ -344,7 +346,7 @@ class TicketCoordinator:
                 or actor.user_id in (ticket.author_id, ticket.assignee_id)
             ):
                 return TicketResult(False, PERMISSION_DENIED)
-            if not await self._store.begin_finishing(ticket_id, self._clock()):
+            if not await self._begin_finishing(ticket_id, self._clock()):
                 return TicketResult(False, INACTIVE_TICKET)
             finishing = await self._store.get_ticket(ticket_id)
             if finishing is None:
@@ -372,7 +374,7 @@ class TicketCoordinator:
                 TicketState.CLAIMED,
                 TicketState.FINISHING,
             ):
-                if not await self._store.begin_finishing(
+                if not await self._begin_finishing(
                     current.ticket_id,
                     self._clock(),
                     message_absent=True,
@@ -402,7 +404,7 @@ class TicketCoordinator:
                 TicketState.CLAIMED,
                 TicketState.FINISHING,
             ):
-                if not await self._store.begin_finishing(
+                if not await self._begin_finishing(
                     current.ticket_id,
                     self._clock(),
                     thread_absent=True,
@@ -430,6 +432,7 @@ class TicketCoordinator:
     ) -> TicketResult:
         ticket = await self._store.get_ticket(ticket_id)
         if ticket is None:
+            self._forget_ticket_ping_state(ticket_id)
             return TicketResult(True)
         if ticket.state not in (TicketState.CREATING, TicketState.FINISHING):
             return TicketResult(False, INACTIVE_TICKET)
@@ -469,10 +472,11 @@ class TicketCoordinator:
             ticket = await self._store.get_ticket(ticket_id)
             if ticket is None or ticket.author_id != author_id:
                 return None
-            return await self._store.begin_authored_ticket_cleanup(
+            return await self._commit_ticket_cleanup(
                 ticket_id,
-                author_id=author_id,
-                updated_at=updated_at,
+                self._store.begin_authored_ticket_cleanup(
+                    ticket_id, author_id=author_id, updated_at=updated_at,
+                ),
             )
 
     async def redact_user(
@@ -513,10 +517,11 @@ class TicketCoordinator:
                 current = await self._store.get_ticket(ticket.ticket_id)
                 if current is None or current.author_id != user_id:
                     continue
-                cleanup = await self._store.begin_authored_ticket_cleanup(
+                cleanup = await self._commit_ticket_cleanup(
                     current.ticket_id,
-                    author_id=user_id,
-                    updated_at=updated_at,
+                    self._store.begin_authored_ticket_cleanup(
+                        current.ticket_id, author_id=user_id, updated_at=updated_at,
+                    ),
                 )
                 if cleanup is not None:
                     await self._recover_projection_cleanup_locked(cleanup.ticket_id)
@@ -597,7 +602,7 @@ class TicketCoordinator:
         ticket: Ticket,
         now: datetime,
     ) -> TicketResult:
-        if not await self._store.begin_finishing(
+        if not await self._begin_finishing(
             ticket.ticket_id,
             now,
             message_absent=True,
@@ -705,7 +710,7 @@ class TicketCoordinator:
                     reservation.reserved_at,
                 )
             except ProjectionNotFound:
-                if not await self._store.begin_finishing(
+                if not await self._begin_finishing(
                     ticket.ticket_id,
                     now,
                     thread_absent=True,
@@ -749,12 +754,13 @@ class TicketCoordinator:
             self._wake_deadlines()
         return result
 
-    async def _automatic_target_is_eligible(self, ticket: Ticket, target_user_id: int) -> bool:
-        return any(
-            candidate.user_id == target_user_id
-            and select_reviewer((candidate,)) is not None
-            for candidate in await self._get_candidates(ticket)
-        )
+    async def _automatic_target_response_seconds(
+        self, ticket: Ticket, target_user_id: int, settings: GuildSettings,
+    ) -> int | None:
+        for candidate in await self._get_candidates(ticket):
+            if candidate.user_id == target_user_id and select_reviewer((candidate,)) is not None:
+                return self._automatic_response_seconds(settings, candidate.presence_tier)
+        return None
 
     async def _reroute_unavailable_ping(
         self,
@@ -784,17 +790,14 @@ class TicketCoordinator:
         if ticket.thread_id is None:
             await self._delete_remaining_projection(ticket, thread_absent=True)
             return TicketResult(True)
-        if reservation.automatic and not await self._automatic_target_is_eligible(
-            ticket, reservation.target_user_id,
-        ):
-            return await self._reroute_unavailable_ping(ticket, reservation, settings, now)
-        response_seconds = (
-            self._automatic_response_seconds(
-                settings, reservation.presence_tier or PresenceTier.OFFLINE,
+        if reservation.automatic:
+            response_seconds = await self._automatic_target_response_seconds(
+                ticket, reservation.target_user_id, settings,
             )
-            if reservation.automatic
-            else settings.direct_response_seconds
-        )
+            if response_seconds is None:
+                return await self._reroute_unavailable_ping(ticket, reservation, settings, now)
+        else:
+            response_seconds = settings.direct_response_seconds
         if not await self._store.rebase_pending_ping(
             ticket.ticket_id, reservation.target_user_id,
             self._clock() + timedelta(seconds=response_seconds),
@@ -832,7 +835,6 @@ class TicketCoordinator:
             if ticket.direct_target_id is None:
                 return None
             target_user_id = ticket.direct_target_id
-            presence_tier = None
             automatic = False
             response_seconds = settings.direct_response_seconds
         else:
@@ -840,7 +842,6 @@ class TicketCoordinator:
             if candidate is None:
                 return None
             target_user_id = candidate.user_id
-            presence_tier = candidate.presence_tier
             automatic = True
             response_seconds = self._automatic_response_seconds(
                 settings,
@@ -849,7 +850,7 @@ class TicketCoordinator:
         return await self._store.reserve_ping(
             ticket.ticket_id,
             target_user_id=target_user_id,
-            presence_tier=presence_tier,
+            presence_tier=None,
             automatic=automatic,
             reserved_at=now,
             response_deadline=now + timedelta(seconds=response_seconds),
@@ -868,7 +869,7 @@ class TicketCoordinator:
         return PingReservation(
             ticket_id=ticket.ticket_id,
             target_user_id=ticket.pending_target_id,
-            presence_tier=ticket.pending_presence_tier,
+            presence_tier=None,
             automatic=ticket.pending_ping_automatic,
             reserved_at=ticket.pending_ping_reserved_at,
             response_deadline=ticket.pending_response_deadline,
@@ -966,6 +967,53 @@ class TicketCoordinator:
     def _ticket_lock(self, ticket_id: int) -> asyncio.Lock:
         return self._locks.setdefault(ticket_id, asyncio.Lock())
 
+    def _forget_ticket_ping_state(self, ticket_id: int) -> None:
+        self._sent_ping_settlements.pop(ticket_id, None)
+        self._locally_reserved_pings.discard(ticket_id)
+
+    async def _commit_ticket_cleanup(
+        self,
+        ticket_id: int,
+        operation: Awaitable[_CleanupResult],
+    ) -> _CleanupResult:
+        # Finish the database change and memory cleanup before releasing the ticket lock.
+        worker = asyncio.ensure_future(operation)
+        cancellation = None
+        while True:
+            try:
+                result = await asyncio.shield(worker)
+                break
+            except asyncio.CancelledError as error:
+                if worker.cancelled():
+                    raise
+                cancellation = error
+            except Exception:
+                if cancellation is not None:
+                    raise cancellation from None
+                raise
+        if result:
+            self._forget_ticket_ping_state(ticket_id)
+            self._wake_deadlines()
+        if cancellation is not None:
+            raise cancellation
+        return result
+
+    async def _begin_finishing(
+        self,
+        ticket_id: int,
+        updated_at: datetime,
+        *,
+        message_absent: bool = False,
+        thread_absent: bool = False,
+    ) -> bool:
+        return await self._commit_ticket_cleanup(
+            ticket_id,
+            self._store.begin_finishing(
+                ticket_id, updated_at,
+                message_absent=message_absent, thread_absent=thread_absent,
+            ),
+        )
+
     async def _delete_remaining_projection(
         self,
         ticket: Ticket,
@@ -973,6 +1021,12 @@ class TicketCoordinator:
         message_absent: bool = False,
         thread_absent: bool = False,
     ) -> None:
+        if ticket.state is not TicketState.FINISHING and not await self._begin_finishing(
+            ticket.ticket_id, self._clock(),
+            message_absent=message_absent, thread_absent=thread_absent,
+        ):
+            return
+        self._forget_ticket_ping_state(ticket.ticket_id)
         if ticket.thread_id is not None and not thread_absent:
             try:
                 await self._projection.delete_thread(ticket.thread_id)
