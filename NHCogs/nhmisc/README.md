@@ -657,6 +657,35 @@ Daily emoji aggregates are retained for 30 days independently of activity detail
 summary retention. The small per-channel lifetime aggregates used by `summary` are
 retained until the bot leaves the server. No pre-installation history is imported.
 
+### Complete Emoji Report
+
+```ini
+[p]emojireport
+```
+
+Exports a complete CSV for every custom emoji currently belonging to this server,
+including emoji with zero recorded uses. The command requires Manage Messages and
+uses the same collection intent requirements as the combined emoji chart. It accepts
+no arguments and reports lifetime observations since emoji tracking began.
+
+Rows are sorted from the lowest use rate to the highest. Columns include the current
+emoji name and ID, animation flag, message uses, reaction balance, combined total,
+tracking start date, tracking days, and uses per day. Deleted emoji and emoji belonging
+to other servers are excluded from this catalog report.
+
+For emoji older than tracking, days begin at the recorded start of tracking for this
+server. For emoji created later, days begin on their creation date. The current UTC
+day is included, so an emoji created today has one tracking day. Uses per day equals
+the combined total divided by this number of calendar days. It is not a measurement
+of bot uptime. Normal reactions and super reactions share the same balance, with
+individual removals deducted. Message uses count each emoji once per message.
+
+The accompanying embed shows the number of current emoji, how many have zero uses,
+examples of those emoji, and the lowest nonzero rates. The CSV uses the existing export
+helper and is compressed to ZIP if needed to fit Discord's attachment limit. Tracking
+start dates are retained across restart and daily-history pruning and are removed when
+the bot leaves the server.
+
 ### User Command
 
 ```ini
@@ -806,7 +835,8 @@ aggregate counts and channel IDs, but not user IDs.
 Emoji statistics store guild, channel or thread, and emoji IDs, UTC dates, message-use
 counts, signed reaction balances, emoji names, and animation flags in the activity
 SQLite database. Daily rows are kept for 30 days. Lifetime per-channel counters are
-kept separately. Daily reports retain the winning emoji under normal summary retention.
+kept separately, along with each server's tracking start date. Daily reports retain
+the winning emoji under normal summary retention.
 No message content, message IDs, or reacting user IDs are stored by emoji statistics.
 Guild removal deletes that guild's emoji counters, metadata, and saved daily winners.
 

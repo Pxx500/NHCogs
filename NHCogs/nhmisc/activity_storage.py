@@ -43,6 +43,14 @@ class EmojiCount:
 
 
 @dataclass(frozen=True)
+class EmojiUsageRate:
+    usage: EmojiCount
+    tracked_since: date
+    tracked_days: int
+    uses_per_day: float
+
+
+@dataclass(frozen=True)
 class DailySummary:
     date_utc: date
     total_messages: int
@@ -148,6 +156,7 @@ EMOJI_ACTIVITY_TABLES = (
     "activity_emoji_total",
     "activity_emoji_metadata",
     "activity_daily_emoji",
+    "activity_emoji_tracking",
 )
 NO_THREAD_ID = 0
 EMOJI_HISTORY_DAYS = 30
@@ -199,6 +208,18 @@ class ActivityStore:
         async with self._lock:
             await asyncio.to_thread(
                 self._record_emoji_reaction_sync, guild_id, date_utc, channel_id, emoji, delta
+            )
+
+    async def begin_emoji_tracking(self, guild_id: int, started_on: date) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._begin_emoji_tracking_sync, guild_id, started_on)
+
+    async def get_emoji_report(
+        self, guild_id: int, end_date_utc: date, catalog: Sequence[tuple[EmojiInfo, date]],
+    ) -> list[EmojiUsageRate]:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._get_emoji_report_sync, guild_id, end_date_utc, catalog
             )
 
     async def get_emoji_counts(
@@ -580,6 +601,10 @@ class ActivityStore:
                           REFERENCES activity_daily_summary (guild_id, date_utc)
                           ON DELETE CASCADE
                   );
+                  CREATE TABLE IF NOT EXISTS activity_emoji_tracking (
+                      guild_id INTEGER PRIMARY KEY,
+                      started_on TEXT NOT NULL
+                  );
                 """
             )
 
@@ -598,6 +623,7 @@ class ActivityStore:
         stored_thread_id = thread_id or NO_THREAD_ID
         now_key = now_utc.isoformat()
         with self._connection() as conn:
+            self._begin_emoji_tracking_with_conn(conn, guild_id, date_utc)
             conn.execute(
                 """
                 INSERT INTO activity_open_day
@@ -673,6 +699,7 @@ class ActivityStore:
         self, guild_id: int, day: date, channel_id: int, emoji: EmojiInfo, delta: int
     ) -> None:
         with self._connection() as conn:
+            self._begin_emoji_tracking_with_conn(conn, guild_id, day)
             self._record_emoji_with_conn(conn, guild_id, day, channel_id, emoji, 0, delta)
             conn.execute(
                 """
@@ -681,6 +708,43 @@ class ActivityStore:
                 """,
                 (guild_id, day.isoformat(), day.isoformat(), day.isoformat()),
             )
+
+    def _begin_emoji_tracking_with_conn(
+        self, conn: sqlite3.Connection, guild_id: int, started_on: date,
+    ) -> None:
+        conn.execute(
+            "INSERT INTO activity_emoji_tracking VALUES (?, ?) ON CONFLICT(guild_id) DO NOTHING",
+            (guild_id, started_on.isoformat()),
+        )
+
+    def _begin_emoji_tracking_sync(self, guild_id: int, started_on: date) -> None:
+        with self._connection() as conn:
+            self._begin_emoji_tracking_with_conn(conn, guild_id, started_on)
+
+    def _get_emoji_report_sync(
+        self, guild_id: int, end_date: date, catalog: Sequence[tuple[EmojiInfo, date]],
+    ) -> list[EmojiUsageRate]:
+        with self._connection() as conn:
+            self._begin_emoji_tracking_with_conn(conn, guild_id, end_date)
+            started_on = date.fromisoformat(conn.execute(
+                "SELECT started_on FROM activity_emoji_tracking WHERE guild_id = ?", (guild_id,),
+            ).fetchone()[0])
+            counts = {
+                row.emoji_id: row
+                for row in self._emoji_counts_with_conn(conn, guild_id, end_date, None)
+            }
+        rows = []
+        for emoji, created_on in catalog:
+            usage = counts.get(emoji.emoji_id, EmojiCount(emoji, 0, 0))
+            # The live catalog supplies current names, including unused emoji.
+            usage = EmojiCount(emoji, usage.message_uses, usage.reaction_uses)
+            tracked_since = max(started_on, created_on)
+            tracked_days = max(1, (end_date - tracked_since).days + 1)
+            rows.append(EmojiUsageRate(usage, tracked_since, tracked_days, usage.total / tracked_days))
+        return sorted(rows, key=lambda row: (
+            row.uses_per_day, row.usage.total,
+            row.usage.emoji.name.casefold(), row.usage.emoji_id,
+        ))
 
     def _get_emoji_counts_sync(
         self, guild_id: int, end_date: date, days: int | None, channel_id: int | None,

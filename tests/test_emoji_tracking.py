@@ -1,5 +1,7 @@
+import csv
+import io
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -18,6 +20,53 @@ class Embed:
 
 
 class EmojiTrackingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_guild_join_starts_measurement_before_first_emoji_use(self):
+        with TemporaryDirectory() as directory:
+            store = nhmisc.ActivityStore(Path(directory) / "activity.sqlite3")
+            await store.initialize()
+            cog = object.__new__(nhmisc.NHMisc)
+            cog._activity_store = store
+            cog._utc_today = lambda: date(2026, 10, 1)
+            await cog.on_emoji_guild_join(SimpleNamespace(id=1))
+            emoji = nhmisc.EmojiInfo(7, "old", False)
+            await store.record_emoji_reaction(1, date(2026, 10, 10), 100, emoji, 1)
+            report = await store.get_emoji_report(1, date(2026, 10, 10), [(emoji, date(2020, 1, 1))])
+            self.assertEqual(report[0].tracked_days, 10)
+            self.assertAlmostEqual(report[0].uses_per_day, 0.1)
+
+    async def test_report_exports_all_current_emojis_including_zero_and_age_adjusted_rates(self):
+        with TemporaryDirectory() as directory:
+            store = nhmisc.ActivityStore(Path(directory) / "activity.sqlite3")
+            await store.initialize()
+            today = date(2026, 10, 10)
+            await store.begin_emoji_tracking(1, date(2026, 10, 1))
+            old = nhmisc.EmojiInfo(7, "old", False)
+            await store.record_emoji_reaction(1, today, 100, old, 1)
+            await store.record_emoji_reaction(1, today, 100, nhmisc.EmojiInfo(99, "removed", False), 1)
+            catalog = [
+                SimpleNamespace(id=7, name="old", animated=False, created_at=datetime(2020, 1, 1, tzinfo=timezone.utc)),
+                SimpleNamespace(id=8, name="unused", animated=True, created_at=datetime(2026, 10, 9, tzinfo=timezone.utc)),
+            ]
+            ctx = FakeContext(SimpleNamespace(id=1, name="Test server", emojis=catalog, filesize_limit=8 * 1024 * 1024))
+            cog = object.__new__(nhmisc.NHMisc)
+            cog._activity_store = store
+            cog._utc_today = lambda: today
+            cog.bot = SimpleNamespace(intents=SimpleNamespace(
+                guild_messages=True, message_content=True,
+                guild_reactions=True, emojis_and_stickers=True))
+            with mock.patch.object(nhmisc.discord, "Embed", Embed):
+                await nhmisc.NHMisc.nhmisc_emojireport.callback(cog, ctx)
+            rows = list(csv.DictReader(io.StringIO(ctx.sent[0]["file"].data.decode("utf-8"))))
+            self.assertEqual([row["Emoji"] for row in rows], ["unused", "old"])
+            self.assertEqual(rows[0]["Total uses"], "0")
+            self.assertEqual(rows[0]["Tracking days"], "2")
+            self.assertEqual(rows[1]["Tracking days"], "10")
+            self.assertEqual(rows[1]["Uses per day"], "0.1000")
+            for allowed in (False, True):
+                permission_ctx = SimpleNamespace(author=SimpleNamespace(
+                    guild_permissions=SimpleNamespace(manage_messages=allowed)))
+                self.assertEqual(await nhmisc.NHMisc.nhmisc_emojireport.can_run(permission_ctx), allowed)
+
     async def test_message_dedup_and_reaction_add_remove_use_only_server_emojis(self):
         with TemporaryDirectory() as directory:
             store = nhmisc.ActivityStore(Path(directory) / "activity.sqlite3")

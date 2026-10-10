@@ -6377,6 +6377,64 @@ class NHMisc(commands.Cog):
             embed=self._build_user_channel_distribution_embed(ctx.guild, title, distribution, days)
         )
 
+    @commands.command(name="emojireport", ignore_extra=False)
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def nhmisc_emojireport(self, ctx: commands.Context) -> None:
+        """Export lifetime usage and daily averages for every current server emoji"""
+        self._require_emoji_intents("all")
+        catalog = [
+            (EmojiInfo(emoji.id, emoji.name, emoji.animated), emoji.created_at.date())
+            for emoji in ctx.guild.emojis
+        ]
+        if not catalog:
+            await ctx.send("This server has no custom emoji")
+            return
+        rows = await self._activity_store.get_emoji_report(ctx.guild.id, self._utc_today(), catalog)
+        try:
+            export = build_csv_export(
+                ["Emoji", "Emoji ID", "Animated", "Messages", "Reaction balance", "Total uses",
+                 "Tracking since (UTC)", "Tracking days", "Uses per day"],
+                ((row.usage.emoji.name, str(row.usage.emoji_id), row.usage.emoji.animated,
+                  row.usage.message_uses, row.usage.reaction_uses, row.usage.total,
+                  row.tracked_since.isoformat(), row.tracked_days, f"{row.uses_per_day:.4f}")
+                 for row in rows),
+                ctx.guild.filesize_limit,
+                "emoji-report",
+            )
+        except ExportTooLarge as error:
+            raise commands.UserFeedbackCheckFailure(
+                "The emoji report exceeds this server's attachment limit"
+            ) from error
+        unused = [row for row in rows if row.usage.total == 0]
+        used = [row for row in rows if row.usage.total > 0]
+        embed = discord.Embed(
+            title=f"Emoji usage report - {ctx.guild.name}",
+            description=(
+                f"Current server emoji: {len(rows):,}\nZero recorded uses: {len(unused):,}\n"
+                "The CSV lists all emoji, least used first. Rates include messages and the "
+                "reaction balance. Days start at tracking, or creation for newer emoji (UTC)."
+            ),
+            color=discord.Color.blue(),
+        )
+        embed.add_field(
+            name="Zero-use examples",
+            value=" ".join(row.usage.emoji.mention for row in unused[:10]) or "None",
+            inline=False,
+        )
+        embed.add_field(
+            name="Lowest nonzero use rates",
+            value="\n".join(
+                f"{row.usage.emoji.mention} {row.uses_per_day:.4f}/day"
+                for row in used[:10]
+            ) or "No recorded usage",
+            inline=False,
+        )
+        await ctx.send(
+            embed=embed, file=discord.File(io.BytesIO(export.data), filename=export.filename),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     @commands.command(
         name="emojichart",
         usage="[channel_or_thread] [summary|days] [amount] [all|messages|reactions]",
@@ -7029,6 +7087,10 @@ class NHMisc(commands.Cog):
     async def on_emoji_guild_remove(self, guild: discord.Guild) -> None:
         await self._activity_store.delete_emoji_guild(guild.id)
 
+    @commands.Cog.listener("on_guild_join")
+    async def on_emoji_guild_join(self, guild: discord.Guild) -> None:
+        await self._activity_store.begin_emoji_tracking(guild.id, self._utc_today())
+
     @commands.Cog.listener()
     async def on_voice_state_update(
         self,
@@ -7330,6 +7392,7 @@ class NHMisc(commands.Cog):
 
     async def _close_stale_activity_days_for_all_guilds(self, send_reports: bool) -> None:
         for guild in list(self.bot.guilds):
+            await self._activity_store.begin_emoji_tracking(guild.id, self._utc_today())
             await self._close_stale_activity_days_for_guild(guild, send_reports=send_reports)
             await self._activity_store.prune_emoji_history(guild.id, self._utc_today())
 

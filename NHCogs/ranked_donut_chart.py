@@ -106,6 +106,7 @@ def _draw_donut(
 
 
 def _draw_row_icons(axis, row_icons: Sequence[bytes | None]) -> None:
+    import numpy as np
     from matplotlib.offsetbox import AnnotationBbox, OffsetImage
     from PIL import Image
 
@@ -120,7 +121,7 @@ def _draw_row_icons(axis, row_icons: Sequence[bytes | None]) -> None:
         except (OSError, ValueError):
             continue
         axis.add_artist(AnnotationBbox(
-            OffsetImage(image),
+            OffsetImage(np.asarray(image)),
             (0, position),
             xycoords=axis.get_yaxis_transform(),
             xybox=(-18, 0),

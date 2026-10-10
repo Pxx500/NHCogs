@@ -7,6 +7,35 @@ from tests.test_activity_storage import activity_storage
 
 
 class EmojiStorageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_report_includes_zero_use_emojis_and_uses_tracking_or_creation_date(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.sqlite3"
+            store = activity_storage.ActivityStore(path)
+            await store.initialize()
+            started = date(2026, 10, 1)
+            today = date(2026, 10, 10)
+            await store.begin_emoji_tracking(1, started)
+            old = activity_storage.EmojiInfo(7, "old", False)
+            new = activity_storage.EmojiInfo(8, "new", True)
+            unused = activity_storage.EmojiInfo(9, "unused", False)
+            for emoji in (old, new):
+                await store.record_emoji_reaction(1, today, 100, emoji, 1)
+            await store.prune_emoji_history(1, date(2026, 12, 1))
+            store = activity_storage.ActivityStore(path)
+            await store.initialize()
+            await store.begin_emoji_tracking(1, today)
+            rows = await store.get_emoji_report(1, today, [
+                (old, date(2020, 1, 1)), (new, date(2026, 10, 9)),
+                (unused, date(2020, 1, 1)),
+            ])
+            self.assertEqual([row.usage.emoji_id for row in rows], [9, 7, 8])
+            self.assertEqual(rows[0].usage.total, 0)
+            self.assertEqual(rows[1].tracked_since, started)
+            self.assertEqual(rows[1].tracked_days, 10)
+            self.assertAlmostEqual(rows[1].uses_per_day, 0.1)
+            self.assertEqual(rows[2].tracked_days, 2)
+            self.assertAlmostEqual(rows[2].uses_per_day, 0.5)
+
     async def test_daily_winner_counts_each_emoji_once_and_survives_daily_pruning(self):
         with TemporaryDirectory() as directory:
             store = activity_storage.ActivityStore(Path(directory) / "activity.sqlite3")
