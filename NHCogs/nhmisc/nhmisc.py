@@ -51,6 +51,8 @@ from .activity_storage import (
     ChannelUserCount,
     DailyDominantLocation,
     DailySummary,
+    EmojiCount,
+    EmojiInfo,
     TimelineDay,
     TopChannel,
     UserChannelDistribution,
@@ -132,6 +134,7 @@ def _parse_sticky_db_decision(content: str) -> tuple[str, int | None, str]:
     return command.lower(), role_id, argument.strip()
 
 DEFAULT_CHATCHART_USER_COUNT = 10
+CUSTOM_EMOJI_PATTERN = re.compile(r"<a?:[^:>]+:(\d+)>")
 DISCORD_MESSAGE_CONTENT_LIMIT = 2_000
 MAX_CHATCHART_USER_COUNT = 20
 CHATCHART_SERIES_COLORS = SERIES_COLORS
@@ -6373,6 +6376,100 @@ class NHMisc(commands.Cog):
         )
 
     @commands.command(
+        name="emojichart",
+        usage="[channel_or_thread] [summary|days] [amount] [all|messages|reactions]",
+    )
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    async def nhmisc_emojichart(self, ctx: commands.Context, *, arguments: str = "summary") -> None:
+        """Chart server emoji usage since tracking began or over the last 1-30 days"""
+        tokens = arguments.split()
+        target = None
+        if tokens and (
+            tokens[0].startswith("<#")
+            or (tokens[0].isdigit() and len(tokens[0]) >= DISCORD_SNOWFLAKE_MIN_DIGITS)
+        ):
+            target = self._resolve_text_channel_or_thread(ctx.guild, tokens.pop(0))
+            if not target.permissions_for(ctx.author).view_channel:
+                raise commands.UserFeedbackCheckFailure("You cannot view that channel or thread")
+        period = tokens.pop(0).lower() if tokens else "summary"
+        if period == "summary":
+            days = None
+        elif period.isdigit() and 1 <= int(period) <= 30:
+            days = int(period)
+        else:
+            raise commands.UserFeedbackCheckFailure("Use summary or a day count from 1 through 30")
+        amount_text = (
+            tokens.pop(0) if tokens and tokens[0].isdigit()
+            else str(DEFAULT_CHATCHART_USER_COUNT)
+        )
+        if not amount_text.isdigit() or not 1 <= int(amount_text) <= MAX_CHATCHART_USER_COUNT:
+            raise commands.UserFeedbackCheckFailure("Amount must be between 1 and 20")
+        amount = int(amount_text)
+        mode = tokens.pop(0).lower() if tokens else "all"
+        if mode not in {"all", "messages", "reactions"} or tokens:
+            raise commands.UserFeedbackCheckFailure("Use all, messages, or reactions after amount")
+        self._require_emoji_intents(mode)
+        await self._close_stale_activity_days_for_guild(ctx.guild, send_reports=True)
+        counts = await self._activity_store.get_emoji_counts(
+            ctx.guild.id, self._utc_today(), days, target.id if target is not None else None
+        )
+        counts = sorted(counts, key=lambda row: (-self._emoji_chart_value(row, mode), row.emoji_id))
+        counts = [row for row in counts if self._emoji_chart_value(row, mode) > 0]
+        if not counts:
+            await ctx.send("No recorded server emoji usage for this selection")
+            return
+        period_label = "Since tracking began" if days is None else f"Last {days} days (UTC)"
+        location = f"#{target.name}" if target is not None else ctx.guild.name
+        selected = counts[:amount]
+        file = render_ranked_donut_chart(
+            [(f":{row.emoji.name}:", self._emoji_chart_value(row, mode)) for row in selected],
+            other_count=sum(self._emoji_chart_value(row, mode) for row in counts[amount:]),
+            title=f"Server emoji usage - {period_label}",
+            context_label=location,
+            center_unit="uses",
+            donut_title=f"Emoji share ({mode})",
+            filename="emojichart.png",
+        )
+        embed = discord.Embed(
+            title=f"Emoji usage - {location}",
+            description=(f"{period_label}\nMessages count each emoji once per message. "
+                         "Reactions show additions minus removals, including super reactions."),
+            color=discord.Color.blue(),
+        )
+        for index, row in enumerate(selected, start=1):
+            embed.add_field(
+                name=f"{index}. :{row.emoji.name}:",
+                value=(f"{row.emoji.mention}\nMessages: {row.message_uses:,} | "
+                       f"Reactions: {row.reaction_uses:,} | Total: {row.total:,}"),
+                inline=False,
+            )
+        await ctx.send(embed=embed, file=file, allowed_mentions=discord.AllowedMentions.none())
+
+    @staticmethod
+    def _emoji_chart_value(row: EmojiCount, mode: str) -> int:
+        if mode == "messages":
+            return row.message_uses
+        if mode == "reactions":
+            return row.reaction_uses
+        return row.total
+
+    def _require_emoji_intents(self, mode: str) -> None:
+        intents = self.bot.intents
+        if not intents.emojis_and_stickers:
+            raise commands.UserFeedbackCheckFailure(
+                "Guild Expressions intent is required to keep the server emoji list up to date"
+            )
+        if mode in {"all", "messages"} and not (intents.guild_messages and intents.message_content):
+            raise commands.UserFeedbackCheckFailure(
+                "Guild Messages and Message Content intents are required to collect message emoji"
+            )
+        if mode in {"all", "reactions"} and not intents.guild_reactions:
+            raise commands.UserFeedbackCheckFailure(
+                "Guild Message Reactions intent is required to collect emoji reactions"
+            )
+
+    @commands.command(
         name="chatchart",
         usage="<days> [amount] | <channel_or_thread> <days> [amount]",
     )
@@ -6855,6 +6952,11 @@ class NHMisc(commands.Cog):
         now = datetime.now(timezone.utc)
         today = now.date()
         await self._close_stale_activity_days_for_guild(guild, send_reports=True)
+        emoji_ids = {int(value) for value in CUSTOM_EMOJI_PATTERN.findall(message.content)}
+        emojis = tuple(
+            EmojiInfo(emoji.id, emoji.name, emoji.animated)
+            for emoji in guild.emojis if emoji.id in emoji_ids
+        ) if emoji_ids else ()
         await self._activity_store.record_message(
             guild.id,
             today,
@@ -6863,7 +6965,40 @@ class NHMisc(commands.Cog):
             self._activity_parent_channel_id(message.channel),
             self._activity_thread_id(message.channel),
             now,
+            emojis=emojis,
         )
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
+        await self._record_emoji_reaction_event(payload, 1)
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
+        await self._record_emoji_reaction_event(payload, -1)
+
+    async def _record_emoji_reaction_event(
+        self, payload: discord.RawReactionActionEvent, delta: int,
+    ) -> None:
+        if payload.guild_id is None or payload.emoji.id is None:
+            return
+        guild = self.bot.get_guild(payload.guild_id)
+        if guild is None:
+            return
+        member = payload.member if delta > 0 else guild.get_member(payload.user_id)
+        if member is not None and member.bot:
+            return
+        emoji = next((emoji for emoji in guild.emojis if emoji.id == payload.emoji.id), None)
+        if emoji is None:
+            return
+        await self._close_stale_activity_days_for_guild(guild, send_reports=True)
+        await self._activity_store.record_emoji_reaction(
+            guild.id, self._utc_today(), payload.channel_id,
+            EmojiInfo(emoji.id, emoji.name, emoji.animated), delta,
+        )
+
+    @commands.Cog.listener("on_guild_remove")
+    async def on_emoji_guild_remove(self, guild: discord.Guild) -> None:
+        await self._activity_store.delete_emoji_guild(guild.id)
 
     @commands.Cog.listener()
     async def on_voice_state_update(
@@ -7167,6 +7302,7 @@ class NHMisc(commands.Cog):
     async def _close_stale_activity_days_for_all_guilds(self, send_reports: bool) -> None:
         for guild in list(self.bot.guilds):
             await self._close_stale_activity_days_for_guild(guild, send_reports=send_reports)
+            await self._activity_store.prune_emoji_history(guild.id, self._utc_today())
 
     async def _close_stale_activity_days_for_guild(
         self, guild: discord.Guild, send_reports: bool
@@ -7190,6 +7326,7 @@ class NHMisc(commands.Cog):
         await self._apply_activity_detail_retention(
             guild.id, int(config["activity_detail_retention_days"])
         )
+        await self._activity_store.prune_emoji_history(guild.id, today)
 
     async def _send_activity_summary(
         self, channel: discord.TextChannel, summary: DailySummary
@@ -7864,6 +8001,12 @@ class NHMisc(commands.Cog):
         embed.add_field(
             name="Top channels",
             value=self._format_top_channels(summary.top_channels),
+            inline=False,
+        )
+        embed.add_field(
+            name="Emoji of the Day",
+            value=(summary.emoji_of_day.mention if summary.emoji_of_day is not None
+                   else "No recorded usage"),
             inline=False,
         )
         return embed
