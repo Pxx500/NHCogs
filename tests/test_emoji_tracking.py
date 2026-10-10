@@ -84,7 +84,13 @@ class EmojiTrackingTests(unittest.IsolatedAsyncioTestCase):
             cog.bot = SimpleNamespace(intents=SimpleNamespace(
                 guild_messages=True, message_content=True, guild_reactions=True,
                 emojis_and_stickers=True))
-            with mock.patch.object(nhmisc.discord, "Embed", Embed):
+            with (
+                mock.patch.object(nhmisc.discord, "Embed", Embed),
+                mock.patch.object(nhmisc.aiohttp, "ClientSession") as session_factory,
+            ):
+                session = mock.MagicMock()
+                session_factory.return_value.__aenter__.return_value = session
+                session.get.return_value.__aenter__.return_value.status = 404
                 await nhmisc.NHMisc.nhmisc_emojichart.callback(cog, ctx, arguments="summary")
                 self.assertTrue(ctx.sent[0]["file"].data.startswith(b"\x89PNG"))
                 self.assertIn("Reactions: 2", ctx.sent[0]["embed"].fields[0].value)

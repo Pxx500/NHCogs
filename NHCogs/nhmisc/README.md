@@ -633,6 +633,12 @@ separate message, reaction, and combined counts. Percentages use the total for t
 selected metric, including emoji outside the top. Empty selections return a short
 no-data message.
 
+The ranking displays a thumbnail next to each emoji name. Thumbnails are fetched from
+Discord's CDN as WebP only while rendering a chart, for the selected top emoji. Animated
+emoji use their first frame because the chart is a PNG. If an image is unavailable,
+the name and counts remain visible. Image downloads have time and size limits and do
+not change the collected statistics.
+
 Reactions are a balance of additions and individual removals observed in the selected
 period. Normal reactions and super reactions use the same counter. Changes are assigned
 to the UTC day when the bot receives the event. Daily balances may be negative, with

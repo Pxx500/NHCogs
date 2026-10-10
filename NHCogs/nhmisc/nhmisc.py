@@ -13,6 +13,7 @@ from datetime import time as datetime_time
 from typing import TypeVar
 from uuid import uuid4
 
+import aiohttp
 import discord
 from redbot.core import commands
 from redbot.core.data_manager import cog_data_path
@@ -135,6 +136,7 @@ def _parse_sticky_db_decision(content: str) -> tuple[str, int | None, str]:
 
 DEFAULT_CHATCHART_USER_COUNT = 10
 CUSTOM_EMOJI_PATTERN = re.compile(r"<a?:[^:>]+:(\d+)>")
+MAX_EMOJI_ICON_BYTES = 128 * 1024
 DISCORD_MESSAGE_CONTENT_LIMIT = 2_000
 MAX_CHATCHART_USER_COUNT = 20
 CHATCHART_SERIES_COLORS = SERIES_COLORS
@@ -6422,6 +6424,7 @@ class NHMisc(commands.Cog):
         period_label = "Since tracking began" if days is None else f"Last {days} days (UTC)"
         location = f"#{target.name}" if target is not None else ctx.guild.name
         selected = counts[:amount]
+        row_icons = await self._load_emoji_chart_icons(selected)
         file = render_ranked_donut_chart(
             [(f":{row.emoji.name}:", self._emoji_chart_value(row, mode)) for row in selected],
             other_count=sum(self._emoji_chart_value(row, mode) for row in counts[amount:]),
@@ -6430,6 +6433,7 @@ class NHMisc(commands.Cog):
             center_unit="uses",
             donut_title=f"Emoji share ({mode})",
             filename="emojichart.png",
+            row_icons=row_icons,
         )
         embed = discord.Embed(
             title=f"Emoji usage - {location}",
@@ -6445,6 +6449,31 @@ class NHMisc(commands.Cog):
                 inline=False,
             )
         await ctx.send(embed=embed, file=file, allowed_mentions=discord.AllowedMentions.none())
+
+    async def _load_emoji_chart_icons(self, rows: list[EmojiCount]) -> list[bytes | None]:
+        timeout = aiohttp.ClientTimeout(total=6, connect=3)
+        async with aiohttp.ClientSession(
+            timeout=timeout, connector=aiohttp.TCPConnector(limit=4),
+        ) as session:
+            async def read_icon(row: EmojiCount) -> bytes | None:
+                url = (
+                    f"https://cdn.discordapp.com/emojis/{row.emoji_id}.webp"
+                    "?size=64&quality=lossless"
+                )
+                try:
+                    async with session.get(url, allow_redirects=False) as response:
+                        if response.status != 200:
+                            return None
+                        data = bytearray()
+                        async for chunk in response.content.iter_chunked(16 * 1024):
+                            data.extend(chunk)
+                            if len(data) > MAX_EMOJI_ICON_BYTES:
+                                return None
+                        return bytes(data)
+                except (aiohttp.ClientError, asyncio.TimeoutError):
+                    return None
+
+            return list(await asyncio.gather(*(read_icon(row) for row in rows)))
 
     @staticmethod
     def _emoji_chart_value(row: EmojiCount, mode: str) -> int:
