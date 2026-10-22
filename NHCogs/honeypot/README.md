@@ -265,7 +265,7 @@ Groups: `[p]honeypot research`, `[p]honeypot debug`, `[p]honeypot debug imagesca
 
 | Command | What it does |
 |---|---|
-| `[p]honeypot research dump <channel_id> [channel_ids...]` | Export full history from one or more channels by ID |
+| `[p]honeypot research dump <channel_id> [channel_ids...] [--limit N] [--after DATE/ID] [--before DATE/ID] [--order newest/oldest] [--author ID] [--has attachments/images/videos/embeds/links] [--attachments]` | Export selected history from one or more channels by ID |
 | `[p]honeypot research cancel` | Stop this server's dump and clean temporary files |
 | `[p]honeypot debug imagescan dump` | Export image-review events, sample files, and dates |
 | `[p]honeypot debug imagescan importtpzip` | Import TP images from ZIPs attached to the command |
@@ -273,15 +273,34 @@ Groups: `[p]honeypot research`, `[p]honeypot debug`, `[p]honeypot debug imagesca
 | `[p]honeypot debug exportjoinwatch` | Copy JoinWatch live rows back into Config. Bot owner only |
 | `[p]honeypot debug resetstats` | Reset stored Honeypot counters |
 
-For `research dump`, provide one or more text-channel IDs separated by spaces. Every source is exported identically, including all authors and message formats, up to the run's start time. Duplicate IDs are scanned once. Run it in a private moderator channel. The bot needs View Channel and Read Message History in every source, plus Attach Files in the destination. Only one dump can run per server.
+For `research dump`, provide one or more text-channel IDs separated by spaces. Without options, every source is exported from oldest to newest, including all authors and message formats, up to the run's start time. Duplicate IDs are scanned once. Run it in a private moderator channel. The bot needs View Channel and Read Message History in every source, plus Attach Files in the destination. Only one dump can run per server.
 
-Progress is always active. One status message updates every 30 seconds with the current channel, total message count, current message date, and elapsed time. Temporary API failures wait and resume after the last fetched message. Permanent API failures produce explicitly incomplete exports containing the data collected so far.
+| Option | Selection |
+|---|---|
+| `--limit N` | Export up to N matching messages per channel. Defaults to newest first when a limit is supplied |
+| `--after DATE/ID` | Messages strictly after an ISO date/time or message ID |
+| `--before DATE/ID` | Messages strictly before an ISO date/time or message ID |
+| `--order newest/oldest` | Choose export order explicitly |
+| `--author ID` | Match the actual message sender, including bot senders. Does not interpret account IDs inside log embeds |
+| `--has attachments/images/videos/embeds/links` | Select one content filter. Images and videos include attachments and embeds. Links include URLs in message text and embed URLs |
+| `--attachments` | Download attachment files from selected messages into the ZIPs |
 
-ZIPs contain one `channel-<id>.jsonl` per source and `metadata.json` with channel names, counts, completeness, and format version 2. Records preserve IDs, dates, authors, text, embeds, attachment metadata, reply references, and source links. Attachment files and avatars are not downloaded. Cached names and role labels are current observations, not historical snapshots. For split archives, concatenate matching JSONL files in numbered ZIP order. Keep exports private.
+Options can appear before or after the channel IDs and combine. Dates without a timezone use UTC. For example, `2026-10-01` means midnight UTC, and `2026-10-01T12:00:00+02:00` includes an explicit offset. The run's start time remains the upper bound even when a later `--before` is supplied. Filters apply before the per-channel limit, so finding matching messages can require reading more history than the exported count.
+
+Progress is always active. One status message updates every 30 seconds with the current channel, exported message count, current message date, and elapsed time. Downloads also show completed and failed files and bytes received. Temporary API failures wait and resume after the last fetched message. Permanent history failures and unavailable attachment files produce explicitly incomplete exports containing the data collected so far.
+
+ZIPs contain one `channel-<id>.jsonl` per source and `metadata.json` with channel names, counts, selection, completeness, and format version 2. Records preserve IDs, dates, authors, text, embeds, attachment metadata, reply references, and source links. There is no TXT transcript. Cached names and role labels are current observations, not historical snapshots. Keep exports private.
+
+Without `--attachments`, attachment records contain metadata and URLs only. With it, downloaded files live under `attachments/` and their names start with the source message ID and attachment index, followed by a sanitized original filename. Each JSONL attachment record adds `download_status`, an ordered `local_files` list, and the original file's `sha256` checksum. Failed downloads have an empty list and `download_error` instead. Avatars and external media referenced by embeds are not downloaded.
+
+ZIP sizes use the current server upload limit reported by Discord. A large export becomes numbered, independently readable ZIPs. Concatenate matching JSONL filenames in numbered ZIP order. An attachment too large for one archive is divided into raw `.part001`, `.part002`, and later parts. Extract them, concatenate their bytes in the exact `local_files` order, and verify the resulting file against `sha256`. Parts are not individually usable copies of the original file.
 
 ```text
 [p]honeypot research dump 123456789012345678
 [p]honeypot research dump 123456789012345678 234567890123456789
+[p]honeypot research dump 123456789012345678 --limit 500
+[p]honeypot research dump 123456789012345678 --after 2026-10-01 --before 2026-10-15 --order oldest
+[p]honeypot research dump 123456789012345678 --author 345678901234567890 --has attachments --attachments
 [p]honeypot research cancel
 ```
 

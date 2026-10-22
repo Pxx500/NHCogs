@@ -37,9 +37,13 @@ class LogChannel:
         self.history_calls.append(kwargs)
 
         async def iterator():
-            for item in sorted(self.messages, key=lambda item: item.created_at):
-                if item.created_at < kwargs["before"]:
-                    yield item
+            for item in sorted(self.messages, key=lambda item: item.created_at, reverse=not kwargs.get("oldest_first", True)):
+                before, after = kwargs.get("before"), kwargs.get("after")
+                if before is not None and (item.created_at >= before if isinstance(before, datetime) else item.id >= before.id):
+                    continue
+                if after is not None and (item.created_at <= after if isinstance(after, datetime) else item.id <= after.id):
+                    continue
+                yield item
 
         return iterator()
 
@@ -71,6 +75,68 @@ def read_dump(result):
 
 
 class ResearchDumpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_limits_count_matches_per_channel_and_boundaries_accept_dates_or_ids(self):
+        cases = (
+            ("20 30 --limit 2 --after 2026-09-01T00:01:00Z --before 2026-09-01T00:06:00Z --order oldest", [2, 3]),
+            ("20 30 --limit 2 --after 1 --before 6", [5, 4]),
+        )
+        for arguments, expected in cases:
+            with self.subTest(arguments=arguments), TemporaryDirectory() as directory:
+                channels = [LogChannel(channel_id, [message(number, number) for number in range(1, 8)])
+                            for channel_id in (20, 30)]
+                _ids, options = research_dump.parse_arguments(arguments)
+                result = await research_dump.dump_channels(channels, Path(directory), bot_id=BOT,
+                    upload_limit=100_000, cutoff=START + timedelta(days=1), options=options)
+                data = read_dump(result)
+                for channel in channels:
+                    records = [json.loads(line) for line in data[f"channel-{channel.id}.jsonl"].splitlines()]
+                    self.assertEqual([int(record["message_id"]) for record in records], expected)
+
+    async def test_content_filters_select_files_media_embeds_and_links(self):
+        image = message(1, 1)
+        image.attachments = [SimpleNamespace(id=801, filename="image.png", size=3,
+            content_type="image/png", url="https://cdn.discordapp.com/a", proxy_url="https://media.discordapp.net/a")]
+        items = [image, message(2, 2, {"image": {"url": "https://example.com/p.png"}}),
+                 message(3, 3, {"video": {"url": "https://example.com/v.mp4"}}),
+                 message(4, 4, {"title": "plain embed"}), message(5, 5, content="https://example.com")]
+        for kind, expected in (("attachments", [1]), ("images", [1, 2]), ("videos", [3]), ("embeds", [2, 3, 4]), ("links", [5])):
+            with self.subTest(kind=kind), TemporaryDirectory() as directory:
+                result = await research_dump.dump_channels([LogChannel(20, items)], Path(directory),
+                    bot_id=BOT, upload_limit=100_000, cutoff=START + timedelta(days=1), options=research_dump.DumpOptions(has=kind))
+                records = [json.loads(line) for line in read_dump(result)["channel-20.jsonl"].splitlines()]
+                self.assertEqual([int(record["message_id"]) for record in records], expected)
+
+    async def test_descending_retry_resumes_after_unmatched_messages_without_duplicates(self):
+        source = LogChannel(20, [])
+        failure = Exception("temporary unavailable")
+        failure.status = 503
+
+        async def history(**kwargs):
+            source.history_calls.append(kwargs)
+            if len(source.history_calls) == 1:
+                yield message(6, 6)
+                yield message(5, 5, author_id=USER)
+                yield message(4, 4)
+                raise failure
+            yield message(3, 3, author_id=USER)
+            yield message(2, 2, author_id=USER)
+
+        source.history = history
+        with TemporaryDirectory() as directory, mock.patch.object(research_dump.asyncio, "sleep", new=mock.AsyncMock()):
+            result = await research_dump.dump_channels([source], Path(directory), bot_id=BOT,
+                upload_limit=100_000, cutoff=START + timedelta(days=1), options=research_dump.DumpOptions(limit=2, author_id=USER))
+            records = [json.loads(line) for line in read_dump(result)["channel-20.jsonl"].splitlines()]
+            self.assertEqual([record["message_id"] for record in records], ["5", "3"])
+            self.assertEqual(source.history_calls[1]["before"].id, 4)
+
+    def test_invalid_selection_is_rejected_and_date_only_input_is_utc(self):
+        for arguments in ("20 --limit 0", "20 --after 2026-10-15 --before 2026-10-01",
+                          "20 --before nonsense", "20 --unknown 3", "--limit 1", "20 --author -4"):
+            with self.subTest(arguments=arguments), self.assertRaises(ValueError):
+                research_dump.parse_arguments(arguments)
+        _ids, options = research_dump.parse_arguments("20 --after 2026-09-01")
+        self.assertEqual(options.after, START)
+
     async def test_one_or_many_channels_have_separate_identity_named_exports(self):
         for count in (1, 3):
             with self.subTest(count=count), TemporaryDirectory() as directory:

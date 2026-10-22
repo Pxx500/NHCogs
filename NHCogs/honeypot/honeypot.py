@@ -1557,6 +1557,7 @@ class Honeypot(Cog):
         phases = {
             "starting": "Preparing channel dump",
             "reading": f"Reading #{progress.channel_name}",
+            "attachments": f"Downloading attachments from #{progress.channel_name}",
             "packaging": "Packing ZIP files",
             "uploading": "Uploading ZIP files",
         }
@@ -1565,15 +1566,18 @@ class Honeypot(Cog):
             f"**Research dump: {status}**\n"
             f"Stage: {phases[progress.phase]}\n"
             f"Source channels: {len(progress.counts)}\n"
-            f"Messages read: {sum(progress.counts.values()):,}\n"
+            f"Messages exported: {sum(progress.counts.values()):,}\n"
             f"Current log date: {current}\n"
             f"Elapsed: {hours:02}:{minutes:02}:{seconds:02}"
         )
         if progress.retry_until is not None:
             remaining = max(0, int(progress.retry_until - asyncio.get_running_loop().time()))
             text += f"\nWaiting for Discord, retry in {remaining}s"
+        if progress.attachments_downloaded or progress.attachments_failed or progress.phase == "attachments":
+            text += (f"\nAttachments: {progress.attachments_downloaded} downloaded, "
+                     f"{progress.attachments_failed} failed, {progress.attachment_bytes / (1024 ** 2):.1f} MiB received")
         if status == "incomplete":
-            text += "\nSome history couldn't be read. The ZIP contains the fetched data and error metadata"
+            text += "\nSome history or attachments couldn't be read. See the error metadata in the ZIP"
         return text
 
     async def _research_dump_update_status(self, ctx, message, progress, started, status="running") -> bool:
@@ -1598,11 +1602,11 @@ class Honeypot(Cog):
             if not await self._research_dump_update_status(ctx, message, progress, started):
                 return
 
-    @research.command(name="dump", usage="<channel_id> [channel_ids...]", ignore_extra=False)
+    @research.command(name="dump", usage="<channel_id> [channel_ids...] [--limit N] [--after DATE/ID] [--before DATE/ID] [--order newest/oldest] [--author ID] [--has attachments/images/videos/embeds/links] [--attachments]", ignore_extra=False)
     async def research_dump(
         self,
         ctx: commands.Context,
-        *channel_ids: int,
+        *, arguments: str = "",
     ) -> None:
         """Dump one or more text channels by ID, with progress updates"""
         mentions = discord.AllowedMentions.none()
@@ -1612,11 +1616,13 @@ class Honeypot(Cog):
                 allowed_mentions=mentions,
             )
             return
-        if not channel_ids:
-            await ctx.send(_("Provide at least one channel ID"), allowed_mentions=mentions)
+        try:
+            channel_ids, options = research_export.parse_arguments(arguments)
+        except ValueError as error:
+            await ctx.send(str(error), allowed_mentions=mentions)
             return
         channels = []
-        for channel_id in dict.fromkeys(channel_ids):
+        for channel_id in channel_ids:
             channel = ctx.guild.get_channel(channel_id)
             if not isinstance(channel, discord.TextChannel) or channel.guild.id != ctx.guild.id:
                 await ctx.send(
@@ -1644,9 +1650,9 @@ class Honeypot(Cog):
             )
             return
 
-        await self._run_research_dump(ctx, channels)
+        await self._run_research_dump(ctx, channels, options)
 
-    async def _run_research_dump(self, ctx, channels) -> None:
+    async def _run_research_dump(self, ctx, channels, options) -> None:
         mentions = discord.AllowedMentions.none()
         run = _ResearchDumpRun(
             asyncio.current_task(),
@@ -1673,6 +1679,7 @@ class Honeypot(Cog):
                 upload_limit=ctx.guild.filesize_limit,
                 cutoff=cutoff,
                 progress=run.progress,
+                options=options,
             )
             for archive in result.archives:
                 if not self._channel_is_private(ctx.guild, ctx.channel):
