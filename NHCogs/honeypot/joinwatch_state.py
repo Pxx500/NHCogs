@@ -946,6 +946,8 @@ async def reschedule_pending_roles(
             except (KeyError, TypeError, ValueError):
                 continue
             expires_at = applied_at + timedelta(minutes=new_timer_minutes)
+            if data.get("startup_grace_until"):
+                expires_at = max(expires_at, datetime.fromisoformat(data["startup_grace_until"]))
             data["applied_at"] = applied_at.isoformat()
             data["expires_at"] = expires_at.isoformat()
             await write_row(cog, guild, member_id, "pending_role", data)

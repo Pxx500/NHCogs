@@ -404,6 +404,10 @@ async def _apply_joinwatch_assignment_actions_locked(
             expires_at = datetime.fromisoformat(typing.cast(str, data["expires_at"]))
         except (KeyError, TypeError, ValueError):
             expires_at = now + timedelta(minutes=guild_settings.joinwatch_auto_role_timer_minutes)
+        if data.get("startup_grace_until") and not data.get("restore_incident"):
+            expires_at = max(
+                expires_at, now + timedelta(minutes=guild_settings.joinwatch_auto_role_timer_minutes)
+            )
         await joinwatch_state.store_pending_role(
             cog,
             member,
@@ -658,6 +662,8 @@ async def joinwatch_auto_role_loop(cog) -> None:
         try:
             owner = getattr(cog, "_joinwatch_verification", None)
             if owner is not None:
+                if not await owner.prepare_timers(guild):
+                    continue
                 await owner.settle_history(guild)
             raw_config = await cog.config.guild(guild).all()
             guild_settings = GuildSettings.from_mapping(raw_config)

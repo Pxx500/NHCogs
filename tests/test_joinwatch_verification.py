@@ -362,7 +362,7 @@ class VerificationLifecycleTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await runtime.owner.close()
 
-    async def test_restore_adopts_absent_old_timer_without_changing_enforcement(self):
+    async def test_restore_adopts_absent_old_timer_and_preserves_its_history(self):
         with TemporaryDirectory() as directory, _isolated_honeypot_modules(Path(directory)) as honeypot:
             runtime = _runtime(honeypot)
             entry = runtime.raw["joinwatch_pending_roles"]["20"]
@@ -375,14 +375,17 @@ class VerificationLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await runtime.owner.restore()
                 adopted = runtime.raw["joinwatch_pending_roles"]["20"]
                 for key, value in original.items():
-                    self.assertEqual(adopted[key], value)
+                    if key != "expires_at":
+                        self.assertEqual(adopted[key], value)
+                self.assertGreaterEqual(
+                    datetime.fromisoformat(adopted["expires_at"]), runtime.now + timedelta(hours=24)
+                )
                 identity = adopted["incident_id"]
                 await runtime.owner.restore()
                 history = await runtime.owner.export_history(10)
                 self.assertEqual(len(history["incidents"]), 1)
                 self.assertEqual(history["incidents"][0]["incident_id"], identity)
                 self.assertEqual(history["incidents"][0]["history_origin"], "adopted_active_state")
-                self.assertEqual(history["events"], [])
             finally:
                 await runtime.owner.close()
 
@@ -632,7 +635,7 @@ class VerificationLifecycleTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await runtime.owner.close()
 
-    async def test_explicit_enable_adopts_existing_timer_but_startup_does_not(self):
+    async def test_explicit_enable_adopts_existing_timer_but_startup_does_not_enable_captcha(self):
         with (
             TemporaryDirectory() as directory,
             _isolated_honeypot_modules(Path(directory)) as honeypot,
@@ -651,6 +654,11 @@ class VerificationLifecycleTests(unittest.IsolatedAsyncioTestCase):
             try:
                 await runtime.owner.restore()
                 self.assertEqual((await runtime.owner.start(runtime.member)).status, "unavailable")
+                restored = await honeypot.joinwatch_state.read_row(
+                    runtime.cog, runtime.member.guild, runtime.member.id, "pending_role"
+                )
+                deadline = datetime.fromisoformat(restored["expires_at"])
+                self.assertGreaterEqual(deadline, runtime.now + timedelta(hours=24))
                 with mock.patch.object(captcha.random, "SystemRandom", return_value=random_source):
                     self.assertEqual(await runtime.owner.enable_existing(runtime.member.guild), 1)
                     question = await _question(runtime)

@@ -19,6 +19,7 @@ from .captcha import CaptchaPreparation, CaptchaQuestion, generate_challenge
 
 MAX_ATTEMPTS = 2
 PREPARED_ENROLLMENT_CAPACITY = 32
+STARTUP_GRACE = timedelta(hours=24)
 log = logging.getLogger("red.Honeypot")
 
 
@@ -44,6 +45,7 @@ class JoinwatchVerification:
         self._deleted_challenges: set[tuple] = set()
         self._group_locks: dict[int, asyncio.Lock] = {}
         self._cancelled_waves: set[tuple[int, str]] = set()
+        self._startup_grace_pending: dict[int, str | None] = {}
 
     async def capture_enrollment(self, member, entry):
         """Capture available context before restriction without fetching Discord data."""
@@ -878,6 +880,7 @@ class JoinwatchVerification:
             raise ValueError("\n".join(issues))
 
     async def restore(self):
+        self._startup_grace_pending = dict.fromkeys(guild.id for guild in self.cog.bot.guilds)
         queued = []
         for guild in self.cog.bot.guilds:
             await self.settle_history(guild, adopt=True)
@@ -895,6 +898,86 @@ class JoinwatchVerification:
                 if entry.get("effect_at"):
                     await self._record_enrollment(guild, entry)
         self._start_fill(queued)
+        for guild in self.cog.bot.guilds:
+            await self.prepare_timers(guild)
+
+    @staticmethod
+    def _unfinished(entry):
+        return isinstance(entry, dict) and not (
+            entry.get("test") or entry.get("history_terminal")
+            or entry.get("punishment_started_at")
+            or entry.get("verification_state") == "release_pending"
+        )
+
+    async def prepare_timers(self, guild) -> bool:
+        """Keep restored timers blocked until CAPTCHA and durable grace are ready."""
+        if guild.id not in self._startup_grace_pending:
+            return True
+        try:
+            open_cases = await joinwatch_state.open_maps(self.cog, guild)
+            if any(
+                entry.get("captcha_enabled")
+                for kind in ("pending_role", "pending_assignment")
+                for entry in open_cases[kind].values()
+                if self._unfinished(entry)
+            ):
+                issues = await self.configuration_issues(guild)
+                if issues:
+                    raise ValueError(", ".join(issues))
+            grace_until = datetime.now(timezone.utc) + STARTUP_GRACE
+            protected = await self._protect_startup_deadlines(guild, open_cases, grace_until)
+        except Exception as error:
+            log.exception("JoinWatch timer startup is blocked for guild %s", guild.id)
+            reason = str(error)
+            previous = self._startup_grace_pending[guild.id]
+            self._startup_grace_pending[guild.id] = reason
+            if previous != reason:
+                try:
+                    await self.cog._record_operational_failure(
+                        guild.id, "joinwatch_startup_grace", f"JoinWatch timer startup is blocked: {reason}"
+                    )
+                except Exception:
+                    log.exception("Could not report blocked JoinWatch startup for guild %s", guild.id)
+            return False
+        del self._startup_grace_pending[guild.id]
+        if protected:
+            log.info("Restored JoinWatch timers for %s accounts in guild %s until at least %s",
+                     len(protected), guild.id, grace_until.isoformat())
+            await self._publish_startup_grace(guild, len(protected), grace_until)
+        return True
+
+    async def _protect_startup_deadlines(self, guild, open_cases, grace_until):
+        protected = set()
+        for store_name in ("joinwatch_pending_roles", "joinwatch_pending_role_assignments"):
+            kind = joinwatch_state.kind_for_store(store_name)
+            for user_key in open_cases[kind]:
+                user_id = int(user_key)
+                async with joinwatch_state.member_lock(self.cog, guild.id, user_id):
+                    entry = await joinwatch_state.read_row(self.cog, guild, user_id, kind)
+                    if not self._unfinished(entry):
+                        continue
+                    old_deadline = datetime.fromisoformat(entry["expires_at"])
+                    entry["expires_at"] = max(old_deadline, grace_until).isoformat()
+                    entry["startup_grace_until"] = grace_until.isoformat()
+                    self.event(entry, "startup_grace", now=grace_until - STARTUP_GRACE)
+                    if not await self.persist_history(guild, user_id, entry, store_name=store_name):
+                        raise RuntimeError("Could not save restored JoinWatch deadlines")
+                    protected.add(user_id)
+        return protected
+
+    async def _publish_startup_grace(self, guild, count, grace_until):
+        try:
+            channel_id = await self.cog.config.guild(guild).get_raw("captcha_log_channel")
+            channel = self.cog._get_text_channel_or_thread(guild, channel_id) if channel_id else None
+            if channel is not None and self.cog._channel_is_private(guild, channel):
+                await channel.send(
+                    f"JoinWatch restarted. {count} active verification deadline(s) "
+                    f"are protected until at least {grace_until:%Y-%m-%d %H:%M UTC}. "
+                    "Later deadlines were preserved.",
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+        except Exception:
+            log.exception("Could not publish JoinWatch startup grace for guild %s", guild.id)
 
     async def settle_history(self, guild, *, adopt=False):
         open_cases = await joinwatch_state.open_maps(self.cog, guild)
