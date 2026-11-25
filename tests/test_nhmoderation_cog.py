@@ -104,6 +104,9 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
             manage_messages = context(manage_messages=True)
             unauthorized = context()
             for command_name in (
+                "nhmod_gallery",
+                "nhmod_gallery_add",
+                "nhmod_gallery_remove",
                 "nhmod_filter_add",
                 "nhmod_filter_remove",
                 "nhmod_filter_list",
@@ -262,6 +265,89 @@ class NHModerationCogTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(ctx.send.await_args.kwargs["embed"], embed)
             self.assertFalse(ctx.send.await_args.kwargs["allowed_mentions"].everyone)
             subject._require_private_channel.assert_called_once_with(ctx)
+
+    async def test_gallery_commands_work_from_a_public_channel(self):
+        with loaded_nhmoderation() as module:
+            guild = SimpleNamespace(id=10, me=object(), default_role=object())
+            gallery = SimpleNamespace(
+                id=20,
+                guild=guild,
+                mention="<#20>",
+                permissions_for=lambda member: SimpleNamespace(view_channel=True, manage_messages=True),
+            )
+            ctx = SimpleNamespace(
+                guild=guild,
+                channel=SimpleNamespace(permissions_for=lambda role: SimpleNamespace(view_channel=True)),
+                send=mock.AsyncMock(),
+                command=module.NHModeration.nhmod_gallery,
+                clean_prefix="!",
+            )
+            bot = SimpleNamespace(
+                intents=SimpleNamespace(message_content=True),
+                application_flags=SimpleNamespace(gateway_message_content=True),
+            )
+            subject = module.NHModeration(bot, _operational_support())
+            subject._mark_operational_recovered = mock.AsyncMock()
+            await subject.nhmod_gallery_add.callback(subject, ctx, gallery)
+
+            ctx.send.reset_mock()
+            overview_discord = module.send_group_overview.__globals__["discord"]
+            with mock.patch.object(overview_discord, "Embed", _OverviewEmbed):
+                await subject.nhmod_gallery.callback(subject, ctx)
+            self.assertIn(("<#20>",), [call.args for call in ctx.send.await_args_list])
+            overview = ctx.send.await_args.kwargs["embed"]
+            commands = "\n".join(field.value for field in overview.fields)
+            self.assertIn("!nhmod gallery add", commands)
+            self.assertIn("!nhmod gallery remove", commands)
+
+            for channel, attachments, deleted in (
+                (gallery, (), True),
+                (gallery, (SimpleNamespace(filename="photo.png"),), False),
+                (SimpleNamespace(id=21, parent_id=gallery.id), (), False),
+            ):
+                with self.subTest(channel=channel.id, attachments=attachments):
+                    message = SimpleNamespace(
+                        guild=guild, channel=channel, attachments=attachments, delete=mock.AsyncMock()
+                    )
+                    await subject.on_message(message)
+                    self.assertEqual(message.delete.await_count, int(deleted))
+
+            await subject.nhmod_gallery_remove.callback(subject, ctx, gallery)
+            message = SimpleNamespace(guild=guild, channel=gallery, attachments=(), delete=mock.AsyncMock())
+            await subject.on_message(message)
+            message.delete.assert_not_awaited()
+
+    async def test_saved_gallery_pauses_when_message_content_grant_is_lost(self):
+        with loaded_nhmoderation() as module:
+            flags = SimpleNamespace(gateway_message_content=True)
+            bot = SimpleNamespace(
+                intents=SimpleNamespace(message_content=True),
+                application_flags=flags,
+            )
+            subject = module.NHModeration(bot, _operational_support())
+            await subject.config.guild_from_id(10).set_raw("gallery_channel_ids", value=[20])
+            subject.history.initialize = mock.AsyncMock()
+            subject._operational_errors.initialize = mock.AsyncMock()
+            subject._weekly_scheduler = mock.AsyncMock()
+            subject._startup_catchup = mock.AsyncMock()
+            subject._mark_operational_recovered = mock.AsyncMock()
+            await subject.cog_load()
+            try:
+                message = SimpleNamespace(
+                    guild=SimpleNamespace(id=10),
+                    channel=SimpleNamespace(id=20),
+                    attachments=[],
+                    delete=mock.AsyncMock(),
+                )
+                await subject.on_message(message)
+                message.delete.assert_awaited_once()
+
+                flags.gateway_message_content = False
+                message.delete.reset_mock()
+                await subject.on_message(message)
+                message.delete.assert_not_awaited()
+            finally:
+                await subject.cog_unload()
 
     async def test_message_filter_deletes_case_insensitive_substring_matches(self):
         with loaded_nhmoderation() as module:

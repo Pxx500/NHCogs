@@ -1,6 +1,6 @@
 # NHModeration
 
-NHModeration stores ban-related moderation evidence in SQLite, renders BanChart from local history, and deletes messages containing configured phrases. Chart rendering and message filtering never read the Discord API.
+NHModeration stores ban-related moderation evidence in SQLite, renders BanChart from local history, and enforces message rules. Chart rendering and message filtering do not fetch messages from Discord.
 
 Version 1 does not replace ban, unban, mute, warn, or softban commands.
 
@@ -69,6 +69,18 @@ Names are resolved only from the Discord cache. The command does not call `fetch
 | `[p]nhmod repair [confirm]` | Re-import all available sources, read the active ban list, and rebuild the projection |
 
 The `nhmod` root, all maintenance commands, and BanChart require Manage Messages.
+
+## Gallery channels
+
+| Command | Description |
+|---|---|
+| `[p]nhmod gallery` | List gallery channels |
+| `[p]nhmod gallery add <channel>` | Require an attachment on new messages in a text channel |
+| `[p]nhmod gallery remove <channel>` | Stop requiring attachments in a text channel |
+
+These commands require Manage Messages and can run in public channels. The bot needs View Channel and Manage Messages in the gallery and access to the Message Content intent.
+
+A gallery deletes new messages without a Discord attachment, including messages that only contain links or embeds. Any attached file satisfies the rule, and captions are allowed. The rule applies to messages from members, bots, and webhooks in the selected channel. It leaves threads, edits, and existing history alone. If Message Content access is lost, gallery deletions pause. The phrase filter keeps its own rules.
 
 ## Message phrase filter
 

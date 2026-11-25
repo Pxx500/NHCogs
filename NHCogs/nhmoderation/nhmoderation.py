@@ -23,6 +23,7 @@ from ..command_overview import (
     overview_embeds,
     send_group_overview,
 )
+from ..gateway_capabilities import available
 from ..operational_errors import OperationalErrorReporter, OperationalFailure
 from ..ranked_donut_chart import render_ranked_donut_chart
 from .command_inputs import parse_banchart_arguments
@@ -44,7 +45,7 @@ MAX_FILTER_GROUP_NAME_LENGTH = 64
 
 
 class NHModeration(commands.Cog):
-    """Store moderation history and render moderator charts."""
+    """Store moderation history, render charts, and enforce message rules."""
 
     CONFIG_IDENTIFIER = 205192943327321000143939875896557571751
 
@@ -57,6 +58,7 @@ class NHModeration(commands.Cog):
             force_registration=True,
         )
         self.config.register_guild(
+            gallery_channel_ids=[],
             message_filter_phrases=[],
             message_filter_groups=None,
         )
@@ -70,6 +72,7 @@ class NHModeration(commands.Cog):
         self._startup_task: asyncio.Task[None] | None = None
         self._gateway_catchup_task: asyncio.Task[None] | None = None
         self._sync_tasks: dict[int, asyncio.Task[Any]] = {}
+        self._gallery_channels: dict[int, set[int]] = {}
         self._message_filter_groups: dict[int, dict[str, dict]] = {}
         self._message_filter_lock = asyncio.Lock()
         self._history_export_lock = asyncio.Lock()
@@ -78,6 +81,11 @@ class NHModeration(commands.Cog):
         await self.history.initialize()
         await self._operational_errors.initialize()
         guild_configs = await self.config.all_guilds()
+        self._gallery_channels = {
+            int(guild_id): set(settings["gallery_channel_ids"])
+            for guild_id, settings in guild_configs.items()
+            if settings["gallery_channel_ids"]
+        }
         self._message_filter_groups = {}
         for guild_id, settings in guild_configs.items():
             groups = settings.get("message_filter_groups")
@@ -130,11 +138,26 @@ class NHModeration(commands.Cog):
         await self.history.delete_guild_data(guild.id)
         await self._operational_errors.delete_guild(guild.id)
         async with self._message_filter_lock:
+            self._gallery_channels.pop(guild.id, None)
             self._message_filter_groups.pop(guild.id, None)
             await self.config.guild(guild).clear()
 
     @commands.Cog.listener()
+    async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
+        await self._set_gallery_channel(channel.guild, channel.id, enabled=False)
+
+    @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
+        if message.guild is not None:
+            channels = self._gallery_channels.get(message.guild.id)
+            if (
+                channels
+                and message.channel.id in channels
+                and available(self.bot, "message_content")
+                and not message.attachments
+            ):
+                await self._delete_moderated_message(message, "delete message without gallery attachment")
+                return
         await self._filter_message(message)
 
     @commands.Cog.listener()
@@ -166,23 +189,26 @@ class NHModeration(commands.Cog):
             return
         if not self._message_matches_phrases(message, phrases):
             return
+        await self._delete_moderated_message(message, "delete filtered message")
+
+    async def _delete_moderated_message(self, message: discord.Message, action: str) -> None:
+        guild = message.guild
+        if guild is None:
+            return
         try:
             await message.delete()
         except discord.NotFound:
             pass
         except (discord.Forbidden, discord.HTTPException) as error:
             await self.report_operational_error(
-                guild_id=message.guild.id,
-                action="delete filtered message",
+                guild_id=guild.id,
+                action=action,
                 error=error,
                 channel_id=message.channel.id,
                 message_id=message.id,
             )
             return
-        await self._mark_operational_recovered(
-            message.guild,
-            "delete filtered message",
-        )
+        await self._mark_operational_recovered(guild, action)
 
     @staticmethod
     def _message_matches_phrases(
@@ -598,10 +624,52 @@ class NHModeration(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)
     async def nhmod(self, ctx: commands.Context) -> None:
-        """Manage NHModeration history and synchronization"""
+        """Manage moderation history and message rules"""
         self._require_private_channel(ctx)
         await send_group_overview(ctx, include_descendants=False)
         await self._mark_operational_recovered(ctx.guild, "nhmod")
+
+    @nhmod.group(name="gallery", invoke_without_command=True)
+    async def nhmod_gallery(self, ctx: commands.Context) -> None:
+        """Manage channels that require an attachment on every new message"""
+        channels = sorted(self._gallery_channels.get(ctx.guild.id, ()))
+        listing = "\n".join(f"<#{channel_id}>" for channel_id in channels)
+        for page in pagify(listing or "No gallery channels configured"):
+            await ctx.send(page, allowed_mentions=discord.AllowedMentions.none())
+        await send_group_overview(ctx)
+
+    @nhmod_gallery.command(name="add")
+    async def nhmod_gallery_add(self, ctx: commands.Context, channel: discord.TextChannel) -> None:
+        """Require an attachment on new messages in a text channel"""
+        if channel.guild.id != ctx.guild.id:
+            raise commands.UserFeedbackCheckFailure("Choose a text channel in this server")
+        if not available(self.bot, "message_content"):
+            raise commands.UserFeedbackCheckFailure("I need access to Message Content to check attachments")
+        permissions = channel.permissions_for(ctx.guild.me)
+        if not permissions.view_channel or not permissions.manage_messages:
+            raise commands.UserFeedbackCheckFailure("I need View Channel and Manage Messages in that channel")
+        await self._set_gallery_channel(ctx.guild, channel.id, enabled=True)
+        await ctx.send(f"Gallery enabled in {channel.mention}", allowed_mentions=discord.AllowedMentions.none())
+
+    @nhmod_gallery.command(name="remove")
+    async def nhmod_gallery_remove(self, ctx: commands.Context, channel: discord.TextChannel) -> None:
+        """Stop requiring attachments in a text channel"""
+        if channel.guild.id != ctx.guild.id:
+            raise commands.UserFeedbackCheckFailure("Choose a text channel in this server")
+        await self._set_gallery_channel(ctx.guild, channel.id, enabled=False)
+        await ctx.send(f"Gallery disabled in {channel.mention}", allowed_mentions=discord.AllowedMentions.none())
+
+    async def _set_gallery_channel(self, guild: discord.Guild, channel_id: int, *, enabled: bool) -> None:
+        async with self._message_filter_lock:
+            current = self._gallery_channels.get(guild.id, set())
+            updated = current | {channel_id} if enabled else current - {channel_id}
+            if updated == current:
+                return
+            await self.config.guild(guild).set_raw("gallery_channel_ids", value=sorted(updated))
+            if updated:
+                self._gallery_channels[guild.id] = updated
+            else:
+                self._gallery_channels.pop(guild.id, None)
 
     @nhmod.group(name="history", invoke_without_command=True)
     async def nhmod_history(self, ctx: commands.Context) -> None:
