@@ -700,6 +700,18 @@ Shows the caller's own simplified activity for the last 7 retained days:
 
 This command has no arguments and only shows the caller's own data.
 
+## Server member export
+
+Run `[p]userdump` in a channel hidden from `@everyone` to download a UTF-8 CSV of
+all current server members, including bot accounts. It requires Manage Messages,
+the Server Members intent, and permission for the bot to view the channel, send
+messages and attach files. It can run independently of role analytics.
+
+Each row contains `user_id`, `handle`, `display_name` (the name shown on the server),
+`server_nickname` (blank if unset), `account_created_at` and `joined_at`. Both dates
+are ISO timestamps in UTC. The latter is the current membership's join time and is
+blank if unavailable. A CSV above the server upload limit is compressed into a ZIP.
+
 ## Role Analytics
 
 Role analytics maintains a current SQLite mirror of guild members and their role IDs.

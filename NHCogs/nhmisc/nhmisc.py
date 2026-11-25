@@ -4131,6 +4131,54 @@ class NHMisc(commands.Cog):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
+    @commands.command(name="userdump", ignore_extra=False)
+    @commands.guild_only()
+    @commands.has_permissions(manage_messages=True)
+    @commands.cooldown(1, 30, commands.BucketType.guild)
+    async def userdump(self, ctx: commands.Context) -> None:
+        """Export current server members, names and join dates as CSV"""
+        channel_check = {
+            "export_name": "Member export",
+            "feedback": "Member export requires a private channel where I can attach files",
+        }
+        self._require_private_export_channel(ctx, **channel_check)
+        try:
+            require(self.bot, "members")
+        except GatewayCapabilityUnavailable as error:
+            raise commands.UserFeedbackCheckFailure(
+                "Member export requires the Server Members intent"
+            ) from error
+
+        guild = ctx.guild
+        if not guild.chunked:
+            await guild.chunk(cache=True)
+        members = guild.members
+        if guild.unavailable or not guild.chunked or len(members) != guild.member_count:
+            raise commands.UserFeedbackCheckFailure("Discord's member list is incomplete. Try again later")
+
+        rows = (
+            (
+                member.id, member.name, member.display_name, member.nick or "",
+                member.created_at.isoformat(),
+                member.joined_at.isoformat() if member.joined_at else "",
+            )
+            for member in members
+        )
+        try:
+            export = build_csv_export(
+                ("user_id", "handle", "display_name", "server_nickname", "account_created_at", "joined_at"),
+                rows, guild.filesize_limit, "userdump",
+            )
+        except ExportTooLarge:
+            await ctx.send("Member export is too large to upload")
+            return
+
+        self._require_private_export_channel(ctx, **channel_check)
+        await ctx.send(
+            file=discord.File(io.BytesIO(export.data), filename=export.filename),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
     @commands.command(name="roleusers")
     @commands.guild_only()
     @commands.has_permissions(manage_messages=True)

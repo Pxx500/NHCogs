@@ -396,6 +396,7 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
             "rolesync_discord",
             "rolestats",
             "roleusers",
+            "userdump",
             "achievement",
             "achievement_create",
             "achievement_role",
@@ -885,6 +886,49 @@ class RoleAnalyticsCommandTests(unittest.IsolatedAsyncioTestCase):
             await nhmisc.NHMisc.rolesync_discord.callback(cog, ctx)
 
         cog._achievement_store.bootstrap_guild.assert_not_awaited()
+
+    async def test_userdump_fetches_current_members_and_exports_distinct_names_and_dates(self):
+        guild = FakeGuild()
+        guild.unavailable = False
+        guild.chunked = False
+        guild.member_count = 2
+        created = datetime(2025, 5, 19, tzinfo=timezone.utc)
+        joined = datetime(2026, 11, 20, tzinfo=timezone.utc)
+
+        async def chunk(*, cache):
+            self.assertTrue(cache)
+            guild.chunked = True
+            guild.members = [
+                types.SimpleNamespace(id=10, name="account", display_name="Nick", nick="Nick",
+                                      created_at=created, joined_at=joined, bot=False),
+                types.SimpleNamespace(id=11, name="app", display_name="Global", nick=None,
+                                      created_at=created, joined_at=None, bot=True),
+            ]
+
+        guild.chunk = chunk
+        ctx = make_context(guild)
+        await nhmisc.NHMisc.userdump.callback(self.make_cog(), ctx)
+        sent = ctx.send.await_args.kwargs["file"]
+        self.assertEqual(sent.filename, "userdump.csv")
+        self.assertEqual(sent.data.decode().splitlines(), [
+            "user_id,handle,display_name,server_nickname,account_created_at,joined_at",
+            "10,account,Nick,Nick,2025-05-19T00:00:00+00:00,2026-11-20T00:00:00+00:00",
+            "11,app,Global,,2025-05-19T00:00:00+00:00,",
+        ])
+
+    async def test_userdump_refuses_public_destination_or_incomplete_roster(self):
+        for public in (True, False):
+            with self.subTest(public=public):
+                guild = FakeGuild(public=public)
+                guild.unavailable = False
+                guild.chunked = False
+                guild.member_count = 10
+                guild.chunk = mock.AsyncMock()
+                ctx = make_context(guild)
+                with self.assertRaises(UserFeedbackCheckFailure):
+                    await nhmisc.NHMisc.userdump.callback(self.make_cog(), ctx)
+                self.assertEqual(guild.chunk.await_count, 0 if public else 1)
+                ctx.send.assert_not_awaited()
 
     async def test_roleusers_refuses_public_channel_before_querying(self):
         cog = self.make_cog()
