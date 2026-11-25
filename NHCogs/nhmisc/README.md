@@ -702,6 +702,10 @@ This command has no arguments and only shows the caller's own data.
 
 ## Server member export
 
+Moderators use the CSV from `[p]userdump` to automate the analysis of suspected bot
+waves and the banning of confirmed bots. Account creation and server join times help
+identify groups for review, and the exported user IDs identify which accounts to ban.
+
 Run `[p]userdump` in a channel hidden from `@everyone` to download a UTF-8 CSV of
 all current server members, including bot accounts. It requires Manage Messages,
 the Server Members intent, and permission for the bot to view the channel, send
